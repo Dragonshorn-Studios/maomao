@@ -1,0 +1,18 @@
+services:
+  maomao:
+    build: .
+    ports:
+      - "3000:3000"
+    env_file:
+      - .env
+    environment:
+      DATABASE_PATH: /data/maomao.sqlite
+      WORKSPACE_ROOT: /data/workspaces
+    volumes:
+      - maomao-data:/data
+      # Mount the GitHub App private key if you use GITHUB_APP_PRIVATE_KEY_PATH
+      # - ./github-app.pem:/run/secrets/github-app.pem:ro
+    restart: unless-stopped
+
+volumes:
+  maomao-data:
