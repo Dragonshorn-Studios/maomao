@@ -92,6 +92,8 @@ Then:
 
 Provider API keys live in `.env` only (`env_file`). They are never copied into the image. `GITHUB_APP_PRIVATE_KEY_PATH` inside the container is `/run/secrets/github-app.pem`.
 
+The container runs as `node` (uid **1000** in `node:22-bookworm-slim`). A `:ro` bind mount keeps the host file’s owner and mode, so `github-app.pem` must be readable by that uid (`chown 1000:1000 github-app.pem && chmod 400 github-app.pem`). Do not `chmod 644`. `EACCES: permission denied, open '/run/secrets/github-app.pem'` is host file mode/owner, not a wrong mount path — recreate Compose after fixing (`docker compose up -d --force-recreate`).
+
 `docker compose down` and rebuilding the Maomao image leave both named volumes in place, so OpenCode and job data survive. `docker compose down -v` deletes them.
 
 To bind-mount on the host instead of named volumes, put this in a `docker-compose.override.yml` (the installer already uses that file for the key):
@@ -131,6 +133,7 @@ Pin `OPENCODE_VERSION` if you need a known-good CLI, then re-seed with `--upgrad
 cp .env.example .env
 # fill GitHub App + UI + OpenCode model / provider keys
 cp /path/to/app.pem github-app.pem
+chown 1000:1000 github-app.pem && chmod 400 github-app.pem
 # uncomment the github-app.pem volume in docker-compose.yml, or copy the override the installer writes
 ./scripts/install.sh --upgrade-opencode
 ```
@@ -249,7 +252,7 @@ If both variables are unset, the UI stays open so `npm run dev` on loopback stil
 Checked-out PR code is **untrusted input**. For MVP, reviewers are for static inspection:
 
 - git hooks are disabled (`core.hooksPath=/dev/null`); submodules are not fetched
-- installation tokens are used as a one-shot HTTP header, then the `origin` remote is removed
+- installation tokens authenticate `git fetch` as HTTP Basic (`x-access-token`, not Bearer), then `origin` is removed so the token never stays in the workspace remote URL
 - GitHub private keys, webhook secrets, UI passwords, session secrets, and installation tokens are stripped from the OpenCode environment
 - untrusted `opencode.json` / `.opencode` / `.claude` from the PR are deleted before review
 - OpenCode is launched with permissions that **deny** `bash`, `edit`, `write`, `webfetch`, and related tools; `read` / `glob` / `grep` are allowed

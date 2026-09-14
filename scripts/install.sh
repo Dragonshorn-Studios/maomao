@@ -238,6 +238,22 @@ provider_key_for_model() {
   esac
 }
 
+# node:22-bookworm-slim USER node is uid 1000 / gid 1000. Compose bind-mounts
+# github-app.pem :ro, which preserves host ownership and mode — chmod 600 as the
+# installing user is EACCES inside the container even when the path is correct.
+secure_key_file() {
+  local dest=$1
+  local name
+  name=$(basename "$dest")
+  if ! chown 1000:1000 "$dest" 2>/dev/null; then
+    echo "install.sh: could not chown $name to 1000:1000 (container USER node)." >&2
+    echo "install.sh: EACCES on /run/secrets/github-app.pem is host file mode/owner, not a wrong mount path." >&2
+    echo "install.sh: fix with: chown 1000:1000 github-app.pem && chmod 400 github-app.pem" >&2
+    echo "install.sh: then recreate Compose (docker compose up -d --force-recreate)." >&2
+  fi
+  chmod 400 "$dest"
+}
+
 write_key_file() {
   local dest=$1 src=$2 pem_contents=$3
   if [[ -n "$src" ]]; then
@@ -256,7 +272,7 @@ write_key_file() {
   if ! grep -q "BEGIN .*PRIVATE KEY" "$dest"; then
     die "github-app.pem does not look like a PEM private key"
   fi
-  chmod 600 "$dest"
+  secure_key_file "$dest"
 }
 
 write_override() {
@@ -526,7 +542,7 @@ EOF
   chmod 600 "$ROOT/.env"
   write_key_file "$ROOT/github-app.pem" "$GITHUB_APP_PRIVATE_KEY_PATH" "$GITHUB_APP_PRIVATE_KEY"
   write_override
-  log "Wrote $ROOT/.env and $ROOT/github-app.pem (mode 600)"
+  log "Wrote $ROOT/.env (mode 600) and $ROOT/github-app.pem (mode 400, uid 1000 when chown succeeds)"
   if [[ "$generated_password" == "1" ]]; then
     echo
     echo "Generated UI password (save this; it is also in .env): $UI_PASSWORD"
@@ -534,6 +550,7 @@ EOF
   fi
 else
   [[ -f "$ROOT/github-app.pem" ]] || die "Reusing .env but $ROOT/github-app.pem is missing"
+  secure_key_file "$ROOT/github-app.pem"
   [[ -f "$ROOT/docker-compose.override.yml" ]] || write_override
   MAOMAO_PORT=$(load_env_value "$ROOT/.env" MAOMAO_PORT)
   MAOMAO_PORT=${MAOMAO_PORT:-3000}
