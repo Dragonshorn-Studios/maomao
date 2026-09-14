@@ -1,6 +1,7 @@
 import { createAppAuth } from "@octokit/auth-app";
 import { Octokit } from "@octokit/rest";
 import type { Config } from "../config.js";
+import { findingMarker, fingerprintFinding, parseFindingMarker } from "../findings/identity.js";
 import { reviewMarker } from "../prompts.js";
 
 export interface PullReviewComment {
@@ -37,6 +38,25 @@ export interface ManualTriggerPort {
   getPull(installationId: number, owner: string, repo: string, pullNumber: number): Promise<ResolvedPull>;
 }
 
+export type RepoPermission = "admin" | "maintain" | "write" | "triage" | "read" | "none";
+
+export interface ReviewThreadComment {
+  id: string;
+  databaseId?: number;
+  body: string;
+  path?: string;
+  line?: number | null;
+  authorLogin?: string;
+}
+
+export interface ReviewThread {
+  id: string;
+  isResolved: boolean;
+  path?: string;
+  line?: number | null;
+  comments: ReviewThreadComment[];
+}
+
 export interface GithubPort {
   getInstallationToken(installationId: number): Promise<string>;
   getPullDiff(installationId: number, owner: string, repo: string, pullNumber: number): Promise<string>;
@@ -55,6 +75,20 @@ export interface GithubPort {
     body: string;
     comments: PullReviewComment[];
   }): Promise<PostedReview>;
+  listReviewThreads(
+    installationId: number,
+    owner: string,
+    repo: string,
+    pullNumber: number,
+  ): Promise<ReviewThread[]>;
+  resolveReviewThread(installationId: number, threadId: string): Promise<void>;
+  unresolveReviewThread(installationId: number, threadId: string): Promise<void>;
+  getCollaboratorPermission(
+    installationId: number,
+    owner: string,
+    repo: string,
+    username: string,
+  ): Promise<RepoPermission>;
 }
 
 export class GithubClient implements GithubPort, ManualTriggerPort {
@@ -217,6 +251,98 @@ export class GithubClient implements GithubPort, ManualTriggerPort {
       return { id: String(response.data.id), url: response.data.html_url ?? "" };
     }
   }
+
+  async listReviewThreads(
+    installationId: number,
+    owner: string,
+    repo: string,
+    pullNumber: number,
+  ): Promise<ReviewThread[]> {
+    const octokit = this.installationOctokit(installationId);
+    const threads: ReviewThread[] = [];
+    let cursor: string | null = null;
+    let hasNext = true;
+    while (hasNext && threads.length < 400) {
+      const data = (await octokit.graphql(REVIEW_THREADS_QUERY, {
+        owner,
+        repo,
+        number: pullNumber,
+        cursor,
+      })) as ReviewThreadsResponse;
+      const connection = data.repository?.pullRequest?.reviewThreads;
+      for (const node of connection?.nodes ?? []) {
+        if (!node?.id) continue;
+        threads.push({
+          id: node.id,
+          isResolved: Boolean(node.isResolved),
+          path: node.path ?? undefined,
+          line: node.line ?? undefined,
+          comments: (node.comments?.nodes ?? []).flatMap((comment) =>
+            comment?.id
+              ? [
+                  {
+                    id: comment.id,
+                    databaseId: comment.databaseId ?? undefined,
+                    body: comment.body ?? "",
+                    path: comment.path ?? undefined,
+                    line: comment.line ?? undefined,
+                    authorLogin: comment.author?.login ?? undefined,
+                  },
+                ]
+              : [],
+          ),
+        });
+      }
+      hasNext = Boolean(connection?.pageInfo.hasNextPage);
+      cursor = connection?.pageInfo.endCursor ?? null;
+      if (!cursor) hasNext = false;
+    }
+    return threads;
+  }
+
+  async resolveReviewThread(installationId: number, threadId: string): Promise<void> {
+    const octokit = this.installationOctokit(installationId);
+    try {
+      await octokit.graphql(RESOLVE_THREAD_MUTATION, { threadId });
+    } catch (error) {
+      if (isAlreadyResolvedError(error)) return;
+      throw error;
+    }
+  }
+
+  async unresolveReviewThread(installationId: number, threadId: string): Promise<void> {
+    const octokit = this.installationOctokit(installationId);
+    try {
+      await octokit.graphql(UNRESOLVE_THREAD_MUTATION, { threadId });
+    } catch (error) {
+      if (isAlreadyUnresolvedError(error)) return;
+      throw error;
+    }
+  }
+
+  async getCollaboratorPermission(
+    installationId: number,
+    owner: string,
+    repo: string,
+    username: string,
+  ): Promise<RepoPermission> {
+    const octokit = this.installationOctokit(installationId);
+    try {
+      const response = await octokit.rest.repos.getCollaboratorPermissionLevel({
+        owner,
+        repo,
+        username,
+      });
+      const permission = String(response.data.permission ?? "none").toLowerCase();
+      const roleName =
+        "role_name" in response.data ? String((response.data as { role_name?: string }).role_name ?? "") : "";
+      return normalizePermission(permission, roleName);
+    } catch (error) {
+      const status = error && typeof error === "object" && "status" in error ? Number(error.status) : 0;
+      if (status === 404) return "none";
+      throw error;
+    }
+  }
 }
 
 export function findExistingReview(
@@ -245,19 +371,138 @@ export function buildReviewBody(input: {
 }
 
 export function toInlineComments(
-  findings: { file?: string; line?: number; summary: string; body?: string; severity: string }[],
+  findings: {
+    file?: string;
+    line?: number;
+    summary: string;
+    body?: string;
+    severity: string;
+    category?: string;
+    fingerprint?: string;
+  }[],
   limit: number,
+  headSha: string,
 ): PullReviewComment[] {
   const comments: PullReviewComment[] = [];
   for (const finding of findings) {
     if (comments.length >= limit) break;
     if (!finding.file || !finding.line) continue;
+    const fingerprint = finding.fingerprint ?? fingerprintFinding(finding);
     comments.push({
       path: finding.file,
       line: finding.line,
       side: "RIGHT",
-      body: `**${finding.severity}**: ${finding.summary}${finding.body ? `\n\n${finding.body}` : ""}`,
+      body: `${findingMarker(fingerprint, headSha)}\n**${finding.severity}**: ${finding.summary}${finding.body ? `\n\n${finding.body}` : ""}`,
     });
   }
   return comments;
+}
+
+export function threadRoot(thread: ReviewThread): ReviewThreadComment | undefined {
+  return thread.comments[0];
+}
+
+export function isMaomaoThread(thread: ReviewThread): boolean {
+  return thread.comments.some((comment) => Boolean(parseFindingMarker(comment.body)));
+}
+
+export function threadContainsComment(thread: ReviewThread, commentId: number): boolean {
+  return thread.comments.some((comment) => comment.databaseId === commentId);
+}
+
+export function maomaoBotLogins(appSlug: string): string[] {
+  const slug = (appSlug || "maomao").replace(/\[bot\]$/i, "").toLowerCase();
+  return [`${slug}[bot]`, slug];
+}
+
+export function isMaomaoLogin(login: string | undefined, appSlug: string): boolean {
+  if (!login) return false;
+  return maomaoBotLogins(appSlug).includes(login.toLowerCase());
+}
+
+const REVIEW_THREADS_QUERY = `
+query($owner: String!, $repo: String!, $number: Int!, $cursor: String) {
+  repository(owner: $owner, name: $repo) {
+    pullRequest(number: $number) {
+      reviewThreads(first: 50, after: $cursor) {
+        pageInfo { hasNextPage endCursor }
+        nodes {
+          id
+          isResolved
+          path
+          line
+          comments(first: 50) {
+            nodes {
+              id
+              databaseId
+              body
+              path
+              line
+              author { login }
+            }
+          }
+        }
+      }
+    }
+  }
+}`;
+
+const RESOLVE_THREAD_MUTATION = `
+mutation($threadId: ID!) {
+  resolveReviewThread(input: { threadId: $threadId }) {
+    thread { isResolved }
+  }
+}`;
+
+const UNRESOLVE_THREAD_MUTATION = `
+mutation($threadId: ID!) {
+  unresolveReviewThread(input: { threadId: $threadId }) {
+    thread { isResolved }
+  }
+}`;
+
+interface ReviewThreadsResponse {
+  repository?: {
+    pullRequest?: {
+      reviewThreads?: {
+        pageInfo: { hasNextPage: boolean; endCursor?: string | null };
+        nodes?: Array<{
+          id?: string;
+          isResolved?: boolean;
+          path?: string | null;
+          line?: number | null;
+          comments?: {
+            nodes?: Array<{
+              id?: string;
+              databaseId?: number | null;
+              body?: string | null;
+              path?: string | null;
+              line?: number | null;
+              author?: { login?: string | null } | null;
+            } | null>;
+          } | null;
+        } | null>;
+      };
+    };
+  };
+}
+
+function normalizePermission(permission: string, roleName: string): RepoPermission {
+  const candidates = [permission, roleName.toLowerCase()];
+  for (const value of candidates) {
+    if (value === "admin" || value === "maintain" || value === "write" || value === "triage" || value === "read") {
+      return value;
+    }
+  }
+  return "none";
+}
+
+function isAlreadyResolvedError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return /already resolved|is resolved/i.test(message);
+}
+
+function isAlreadyUnresolvedError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return /not resolved|already unresolved|is not resolved/i.test(message);
 }

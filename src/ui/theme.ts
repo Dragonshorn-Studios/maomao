@@ -428,11 +428,12 @@ button, input, textarea {
 .state-completed, .state-done { background: var(--jade-soft); border-color: var(--jade); }
 .state-failed { background: var(--cinnabar-soft); border-color: var(--cinnabar); }
 .state-stale, .state-cancelled { background: var(--amber-soft); border-color: var(--amber); }
-.state-reviewing, .state-aggregating, .state-publishing, .state-running, .state-preparing {
+.state-reviewing, .state-aggregating, .state-publishing, .state-running, .state-preparing, .state-reconciling {
   background: var(--working-soft);
   border-color: var(--working);
 }
 .state-preparing .mark,
+.state-reconciling .mark,
 .state-reviewing .mark,
 .state-aggregating .mark,
 .state-publishing .mark,
@@ -579,6 +580,22 @@ form.retry, form.retry-job {
 .finding p { margin: 0.35rem 0; }
 .finding .loc { font-family: var(--font-mono); color: var(--ink-muted); }
 
+.finding-status {
+  display: inline-flex;
+  align-items: center;
+  font-family: var(--font-mono);
+  font-size: 0.7rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  border: 1px solid var(--line-strong);
+  padding: 0.05rem 0.4rem;
+}
+.finding-status-resolved { color: var(--jade); background: var(--jade-soft); border-color: var(--jade); }
+.finding-status-dismissed { color: var(--plum); background: var(--plum-soft); border-color: var(--plum); }
+.finding-status-still_valid, .finding-status-open { color: var(--cinnabar); background: var(--cinnabar-soft); border-color: var(--cinnabar); }
+.finding-status-moved { color: var(--amber); background: var(--amber-soft); border-color: var(--amber); }
+.finding-status-uncertain { color: var(--ink-muted); background: var(--surface-2); }
+
 pre, .log-panel {
   white-space: pre-wrap;
   word-break: break-word;
@@ -635,6 +652,7 @@ details summary { cursor: pointer; color: var(--ink-muted); }
   .specimen.is-live::before { animation: none; opacity: 1; }
   .tick.running,
   .state-preparing .mark,
+  .state-reconciling .mark,
   .state-reviewing .mark,
   .state-aggregating .mark,
   .state-publishing .mark,

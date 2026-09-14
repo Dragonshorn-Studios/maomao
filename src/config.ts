@@ -6,6 +6,7 @@ import { DEFAULT_REVIEWER_ROLES, type ReviewerRole } from "./prompts.js";
 export type JobState =
   | "queued"
   | "preparing"
+  | "reconciling"
   | "reviewing"
   | "aggregating"
   | "publishing"
@@ -29,8 +30,10 @@ export interface OpenCodeConfig {
   bin: string;
   reviewerModel: string;
   aggregatorModel: string;
+  verifierModel: string;
   extraArgs: string[];
   timeoutMs: number;
+  verifierTimeoutMs: number;
   maxRetries: number;
   reviewerConcurrency: number;
 }
@@ -50,6 +53,7 @@ export interface Config {
   postEmptyReview: boolean;
   pullRequestActions: PullRequestAction[];
   maxInlineComments: number;
+  reconcileMinConfidence: number;
   uiPassword: string;
   uiSessionSecret: string;
 }
@@ -123,8 +127,11 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
       bin: env.OPENCODE_BIN?.trim() || "opencode",
       reviewerModel: env.OPENCODE_REVIEWER_MODEL?.trim() || "",
       aggregatorModel: env.OPENCODE_AGGREGATOR_MODEL?.trim() || env.OPENCODE_REVIEWER_MODEL?.trim() || "",
+      verifierModel:
+        env.OPENCODE_VERIFIER_MODEL?.trim() || env.OPENCODE_REVIEWER_MODEL?.trim() || "",
       extraArgs: parseCsv(env.OPENCODE_EXTRA_ARGS).flatMap((arg) => arg.split(" ")).filter(Boolean),
       timeoutMs: parseInteger(env.OPENCODE_TIMEOUT_MS, 10 * 60 * 1000),
+      verifierTimeoutMs: parseInteger(env.OPENCODE_VERIFIER_TIMEOUT_MS, 2 * 60 * 1000),
       maxRetries: parseInteger(env.OPENCODE_MAX_RETRIES, 1),
       reviewerConcurrency: Math.max(1, parseInteger(env.OPENCODE_REVIEWER_CONCURRENCY, 2)),
     },
@@ -134,6 +141,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     postEmptyReview: parseBoolean(env.POST_EMPTY_REVIEW, false),
     pullRequestActions,
     maxInlineComments: Math.max(0, parseInteger(env.MAX_INLINE_COMMENTS, 12)),
+    reconcileMinConfidence: clamp01(env.RECONCILE_MIN_CONFIDENCE, 0.7),
     uiPassword: env.UI_PASSWORD?.trim() || env.MAOMAO_UI_PASSWORD?.trim() || "",
     uiSessionSecret: env.UI_SESSION_SECRET?.trim() || env.MAOMAO_UI_SESSION_SECRET?.trim() || "",
   };
@@ -159,4 +167,11 @@ export function assertRuntimeConfig(config: Config): void {
 
 export function githubSecrets(config: Config): string[] {
   return [config.github.privateKey, config.github.webhookSecret].filter((value) => value.length >= 4);
+}
+
+function clamp01(value: string | undefined, fallback: number): number {
+  if (value == null || value === "") return fallback;
+  const n = Number.parseFloat(value);
+  if (!Number.isFinite(n)) return fallback;
+  return Math.min(1, Math.max(0, n));
 }

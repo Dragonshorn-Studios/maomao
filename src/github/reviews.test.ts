@@ -23,10 +23,13 @@ describe("GitHub review payload", () => {
         { file: "b.ts", line: 2, summary: "two", severity: "medium" },
       ],
       1,
+      "abc123",
     );
     expect(comments).toHaveLength(1);
     expect(comments[0]?.path).toBe("a.ts");
     expect(comments[0]?.side).toBe("RIGHT");
+    expect(comments[0]?.body).toContain("maomao-finding");
+    expect(comments[0]?.body).toContain("sha=abc123");
   });
 
   it("detects an already posted Maomao review for the SHA", () => {

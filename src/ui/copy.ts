@@ -13,6 +13,7 @@ export interface LabeledState {
 const JOB_STATES: Record<JobState, LabeledState> = {
   queued: { text: "Queued", hint: "Waiting to examine this pull request", mark: "○" },
   preparing: { text: "Preparing", hint: "Checking out the reviewed head SHA", mark: "◌" },
+  reconciling: { text: "Reconciling", hint: "Checking prior findings against this SHA", mark: "◍" },
   reviewing: { text: "Reviewing", hint: "Examining this pull request", mark: "◉" },
   aggregating: { text: "Aggregating", hint: "Aggregation in progress", mark: "◎" },
   publishing: { text: "Publishing", hint: "Posting the GitHub COMMENT review", mark: "▣" },
@@ -84,7 +85,25 @@ export function staleBanner(): string {
 
 export function flavorForJob(state: string, prNumber: number): string | undefined {
   if (state === "reviewing" || state === "preparing") return `Examining PR #${prNumber}…`;
+  if (state === "reconciling") return `Reconciling prior findings for PR #${prNumber}`;
   if (state === "aggregating") return "Aggregation in progress";
   if (state === "queued") return `PR #${prNumber} is queued for examination`;
   return undefined;
+}
+
+export function findingStatusLabel(status: string): { text: string; hint: string } {
+  switch (status) {
+    case "resolved":
+      return { text: "Resolved", hint: "Verifier confirmed the problem is gone" };
+    case "dismissed":
+      return { text: "Dismissed", hint: "Acknowledged and intentionally ignored" };
+    case "still_valid":
+      return { text: "Still valid", hint: "The finding still applies on the current SHA" };
+    case "moved":
+      return { text: "Moved", hint: "Same finding at a new location" };
+    case "uncertain":
+      return { text: "Uncertain", hint: "Not enough evidence to close safely" };
+    default:
+      return { text: "Open", hint: "Outstanding finding" };
+  }
 }

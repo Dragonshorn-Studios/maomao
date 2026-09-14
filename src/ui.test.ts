@@ -102,6 +102,37 @@ describe("monitoring pages", () => {
     expect(html).toContain("cache r");
   });
 
+  it("shows resolved and dismissed findings as distinct ledger statuses", () => {
+    const store = seededStore();
+    const job = store.listJobs(20).find((row) => row.pr_number === 412);
+    expect(job).toBeTruthy();
+    store.upsertFinding({
+      repoFullName: job!.repo_full_name,
+      prNumber: job!.pr_number,
+      fingerprint: "resolvedfid00001",
+      status: "resolved",
+      reviewedSha: job!.head_sha,
+      summary: "null deref after fix",
+    });
+    store.dismissFinding({
+      repoFullName: job!.repo_full_name,
+      prNumber: job!.pr_number,
+      fingerprint: "dismissedfid0001",
+      actor: "octocat",
+      command: "bury",
+      reviewedSha: job!.head_sha,
+      summary: "style nit we accepted",
+    });
+    const html = renderJob(job!, store.listReviewerRuns(job!.id), store.listLogs(job!.id), {
+      prFindings: store.listFindings(job!.repo_full_name, job!.pr_number),
+    });
+    expect(html).toContain("Finding ledger");
+    expect(html).toContain("Resolved");
+    expect(html).toContain("Dismissed");
+    expect(html).toContain("intentionally ignored");
+    expect(html).toContain("via bury");
+  });
+
   it("marks specialist findings unconfirmed until the aggregator finishes", () => {
     const store = seededStore();
     const aggregating = store.listJobs(20).find((row) => row.state === "aggregating");

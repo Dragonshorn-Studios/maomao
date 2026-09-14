@@ -2,6 +2,7 @@ import type { JobRow, JobStore, ReviewerRunRow } from "../jobs/store.js";
 import { elapsedMs, escapeHtml, formatDuration, shortSha } from "../util.js";
 import {
   emptyQueueCopy,
+  findingStatusLabel,
   flavorForJob,
   jobStateLabel,
   observationsCopy,
@@ -122,6 +123,15 @@ export function renderJob(
         </dd>
       </div>
       <div>
+        <dt>Reconciliation</dt>
+        <dd>${
+          job.risk_profile
+            ? `<span class="state state-reconciling"><span class="mark" aria-hidden="true">◍</span> ${escapeHtml(job.risk_profile)}</span>
+               ${job.risk_reason ? `<div class="muted">${escapeHtml(job.risk_reason)}</div>` : ""}`
+            : "—"
+        }</dd>
+      </div>
+      <div>
         <dt>Tokens / cost</dt>
         <dd class="metric">${escapeHtml(formatTokens(metrics.tokens))} · ${escapeHtml(formatCost(metrics.cost))}${
           metrics.usageComplete ? "" : " · incomplete"
@@ -155,6 +165,7 @@ export function renderJob(
     ${renderAggregator(job, metrics)}
     <h2 id="findings">Findings</h2>
     ${findingsHtml}
+    ${renderPrFindings(options.prFindings ?? [], job)}
     <h2>Logs</h2>
     <ol class="logs" aria-label="Job logs">
       ${
@@ -173,7 +184,7 @@ export function renderJob(
 function renderQueueCard(job: JobRow, metrics: JobMetrics): string {
   const state = jobStateLabel(job.state);
   const elapsed = formatDuration(elapsedMs(job.started_at, job.finished_at) ?? elapsedMs(job.created_at));
-  const live = ["preparing", "reviewing", "aggregating", "publishing"].includes(job.state);
+  const live = ["preparing", "reconciling", "reviewing", "aggregating", "publishing"].includes(job.state);
   const flavor = flavorForJob(job.state, job.pr_number);
   return `<li>
     <article class="specimen${live ? " is-live" : ""}">
@@ -394,4 +405,39 @@ function renderFindings(metrics: JobMetrics): string {
       })
       .join("")
   );
+}
+
+function renderPrFindings(findings: NonNullable<PageOptions["prFindings"]>, job: JobRow): string {
+  if (!findings.length) return "";
+  const items = findings
+    .map((finding) => {
+      const status = findingStatusLabel(finding.status);
+      const loc = finding.current_path
+        ? `${finding.current_path}${finding.current_line ? `:${finding.current_line}` : ""}`
+        : finding.original_path
+          ? `${finding.original_path}${finding.original_line ? `:${finding.original_line}` : ""}`
+          : "";
+      const actor =
+        finding.status === "dismissed" && finding.dismissed_by
+          ? `by ${finding.dismissed_by}${finding.dismiss_command ? ` via ${finding.dismiss_command}` : ""}`
+          : finding.reopened_by
+            ? `reopened by ${finding.reopened_by}`
+            : "";
+      return `<article class="finding finding-status-${escapeHtml(finding.status)}">
+        <div class="finding-head">
+          <span class="finding-status finding-status-${escapeHtml(finding.status)}" title="${escapeHtml(status.hint)}">${escapeHtml(status.text)}</span>
+          <span class="muted">fingerprint <code class="metric">${escapeHtml(finding.fingerprint)}</code></span>
+          ${finding.severity ? `<span>· ${escapeHtml(finding.severity)}</span>` : ""}
+        </div>
+        ${loc ? `<p class="loc">${escapeHtml(loc)}</p>` : ""}
+        <h3>${escapeHtml(finding.summary || finding.fingerprint)}</h3>
+        ${actor ? `<p class="muted">${escapeHtml(actor)}</p>` : ""}
+        ${finding.reconciliation_reason ? `<p class="muted">${escapeHtml(finding.reconciliation_reason)}</p>` : ""}
+        ${finding.reviewed_sha === job.head_sha ? "" : `<p class="muted">last reviewed SHA <code class="sha">${escapeHtml(finding.reviewed_sha)}</code></p>`}
+      </article>`;
+    })
+    .join("");
+  return `<h2 id="ledger">Finding ledger</h2>
+    <p class="muted">Persisted outcomes for this pull request. <strong>Resolved</strong> means the code no longer has the problem; <strong>Dismissed</strong> means an authorized human buried it.</p>
+    ${items}`;
 }
