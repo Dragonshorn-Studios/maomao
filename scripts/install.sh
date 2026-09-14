@@ -265,11 +265,51 @@ services:
 EOF
 }
 
+opencode_filename() {
+  local arch extra=""
+  arch=$(docker info --format '{{.Architecture}}' 2>/dev/null || uname -m)
+  case "$arch" in
+    x86_64|amd64) arch=x64 ;;
+    aarch64|arm64) arch=arm64 ;;
+    *) die "Unsupported Docker architecture: $arch" ;;
+  esac
+  if [[ "$arch" == "x64" ]] && ! grep -qwi avx2 /proc/cpuinfo 2>/dev/null; then
+    extra="-baseline"
+  fi
+  printf '%s\n' "opencode-linux-${arch}${extra}.tar.gz"
+}
+
+seed_opencode() {
+  need_cmd curl
+  need_cmd tar
+  local filename url tmp ver=""
+  filename=$(opencode_filename)
+  if [[ -n "${OPENCODE_VERSION:-}" ]]; then
+    ver="${OPENCODE_VERSION#v}"
+    url="https://github.com/anomalyco/opencode/releases/download/v${ver}/${filename}"
+  else
+    url="https://github.com/anomalyco/opencode/releases/latest/download/${filename}"
+  fi
+  tmp=$(mktemp -d)
+  log "Downloading OpenCode into the maomao-opencode volume ($filename)"
+  curl -fsSL --connect-timeout 20 --max-time 180 -o "$tmp/$filename" "$url" \
+    || die "Failed to download OpenCode from $url"
+  tar -xzf "$tmp/$filename" -C "$tmp"
+  [[ -f "$tmp/opencode" ]] || die "OpenCode archive did not contain an 'opencode' binary"
+  chmod 755 "$tmp/opencode"
+  docker compose build
+  docker compose run -T --rm --no-deps \
+    -v "$tmp/opencode:/tmp/opencode-bin:ro" \
+    --entrypoint sh maomao -c \
+    'mkdir -p /opt/opencode/.opencode/bin && cp /tmp/opencode-bin /opt/opencode/.opencode/bin/opencode && chmod 755 /opt/opencode/.opencode/bin/opencode && /opt/opencode/.opencode/bin/opencode --version'
+  rm -rf "$tmp"
+}
+
 wait_health() {
   local port=$1
   local i=0
-  local max=240
-  log "Waiting for http://127.0.0.1:${port}/health (first start installs OpenCode into the volume)"
+  local max=90
+  log "Waiting for http://127.0.0.1:${port}/health"
   while [[ $i -lt $max ]]; do
     if command -v curl >/dev/null 2>&1; then
       if curl -fsS "http://127.0.0.1:${port}/health" >/dev/null 2>&1; then
@@ -364,8 +404,8 @@ fi
 
 if [[ "$UPGRADE_OPENCODE" == "1" ]]; then
   [[ -f "$ROOT/.env" ]] || die "No .env yet; run the installer without --upgrade-opencode first"
-  log "Reinstalling OpenCode into the maomao-opencode volume"
-  docker compose run --rm --no-deps --entrypoint rm maomao -f /opt/opencode/.opencode/bin/opencode
+  OPENCODE_VERSION="${OPENCODE_VERSION:-$(load_env_value "$ROOT/.env" OPENCODE_VERSION)}"
+  seed_opencode
   docker compose up -d --force-recreate
   upgrade_port=$(load_env_value "$ROOT/.env" MAOMAO_PORT)
   wait_health "${upgrade_port:-3000}"
@@ -505,9 +545,10 @@ if [[ "$SKIP_START" == "1" ]]; then
   exit 0
 fi
 
-log "Building and starting Maomao (OpenCode installs into volume maomao-opencode on first boot)"
+log "Building Maomao and seeding OpenCode into volume maomao-opencode"
 export MAOMAO_PORT
-docker compose up -d --build
+seed_opencode
+docker compose up -d
 wait_health "$MAOMAO_PORT"
 
 cat <<EOF

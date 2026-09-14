@@ -58,7 +58,7 @@ From a local checkout of this repo, the same script:
 ./scripts/install.sh
 ```
 
-The installer uses this checkout, or clones into `~/.maomao` (`MAOMAO_HOME` overrides). It prompts for GitHub App id / webhook secret / private key file, a UI password + session secret (either can be generated), and OpenCode provider keys / model ids. It writes `.env` (mode `600`) plus `github-app.pem`, bind-mounts the key, and runs `docker compose up -d --build`.
+The installer uses this checkout, or clones into `~/.maomao` (`MAOMAO_HOME` overrides). It prompts for GitHub App id / webhook secret / private key file, a UI password + session secret (either can be generated), and OpenCode provider keys / model ids. It writes `.env` (mode `600`) plus `github-app.pem`, bind-mounts the key, downloads the OpenCode CLI from GitHub releases onto the `maomao-opencode` volume, and runs `docker compose up -d`.
 
 Create the GitHub App first (least-privilege table below). The installer does not create it in the browser.
 
@@ -135,7 +135,7 @@ cp /path/to/app.pem github-app.pem
 docker compose up --build -d
 ```
 
-First start needs outbound HTTPS so the entrypoint can install OpenCode into `maomao-opencode`. After that the binary lives on the volume; you do not rebuild a derived image just to keep OpenCode.
+First start: `scripts/install.sh` downloads OpenCode on the **host** (GitHub releases) and copies it into `maomao-opencode`, so the container does not need outbound HTTPS just to boot. If you start Compose without the installer and the volume is empty, the image entrypoint tries the same install from inside the container. After that the binary lives on the volume; you do not rebuild a derived image just to keep OpenCode.
 
 ## Configure a GitHub App
 

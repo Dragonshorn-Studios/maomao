@@ -50,7 +50,11 @@ if [ "$need_install" = "1" ]; then
     exit 1
   fi
   installer="${TMPDIR:-/tmp}/opencode-install.sh"
-  curl -fsSL -o "$installer" https://opencode.ai/install
+  if ! curl -fsSL --connect-timeout 20 --max-time 180 -o "$installer" https://opencode.ai/install; then
+    echo "Maomao: could not download the OpenCode installer (no outbound HTTPS from the container?)." >&2
+    echo "Maomao: run scripts/install.sh to seed OpenCode from the host, or mount a binary at $OPENCODE_BIN." >&2
+    exit 1
+  fi
   if [ -n "${OPENCODE_VERSION:-}" ]; then
     bash "$installer" --no-modify-path --version "$OPENCODE_VERSION"
   else
