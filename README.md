@@ -138,9 +138,19 @@ USER node
 
 ## Monitoring UI
 
-`/` lists recent jobs (repo, PR, SHA, state, `n / m` reviewers, aggregator, elapsed time).
+The monitoring UI is a small server-rendered apothecary-notebook console (muted jade, parchment, ink). Visual tokens live in `src/ui/theme.ts` and are served at `/assets/maomao.css` — separate from job orchestration. Appearance is `light`, `dark`, or `system`, persisted in `localStorage`. Fonts are system stacks only.
 
-`/jobs/:id` shows per-reviewer state, models, findings, raw/normalized JSON, stdout/stderr, aggregator output, and logs. The pages refresh over SSE.
+`/` lists recent jobs as specimen cards: repo, PR, SHA, state, elapsed time, `n / m` reviewers, aggregator, model/provider, token/cost totals, and findings by severity.
+
+`/jobs/:id` shows the immutable reviewed SHA, base/head refs, per-reviewer cards (role, state, duration, model, provider, cost, raw vs normalized output), aggregator diagnosis, findings, and a monospace log panel. Pages refresh over SSE.
+
+To preview the UI with fixture jobs (no GitHub App or OpenCode required):
+
+```bash
+npm run demo
+# open http://127.0.0.1:3000  password: demo
+# MAOMAO_DEMO_EMPTY=1 npm run demo   # empty queue
+```
 
 The home page also has an operator form to paste a GitHub pull request URL (`https://github.com/owner/repo/pull/123`). Maomao resolves that PR through the GitHub App installation, then enqueues through the **same** job store and queue as webhooks (same `(repo, PR, head SHA)` idempotency and stale handling). Drafts follow `REVIEW_DRAFTS`. This is for testing before webhooks are wired; it is behind the same session gate as the rest of the UI.
 
@@ -155,7 +165,7 @@ UI_SESSION_SECRET=a-long-random-string   # e.g. openssl rand -hex 32
 
 Aliases: `MAOMAO_UI_PASSWORD`, `MAOMAO_UI_SESSION_SECRET`. Setting only one of the two is a startup error.
 
-With both set, GET/POST `/login` issues an **HttpOnly**, **SameSite=Lax** cookie (`maomao_session`), signed with `UI_SESSION_SECRET`. The cookie is **Secure** when the request is HTTPS (including `X-Forwarded-Proto: https`). Unauthenticated HTML pages redirect to `/login`; `/api/*` and `/events` return 401. `/webhooks/github` and `/health` stay public (no cookie). This is a shared-password gate, not HTTP Basic Auth, OAuth, or a user database.
+With both set, GET/POST `/login` issues an **HttpOnly**, **SameSite=Lax** cookie (`maomao_session`), signed with `UI_SESSION_SECRET`. The cookie is **Secure** when the request is HTTPS (including `X-Forwarded-Proto: https`). Unauthenticated HTML pages redirect to `/login`; `/api/*` and `/events` return 401. `/webhooks/github`, `/health`, and `/assets/maomao.css` stay public (no cookie). This is a shared-password gate, not HTTP Basic Auth, OAuth, or a user database.
 
 If both variables are unset, the UI stays open so `npm run dev` on loopback still works. Do not ship that configuration on a public address.
 

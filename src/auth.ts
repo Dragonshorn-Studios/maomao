@@ -51,7 +51,13 @@ export function safeNextPath(raw: string | undefined | null): string {
 }
 
 export function isPublicPath(path: string): boolean {
-  return path === "/health" || path === "/webhooks/github" || path === "/login" || path === "/logout";
+  return (
+    path === "/health" ||
+    path === "/webhooks/github" ||
+    path === "/login" ||
+    path === "/logout" ||
+    path === "/assets/maomao.css"
+  );
 }
 
 export function cookieSecure(url: string, forwardedProto?: string | null): boolean {
