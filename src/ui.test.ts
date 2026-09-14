@@ -96,8 +96,7 @@ describe("monitoring pages", () => {
     expect(html).toContain("main");
     expect(html).toContain("cookie-flags");
     expect(html).not.toContain("Unconfirmed");
-    expect(html).toContain("tokens");
-    expect(html).toContain("$0.12");
+    expect(html).toContain("10.3k tokens · $0.12");
   });
 
   it("marks specialist findings unconfirmed until the aggregator finishes", () => {

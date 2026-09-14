@@ -15,6 +15,18 @@ describe("parseOpenCodeOutput", () => {
     expect(parsed.usage.cost).toBe(0.01);
   });
 
+  it("reads usage from nested events and numeric strings", () => {
+    const stdout = JSON.stringify({
+      type: "message",
+      info: { usage: { prompt_tokens: "12", completion_tokens: "3", cost: "0.02" } },
+    });
+    expect(parseOpenCodeOutput(stdout).usage).toEqual({
+      promptTokens: 12,
+      completionTokens: 3,
+      cost: 0.02,
+    });
+  });
+
   it("falls back to raw stdout when events are absent", () => {
     expect(parseOpenCodeOutput('{"reviewer":"tests","verdict":"clean","findings":[]}').text).toContain("tests");
   });

@@ -114,8 +114,8 @@ export function renderJob(
       <div>
         <dt>Aggregator</dt>
         <dd>${renderState(job.aggregator_state, runStateLabel(job.aggregator_state).text, runStateLabel(job.aggregator_state).hint, runStateLabel(job.aggregator_state).mark)}
-          ${job.aggregator_model ? `<code class="metric">${escapeHtml(job.aggregator_model)}</code>` : ""}
-          ${job.aggregator_provider ? `<span class="muted"> · <code class="metric">${escapeHtml(job.aggregator_provider)}</code></span>` : ""}
+          ${job.aggregator_model ? `<div><code class="metric">${escapeHtml(job.aggregator_model)}</code>${job.aggregator_provider ? `<span class="muted"> · <code class="metric">${escapeHtml(job.aggregator_provider)}</code></span>` : ""}</div>` : ""}
+          <div class="metric">${escapeHtml(aggregatorUsageCopy(job))}</div>
         </dd>
       </div>
       <div>
@@ -225,6 +225,11 @@ function renderState(stateClass: string, text: string, hint: string, mark: strin
   return `<span class="state state-${escapeHtml(stateClass)}" title="${escapeHtml(hint)}"><span class="mark" aria-hidden="true">${escapeHtml(mark)}</span> ${escapeHtml(text)}</span>`;
 }
 
+function aggregatorUsageCopy(job: JobRow): string {
+  const tokens = (job.aggregator_prompt_tokens ?? 0) + (job.aggregator_completion_tokens ?? 0);
+  return `${formatTokens(tokens)} tokens · ${formatCost(job.aggregator_cost)}`;
+}
+
 function progressCopy(metrics: JobMetrics): string {
   const failed = metrics.reviewersFailed ? `, ${metrics.reviewersFailed} failed` : "";
   return `${metrics.reviewersDone} / ${metrics.reviewersTotal} reviewers done${failed}`;
@@ -302,8 +307,7 @@ function renderAggregator(job: JobRow, metrics: JobMetrics): string {
       ${job.aggregator_model ? `model <code class="metric">${escapeHtml(job.aggregator_model)}</code>` : "model pending"}
       ${job.aggregator_provider ? ` · provider <code class="metric">${escapeHtml(job.aggregator_provider)}</code>` : ""}
       · <span class="metric">${escapeHtml(formatDuration(job.aggregator_duration_ms))}</span>
-      · <span class="metric">${escapeHtml(formatTokens((job.aggregator_prompt_tokens ?? 0) + (job.aggregator_completion_tokens ?? 0)))} tokens</span>
-      · <span class="metric">${escapeHtml(formatCost(job.aggregator_cost))}</span>
+      · <span class="metric">${escapeHtml(aggregatorUsageCopy(job))}</span>
     </p>
     <p><strong>${escapeHtml(heading)}</strong></p>
     ${agg?.summary ? `<pre class="log-panel">${escapeHtml(agg.summary)}</pre>` : job.aggregator_normalized || job.aggregator_raw ? "" : `<p class="muted">(pending)</p>`}
