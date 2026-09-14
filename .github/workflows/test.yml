@@ -21,6 +21,34 @@ jobs:
         run: |
           bash -n scripts/install.sh
           sh -n scripts/docker-entrypoint.sh
+          if grep -E 'opencode\.ai/install|\bcurl\b|\bbash\b' scripts/docker-entrypoint.sh; then
+            echo "entrypoint must not download or execute a remote installer" >&2
+            exit 1
+          fi
+      - name: Entrypoint fails closed without a seeded OpenCode binary
+        run: |
+          tmp=$(mktemp -d)
+          trap 'rm -rf "$tmp"' EXIT
+          export OPENCODE_HOME="$tmp/home"
+          export OPENCODE_BIN="$tmp/home/.opencode/bin/opencode"
+          export WORKSPACE_ROOT="$tmp/ws"
+          if err=$(sh scripts/docker-entrypoint.sh true 2>&1); then
+            echo "expected missing binary to fail" >&2
+            exit 1
+          fi
+          printf '%s\n' "$err" | grep -F './scripts/install.sh'
+          printf '%s\n' "$err" | grep -F -- '--upgrade-opencode'
+          mkdir -p "$(dirname "$OPENCODE_BIN")"
+          printf '#!/bin/sh\necho 1.2.3\n' > "$OPENCODE_BIN"
+          chmod 755 "$OPENCODE_BIN"
+          sh scripts/docker-entrypoint.sh true
+          if err=$(OPENCODE_VERSION=9.9.9 sh scripts/docker-entrypoint.sh true 2>&1); then
+            echo "expected version mismatch to fail" >&2
+            exit 1
+          fi
+          printf '%s\n' "$err" | grep -F './scripts/install.sh'
+          OPENCODE_VERSION=1.2.3 sh scripts/docker-entrypoint.sh true
+          OPENCODE_VERSION=v1.2.3 sh scripts/docker-entrypoint.sh true
       - name: Installer writes env and Compose config
         run: |
           openssl genrsa -out /tmp/app.pem 2048

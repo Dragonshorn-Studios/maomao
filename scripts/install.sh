@@ -475,7 +475,7 @@ EOF
 
   prompt_required OPENCODE_REVIEWER_MODEL "OpenCode reviewer model (provider/model)" "anthropic/claude-sonnet-4-5"
   prompt OPENCODE_AGGREGATOR_MODEL "Aggregator model (empty = same as reviewer)"
-  prompt OPENCODE_VERSION "Pin OpenCode CLI version (empty = latest on first start)"
+  prompt OPENCODE_VERSION "Pin OpenCode CLI version (empty = latest GitHub release)"
 
   provider_key=$(provider_key_for_model "$OPENCODE_REVIEWER_MODEL")
   if [[ -n "$provider_key" ]]; then
@@ -545,7 +545,9 @@ MAOMAO_PUBLIC_URL="${MAOMAO_PUBLIC_URL:-http://127.0.0.1:${MAOMAO_PORT}}"
 
 if [[ "$SKIP_START" == "1" ]]; then
   log "Skipping docker compose (--skip-start)"
-  echo "Next: cd $ROOT && docker compose up -d --build"
+  echo "Next: cd $ROOT && ./scripts/install.sh --upgrade-opencode"
+  echo "(seeds OpenCode from GitHub releases, then starts Compose;"
+  echo " bare docker compose up with an empty maomao-opencode volume fails closed)"
   exit 0
 fi
 

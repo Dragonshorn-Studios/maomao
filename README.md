@@ -40,7 +40,7 @@ Only the orchestrator talks to GitHub. Reviewers cannot post reviews or write in
 
 - Docker with Compose v2 (self-host path below), **or** Node.js 22+ for local `npm` development
 - git
-- [OpenCode](https://opencode.ai/docs/cli/) — installed automatically onto a Docker volume in the self-host path; on `PATH` (or `OPENCODE_BIN`) for local `npm`
+- [OpenCode](https://opencode.ai/docs/cli/) — seeded onto a Docker volume by `scripts/install.sh` in the self-host path; on `PATH` (or `OPENCODE_BIN`) for local `npm`
 - A GitHub App (see below)
 - Provider credentials for whatever models you point OpenCode at
 
@@ -119,11 +119,11 @@ OpenCode CLI only (keep the Maomao image):
 
 ```bash
 ./scripts/install.sh --upgrade-opencode
-# or pin a release, then recreate:
-# echo OPENCODE_VERSION=1.2.3 >> .env && docker compose up -d --force-recreate
+# pin a release, then re-seed (recreating the container does not download a CLI):
+# OPENCODE_VERSION=1.2.3 ./scripts/install.sh --upgrade-opencode
 ```
 
-Pin `OPENCODE_VERSION` if you need a known-good CLI. See **OpenCode must honor the permission denies** before pointing Maomao at untrusted repositories.
+Pin `OPENCODE_VERSION` if you need a known-good CLI, then re-seed with `--upgrade-opencode`. See **OpenCode must honor the permission denies** before pointing Maomao at untrusted repositories.
 
 ### Manual Compose (no installer)
 
@@ -132,10 +132,10 @@ cp .env.example .env
 # fill GitHub App + UI + OpenCode model / provider keys
 cp /path/to/app.pem github-app.pem
 # uncomment the github-app.pem volume in docker-compose.yml, or copy the override the installer writes
-docker compose up --build -d
+./scripts/install.sh --upgrade-opencode
 ```
 
-First start: `scripts/install.sh` downloads OpenCode on the **host** (GitHub releases) and copies it into `maomao-opencode`, so the container does not need outbound HTTPS just to boot. If you start Compose without the installer and the volume is empty, the image entrypoint tries the same install from inside the container. After that the binary lives on the volume; you do not rebuild a derived image just to keep OpenCode.
+`--upgrade-opencode` downloads OpenCode on the **host** (GitHub releases) into `maomao-opencode` and starts Compose. Host seed is required for the first OpenCode install. The container entrypoint never downloads or executes a remote installer. Empty volume + bare `docker compose up` fails closed with instructions to run `./scripts/install.sh` / `--upgrade-opencode` (or mount a binary at `OPENCODE_BIN`). After a successful seed the binary lives on the volume; you do not rebuild a derived image just to keep OpenCode.
 
 ## Configure a GitHub App
 
