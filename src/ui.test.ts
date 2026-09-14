@@ -22,6 +22,9 @@ describe("theme tokens", () => {
     expect(THEME_CSS).toContain("--cinnabar:");
     expect(THEME_CSS).toContain("--amber:");
     expect(THEME_CSS).toContain("--working:");
+    expect(THEME_CSS).toContain("--working: var(--plum)");
+    expect(THEME_CSS).not.toContain("#6ecad6");
+    expect(THEME_CSS).toContain(".finding.is-unconfirmed");
     expect(THEME_CSS).toContain("@keyframes spin");
     expect(THEME_CSS).toContain(".section-head");
     expect(THEME_CSS).toMatch(/\.tick\.running[\s\S]*var\(--working\)/);
@@ -72,6 +75,8 @@ describe("monitoring pages", () => {
     expect(html).toContain("Failed");
     expect(html).toContain("Examining PR #418");
     expect(html).toContain("No suspicious findings");
+    expect(html).toContain("Unconfirmed");
+    expect(html).toContain("unconfirmed observation");
   });
 
   it("renders job detail with reviewer cards, findings, and a log panel", () => {
@@ -90,6 +95,20 @@ describe("monitoring pages", () => {
     expect(html).toContain("provider");
     expect(html).toContain("main");
     expect(html).toContain("cookie-flags");
+    expect(html).not.toContain("Unconfirmed");
+    expect(html).toContain("tokens");
+    expect(html).toContain("$0.12");
+  });
+
+  it("marks specialist findings unconfirmed until the aggregator finishes", () => {
+    const store = seededStore();
+    const aggregating = store.listJobs(20).find((row) => row.state === "aggregating");
+    expect(aggregating).toBeTruthy();
+    const html = renderJob(aggregating!, store.listReviewerRuns(aggregating!.id), store.listLogs(aggregating!.id));
+    expect(html).toContain("Unconfirmed specialist observations");
+    expect(html).toContain("is-unconfirmed");
+    expect(html).toContain("src/routes/v1.ts:12");
+    expect(html).toContain("findings-provisional");
   });
 
   it("puts the technical failure first on a failed job and warns on stale SHAs", () => {
@@ -126,5 +145,15 @@ describe("job metrics", () => {
     expect(metrics.cost).toBeGreaterThan(0.2);
     expect(formatTokens(12_400)).toMatch(/k$/);
     expect(formatCost(0.18)).toBe("$0.18");
+  });
+
+  it("treats specialist findings as unconfirmed until the aggregator is done", () => {
+    const store = seededStore();
+    const aggregating = store.listJobs(20).find((row) => row.state === "aggregating")!;
+    const live = jobMetrics(aggregating, store);
+    expect(live.findingsConfirmed).toBe(false);
+    expect(live.findings.medium).toBe(1);
+    const done = store.listJobs(20).find((row) => row.pr_number === 412)!;
+    expect(jobMetrics(done, store).findingsConfirmed).toBe(true);
   });
 });

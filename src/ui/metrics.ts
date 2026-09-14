@@ -25,6 +25,7 @@ export interface JobMetrics {
   findings: SeverityCounts;
   specialistFindings: Array<ReviewerFinding & { role: string }>;
   aggregator: AggregatorResult | null;
+  findingsConfirmed: boolean;
 }
 
 const EMPTY_COUNTS = (): SeverityCounts => ({
@@ -99,7 +100,10 @@ export function jobMetricsFromRuns(job: JobRow, runs: ReviewerRunRow[]): JobMetr
   }
 
   const aggregator = parseAggregatorResult(job.aggregator_normalized);
-  const findings = countSeverities(aggregator?.findings?.length ? aggregator.findings : specialistFindings);
+  const findingsConfirmed = job.aggregator_state === "done" && aggregator != null;
+  const findings = countSeverities(
+    findingsConfirmed ? (aggregator?.findings ?? []) : specialistFindings,
+  );
 
   return {
     reviewersDone: runs.filter((run) => run.state === "done").length,
@@ -115,6 +119,7 @@ export function jobMetricsFromRuns(job: JobRow, runs: ReviewerRunRow[]): JobMetr
     findings,
     specialistFindings,
     aggregator,
+    findingsConfirmed,
   };
 }
 

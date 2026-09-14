@@ -19,8 +19,8 @@ export const THEME_CSS = `
   --cinnabar-soft: #f3d6d6;
   --amber: #8a5a10;
   --amber-soft: #f1e4c4;
-  --working: #246e78;
-  --working-soft: #d5ebee;
+  --working: var(--plum);
+  --working-soft: var(--plum-soft);
   --ash: #7a776b;
   --line: #cfc8b6;
   --line-strong: #b7b09c;
@@ -59,8 +59,8 @@ html[data-theme="dark"] {
   --cinnabar-soft: #3a2224;
   --amber: #e0b45c;
   --amber-soft: #3a3220;
-  --working: #6ecad6;
-  --working-soft: #173033;
+  --working: var(--plum);
+  --working-soft: var(--plum-soft);
   --ash: #8c8a7e;
   --line: #2e352e;
   --line-strong: #4a524a;
@@ -89,8 +89,8 @@ html[data-theme="dark"] {
     --cinnabar-soft: #3a2224;
     --amber: #e0b45c;
     --amber-soft: #3a3220;
-    --working: #6ecad6;
-    --working-soft: #173033;
+    --working: var(--plum);
+    --working-soft: var(--plum-soft);
     --ash: #8c8a7e;
     --line: #2e352e;
     --line-strong: #4a524a;
@@ -530,6 +530,36 @@ form.retry, form.retry-job {
 .finding {
   padding: 0.85rem 1rem;
   margin: 0 0 0.75rem;
+}
+.finding.is-unconfirmed {
+  border-style: dashed;
+  background: color-mix(in srgb, var(--plum-soft) 70%, var(--surface));
+}
+.finding-head {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem 0.7rem;
+  align-items: baseline;
+  font-family: var(--font-mono);
+  font-size: 0.82rem;
+}
+.unconfirmed {
+  display: inline-flex;
+  align-items: center;
+  font-family: var(--font-mono);
+  font-size: 0.7rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--plum);
+  border: 1px dashed var(--plum);
+  background: var(--plum-soft);
+  padding: 0.05rem 0.4rem;
+}
+.findings-provisional {
+  border: 1px dashed var(--plum);
+  background: var(--plum-soft);
+  padding: 0.65rem 0.8rem;
+  margin: 0.8rem 0;
 }
 .finding-head {
   display: flex;

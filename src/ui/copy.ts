@@ -56,10 +56,18 @@ export function emptyQueueCopy(): { title: string; body: string } {
   };
 }
 
-export function observationsCopy(count: number): string {
+export function observationsCopy(count: number, unconfirmed = false): string {
   if (count === 0) return "No suspicious findings";
+  if (unconfirmed) {
+    if (count === 1) return "1 unconfirmed observation";
+    return `${count} unconfirmed observations`;
+  }
   if (count === 1) return "1 observation collected";
   return `${count} observations collected`;
+}
+
+export function unconfirmedFindingsBanner(): string {
+  return "Unconfirmed specialist observations. The aggregator has not validated these yet.";
 }
 
 export function staleBanner(): string {
