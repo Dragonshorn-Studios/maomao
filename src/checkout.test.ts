@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
+  chmodTree,
   createCheckout,
   execFile,
   gitAuthSecrets,
@@ -86,7 +87,13 @@ describe("createCheckout", () => {
       expect(log).toContain(`AUTHORIZATION: basic ${basic}`);
       expect(log).toContain("credential.helper=");
       expect(log.toLowerCase()).not.toContain("bearer");
+      await checkout.cleanup(workspace.dir);
     } finally {
+      try {
+        await chmodTree(tmp, 0o755);
+      } catch {
+        // best-effort so the read-only checkout tree can be deleted
+      }
       await rm(tmp, { recursive: true, force: true });
     }
   });
