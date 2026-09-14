@@ -420,4 +420,116 @@ describe("pipeline", () => {
     const logs = store.listLogs(created.job.id).map((row) => row.message).join("\n");
     expect(logs).toContain("You must provide a message or a command");
   });
+
+  it("skips reviewers that already succeeded when a job is retried", async () => {
+    const config = loadConfig({
+      REVIEWER_ROLES: "correctness,security",
+      OPENCODE_REVIEWER_MODEL: "test/model",
+      POST_EMPTY_REVIEW: "true",
+      OPENCODE_MAX_RETRIES: "0",
+      GITHUB_APP_ID: "1",
+      GITHUB_WEBHOOK_SECRET: "s",
+      GITHUB_APP_PRIVATE_KEY: "k",
+    });
+    const store = new JobStore(openDb(":memory:"));
+    const created = store.enqueue({
+      repoFullName: "acme/widgets",
+      repoOwner: "acme",
+      repoName: "widgets",
+      installationId: 9,
+      prNumber: 4,
+      prTitle: "t",
+      prBody: "",
+      prHtmlUrl: "",
+      prAuthor: "dev",
+      baseSha: "base",
+      headSha: "abc",
+      baseRef: "main",
+      headRef: "feat",
+      reviewers: [
+        { role: "correctness", title: "Correctness" },
+        { role: "security", title: "Security" },
+      ],
+    });
+    const runs = store.listReviewerRuns(created.job.id);
+    store.patchReviewer(runs[0].id, {
+      state: "done",
+      normalized_json: reviewerJson("correctness"),
+    });
+    const roles: string[] = [];
+    await createPipeline({
+      config,
+      store,
+      github: {
+        getInstallationToken: async () => "token",
+        getPullDiff: async () => "diff",
+        listReviews: async () => [],
+        createCommentReview: async () => ({ id: "1", url: "u" }),
+      },
+      checkout: await fixtureCheckout(),
+      opencode: {
+        async run(input) {
+          const roleMatch = input.prompt.match(/Role id: (\w+)/);
+          if (roleMatch) roles.push(roleMatch[1]);
+          const text = roleMatch
+            ? reviewerJson(roleMatch[1])
+            : JSON.stringify({ verdict: "comment", summary: "ok", findings: [] });
+          return { stdout: text, stderr: "", exitCode: 0, text, usage: {} };
+        },
+      },
+    }).run(created.job.id);
+    expect(roles).toEqual(["security"]);
+    expect(store.getReviewerRun(runs[0].id)?.state).toBe("done");
+    expect(store.getJob(created.job.id)?.state).toBe("completed");
+  });
+});
+
+describe("retryFailedReviewers", () => {
+  const base = {
+    repoFullName: "acme/widgets",
+    repoOwner: "acme",
+    repoName: "widgets",
+    installationId: 1,
+    prNumber: 3,
+    prTitle: "t",
+    prBody: "",
+    prHtmlUrl: "",
+    prAuthor: "a",
+    baseSha: "b",
+    baseRef: "main",
+    headRef: "f",
+    headSha: "abc",
+    reviewers: [
+      { role: "correctness", title: "Correctness" },
+      { role: "security", title: "Security" },
+    ],
+  };
+
+  it("re-queues failed runs and the job, leaving successful runs alone", () => {
+    const store = new JobStore(openDb(":memory:"));
+    const created = store.enqueue(base);
+    const runs = store.listReviewerRuns(created.job.id);
+    store.patchReviewer(runs[0].id, { state: "failed", validation_error: "empty", stderr: "File not found" });
+    store.patchReviewer(runs[1].id, { state: "done", normalized_json: "{}" });
+    store.setJobState(created.job.id, "failed", { failure_reason: "all specialist reviewers failed" });
+    const result = store.retryFailedReviewers(created.job.id, runs[0].id);
+    expect(result).toEqual({ ok: true, reset: 1 });
+    expect(store.getJob(created.job.id)?.state).toBe("queued");
+    expect(store.getJob(created.job.id)?.failure_reason).toBeNull();
+    expect(store.getReviewerRun(runs[0].id)?.state).toBe("queued");
+    expect(store.getReviewerRun(runs[0].id)?.stderr).toBeNull();
+    expect(store.getReviewerRun(runs[1].id)?.state).toBe("done");
+  });
+
+  it("rejects in-flight and stale jobs", () => {
+    const store = new JobStore(openDb(":memory:"));
+    const created = store.enqueue(base);
+    const run = store.listReviewerRuns(created.job.id)[0];
+    store.patchReviewer(run.id, { state: "failed" });
+    store.setJobState(created.job.id, "reviewing");
+    expect(store.retryFailedReviewers(created.job.id).ok).toBe(false);
+    store.setJobState(created.job.id, "failed", { failure_reason: "x" });
+    store.setJobState(created.job.id, "stale");
+    expect(store.retryFailedReviewers(created.job.id).ok).toBe(false);
+  });
 });

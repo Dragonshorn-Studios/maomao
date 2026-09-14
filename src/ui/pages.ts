@@ -81,9 +81,11 @@ export function renderJob(
   const elapsed = formatDuration(elapsedMs(job.started_at, job.finished_at) ?? elapsedMs(job.created_at));
   const stale = job.state === "stale";
   const findingsHtml = renderFindings(metrics);
+  const failedToRetry = retryableFailedCount(job, runs);
   const body = `
     <p class="crumb"><a href="/">Jobs</a> / job ${job.id}</p>
     ${options.notice ? `<p class="notice" role="status">${escapeHtml(options.notice)}</p>` : ""}
+    ${options.error ? `<p class="error" role="alert">${escapeHtml(options.error)}</p>` : ""}
     ${stale ? `<p class="warn" role="status">${escapeHtml(staleBanner())}</p>` : ""}
     <h1>${escapeHtml(job.repo_full_name)}#${job.pr_number}</h1>
     <p class="lede">${escapeHtml(job.pr_title || "")}${flavor ? ` · ${escapeHtml(flavor)}` : ""}</p>
@@ -133,8 +135,9 @@ export function renderJob(
     ${job.failure_reason ? `<p class="error" role="alert"><strong>Failure:</strong> ${escapeHtml(job.failure_reason)}</p>` : ""}
     <h2>Reviewers</h2>
     <p class="muted">${escapeHtml(progressCopy(metrics))}</p>
+    ${failedToRetry > 0 ? renderJobRetry(job.id, failedToRetry) : ""}
     <div class="cards">
-      ${runs.map(renderRun).join("")}
+      ${runs.map((run) => renderRun(run, canRetryRun(job, run))).join("")}
     </div>
     <h2>Aggregator</h2>
     ${renderAggregator(job, metrics)}
@@ -221,7 +224,23 @@ function progressCopy(metrics: JobMetrics): string {
   return `${metrics.reviewersDone} / ${metrics.reviewersTotal} reviewers done${failed}`;
 }
 
-function renderRun(run: ReviewerRunRow): string {
+function retryableFailedCount(job: JobRow, runs: ReviewerRunRow[]): number {
+  if (!["failed", "completed"].includes(job.state)) return 0;
+  return runs.filter((run) => run.state === "failed").length;
+}
+
+function canRetryRun(job: JobRow, run: ReviewerRunRow): boolean {
+  return ["failed", "completed"].includes(job.state) && run.state === "failed";
+}
+
+function renderJobRetry(jobId: number, count: number): string {
+  const label = count === 1 ? "Retry failed reviewer" : `Retry ${count} failed reviewers`;
+  return `<form class="retry-job" method="post" action="/jobs/${jobId}/retry">
+    <button type="submit">${escapeHtml(label)}</button>
+  </form>`;
+}
+
+function renderRun(run: ReviewerRunRow, showRetry = false): string {
   const parsed = parseReviewerResult(run.normalized_json);
   const findingCount = parsed?.findings.length ?? 0;
   const state = runStateLabel(run.state);
@@ -232,7 +251,16 @@ function renderRun(run: ReviewerRunRow): string {
   return `<article class="card">
     <header>
       <span class="role">${roleGlyph(run.role)} <strong>${escapeHtml(run.title || run.role)}</strong> <span class="muted">(${escapeHtml(run.role)})</span></span>
-      ${renderState(run.state, state.text, state.hint, state.mark)}
+      <span class="run-actions">
+        ${renderState(run.state, state.text, state.hint, state.mark)}
+        ${
+          showRetry
+            ? `<form class="retry" method="post" action="/jobs/${run.job_id}/reviewers/${run.id}/retry">
+                 <button type="submit">Retry</button>
+               </form>`
+            : ""
+        }
+      </span>
     </header>
     <p class="muted">
       model <code class="metric">${escapeHtml(run.model || "default model")}</code>

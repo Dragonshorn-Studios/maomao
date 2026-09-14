@@ -87,7 +87,7 @@ async function runJob(deps: PipelineDeps, jobId: number, signal: AbortSignal): P
     throwIfStale(store, jobId, signal);
 
     store.setJobState(jobId, "reviewing");
-    const runs = store.listReviewerRuns(jobId);
+    const runs = store.listReviewerRuns(jobId).filter((run) => run.state !== "done");
     await mapLimit(runs, config.opencode.reviewerConcurrency, async (run) => {
       throwIfStale(store, jobId, signal);
       await runReviewer(deps, job, run, workspace.repoDir, [workspace.diffPath, workspace.metaPath], signal);

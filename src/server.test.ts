@@ -276,4 +276,38 @@ describe("manual review trigger", () => {
     expect(await res.text()).toContain("draft");
     expect(enqueued).toEqual([]);
   });
+
+  it("retries failed reviewers and enqueues the job", async () => {
+    const { app, store, enqueued } = testApp();
+    const created = store.enqueue({
+      repoFullName: "acme/widgets",
+      repoOwner: "acme",
+      repoName: "widgets",
+      installationId: 1,
+      prNumber: 8,
+      prTitle: "Hello",
+      prBody: "",
+      prHtmlUrl: "https://example.test",
+      prAuthor: "dev",
+      baseSha: "b",
+      headSha: "h",
+      baseRef: "main",
+      headRef: "f",
+      reviewers: [{ role: "correctness", title: "Correctness" }],
+    });
+    const run = store.listReviewerRuns(created.job.id)[0];
+    store.patchReviewer(run.id, { state: "failed", validation_error: "empty" });
+    store.setJobState(created.job.id, "failed", { failure_reason: "all specialist reviewers failed" });
+
+    const res = await app.request(`/jobs/${created.job.id}/reviewers/${run.id}/retry`, { method: "POST" });
+    expect(res.status).toBe(302);
+    expect(res.headers.get("location")).toBe(`/jobs/${created.job.id}?notice=retry`);
+    expect(enqueued).toEqual([created.job.id]);
+    expect(store.getJob(created.job.id)?.state).toBe("queued");
+    expect(store.getReviewerRun(run.id)?.state).toBe("queued");
+
+    const again = await app.request(`/jobs/${created.job.id}/retry`, { method: "POST" });
+    expect(again.status).toBe(400);
+    expect(await again.text()).toContain("still running");
+  });
 });
