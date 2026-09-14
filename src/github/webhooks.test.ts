@@ -318,6 +318,7 @@ describe("webhook handling", () => {
     });
     const store = new JobStore(openDb(":memory:"));
     const limiter = new RepoRateLimiter();
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     const firstBody = JSON.stringify(prPayload());
     const first = await handleGithubWebhook({
       config,
@@ -382,5 +383,6 @@ describe("webhook handling", () => {
     expect(third.status).toBe(202);
     expect(third.body).toEqual({ ok: true, ignored: true, reason: "rate limited" });
     expect(store.listJobs()).toHaveLength(2);
+    warn.mockRestore();
   });
 });

@@ -599,6 +599,7 @@ describe("pipeline", () => {
     });
     let tokens = 0;
     let opencode = 0;
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     await createPipeline({
       config,
       store,
@@ -628,6 +629,7 @@ describe("pipeline", () => {
     expect(tokens).toBe(0);
     expect(opencode).toBe(0);
     expect(store.getJob(created.job.id)?.failure_reason).toBe("unauthorized: missing account id");
+    warn.mockRestore();
   });
 
   it("fails the job when the pull diff exceeds MAX_DIFF_BYTES without calling OpenCode", async () => {
