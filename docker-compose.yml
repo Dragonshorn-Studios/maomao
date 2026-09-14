@@ -1,18 +1,24 @@
+name: maomao
+
 services:
   maomao:
     build: .
     ports:
-      - "3000:3000"
+      - "${MAOMAO_PORT:-3000}:3000"
     env_file:
       - .env
     environment:
       DATABASE_PATH: /data/maomao.sqlite
       WORKSPACE_ROOT: /data/workspaces
+      HOME: /opt/opencode
+      OPENCODE_BIN: /opt/opencode/.opencode/bin/opencode
     volumes:
       - maomao-data:/data
-      # Mount the GitHub App private key if you use GITHUB_APP_PRIVATE_KEY_PATH
+      - maomao-opencode:/opt/opencode
+      # scripts/install.sh bind-mounts ./github-app.pem via docker-compose.override.yml
       # - ./github-app.pem:/run/secrets/github-app.pem:ro
     restart: unless-stopped
 
 volumes:
   maomao-data:
+  maomao-opencode:

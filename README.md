@@ -38,11 +38,104 @@ Only the orchestrator talks to GitHub. Reviewers cannot post reviews or write in
 
 ## Requirements
 
-- Node.js 22+
+- Docker with Compose v2 (self-host path below), **or** Node.js 22+ for local `npm` development
 - git
-- [OpenCode](https://opencode.ai/docs/cli/) on `PATH` (or `OPENCODE_BIN`)
+- [OpenCode](https://opencode.ai/docs/cli/) — installed automatically onto a Docker volume in the self-host path; on `PATH` (or `OPENCODE_BIN`) for local `npm`
 - A GitHub App (see below)
 - Provider credentials for whatever models you point OpenCode at
+
+## Install (self-host)
+
+On a host with Docker and git:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Dragonshorn-Studios/maomao/main/scripts/install.sh | bash
+```
+
+From a local checkout of this repo, the same script:
+
+```bash
+./scripts/install.sh
+```
+
+The installer uses this checkout, or clones into `~/.maomao` (`MAOMAO_HOME` overrides). It prompts for GitHub App id / webhook secret / private key file, a UI password + session secret (either can be generated), and OpenCode provider keys / model ids. It writes `.env` (mode `600`) plus `github-app.pem`, bind-mounts the key, and runs `docker compose up -d --build`.
+
+Create the GitHub App first (least-privilege table below). The installer does not create it in the browser.
+
+Non-interactive (CI or already-exported env):
+
+```bash
+export GITHUB_APP_ID=123
+export GITHUB_WEBHOOK_SECRET=...
+export GITHUB_APP_PRIVATE_KEY_PATH=/path/to/app.pem
+export UI_PASSWORD=...                 # generated if unset
+export OPENCODE_REVIEWER_MODEL=anthropic/claude-sonnet-4-5
+export ANTHROPIC_API_KEY=...           # or OPENAI_API_KEY / OPENROUTER_API_KEY / …
+./scripts/install.sh --non-interactive
+```
+
+Then:
+
+- UI: http://127.0.0.1:3000
+- Health: `GET /health`
+- Webhook: `POST /webhooks/github` — set this URL on the GitHub App
+
+`--skip-start` writes `.env` and mounts only. `--upgrade-opencode` reinstalls the CLI into the OpenCode volume without rebuilding a derived Maomao image. `./scripts/install.sh --help` lists flags.
+
+### Volumes and secrets
+
+| Mount | Path in container | Purpose |
+| --- | --- | --- |
+| named volume `maomao-data` | `/data` | SQLite (`maomao.sqlite`) and PR workspaces |
+| named volume `maomao-opencode` | `/opt/opencode` (`HOME`) | OpenCode CLI (`~/.opencode/bin`) plus its config/cache |
+| bind `./github-app.pem` | `/run/secrets/github-app.pem` | GitHub App private key |
+
+Provider API keys live in `.env` only (`env_file`). They are never copied into the image. `GITHUB_APP_PRIVATE_KEY_PATH` inside the container is `/run/secrets/github-app.pem`.
+
+`docker compose down` and rebuilding the Maomao image leave both named volumes in place, so OpenCode and job data survive. `docker compose down -v` deletes them.
+
+To bind-mount on the host instead of named volumes, put this in a `docker-compose.override.yml` (the installer already uses that file for the key):
+
+```yaml
+services:
+  maomao:
+    volumes:
+      - ./data:/data
+      - ./opencode:/opt/opencode
+      - ./github-app.pem:/run/secrets/github-app.pem:ro
+```
+
+### Upgrades
+
+Maomao app (keep OpenCode + SQLite):
+
+```bash
+cd ~/.maomao   # or your checkout
+git pull
+docker compose up -d --build
+```
+
+OpenCode CLI only (keep the Maomao image):
+
+```bash
+./scripts/install.sh --upgrade-opencode
+# or pin a release, then recreate:
+# echo OPENCODE_VERSION=1.2.3 >> .env && docker compose up -d --force-recreate
+```
+
+Pin `OPENCODE_VERSION` if you need a known-good CLI. See **OpenCode must honor the permission denies** before pointing Maomao at untrusted repositories.
+
+### Manual Compose (no installer)
+
+```bash
+cp .env.example .env
+# fill GitHub App + UI + OpenCode model / provider keys
+cp /path/to/app.pem github-app.pem
+# uncomment the github-app.pem volume in docker-compose.yml, or copy the override the installer writes
+docker compose up --build -d
+```
+
+First start needs outbound HTTPS so the entrypoint can install OpenCode into `maomao-opencode`. After that the binary lives on the volume; you do not rebuild a derived image just to keep OpenCode.
 
 ## Configure a GitHub App
 
@@ -101,7 +194,7 @@ Each run has a timeout (`OPENCODE_TIMEOUT_MS`), retries (`OPENCODE_MAX_RETRIES`)
 
 ```bash
 cp .env.example .env
-# fill GitHub App + OpenCode settings
+# fill GitHub App + OpenCode settings; put `opencode` on PATH
 npm install
 npm run dev
 ```
@@ -116,24 +209,6 @@ Then:
 npm test
 npm run build
 npm start
-```
-
-## Docker
-
-```bash
-cp .env.example .env
-docker compose up --build
-```
-
-SQLite and workspaces live in the `maomao-data` volume (`/data` in the container). Mount `github-app.pem` and set `GITHUB_APP_PRIVATE_KEY_PATH=/run/secrets/github-app.pem` if you prefer a file over an env var.
-
-The image boots the Maomao process. Install OpenCode in a derived image or bind-mount the binary, and pass provider keys via `.env`. Example derived image:
-
-```dockerfile
-FROM ghcr.io/your-org/maomao:latest
-USER root
-RUN apt-get update && apt-get install -y curl && curl -fsSL https://opencode.ai/install | bash
-USER node
 ```
 
 ## Monitoring UI
