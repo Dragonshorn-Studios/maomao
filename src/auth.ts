@@ -56,8 +56,7 @@ export function isPublicPath(path: string): boolean {
     path === "/webhooks/github" ||
     path === "/login" ||
     path === "/logout" ||
-    path === "/assets/maomao.css" ||
-    path.startsWith("/assets/")
+    path === "/assets/maomao.css"
   );
 }
 
