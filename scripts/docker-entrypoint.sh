@@ -3,8 +3,6 @@
 # The binary and OpenCode's own config/cache live under $HOME (/opt/opencode
 # by default) so `docker compose down` / image rebuilds do not wipe them.
 set -eu
-# pipefail is dash-supported on Debian; needed so `curl | bash` fails on curl errors.
-set -o pipefail 2>/dev/null || true
 
 OPENCODE_HOME="${OPENCODE_HOME:-/opt/opencode}"
 OPENCODE_BIN="${OPENCODE_BIN:-$OPENCODE_HOME/.opencode/bin/opencode}"
@@ -51,11 +49,14 @@ if [ "$need_install" = "1" ]; then
     echo "Maomao: cannot write OpenCode volume $HOME" >&2
     exit 1
   fi
+  installer="${TMPDIR:-/tmp}/opencode-install.sh"
+  curl -fsSL -o "$installer" https://opencode.ai/install
   if [ -n "${OPENCODE_VERSION:-}" ]; then
-    curl -fsSL https://opencode.ai/install | bash -s -- --no-modify-path --version "$OPENCODE_VERSION"
+    bash "$installer" --no-modify-path --version "$OPENCODE_VERSION"
   else
-    curl -fsSL https://opencode.ai/install | bash -s -- --no-modify-path
+    bash "$installer" --no-modify-path
   fi
+  rm -f "$installer"
   if [ ! -x "$OPENCODE_BIN" ]; then
     echo "Maomao: OpenCode install finished but $OPENCODE_BIN is missing" >&2
     exit 1
