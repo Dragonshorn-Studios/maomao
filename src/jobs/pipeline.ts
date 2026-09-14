@@ -129,7 +129,20 @@ async function runJob(deps: PipelineDeps, jobId: number, signal: AbortSignal): P
       return;
     }
     const message = error instanceof Error ? error.message : String(error);
-    store.setJobState(jobId, "failed", { failure_reason: message, finished_at: nowIso() });
+    for (const run of store.listReviewerRuns(jobId)) {
+      if (run.state === "queued" || run.state === "running") {
+        store.patchReviewer(run.id, {
+          state: "failed",
+          validation_error: "job ended before this reviewer finished",
+          finished_at: nowIso(),
+        });
+      }
+    }
+    store.setJobState(jobId, "failed", {
+      failure_reason: message,
+      finished_at: nowIso(),
+      aggregator_state: store.getJob(jobId)?.aggregator_state === "done" ? "done" : "failed",
+    });
     store.log(jobId, `Job failed: ${message}`, "error");
   }
 }

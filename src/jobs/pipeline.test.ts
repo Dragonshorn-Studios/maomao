@@ -274,4 +274,51 @@ describe("pipeline", () => {
     expect(creates).toBe(0);
     expect(store.getJob(created.job.id)?.github_review_id).toBe("5");
   });
+
+  it("marks leftover reviewers failed when checkout throws", async () => {
+    const config = loadConfig({ REVIEWER_ROLES: "correctness,security" });
+    const store = new JobStore(openDb(":memory:"));
+    const created = store.enqueue({
+      repoFullName: "acme/widgets",
+      repoOwner: "acme",
+      repoName: "widgets",
+      installationId: 9,
+      prNumber: 4,
+      prTitle: "t",
+      prBody: "",
+      prHtmlUrl: "",
+      prAuthor: "dev",
+      baseSha: "base",
+      headSha: "abc",
+      baseRef: "main",
+      headRef: "feat",
+      reviewers: [
+        { role: "correctness", title: "Correctness" },
+        { role: "security", title: "Security" },
+      ],
+    });
+    await createPipeline({
+      config,
+      store,
+      github: {
+        getInstallationToken: async () => "token",
+        getPullDiff: async () => "diff",
+        listReviews: async () => [],
+        createCommentReview: async () => ({ id: "x", url: "u" }),
+      },
+      checkout: {
+        async prepare() {
+          throw new Error("boom");
+        },
+        async cleanup() {},
+      },
+      opencode: {
+        async run() {
+          throw new Error("should not run");
+        },
+      },
+    }).run(created.job.id);
+    expect(store.getJob(created.job.id)?.state).toBe("failed");
+    expect(store.listReviewerRuns(created.job.id).every((run) => run.state === "failed")).toBe(true);
+  });
 });
