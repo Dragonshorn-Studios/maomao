@@ -133,9 +133,11 @@ export function renderJob(
       </div>
     </dl>
     ${job.failure_reason ? `<p class="error" role="alert"><strong>Failure:</strong> ${escapeHtml(job.failure_reason)}</p>` : ""}
-    <h2>Reviewers</h2>
+    <div class="section-head">
+      <h2>Reviewers</h2>
+      ${failedToRetry > 0 ? renderJobRetry(job.id, failedToRetry) : ""}
+    </div>
     <p class="muted">${escapeHtml(progressCopy(metrics))}</p>
-    ${failedToRetry > 0 ? renderJobRetry(job.id, failedToRetry) : ""}
     <div class="cards">
       ${runs.map((run) => renderRun(run, canRetryRun(job, run))).join("")}
     </div>
@@ -251,16 +253,7 @@ function renderRun(run: ReviewerRunRow, showRetry = false): string {
   return `<article class="card">
     <header>
       <span class="role">${roleGlyph(run.role)} <strong>${escapeHtml(run.title || run.role)}</strong> <span class="muted">(${escapeHtml(run.role)})</span></span>
-      <span class="run-actions">
-        ${renderState(run.state, state.text, state.hint, state.mark)}
-        ${
-          showRetry
-            ? `<form class="retry" method="post" action="/jobs/${run.job_id}/reviewers/${run.id}/retry">
-                 <button type="submit">Retry</button>
-               </form>`
-            : ""
-        }
-      </span>
+      ${renderState(run.state, state.text, state.hint, state.mark)}
     </header>
     <p class="muted">
       model <code class="metric">${escapeHtml(run.model || "default model")}</code>
@@ -272,6 +265,13 @@ function renderRun(run: ReviewerRunRow, showRetry = false): string {
       · ${findingCount} finding(s)
     </p>
     ${run.validation_error ? `<p class="error" role="alert"><strong>Validation error:</strong> ${escapeHtml(run.validation_error)}</p>` : ""}
+    ${
+      showRetry
+        ? `<form class="retry" method="post" action="/jobs/${run.job_id}/reviewers/${run.id}/retry">
+             <button type="submit">Retry</button>
+           </form>`
+        : ""
+    }
     ${parsed?.summary ? `<p>${escapeHtml(parsed.summary)}</p>` : ""}
     ${run.normalized_json ? `<details><summary>Normalized JSON</summary><pre class="log-panel">${escapeHtml(run.normalized_json)}</pre></details>` : ""}
     ${run.raw_output && run.raw_output !== run.normalized_json ? `<details><summary>Raw output</summary><pre class="log-panel">${escapeHtml(run.raw_output)}</pre></details>` : ""}
