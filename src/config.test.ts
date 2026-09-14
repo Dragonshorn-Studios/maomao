@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { loadConfig } from "./config.js";
+import { assertRuntimeConfig, loadConfig } from "./config.js";
 import { parseBoolean, parseCsv } from "./util.js";
 
 describe("loadConfig", () => {
@@ -20,6 +20,28 @@ describe("loadConfig", () => {
     expect(config.postEmptyReview).toBe(false);
     expect(config.opencode.reviewerConcurrency).toBe(3);
     expect(config.pullRequestActions).toContain("ready_for_review");
+  });
+
+  it("reads UI password aliases and rejects a half-configured gate", () => {
+    const config = loadConfig({
+      GITHUB_APP_ID: "1",
+      GITHUB_APP_PRIVATE_KEY: "k",
+      GITHUB_WEBHOOK_SECRET: "s",
+      MAOMAO_UI_PASSWORD: "pw",
+      UI_SESSION_SECRET: "session-secret",
+    });
+    expect(config.uiPassword).toBe("pw");
+    expect(config.uiSessionSecret).toBe("session-secret");
+    expect(() =>
+      assertRuntimeConfig(
+        loadConfig({
+          GITHUB_APP_ID: "1",
+          GITHUB_APP_PRIVATE_KEY: "k",
+          GITHUB_WEBHOOK_SECRET: "s",
+          UI_PASSWORD: "pw",
+        }),
+      ),
+    ).toThrow(/UI_PASSWORD and UI_SESSION_SECRET/);
   });
 
   it("supports unknown reviewer ids", () => {

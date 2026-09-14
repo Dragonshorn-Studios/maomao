@@ -50,8 +50,8 @@ export interface Config {
   postEmptyReview: boolean;
   pullRequestActions: PullRequestAction[];
   maxInlineComments: number;
-  uiBasicAuthUser: string;
-  uiBasicAuthPassword: string;
+  uiPassword: string;
+  uiSessionSecret: string;
 }
 
 const DEFAULT_ACTIONS: PullRequestAction[] = [
@@ -134,8 +134,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     postEmptyReview: parseBoolean(env.POST_EMPTY_REVIEW, false),
     pullRequestActions,
     maxInlineComments: Math.max(0, parseInteger(env.MAX_INLINE_COMMENTS, 12)),
-    uiBasicAuthUser: env.UI_BASIC_AUTH_USER?.trim() || "",
-    uiBasicAuthPassword: env.UI_BASIC_AUTH_PASSWORD?.trim() || "",
+    uiPassword: env.UI_PASSWORD?.trim() || env.MAOMAO_UI_PASSWORD?.trim() || "",
+    uiSessionSecret: env.UI_SESSION_SECRET?.trim() || env.MAOMAO_UI_SESSION_SECRET?.trim() || "",
   };
 }
 
@@ -149,6 +149,11 @@ export function assertRuntimeConfig(config: Config): void {
   }
   if (config.reviewers.length === 0) {
     throw new Error("At least one reviewer role is required");
+  }
+  const passwordSet = Boolean(config.uiPassword);
+  const secretSet = Boolean(config.uiSessionSecret);
+  if (passwordSet !== secretSet) {
+    throw new Error("Set both UI_PASSWORD and UI_SESSION_SECRET (or neither, for an open local UI)");
   }
 }
 

@@ -35,6 +35,11 @@ const app = createApp({ config, store, queue, startedAt: Date.now() });
 serve({ fetch: app.fetch, hostname: config.host, port: config.port }, (info) => {
   console.log(`Maomao listening on http://${info.address}:${info.port}`);
   console.log(`Webhook: POST /webhooks/github`);
+  if (!config.uiPassword || !config.uiSessionSecret) {
+    console.warn(
+      "UI_PASSWORD and UI_SESSION_SECRET are unset; / , /jobs, /api, and /events are open. Set both before exposing Maomao.",
+    );
+  }
 });
 
 function shutdown(signal: string) {

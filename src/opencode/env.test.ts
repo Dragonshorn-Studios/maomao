@@ -13,7 +13,9 @@ describe("sanitizeChildEnv", () => {
       OPENAI_API_KEY: "sk-openai",
       OPENCODE_REVIEWER_MODEL: "anthropic/claude",
       MAOMAO_INTERNAL: "nope",
-      UI_BASIC_AUTH_PASSWORD: "pw",
+      UI_PASSWORD: "pw",
+      UI_SESSION_SECRET: "sess",
+      AWS_ACCESS_KEY_ID: "AKIAEXAMPLE",
     });
     for (const key of GITHUB_SECRET_KEYS) {
       expect(env[key]).toBeUndefined();
@@ -22,7 +24,9 @@ describe("sanitizeChildEnv", () => {
     expect(env.OPENAI_API_KEY).toBe("sk-openai");
     expect(env.OPENCODE_REVIEWER_MODEL).toBe("anthropic/claude");
     expect(env.MAOMAO_INTERNAL).toBeUndefined();
-    expect(env.UI_BASIC_AUTH_PASSWORD).toBeUndefined();
+    expect(env.UI_PASSWORD).toBeUndefined();
+    expect(env.UI_SESSION_SECRET).toBeUndefined();
+    expect(env.AWS_ACCESS_KEY_ID).toBe("AKIAEXAMPLE");
     expect(JSON.stringify(env)).not.toContain("super-secret-pem");
     expect(JSON.stringify(env)).not.toContain("ghs_xxx");
   });

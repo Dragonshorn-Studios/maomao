@@ -1,5 +1,5 @@
 const SECRET_KEY_PATTERN =
-  /^(GITHUB_|GH_|MAOMAO_|UI_BASIC_AUTH|WEBHOOK_|.*PRIVATE_KEY.*|.*_SECRET.*|.*_TOKEN$|INSTALLATION_)/i;
+  /^(GITHUB_|GH_|MAOMAO_|UI_|WEBHOOK_|.*PRIVATE_KEY.*|.*_SECRET.*|.*_TOKEN$|INSTALLATION_)/i;
 
 const PROVIDER_ALLOWLIST = [
   /^OPENAI_/i,
@@ -14,6 +14,8 @@ const PROVIDER_ALLOWLIST = [
   /^DEEPSEEK_/i,
   /^COHERE_/i,
   /^AZURE_OPENAI_/i,
+  // Broad cloud prefixes so documented BYO providers keep working. Do not run
+  // Maomao on a host whose process env holds unrelated AWS/GCP/Bedrock creds.
   /^AWS_/i,
   /^BEDROCK_/i,
   /^VERTEX_/i,
@@ -80,6 +82,9 @@ export function sanitizeChildEnv(
   return env;
 }
 
+// These denies are honored only if the OpenCode binary respects
+// OPENCODE_PERMISSION / OPENCODE_CONFIG_CONTENT. Operators must pin a known-good
+// OpenCode build; a malicious PR must not regain shell via ignored permissions.
 export function reviewerPermissionConfig(): Record<string, unknown> {
   return {
     $schema: "https://opencode.ai/config.json",

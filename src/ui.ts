@@ -2,24 +2,18 @@ import type { JobRow, JobStore, ReviewerRunRow } from "./jobs/store.js";
 import { elapsedMs, escapeHtml, formatDuration, shortSha } from "./util.js";
 import type { ReviewerResult } from "./schema.js";
 
-export function layout(title: string, body: string): string {
-  return `<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8"/>
-  <meta name="viewport" content="width=device-width, initial-scale=1"/>
-  <title>${escapeHtml(title)}</title>
-  <style>${css()}</style>
-</head>
-<body>
-  <header class="top">
-    <a class="brand" href="/">Maomao</a>
-    <span class="tag">PR review factory</span>
-    <span class="grow"></span>
-    <a href="/health">health</a>
-  </header>
-  <main>${body}</main>
-  <script>
+export interface PageOptions {
+  showLogout?: boolean;
+  live?: boolean;
+}
+
+export function layout(title: string, body: string, options: PageOptions = {}): string {
+  const live = options.live !== false;
+  const logout = options.showLogout
+    ? `<form method="post" action="/logout" class="logout"><button type="submit">Log out</button></form>`
+    : "";
+  const script = live
+    ? `<script>
     const events = new EventSource("/events");
     events.addEventListener("message", () => {});
     events.onmessage = (event) => {
@@ -35,12 +29,47 @@ export function layout(title: string, body: string): string {
         }
       } catch {}
     };
-  </script>
+  </script>`
+    : "";
+  return `<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <title>${escapeHtml(title)}</title>
+  <style>${css()}</style>
+</head>
+<body>
+  <header class="top">
+    <a class="brand" href="/">Maomao</a>
+    <span class="tag">PR review factory</span>
+    <span class="grow"></span>
+    <a href="/health">health</a>
+    ${logout}
+  </header>
+  <main>${body}</main>
+  ${script}
 </body>
 </html>`;
 }
 
-export function renderHome(jobs: JobRow[], store: JobStore): string {
+export function renderLogin(error: boolean, nextPath: string): string {
+  const body = `
+    <h1>Sign in</h1>
+    <p class="lede">Enter the monitoring password to view jobs, logs, and APIs.</p>
+    ${error ? `<p class="error">Invalid password.</p>` : ""}
+    <form class="login" method="post" action="/login">
+      <input type="hidden" name="next" value="${escapeHtml(nextPath)}"/>
+      <label>
+        Password
+        <input type="password" name="password" autocomplete="current-password" autofocus required/>
+      </label>
+      <button type="submit">Sign in</button>
+    </form>`;
+  return layout("Maomao sign in", body, { live: false });
+}
+
+export function renderHome(jobs: JobRow[], store: JobStore, options: PageOptions = {}): string {
   const rows = jobs
     .map((job) => {
       const summary = store.jobSummary(job);
@@ -73,10 +102,15 @@ export function renderHome(jobs: JobRow[], store: JobStore): string {
         ${rows || `<tr><td colspan="7" class="muted">No jobs yet. Waiting for GitHub pull_request webhooks.</td></tr>`}
       </tbody>
     </table>`;
-  return layout("Maomao", body);
+  return layout("Maomao", body, options);
 }
 
-export function renderJob(job: JobRow, runs: ReviewerRunRow[], logs: { created_at: string; level: string; message: string }[]): string {
+export function renderJob(
+  job: JobRow,
+  runs: ReviewerRunRow[],
+  logs: { created_at: string; level: string; message: string }[],
+  options: PageOptions = {},
+): string {
   const findings = collectFindings(runs);
   const body = `
     <p class="crumb"><a href="/">Jobs</a> / job ${job.id}</p>
@@ -104,7 +138,7 @@ export function renderJob(job: JobRow, runs: ReviewerRunRow[], logs: { created_a
       ${logs.map((log) => `<li><span class="muted">${escapeHtml(log.created_at)}</span> <strong>${escapeHtml(log.level)}</strong> ${escapeHtml(log.message)}</li>`).join("") || "<li class='muted'>No logs</li>"}
     </ol>
   `;
-  return layout(`${job.repo_full_name}#${job.pr_number}`, body);
+  return layout(`${job.repo_full_name}#${job.pr_number}`, body, options);
 }
 
 function renderRun(run: ReviewerRunRow): string {
@@ -181,5 +215,9 @@ function css(): string {
     .logs { padding-left:1.1rem; }
     .error { color:#f0b7b7; }
     details { margin:.4rem 0; }
+    .login { max-width: 22rem; display:grid; gap:.8rem; background:var(--card); padding:1rem; border:1px solid var(--line); }
+    .login input { width:100%; margin-top:.3rem; padding:.45rem .5rem; background:#0c0e14; color:var(--fg); border:1px solid var(--line); }
+    .login button, .logout button { background:var(--acc); color:#111; border:0; padding:.45rem .8rem; font-weight:600; cursor:pointer; }
+    .logout { margin:0; }
   `;
 }

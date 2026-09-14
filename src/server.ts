@@ -1,12 +1,23 @@
 import { Hono } from "hono";
 import { streamSSE } from "hono/streaming";
-import { basicAuth } from "hono/basic-auth";
+import { deleteCookie, getCookie, setCookie } from "hono/cookie";
 import type { Config } from "./config.js";
 import type { JobStore } from "./jobs/store.js";
 import { handleGithubWebhook } from "./github/webhooks.js";
 import { subscribe } from "./events.js";
-import { renderHome, renderJob } from "./ui.js";
+import { renderHome, renderJob, renderLogin } from "./ui.js";
 import type { JobQueue } from "./jobs/queue.js";
+import {
+  SESSION_COOKIE,
+  SESSION_TTL_MS,
+  cookieSecure,
+  isPublicPath,
+  passwordsMatch,
+  safeNextPath,
+  signSession,
+  uiGateEnabled,
+  verifySession,
+} from "./auth.js";
 
 export interface ServerContext {
   config: Config;
@@ -17,13 +28,50 @@ export interface ServerContext {
 
 export function createApp(ctx: ServerContext): Hono {
   const app = new Hono();
+  const gateOn = uiGateEnabled(ctx.config.uiPassword, ctx.config.uiSessionSecret);
+  const pageOpts = { showLogout: gateOn };
 
-  if (ctx.config.uiBasicAuthUser && ctx.config.uiBasicAuthPassword) {
-    app.use("/*", async (c, next) => {
-      if (c.req.path === "/webhooks/github" || c.req.path === "/health") return next();
-      return basicAuth({ username: ctx.config.uiBasicAuthUser, password: ctx.config.uiBasicAuthPassword })(c, next);
+  app.use("*", async (c, next) => {
+    if (!gateOn || isPublicPath(c.req.path)) return next();
+    const token = getCookie(c, SESSION_COOKIE);
+    if (verifySession(ctx.config.uiSessionSecret, token)) return next();
+    if (c.req.path.startsWith("/api/") || c.req.path === "/events") {
+      return c.json({ error: "unauthorized" }, 401);
+    }
+    const url = new URL(c.req.url);
+    return c.redirect(`/login?next=${encodeURIComponent(`${url.pathname}${url.search}`)}`, 302);
+  });
+
+  app.get("/login", (c) => {
+    if (!gateOn) return c.redirect("/", 302);
+    const token = getCookie(c, SESSION_COOKIE);
+    const nextPath = safeNextPath(c.req.query("next"));
+    if (verifySession(ctx.config.uiSessionSecret, token)) return c.redirect(nextPath, 302);
+    return c.html(renderLogin(false, nextPath));
+  });
+
+  app.post("/login", async (c) => {
+    if (!gateOn) return c.redirect("/", 302);
+    const body = await c.req.parseBody();
+    const password = typeof body.password === "string" ? body.password : "";
+    const nextPath = safeNextPath(typeof body.next === "string" ? body.next : c.req.query("next"));
+    if (!passwordsMatch(password, ctx.config.uiPassword)) {
+      return c.html(renderLogin(true, nextPath), 401);
+    }
+    setCookie(c, SESSION_COOKIE, signSession(ctx.config.uiSessionSecret), {
+      httpOnly: true,
+      sameSite: "Lax",
+      secure: cookieSecure(c.req.url, c.req.header("x-forwarded-proto")),
+      path: "/",
+      maxAge: Math.floor(SESSION_TTL_MS / 1000),
     });
-  }
+    return c.redirect(nextPath, 302);
+  });
+
+  app.post("/logout", (c) => {
+    deleteCookie(c, SESSION_COOKIE, { path: "/" });
+    return c.redirect(gateOn ? "/login" : "/", 302);
+  });
 
   app.get("/health", (c) =>
     c.json({
@@ -56,14 +104,14 @@ export function createApp(ctx: ServerContext): Hono {
 
   app.get("/", (c) => {
     const jobs = ctx.store.listJobs(75);
-    return c.html(renderHome(jobs, ctx.store));
+    return c.html(renderHome(jobs, ctx.store, pageOpts));
   });
 
   app.get("/jobs/:id", (c) => {
     const id = Number(c.req.param("id"));
     const job = ctx.store.getJob(id);
     if (!job) return c.text("Not found", 404);
-    return c.html(renderJob(job, ctx.store.listReviewerRuns(id), ctx.store.listLogs(id)));
+    return c.html(renderJob(job, ctx.store.listReviewerRuns(id), ctx.store.listLogs(id), pageOpts));
   });
 
   app.get("/api/jobs", (c) => {

@@ -142,7 +142,20 @@ USER node
 
 `/jobs/:id` shows per-reviewer state, models, findings, raw/normalized JSON, stdout/stderr, aggregator output, and logs. The pages refresh over SSE.
 
-Optional `UI_BASIC_AUTH_USER` / `UI_BASIC_AUTH_PASSWORD` protect the UI. `/webhooks/github` and `/health` stay public.
+### Session password (required in production)
+
+`/`, `/jobs/*`, `/api/*`, and `/events` can be left open for local development. **If you expose Maomao beyond localhost, set both:**
+
+```bash
+UI_PASSWORD=a-long-password
+UI_SESSION_SECRET=a-long-random-string   # e.g. openssl rand -hex 32
+```
+
+Aliases: `MAOMAO_UI_PASSWORD`, `MAOMAO_UI_SESSION_SECRET`. Setting only one of the two is a startup error.
+
+With both set, GET/POST `/login` issues an **HttpOnly**, **SameSite=Lax** cookie (`maomao_session`), signed with `UI_SESSION_SECRET`. The cookie is **Secure** when the request is HTTPS (including `X-Forwarded-Proto: https`). Unauthenticated HTML pages redirect to `/login`; `/api/*` and `/events` return 401. `/webhooks/github` and `/health` stay public (no cookie). This is a shared-password gate, not HTTP Basic Auth, OAuth, or a user database.
+
+If both variables are unset, the UI stays open so `npm run dev` on loopback still works. Do not ship that configuration on a public address.
 
 ## Security / trust boundary
 
@@ -150,13 +163,27 @@ Checked-out PR code is **untrusted input**. For MVP, reviewers are for static in
 
 - git hooks are disabled (`core.hooksPath=/dev/null`); submodules are not fetched
 - installation tokens are used as a one-shot HTTP header, then the `origin` remote is removed
-- GitHub private keys, webhook secrets, and installation tokens are stripped from the OpenCode environment
+- GitHub private keys, webhook secrets, UI passwords, session secrets, and installation tokens are stripped from the OpenCode environment
 - untrusted `opencode.json` / `.opencode` / `.claude` from the PR are deleted before review
 - OpenCode is launched with permissions that **deny** `bash`, `edit`, `write`, `webfetch`, and related tools; `read` / `glob` / `grep` are allowed
 - the repo tree is marked read-only after checkout
 - Maomao never executes `npm install`, tests, or repo-defined agents
 
-OpenCode is still a powerful process. A model that ignores instructions, a future OpenCode default, or a host-level plugin can widen the sandbox. Keep Maomao on a locked-down host, do not run it as root, and do not put unrelated secrets in the process environment.
+### OpenCode must honor the permission denies
+
+Maomao passes those denies through `OPENCODE_PERMISSION` and `OPENCODE_CONFIG_CONTENT`. **The sandbox is only as strong as the OpenCode binary.** Operators must:
+
+- run a **known-good OpenCode build** that actually enforces those env/config flags
+- not assume a model “will behave” if the CLI ignores denies, auto-approves tools, or loads extra plugins
+- treat a future OpenCode default or host-level plugin that re-enables `bash`/`edit` as a host compromise path: malicious PR code must not regain a shell that way
+
+If you cannot pin and verify OpenCode’s permission behavior, do not point Maomao at untrusted repositories.
+
+### Provider credentials in the process environment
+
+OpenCode children inherit a **narrow allowlist** of env vars (provider API keys, `OPENCODE_*`, proxy, `PATH`/`HOME`, …) so BYO models keep working. That list includes broad prefixes such as `AWS_`, `BEDROCK_`, and `VERTEX_`. **Do not run Maomao on a host whose process environment already holds unrelated cloud credentials** — those keys would be visible to the reviewer process. Prefer a dedicated user/container whose env only contains the GitHub App material plus the model provider you intend.
+
+OpenCode is still a powerful process. Keep Maomao on a locked-down host and do not run it as root.
 
 ## GitHub review policy
 
@@ -167,7 +194,7 @@ OpenCode is still a powerful process. A model that ignores instructions, a futur
 
 ## Configuration reference
 
-See `.env.example`. Notable knobs: `REVIEW_DRAFTS`, `POST_EMPTY_REVIEW`, `JOB_CONCURRENCY`, `WORKSPACE_ROOT`, `DATABASE_PATH`, `MAX_INLINE_COMMENTS`, `PULL_REQUEST_ACTIONS`.
+See `.env.example`. Notable knobs: `REVIEW_DRAFTS`, `POST_EMPTY_REVIEW`, `JOB_CONCURRENCY`, `WORKSPACE_ROOT`, `DATABASE_PATH`, `MAX_INLINE_COMMENTS`, `PULL_REQUEST_ACTIONS`, `UI_PASSWORD`, `UI_SESSION_SECRET`.
 
 ## Follow-ups (not in this MVP)
 
