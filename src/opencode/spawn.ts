@@ -44,11 +44,15 @@ export function createOpenCodeRunner(defaultBin = "opencode"): OpenCodePort {
           reject(new Error("aborted"));
           return;
         }
+        // OpenCode `run` reads stdin whenever it is not a TTY (`Bun.stdin.text()`).
+        // `stdio: ignore` is a closed fd, which can abort before any JSON events.
+        // A piped stdin closed immediately is a normal EOF and keeps the argv prompt.
         const child = spawn(bin, args, {
           cwd: input.cwd,
           env,
-          stdio: ["ignore", "pipe", "pipe"],
+          stdio: ["pipe", "pipe", "pipe"],
         });
+        child.stdin?.end();
         let stdout = "";
         let stderr = "";
         child.stdout.on("data", (chunk: Buffer) => {

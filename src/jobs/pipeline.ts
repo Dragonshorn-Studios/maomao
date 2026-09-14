@@ -3,7 +3,7 @@ import type { JobStore, JobRow, ReviewerRunRow } from "./store.js";
 import type { GithubPort } from "../github/client.js";
 import { buildReviewBody, findExistingReview, toInlineComments } from "../github/client.js";
 import type { CheckoutPort } from "../checkout.js";
-import type { OpenCodePort } from "../opencode/parse.js";
+import type { OpenCodePort, OpenCodeRunResult } from "../opencode/parse.js";
 import { buildAggregatorPrompt, buildReviewerPrompt } from "../prompts.js";
 import {
   fallbackAggregator,
@@ -182,6 +182,7 @@ async function runReviewer(
     });
     deps.store.log(job.id, `Reviewer ${run.role} attempt ${attempt}/${retries + 1} model=${model || "(default)"}`, "info", run.id);
 
+    let result: OpenCodeRunResult | undefined;
     try {
       const prompt = buildReviewerPrompt({
         role: role ?? { id: run.role, title: run.title, prompt: `Review as ${run.role}` },
@@ -193,7 +194,7 @@ async function runReviewer(
         headSha: job.head_sha,
         author: job.pr_author,
       });
-      const result = await deps.opencode.run({
+      result = await deps.opencode.run({
         cwd,
         model,
         prompt,
@@ -231,13 +232,23 @@ async function runReviewer(
       return;
     } catch (error) {
       lastError = formatError(error);
+      const cliDump = result ? truncate(result.stderr.trim() || result.stdout.trim(), 500) : "";
       deps.store.patchReviewer(run.id, {
         state: "failed",
         validation_error: lastError,
+        raw_output: result ? truncate(result.text || result.stdout, 200_000) : null,
+        stdout: result ? truncate(result.stdout, 80_000) : null,
+        stderr: result ? truncate(result.stderr, 20_000) : null,
+        exit_code: result?.exitCode ?? null,
         finished_at: nowIso(),
         duration_ms: Date.now() - started,
       });
-      deps.store.log(job.id, `Reviewer ${run.role} attempt ${attempt} failed: ${lastError}`, "warn", run.id);
+      deps.store.log(
+        job.id,
+        `Reviewer ${run.role} attempt ${attempt} failed: ${lastError}${cliDump ? ` — ${cliDump}` : ""}`,
+        "warn",
+        run.id,
+      );
       if (attempt <= retries) await sleep(500 * attempt, signal);
     }
   }
