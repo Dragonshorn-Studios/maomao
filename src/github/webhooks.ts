@@ -2,6 +2,8 @@ import { verify } from "@octokit/webhooks-methods";
 import type { Config, PullRequestAction } from "../config.js";
 import type { EnqueueResult, JobStore } from "../jobs/store.js";
 import { enqueuePullJob } from "../jobs/enqueue.js";
+import { authorizeGithubTarget, logAuthorizationRejection } from "./authorize.js";
+import type { RepoRateLimiter } from "./rate-limit.js";
 
 export interface WebhookRequest {
   event: string;
@@ -18,11 +20,12 @@ export type WebhookHandleResult = {
 
 export interface PullRequestWebhookPayload {
   action?: string;
-  installation?: { id?: number };
+  installation?: { id?: number; account?: { id?: number } };
   repository?: {
+    id?: number;
     full_name?: string;
     name?: string;
-    owner?: { login?: string };
+    owner?: { login?: string; id?: number };
   };
   pull_request?: {
     number?: number;
@@ -59,8 +62,15 @@ export function shouldHandlePullRequest(config: Config, payload: PullRequestWebh
   return { handle: true };
 }
 
+function numericId(value: unknown): number | undefined {
+  const n = typeof value === "number" ? value : Number(value);
+  return Number.isSafeInteger(n) && n > 0 ? n : undefined;
+}
+
 export function parsePullRequestPayload(payload: PullRequestWebhookPayload): {
   installationId: number;
+  githubAccountId?: number;
+  githubRepositoryId?: number;
   repoFullName: string;
   repoOwner: string;
   repoName: string;
@@ -74,7 +84,10 @@ export function parsePullRequestPayload(payload: PullRequestWebhookPayload): {
   baseRef: string;
   headRef: string;
 } {
-  const installationId = payload.installation?.id;
+  const installationId = numericId(payload.installation?.id);
+  const githubAccountId =
+    numericId(payload.installation?.account?.id) ?? numericId(payload.repository?.owner?.id);
+  const githubRepositoryId = numericId(payload.repository?.id);
   const repoOwner = payload.repository?.owner?.login;
   const repoName = payload.repository?.name;
   const repoFullName = payload.repository?.full_name;
@@ -84,6 +97,8 @@ export function parsePullRequestPayload(payload: PullRequestWebhookPayload): {
   }
   return {
     installationId,
+    githubAccountId,
+    githubRepositoryId,
     repoFullName,
     repoOwner,
     repoName,
@@ -99,10 +114,15 @@ export function parsePullRequestPayload(payload: PullRequestWebhookPayload): {
   };
 }
 
+function ignored(reason: string): WebhookHandleResult {
+  return { status: 202, body: { ok: true, ignored: true, reason } };
+}
+
 export async function handleGithubWebhook(input: {
   config: Config;
   store: JobStore;
   request: WebhookRequest;
+  rateLimiter?: RepoRateLimiter;
 }): Promise<WebhookHandleResult> {
   const valid = await verifyGithubSignature(
     input.config.github.webhookSecret,
@@ -118,7 +138,7 @@ export async function handleGithubWebhook(input: {
   }
 
   if (input.request.event !== "pull_request") {
-    return { status: 202, body: { ok: true, ignored: true, reason: `event ${input.request.event}` } };
+    return ignored(`event ${input.request.event}`);
   }
 
   let payload: PullRequestWebhookPayload;
@@ -130,11 +150,42 @@ export async function handleGithubWebhook(input: {
 
   const decision = shouldHandlePullRequest(input.config, payload);
   if (!decision.handle) {
-    return { status: 202, body: { ok: true, ignored: true, reason: decision.reason } };
+    return ignored(decision.reason ?? "ignored");
   }
 
   try {
     const parsed = parsePullRequestPayload(payload);
+    const auth = authorizeGithubTarget(input.config, {
+      installationId: parsed.installationId,
+      accountId: parsed.githubAccountId,
+      repositoryId: parsed.githubRepositoryId,
+    });
+    if (!auth.ok) {
+      logAuthorizationRejection({
+        installationId: parsed.installationId,
+        repositoryId: parsed.githubRepositoryId,
+        reason: auth.reason,
+      });
+      return ignored(auth.reason);
+    }
+
+    if (
+      parsed.githubRepositoryId != null &&
+      input.rateLimiter &&
+      !input.rateLimiter.allow(
+        parsed.githubRepositoryId,
+        input.config.repoRateLimitPerWindow,
+        input.config.repoRateWindowMs,
+      )
+    ) {
+      logAuthorizationRejection({
+        installationId: parsed.installationId,
+        repositoryId: parsed.githubRepositoryId,
+        reason: "rate limited",
+      });
+      return ignored("rate limited");
+    }
+
     const enqueue = enqueuePullJob(input.store, input.config, {
       ...parsed,
       webhookDeliveryId: input.request.deliveryId,

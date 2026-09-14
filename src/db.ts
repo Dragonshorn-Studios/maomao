@@ -55,6 +55,8 @@ function migrate(db: SqliteDb): void {
       updated_at TEXT NOT NULL,
       started_at TEXT,
       finished_at TEXT,
+      github_account_id INTEGER,
+      github_repository_id INTEGER,
       UNIQUE (repo_full_name, pr_number, head_sha)
     );
 
@@ -96,4 +98,17 @@ function migrate(db: SqliteDb): void {
     CREATE INDEX IF NOT EXISTS idx_logs_job ON job_logs(job_id, id);
     CREATE INDEX IF NOT EXISTS idx_runs_job ON reviewer_runs(job_id);
   `);
+  ensureColumn(db, "jobs", "github_account_id", "INTEGER");
+  ensureColumn(db, "jobs", "github_repository_id", "INTEGER");
+}
+
+function columnNames(db: SqliteDb, table: string): Set<string> {
+  const rows = db.prepare(`PRAGMA table_info(${table})`).all() as { name: string }[];
+  return new Set(rows.map((row) => row.name));
+}
+
+function ensureColumn(db: SqliteDb, table: string, name: string, ddl: string): void {
+  if (!columnNames(db, table).has(name)) {
+    db.exec(`ALTER TABLE ${table} ADD COLUMN ${name} ${ddl}`);
+  }
 }

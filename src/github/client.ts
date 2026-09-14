@@ -17,6 +17,8 @@ export interface PostedReview {
 
 export interface ResolvedPull {
   installationId: number;
+  accountId: number;
+  repositoryId: number;
   repoOwner: string;
   repoName: string;
   repoFullName: string;
@@ -33,7 +35,11 @@ export interface ResolvedPull {
 }
 
 export interface ManualTriggerPort {
-  getRepoInstallationId(owner: string, repo: string): Promise<number>;
+  getRepoInstallation(
+    owner: string,
+    repo: string,
+  ): Promise<{ installationId: number; accountId: number }>;
+  getRepository(owner: string, repo: string, installationId: number): Promise<{ id: number }>;
   getPull(installationId: number, owner: string, repo: string, pullNumber: number): Promise<ResolvedPull>;
 }
 
@@ -90,10 +96,18 @@ export class GithubClient implements GithubPort, ManualTriggerPort {
     return result.token;
   }
 
-  async getRepoInstallationId(owner: string, repo: string): Promise<number> {
+  async getRepoInstallation(
+    owner: string,
+    repo: string,
+  ): Promise<{ installationId: number; accountId: number }> {
     try {
       const response = await this.appOctokit().rest.apps.getRepoInstallation({ owner, repo });
-      return response.data.id;
+      const account = response.data.account;
+      const accountId = account && "id" in account ? Number(account.id) : Number.NaN;
+      if (!response.data.id || !Number.isSafeInteger(accountId) || accountId <= 0) {
+        throw new Error("GitHub App installation is missing a numeric account id");
+      }
+      return { installationId: response.data.id, accountId };
     } catch (error) {
       const status = error && typeof error === "object" && "status" in error ? Number(error.status) : 0;
       if (status === 404) {
@@ -101,6 +115,15 @@ export class GithubClient implements GithubPort, ManualTriggerPort {
       }
       throw error instanceof Error ? error : new Error(`Could not resolve installation for ${owner}/${repo}`);
     }
+  }
+
+  async getRepository(owner: string, repo: string, installationId: number): Promise<{ id: number }> {
+    const response = await this.installationOctokit(installationId).rest.repos.get({ owner, repo });
+    const id = Number(response.data.id);
+    if (!Number.isSafeInteger(id) || id <= 0) {
+      throw new Error("repository is missing a numeric id");
+    }
+    return { id };
   }
 
   async getPull(
@@ -119,8 +142,18 @@ export class GithubClient implements GithubPort, ManualTriggerPort {
       if (!pr.head?.sha || !pr.base?.sha) {
         throw new Error("pull request is missing base or head SHA");
       }
+      const repositoryId = Number(pr.base.repo?.id);
+      const accountId = Number(pr.base.repo?.owner?.id);
+      if (!Number.isSafeInteger(repositoryId) || repositoryId <= 0) {
+        throw new Error("pull request is missing a numeric repository id");
+      }
+      if (!Number.isSafeInteger(accountId) || accountId <= 0) {
+        throw new Error("pull request is missing a numeric account id");
+      }
       return {
         installationId,
+        accountId,
+        repositoryId,
         repoOwner: owner,
         repoName: repo,
         repoFullName: `${owner}/${repo}`,

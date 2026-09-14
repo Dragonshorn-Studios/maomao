@@ -1,7 +1,7 @@
 import { mkdtemp, writeFile, mkdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { loadConfig } from "../config.js";
 import { openDb } from "../db.js";
 import type { GithubPort } from "../github/client.js";
@@ -369,6 +369,134 @@ describe("pipeline", () => {
     expect(prepared).toBe(0);
     expect(store.getJob(created.job.id)?.state).toBe("failed");
     expect(store.getJob(created.job.id)?.failure_reason).toContain("installation token");
+  });
+
+  it("rejects unauthorized jobs before minting a token, checking out, or calling OpenCode", async () => {
+    const config = loadConfig({
+      REVIEWER_ROLES: "correctness",
+      ALLOWED_GITHUB_ACCOUNT_IDS: "1001",
+      ALLOWED_GITHUB_REPOSITORY_IDS: "2002",
+    });
+    const store = new JobStore(openDb(":memory:"));
+    const created = store.enqueue({
+      repoFullName: "acme/widgets",
+      repoOwner: "acme",
+      repoName: "widgets",
+      installationId: 9,
+      githubAccountId: 1,
+      githubRepositoryId: 2,
+      prNumber: 4,
+      prTitle: "t",
+      prBody: "",
+      prHtmlUrl: "https://github.com/acme/widgets/pull/4",
+      prAuthor: "octocat",
+      baseSha: "base",
+      headSha: "abc",
+      baseRef: "main",
+      headRef: "feat",
+      reviewers: [{ role: "correctness", title: "Correctness" }],
+    });
+    let tokens = 0;
+    let diffs = 0;
+    let prepared = 0;
+    let opencode = 0;
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    await createPipeline({
+      config,
+      store,
+      github: {
+        getInstallationToken: async () => {
+          tokens += 1;
+          return "token";
+        },
+        getPullDiff: async () => {
+          diffs += 1;
+          return "diff";
+        },
+        listReviews: async () => [],
+        createCommentReview: async () => ({ id: "x", url: "u" }),
+      },
+      checkout: {
+        async prepare() {
+          prepared += 1;
+          throw new Error("should not checkout");
+        },
+        async cleanup() {},
+      },
+      opencode: {
+        async run() {
+          opencode += 1;
+          throw new Error("should not run");
+        },
+      },
+    }).run(created.job.id);
+    expect(tokens).toBe(0);
+    expect(diffs).toBe(0);
+    expect(prepared).toBe(0);
+    expect(opencode).toBe(0);
+    expect(store.getJob(created.job.id)?.state).toBe("failed");
+    expect(store.getJob(created.job.id)?.failure_reason).toBe("unauthorized: unauthorized account");
+    expect(store.listReviewerRuns(created.job.id).every((run) => run.state === "failed")).toBe(true);
+    const log = store.listLogs(created.job.id).map((row) => row.message).join("\n");
+    expect(log).toContain("installation_id=9");
+    expect(log).toContain("repository_id=2");
+    expect(log).toContain("unauthorized account");
+    expect(log).not.toContain("acme/widgets");
+    expect(String(warn.mock.calls[0]?.[0])).not.toContain("acme/widgets");
+    warn.mockRestore();
+  });
+
+  it("fails the job when the pull diff exceeds MAX_DIFF_BYTES without calling OpenCode", async () => {
+    const config = loadConfig({
+      REVIEWER_ROLES: "correctness",
+      MAX_DIFF_BYTES: "8",
+    });
+    const store = new JobStore(openDb(":memory:"));
+    const created = store.enqueue({
+      repoFullName: "acme/widgets",
+      repoOwner: "acme",
+      repoName: "widgets",
+      installationId: 9,
+      prNumber: 4,
+      prTitle: "t",
+      prBody: "",
+      prHtmlUrl: "",
+      prAuthor: "dev",
+      baseSha: "base",
+      headSha: "abc",
+      baseRef: "main",
+      headRef: "feat",
+      reviewers: [{ role: "correctness", title: "Correctness" }],
+    });
+    let prepared = 0;
+    let opencode = 0;
+    await createPipeline({
+      config,
+      store,
+      github: {
+        getInstallationToken: async () => "token",
+        getPullDiff: async () => "this diff is definitely larger than eight bytes",
+        listReviews: async () => [],
+        createCommentReview: async () => ({ id: "x", url: "u" }),
+      },
+      checkout: {
+        async prepare() {
+          prepared += 1;
+          throw new Error("should not checkout an oversized diff");
+        },
+        async cleanup() {},
+      },
+      opencode: {
+        async run() {
+          opencode += 1;
+          throw new Error("should not run");
+        },
+      },
+    }).run(created.job.id);
+    expect(prepared).toBe(0);
+    expect(opencode).toBe(0);
+    expect(store.getJob(created.job.id)?.state).toBe("failed");
+    expect(store.getJob(created.job.id)?.failure_reason).toContain("MAX_DIFF_BYTES");
   });
 
   it("keeps OpenCode stderr when reviewer output is empty", async () => {

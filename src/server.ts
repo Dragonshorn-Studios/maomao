@@ -5,6 +5,8 @@ import type { Config } from "./config.js";
 import type { JobStore } from "./jobs/store.js";
 import { handleGithubWebhook } from "./github/webhooks.js";
 import type { ManualTriggerPort } from "./github/client.js";
+import { authorizeGithubAccount, authorizeGithubTarget, logAuthorizationRejection } from "./github/authorize.js";
+import { RepoRateLimiter } from "./github/rate-limit.js";
 import { parseGithubPullUrl, PullUrlError } from "./github/pull-url.js";
 import { dispatchEnqueue, enqueuePullJob } from "./jobs/enqueue.js";
 import { subscribe } from "./events.js";
@@ -28,12 +30,14 @@ export interface ServerContext {
   queue: JobQueue;
   startedAt: number;
   github?: ManualTriggerPort;
+  rateLimiter?: RepoRateLimiter;
 }
 
 export function createApp(ctx: ServerContext): Hono {
   const app = new Hono();
   const gateOn = uiGateEnabled(ctx.config.uiPassword, ctx.config.uiSessionSecret);
   const pageOpts = { showLogout: gateOn };
+  const rateLimiter = ctx.rateLimiter ?? new RepoRateLimiter();
 
   app.use("*", async (c, next) => {
     if (!gateOn || isPublicPath(c.req.path)) return next();
@@ -103,6 +107,7 @@ export function createApp(ctx: ServerContext): Hono {
         signature: c.req.header("x-hub-signature-256") ?? "",
         rawBody,
       },
+      rateLimiter,
     });
     if (result.enqueue) {
       dispatchEnqueue(ctx.queue, result.enqueue);
@@ -134,16 +139,94 @@ export function createApp(ctx: ServerContext): Hono {
     }
 
     try {
-      const installationId = await ctx.github.getRepoInstallationId(parsed.owner, parsed.repo);
-      const pull = await ctx.github.getPull(installationId, parsed.owner, parsed.repo, parsed.number);
+      const installation = await ctx.github.getRepoInstallation(parsed.owner, parsed.repo);
+      const accountAuth = authorizeGithubAccount(ctx.config, {
+        installationId: installation.installationId,
+        accountId: installation.accountId,
+      });
+      if (!accountAuth.ok) {
+        logAuthorizationRejection({
+          installationId: installation.installationId,
+          reason: accountAuth.reason,
+        });
+        return home({ error: "Not authorized to review this installation or repository." });
+      }
+
+      let repositoryId: number | undefined;
+      if (ctx.config.allowedGithubRepositoryIds.length > 0) {
+        const repository = await ctx.github.getRepository(
+          parsed.owner,
+          parsed.repo,
+          installation.installationId,
+        );
+        repositoryId = repository.id;
+        const repoAuth = authorizeGithubTarget(ctx.config, {
+          installationId: installation.installationId,
+          accountId: installation.accountId,
+          repositoryId: repository.id,
+        });
+        if (!repoAuth.ok) {
+          logAuthorizationRejection({
+            installationId: installation.installationId,
+            repositoryId: repository.id,
+            reason: repoAuth.reason,
+          });
+          return home({ error: "Not authorized to review this installation or repository." });
+        }
+      }
+
+      if (
+        repositoryId != null &&
+        !rateLimiter.allow(repositoryId, ctx.config.repoRateLimitPerWindow, ctx.config.repoRateWindowMs)
+      ) {
+        logAuthorizationRejection({
+          installationId: installation.installationId,
+          repositoryId,
+          reason: "rate limited",
+        });
+        return home({ error: "Rate limited for this repository; try again later." });
+      }
+
+      const pull = await ctx.github.getPull(installation.installationId, parsed.owner, parsed.repo, parsed.number);
+      const auth = authorizeGithubTarget(ctx.config, {
+        installationId: pull.installationId,
+        accountId: pull.accountId || installation.accountId,
+        repositoryId: pull.repositoryId || repositoryId,
+      });
+      if (!auth.ok) {
+        logAuthorizationRejection({
+          installationId: pull.installationId,
+          repositoryId: pull.repositoryId || repositoryId,
+          reason: auth.reason,
+        });
+        return home({ error: "Not authorized to review this installation or repository." });
+      }
+
       if (pull.draft && !ctx.config.reviewDrafts) {
         return home({ error: "Ignored draft pull request (set REVIEW_DRAFTS=true to review drafts)." });
       }
+
+      const resolvedRepoId = pull.repositoryId || repositoryId;
+      if (
+        repositoryId == null &&
+        resolvedRepoId != null &&
+        !rateLimiter.allow(resolvedRepoId, ctx.config.repoRateLimitPerWindow, ctx.config.repoRateWindowMs)
+      ) {
+        logAuthorizationRejection({
+          installationId: pull.installationId,
+          repositoryId: resolvedRepoId,
+          reason: "rate limited",
+        });
+        return home({ error: "Rate limited for this repository; try again later." });
+      }
+
       const enqueue = enqueuePullJob(ctx.store, ctx.config, {
         repoFullName: pull.repoFullName,
         repoOwner: pull.repoOwner,
         repoName: pull.repoName,
         installationId: pull.installationId,
+        githubAccountId: pull.accountId || installation.accountId,
+        githubRepositoryId: resolvedRepoId,
         prNumber: pull.prNumber,
         prTitle: pull.prTitle,
         prBody: pull.prBody,

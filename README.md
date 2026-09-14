@@ -160,7 +160,18 @@ https://<your-host>/webhooks/github
 
 Use a webhook secret and put it in `GITHUB_WEBHOOK_SECRET`. Download the app private key and set either `GITHUB_APP_PRIVATE_KEY` (PEM, `\n` newlines are fine) or `GITHUB_APP_PRIVATE_KEY_PATH`. Set `GITHUB_APP_ID` to the numeric app id.
 
-Install the app on the repositories you want reviewed.
+Install the app on the repositories you want reviewed. Then set **numeric** GitHub allowlists on the Maomao host so a webhook from some other installation cannot enqueue work:
+
+```bash
+# User or organization node ids (installation.account.id). Comma-separated.
+ALLOWED_GITHUB_ACCOUNT_IDS=123456
+# Repository node ids (repository.id). Comma-separated.
+ALLOWED_GITHUB_REPOSITORY_IDS=987654321
+```
+
+Find those IDs from a signed webhook payload (`installation.account.id`, `repository.id`), from `GET /orgs/{org}` / `GET /repos/{owner}/{repo}`, or from the GitHub UI. Prefer IDs over `owner/repo` names: a rename or transfer must not change who Maomao will review. Empty allowlists mean “unrestricted on that axis” (local/dev); Maomao warns at startup if both are empty.
+
+Valid signatures for an unauthorized installation or repository receive **`202`** with `{ "ok": true, "ignored": true, "reason": "..." }`. Maomao logs only `installation_id`, `repository_id`, and the reason — never the repository name, URL, or author. The operator paste-URL form (`POST /reviews`) uses the same policy and cannot bypass it.
 
 Events handled by default: `opened`, `reopened`, `synchronize`, `ready_for_review`. Draft PRs are ignored unless `REVIEW_DRAFTS=true`.
 
@@ -191,7 +202,7 @@ Default specialist roles (override with `REVIEWER_ROLES`):
 - `api` — backwards compatibility
 - `maintainer` — merge blockers
 
-Each run has a timeout (`OPENCODE_TIMEOUT_MS`), retries (`OPENCODE_MAX_RETRIES`), and a concurrency cap (`OPENCODE_REVIEWER_CONCURRENCY`).
+Each run has a timeout (`OPENCODE_TIMEOUT_MS`), retries (`OPENCODE_MAX_RETRIES`, capped at 5), and a concurrency cap (`OPENCODE_REVIEWER_CONCURRENCY`). Oversized pull request diffs are rejected before OpenCode (`MAX_DIFF_BYTES`, default 1 MiB). Per-repository enqueue rate limits (`REPO_RATE_LIMIT_PER_WINDOW` / `REPO_RATE_WINDOW_MS`) sit in front of the job queue.
 
 ## Run locally
 
@@ -230,7 +241,7 @@ npm run demo
 # MAOMAO_DEMO_EMPTY=1 npm run demo   # empty queue
 ```
 
-The home page also has an operator form to paste a GitHub pull request URL (`https://github.com/owner/repo/pull/123`). Maomao resolves that PR through the GitHub App installation, then enqueues through the **same** job store and queue as webhooks (same `(repo, PR, head SHA)` idempotency and stale handling). Drafts follow `REVIEW_DRAFTS`. This is for testing before webhooks are wired; it is behind the same session gate as the rest of the UI.
+The home page also has an operator form to paste a GitHub pull request URL (`https://github.com/owner/repo/pull/123`). Maomao resolves that PR through the GitHub App installation, applies the **same** account/repository allowlists and per-repository rate limit as webhooks, then enqueues through the **same** job store and queue (same `(repo, PR, head SHA)` idempotency and stale handling). Drafts follow `REVIEW_DRAFTS`. This is for testing before webhooks are wired; it is behind the same session gate as the rest of the UI.
 
 ### Session password (required in production)
 
@@ -251,6 +262,7 @@ If both variables are unset, the UI stays open so `npm run dev` on loopback stil
 
 Checked-out PR code is **untrusted input**. For MVP, reviewers are for static inspection:
 
+- GitHub App installations and repositories are authorized by **numeric ID allowlists** (`ALLOWED_GITHUB_ACCOUNT_IDS`, `ALLOWED_GITHUB_REPOSITORY_IDS`) after webhook signature verification and before enqueue, installation tokens, checkout, or OpenCode
 - git hooks are disabled (`core.hooksPath=/dev/null`); submodules are not fetched
 - installation tokens authenticate `git fetch` as HTTP Basic (`x-access-token`, not Bearer), then `origin` is removed so the token never stays in the workspace remote URL
 - GitHub private keys, webhook secrets, UI passwords, session secrets, and installation tokens are stripped from the OpenCode environment
@@ -284,7 +296,7 @@ OpenCode is still a powerful process. Keep Maomao on a locked-down host and do n
 
 ## Configuration reference
 
-See `.env.example`. Notable knobs: `REVIEW_DRAFTS`, `POST_EMPTY_REVIEW`, `JOB_CONCURRENCY`, `WORKSPACE_ROOT`, `DATABASE_PATH`, `MAX_INLINE_COMMENTS`, `PULL_REQUEST_ACTIONS`, `UI_PASSWORD`, `UI_SESSION_SECRET`.
+See `.env.example`. Notable knobs: `ALLOWED_GITHUB_ACCOUNT_IDS`, `ALLOWED_GITHUB_REPOSITORY_IDS`, `MAX_DIFF_BYTES`, `REPO_RATE_LIMIT_PER_WINDOW`, `REPO_RATE_WINDOW_MS`, `OPENCODE_MAX_RETRIES`, `REVIEW_DRAFTS`, `POST_EMPTY_REVIEW`, `JOB_CONCURRENCY`, `WORKSPACE_ROOT`, `DATABASE_PATH`, `MAX_INLINE_COMMENTS`, `PULL_REQUEST_ACTIONS`, `UI_PASSWORD`, `UI_SESSION_SECRET`.
 
 ## Follow-ups (not in this MVP)
 

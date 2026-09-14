@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { assertRuntimeConfig, loadConfig } from "./config.js";
-import { parseBoolean, parseCsv } from "./util.js";
+import { parseBoolean, parseCsv, parseIdList } from "./util.js";
 
 describe("loadConfig", () => {
   it("loads defaults and reviewer roles from env", () => {
@@ -20,6 +20,28 @@ describe("loadConfig", () => {
     expect(config.postEmptyReview).toBe(false);
     expect(config.opencode.reviewerConcurrency).toBe(3);
     expect(config.pullRequestActions).toContain("ready_for_review");
+    expect(config.allowedGithubAccountIds).toEqual([]);
+    expect(config.allowedGithubRepositoryIds).toEqual([]);
+    expect(config.maxDiffBytes).toBe(1_048_576);
+    expect(config.repoRateLimitPerWindow).toBe(6);
+    expect(config.opencode.maxRetries).toBe(1);
+  });
+
+  it("parses numeric GitHub allowlists and defense-in-depth limits", () => {
+    const config = loadConfig({
+      ALLOWED_GITHUB_ACCOUNT_IDS: "1001, not-an-id, 2002, 1001",
+      ALLOWED_GITHUB_REPOSITORY_IDS: " 555 777 ",
+      MAX_DIFF_BYTES: "2048",
+      REPO_RATE_LIMIT_PER_WINDOW: "3",
+      REPO_RATE_WINDOW_MS: "1000",
+      OPENCODE_MAX_RETRIES: "99",
+    });
+    expect(config.allowedGithubAccountIds).toEqual([1001, 2002]);
+    expect(config.allowedGithubRepositoryIds).toEqual([555, 777]);
+    expect(config.maxDiffBytes).toBe(2048);
+    expect(config.repoRateLimitPerWindow).toBe(3);
+    expect(config.repoRateWindowMs).toBe(1000);
+    expect(config.opencode.maxRetries).toBe(5);
   });
 
   it("reads UI password aliases and rejects a half-configured gate", () => {
@@ -60,5 +82,11 @@ describe("env parsers", () => {
     expect(parseBoolean("yes", false)).toBe(true);
     expect(parseBoolean("off", true)).toBe(false);
     expect(parseCsv("a, b,,c")).toEqual(["a", "b", "c"]);
+  });
+
+  it("parses positive numeric GitHub ids and ignores junk", () => {
+    expect(parseIdList("")).toEqual([]);
+    expect(parseIdList("1, 02, -3, foo, 1")).toEqual([1, 2]);
+    expect(parseIdList(" 9\n10 ")).toEqual([9, 10]);
   });
 });

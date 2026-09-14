@@ -47,6 +47,18 @@ export function parseCsv(value: string | undefined): string[] {
     .filter(Boolean);
 }
 
+/** Positive GitHub numeric IDs from a comma/whitespace list. Non-numeric tokens are ignored. */
+export function parseIdList(value: string | undefined): number[] {
+  if (!value?.trim()) return [];
+  const ids: number[] = [];
+  for (const token of value.split(/[\s,]+/)) {
+    if (!token || !/^\d+$/.test(token)) continue;
+    const n = Number.parseInt(token, 10);
+    if (Number.isSafeInteger(n) && n > 0) ids.push(n);
+  }
+  return [...new Set(ids)];
+}
+
 export function escapeHtml(value: string): string {
   return value
     .replaceAll("&", "&amp;")
