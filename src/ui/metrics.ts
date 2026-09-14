@@ -1,4 +1,5 @@
 import type { JobRow, JobStore, ReviewerRunRow } from "../jobs/store.js";
+import { tokenTotalFromRow } from "../opencode/parse.js";
 import type { AggregatorFinding, AggregatorResult, ReviewerFinding, ReviewerResult } from "../schema.js";
 import { safeJsonParse } from "../util.js";
 
@@ -18,8 +19,13 @@ export interface JobMetrics {
   reviewerStates: string[];
   promptTokens: number;
   completionTokens: number;
+  reasoningTokens: number;
+  cacheReadTokens: number;
+  cacheWriteTokens: number;
   tokens: number;
   cost: number | null;
+  usageComplete: boolean;
+  usageWarning: string | null;
   model: string | null;
   provider: string | null;
   findings: SeverityCounts;
@@ -81,14 +87,34 @@ export function jobMetricsFromRuns(job: JobRow, runs: ReviewerRunRow[]): JobMetr
   const specialistFindings: Array<ReviewerFinding & { role: string }> = [];
   let promptTokens = job.aggregator_prompt_tokens ?? 0;
   let completionTokens = job.aggregator_completion_tokens ?? 0;
+  let reasoningTokens = job.aggregator_reasoning_tokens ?? 0;
+  let cacheReadTokens = job.aggregator_cache_read_tokens ?? 0;
+  let cacheWriteTokens = job.aggregator_cache_write_tokens ?? 0;
+  let tokens = tokenTotalFromRow({
+    total_tokens: job.aggregator_total_tokens,
+    prompt_tokens: job.aggregator_prompt_tokens,
+    completion_tokens: job.aggregator_completion_tokens,
+    reasoning_tokens: job.aggregator_reasoning_tokens,
+    cache_read_tokens: job.aggregator_cache_read_tokens,
+    cache_write_tokens: job.aggregator_cache_write_tokens,
+  });
   let cost = job.aggregator_cost;
   let model = job.aggregator_model;
   let provider = job.aggregator_provider;
+  const completeness: Array<number | null> = [job.aggregator_usage_complete];
+  const warnings: string[] = [];
+  if (job.aggregator_usage_warning) warnings.push(job.aggregator_usage_warning);
 
   for (const run of runs) {
     promptTokens += run.prompt_tokens ?? 0;
     completionTokens += run.completion_tokens ?? 0;
+    reasoningTokens += run.reasoning_tokens ?? 0;
+    cacheReadTokens += run.cache_read_tokens ?? 0;
+    cacheWriteTokens += run.cache_write_tokens ?? 0;
+    tokens += tokenTotalFromRow(run);
     if (run.cost != null) cost = (cost ?? 0) + run.cost;
+    completeness.push(run.usage_complete);
+    if (run.usage_warning) warnings.push(`${run.role}: ${run.usage_warning}`);
     if (!model && run.model) model = run.model;
     if (!provider && run.provider) provider = run.provider;
     const parsed = parseReviewerResult(run.normalized_json);
@@ -112,8 +138,13 @@ export function jobMetricsFromRuns(job: JobRow, runs: ReviewerRunRow[]): JobMetr
     reviewerStates: runs.map((run) => run.state),
     promptTokens,
     completionTokens,
-    tokens: promptTokens + completionTokens,
+    reasoningTokens,
+    cacheReadTokens,
+    cacheWriteTokens,
+    tokens,
     cost,
+    usageComplete: completeness.every((value) => value == null || value === 1),
+    usageWarning: warnings[0] ?? null,
     model,
     provider,
     findings,
@@ -135,6 +166,25 @@ export function formatCost(n: number | null | undefined): string {
   if (n === 0) return "$0";
   if (n < 0.01) return `$${n.toFixed(4)}`;
   return `$${n.toFixed(2)}`;
+}
+
+export function formatUsageBreakdown(parts: {
+  promptTokens?: number;
+  completionTokens?: number;
+  reasoningTokens?: number;
+  cacheReadTokens?: number;
+  cacheWriteTokens?: number;
+}): string | undefined {
+  const bits: string[] = [];
+  if (parts.promptTokens) bits.push(`in ${formatTokens(parts.promptTokens)}`);
+  if (parts.completionTokens) bits.push(`out ${formatTokens(parts.completionTokens)}`);
+  if (parts.reasoningTokens) bits.push(`reasoning ${formatTokens(parts.reasoningTokens)}`);
+  if (parts.cacheReadTokens || parts.cacheWriteTokens) {
+    bits.push(`cache r ${formatTokens(parts.cacheReadTokens ?? 0)} / w ${formatTokens(parts.cacheWriteTokens ?? 0)}`);
+  }
+  return bits.length > 2 || parts.reasoningTokens || parts.cacheReadTokens || parts.cacheWriteTokens
+    ? bits.join(" · ")
+    : undefined;
 }
 
 export function findingLocation(finding: { file?: string; line?: number }): string {

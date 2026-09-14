@@ -193,6 +193,8 @@ Default specialist roles (override with `REVIEWER_ROLES`):
 
 Each run has a timeout (`OPENCODE_TIMEOUT_MS`), retries (`OPENCODE_MAX_RETRIES`), and a concurrency cap (`OPENCODE_REVIEWER_CONCURRENCY`).
 
+Maomao records OpenCode `step_finish` usage across every unique agent step (including tool-call steps). Token totals include input, output, reasoning, and cache read/write when the CLI reports them. **These figures are provider/OpenCode-reported usage, not an independently calculated invoice.** If the JSON stream ends without a matching `step_finish` (see [opencode#26855](https://github.com/anomalyco/opencode/issues/26855)), the UI marks usage incomplete and treats the stored numbers as a minimum.
+
 ## Run locally
 
 ```bash
@@ -220,7 +222,7 @@ The monitoring UI is a small server-rendered apothecary-notebook console (muted 
 
 `/` lists recent jobs as specimen cards: repo, PR, SHA, state, elapsed time, `n / m` reviewers, aggregator, model/provider, token/cost totals, and findings by severity.
 
-`/jobs/:id` shows the immutable reviewed SHA, base/head refs, per-reviewer cards (role, state, duration, model, provider, cost, raw vs normalized output), aggregator diagnosis, findings, and a monospace log panel. Pages refresh over SSE.
+`/jobs/:id` shows the immutable reviewed SHA, base/head refs, per-reviewer cards (role, state, duration, model, provider, token breakdown, cost, raw vs normalized output), aggregator diagnosis, findings, and a monospace log panel. Pages refresh over SSE. Token and cost figures are OpenCode/provider-reported usage, not an invoice.
 
 To preview the UI with fixture jobs (no GitHub App or OpenCode required):
 

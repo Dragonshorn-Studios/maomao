@@ -51,6 +51,12 @@ function migrate(db: SqliteDb): void {
       aggregator_prompt_tokens INTEGER,
       aggregator_completion_tokens INTEGER,
       aggregator_cost REAL,
+      aggregator_reasoning_tokens INTEGER,
+      aggregator_cache_read_tokens INTEGER,
+      aggregator_cache_write_tokens INTEGER,
+      aggregator_total_tokens INTEGER,
+      aggregator_usage_complete INTEGER,
+      aggregator_usage_warning TEXT,
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL,
       started_at TEXT,
@@ -79,6 +85,12 @@ function migrate(db: SqliteDb): void {
       prompt_tokens INTEGER,
       completion_tokens INTEGER,
       cost REAL,
+      reasoning_tokens INTEGER,
+      cache_read_tokens INTEGER,
+      cache_write_tokens INTEGER,
+      total_tokens INTEGER,
+      usage_complete INTEGER,
+      usage_warning TEXT,
       UNIQUE (job_id, role)
     );
 
@@ -96,4 +108,27 @@ function migrate(db: SqliteDb): void {
     CREATE INDEX IF NOT EXISTS idx_logs_job ON job_logs(job_id, id);
     CREATE INDEX IF NOT EXISTS idx_runs_job ON reviewer_runs(job_id);
   `);
+  ensureColumn(db, "jobs", "aggregator_reasoning_tokens", "INTEGER");
+  ensureColumn(db, "jobs", "aggregator_cache_read_tokens", "INTEGER");
+  ensureColumn(db, "jobs", "aggregator_cache_write_tokens", "INTEGER");
+  ensureColumn(db, "jobs", "aggregator_total_tokens", "INTEGER");
+  ensureColumn(db, "jobs", "aggregator_usage_complete", "INTEGER");
+  ensureColumn(db, "jobs", "aggregator_usage_warning", "TEXT");
+  ensureColumn(db, "reviewer_runs", "reasoning_tokens", "INTEGER");
+  ensureColumn(db, "reviewer_runs", "cache_read_tokens", "INTEGER");
+  ensureColumn(db, "reviewer_runs", "cache_write_tokens", "INTEGER");
+  ensureColumn(db, "reviewer_runs", "total_tokens", "INTEGER");
+  ensureColumn(db, "reviewer_runs", "usage_complete", "INTEGER");
+  ensureColumn(db, "reviewer_runs", "usage_warning", "TEXT");
+}
+
+function columnNames(db: SqliteDb, table: string): Set<string> {
+  const rows = db.prepare(`PRAGMA table_info(${table})`).all() as { name: string }[];
+  return new Set(rows.map((row) => row.name));
+}
+
+function ensureColumn(db: SqliteDb, table: string, name: string, ddl: string): void {
+  if (!columnNames(db, table).has(name)) {
+    db.exec(`ALTER TABLE ${table} ADD COLUMN ${name} ${ddl}`);
+  }
 }
