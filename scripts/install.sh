@@ -22,6 +22,10 @@ Usage:
   ./scripts/install.sh
   ./scripts/install.sh --non-interactive
 
+The script writes .env and github-app.pem, downloads the OpenCode CLI from
+GitHub releases onto a named Docker volume, and starts Compose. OpenCode and
+SQLite survive compose down / Maomao image rebuilds.
+
 Options:
   --non-interactive, -y   No prompts; read GitHub / UI / OpenCode values from env
   --skip-start            Write .env and mounts only; do not run Docker Compose
