@@ -235,6 +235,14 @@ export function createCheckout(workspaceRoot: string, gitBin = "git"): CheckoutP
       } catch {
         // .git may not be writable-needed
       }
+      // Keep the project root writable so OpenCode can create session metadata
+      // (files in the tree stay mode 0555). `--dir` on a fully read-only tree
+      // exits with stderr and no JSON events.
+      try {
+        await chmod(repoDir, 0o755);
+      } catch {
+        // ignore
+      }
 
       return { dir, repoDir, diffPath, metaPath };
     },

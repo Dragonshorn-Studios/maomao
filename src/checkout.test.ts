@@ -1,4 +1,4 @@
-import { mkdtemp, writeFile, chmod, readFile, rm } from "node:fs/promises";
+import { mkdtemp, writeFile, chmod, readFile, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -80,6 +80,8 @@ describe("createCheckout", () => {
       expect(checked).toBe(headSha);
       const remotes = await git(workspace.repoDir, ["remote"]);
       expect(remotes).toBe("");
+      expect((await stat(workspace.repoDir)).mode & 0o777).toBe(0o755);
+      expect((await stat(join(workspace.repoDir, "README.md"))).mode & 0o777).toBe(0o555);
 
       const log = await readFile(logPath, "utf8");
       const basic = Buffer.from(`x-access-token:${TOKEN}`, "utf8").toString("base64");

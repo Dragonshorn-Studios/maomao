@@ -370,4 +370,54 @@ describe("pipeline", () => {
     expect(store.getJob(created.job.id)?.state).toBe("failed");
     expect(store.getJob(created.job.id)?.failure_reason).toContain("installation token");
   });
+
+  it("keeps OpenCode stderr when reviewer output is empty", async () => {
+    const config = loadConfig({ REVIEWER_ROLES: "correctness", OPENCODE_MAX_RETRIES: "0" });
+    const store = new JobStore(openDb(":memory:"));
+    const created = store.enqueue({
+      repoFullName: "acme/widgets",
+      repoOwner: "acme",
+      repoName: "widgets",
+      installationId: 9,
+      prNumber: 4,
+      prTitle: "t",
+      prBody: "",
+      prHtmlUrl: "",
+      prAuthor: "dev",
+      baseSha: "base",
+      headSha: "abc",
+      baseRef: "main",
+      headRef: "feat",
+      reviewers: [{ role: "correctness", title: "Correctness" }],
+    });
+    await createPipeline({
+      config,
+      store,
+      github: {
+        getInstallationToken: async () => "token",
+        getPullDiff: async () => "diff",
+        listReviews: async () => [],
+        createCommentReview: async () => ({ id: "x", url: "u" }),
+      },
+      checkout: await fixtureCheckout(),
+      opencode: {
+        async run() {
+          return {
+            stdout: "",
+            stderr: "You must provide a message or a command\n",
+            exitCode: 1,
+            text: "",
+            usage: {},
+          };
+        },
+      },
+    }).run(created.job.id);
+    const run = store.listReviewerRuns(created.job.id)[0];
+    expect(store.getJob(created.job.id)?.state).toBe("failed");
+    expect(run?.validation_error).toContain("Empty reviewer output");
+    expect(run?.stderr).toContain("You must provide a message or a command");
+    expect(run?.exit_code).toBe(1);
+    const logs = store.listLogs(created.job.id).map((row) => row.message).join("\n");
+    expect(logs).toContain("You must provide a message or a command");
+  });
 });
