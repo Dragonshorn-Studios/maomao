@@ -11,22 +11,35 @@ export class OpenCodeTimeoutError extends Error {
   }
 }
 
+/** `--file` is a yargs array option; without `--` the prompt is eaten as another file path. */
+export function buildOpenCodeArgs(input: {
+  cwd: string;
+  model?: string;
+  title?: string;
+  files?: string[];
+  extraArgs?: string[];
+  prompt: string;
+}): string[] {
+  return [
+    "run",
+    "--format",
+    "json",
+    "--dir",
+    input.cwd,
+    ...(input.model ? ["--model", input.model] : []),
+    ...(input.title ? ["--title", input.title] : []),
+    ...(input.files ?? []).flatMap((file) => ["--file", file]),
+    ...(input.extraArgs ?? []),
+    "--",
+    input.prompt,
+  ];
+}
+
 export function createOpenCodeRunner(defaultBin = "opencode"): OpenCodePort {
   return {
     async run(input: OpenCodeRunInput): Promise<OpenCodeRunResult> {
       const bin = input.bin || defaultBin;
-      const args = [
-        "run",
-        "--format",
-        "json",
-        "--dir",
-        input.cwd,
-        ...(input.model ? ["--model", input.model] : []),
-        ...(input.title ? ["--title", input.title] : []),
-        ...(input.files ?? []).flatMap((file) => ["--file", file]),
-        ...(input.extraArgs ?? []),
-        input.prompt,
-      ];
+      const args = buildOpenCodeArgs(input);
 
       const extras: Record<string, string> = {
         OPENCODE_DISABLE_DEFAULT_PLUGINS: "true",

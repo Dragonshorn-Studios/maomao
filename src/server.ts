@@ -1,4 +1,4 @@
-import { Hono } from "hono";
+import { Hono, type Context } from "hono";
 import { streamSSE } from "hono/streaming";
 import { deleteCookie, getCookie, setCookie } from "hono/cookie";
 import type { Config } from "./config.js";
@@ -187,6 +187,13 @@ export function createApp(ctx: ServerContext): Hono {
     );
   });
 
+  app.post("/jobs/:id/retry", (c) => retryJob(c, ctx, Number(c.req.param("id"))));
+  app.post("/jobs/:id/reviewers/:runId/retry", (c) => {
+    const runId = Number(c.req.param("runId"));
+    if (!Number.isFinite(runId)) return c.text("Not found", 404);
+    return retryJob(c, ctx, Number(c.req.param("id")), runId);
+  });
+
   app.get("/api/jobs", (c) => {
     const jobs = ctx.store.listJobs(75).map((job) => ({
       ...job,
@@ -243,5 +250,25 @@ function noticeText(
   if (code === "exists") {
     return "A job already exists for this repository, pull request, and head SHA.";
   }
+  if (code === "retry") {
+    return "Re-queued failed reviewer(s) for this head SHA.";
+  }
   return undefined;
+}
+
+function retryJob(c: Context, ctx: ServerContext, jobId: number, runId?: number) {
+  const job = ctx.store.getJob(jobId);
+  if (!job) return c.text("Not found", 404);
+  const result = ctx.store.retryFailedReviewers(jobId, runId);
+  if (!result.ok) {
+    return c.html(
+      renderJob(job, ctx.store.listReviewerRuns(jobId), ctx.store.listLogs(jobId), {
+        showLogout: uiGateEnabled(ctx.config.uiPassword, ctx.config.uiSessionSecret),
+        error: result.error,
+      }),
+      400,
+    );
+  }
+  ctx.queue.enqueue(jobId);
+  return c.redirect(`/jobs/${jobId}?notice=retry`, 302);
 }

@@ -249,7 +249,7 @@ button, input, textarea {
   font: inherit;
 }
 
-.btn, .login button, .trigger button, .logout button.primary {
+.btn, .login button, .trigger button, .logout button.primary, .retry-job button {
   background: var(--jade);
   color: var(--btn-fg);
   border: 1px solid color-mix(in srgb, var(--jade) 70%, var(--ink));
@@ -258,7 +258,7 @@ button, input, textarea {
   cursor: pointer;
   letter-spacing: 0.02em;
 }
-.btn:hover, .login button:hover, .trigger button:hover {
+.btn:hover, .login button:hover, .trigger button:hover, .retry-job button:hover {
   filter: brightness(1.05);
 }
 
@@ -453,6 +453,31 @@ button, input, textarea {
   align-items: center;
   flex-wrap: wrap;
 }
+.run-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.55rem;
+  flex-wrap: wrap;
+}
+form.retry, form.retry-job {
+  margin: 0;
+  background: none;
+  border: none;
+  box-shadow: none;
+  padding: 0;
+  display: inline-flex;
+}
+.retry button {
+  background: var(--paper);
+  color: var(--ink);
+  border: 1px solid var(--line-strong);
+  padding: 0.22rem 0.6rem;
+  font-size: 0.78rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+.retry button:hover { color: var(--jade); border-color: var(--jade); }
+.retry-job { margin: 0.35rem 0 0.85rem; }
 .role {
   display: inline-flex;
   align-items: center;

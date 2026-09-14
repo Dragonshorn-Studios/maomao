@@ -298,6 +298,59 @@ export class JobStore {
     publish({ type: "job", jobId: id });
   }
 
+  retryFailedReviewers(jobId: number, runId?: number): { ok: true; reset: number } | { ok: false; error: string } {
+    const job = this.getJob(jobId);
+    if (!job) return { ok: false, error: "job not found" };
+    if (job.state === "stale" || job.state === "cancelled") {
+      return { ok: false, error: `cannot retry a ${job.state} job` };
+    }
+    if (["queued", "preparing", "reviewing", "aggregating", "publishing"].includes(job.state)) {
+      return { ok: false, error: "job is still running" };
+    }
+
+    const runs = this.listReviewerRuns(jobId);
+    if (runId != null) {
+      const run = runs.find((row) => row.id === runId);
+      if (!run) return { ok: false, error: "reviewer run not found" };
+      if (run.state !== "failed") return { ok: false, error: "only failed reviewers can be retried" };
+    }
+    const targets = runs.filter((run) => run.state === "failed" && (runId == null || run.id === runId));
+    if (targets.length === 0) return { ok: false, error: "no failed reviewers to retry" };
+
+    const updatedAt = nowIso();
+    this.db.transaction(() => {
+      const reset = this.db.prepare(
+        `UPDATE reviewer_runs SET
+           state = 'queued', attempt = 0, validation_error = NULL, raw_output = NULL,
+           normalized_json = NULL, stdout = NULL, stderr = NULL, exit_code = NULL,
+           started_at = NULL, finished_at = NULL, duration_ms = NULL,
+           prompt_tokens = NULL, completion_tokens = NULL, cost = NULL
+         WHERE id = ?`,
+      );
+      for (const run of targets) reset.run(run.id);
+      this.db
+        .prepare(
+          `UPDATE jobs SET
+             state = 'queued', failure_reason = NULL, started_at = NULL, finished_at = NULL,
+             aggregator_state = 'queued', aggregator_started_at = NULL, aggregator_finished_at = NULL,
+             aggregator_raw = NULL, aggregator_normalized = NULL, aggregator_duration_ms = NULL,
+             updated_at = ?
+           WHERE id = ?`,
+        )
+        .run(updatedAt, jobId);
+    })();
+
+    this.log(
+      jobId,
+      runId == null
+        ? `Retrying ${targets.length} failed reviewer(s)`
+        : `Retrying failed reviewer ${targets[0]?.role}`,
+    );
+    publish({ type: "job", jobId });
+    publish({ type: "jobs" });
+    return { ok: true, reset: targets.length };
+  }
+
   patchReviewer(id: number, extra: Partial<ReviewerRunRow>): void {
     const current = this.getReviewerRun(id);
     if (!current) return;

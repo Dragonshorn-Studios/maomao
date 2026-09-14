@@ -94,10 +94,13 @@ describe("monitoring pages", () => {
     const failedHtml = renderJob(failed!, store.listReviewerRuns(failed!.id), store.listLogs(failed!.id));
     expect(failedHtml).toContain("OpenCode exited 1 after 2 attempts");
     expect(failedHtml.indexOf("OpenCode exited 1")).toBeLessThan(failedHtml.indexOf("Validation error:"));
+    expect(failedHtml).toContain(">Retry</button>");
+    expect(failedHtml).toContain(`/jobs/${failed!.id}/retry`);
     const staleHtml = renderJob(stale!, store.listReviewerRuns(stale!.id), store.listLogs(stale!.id));
     expect(staleHtml).toContain("newer head SHA");
     expect(staleHtml).toContain("pull request");
     expect(staleHtml).toContain("6 / 6 reviewers done");
+    expect(staleHtml).not.toContain(">Retry</button>");
   });
 });
 
