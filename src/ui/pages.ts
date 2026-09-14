@@ -8,6 +8,7 @@ import {
   runStateLabel,
   severityLabel,
   staleBanner,
+  unconfirmedFindingsBanner,
 } from "./copy.js";
 import { roleGlyph } from "./glyphs.js";
 import { layout, type PageOptions } from "./layout.js";
@@ -113,8 +114,8 @@ export function renderJob(
       <div>
         <dt>Aggregator</dt>
         <dd>${renderState(job.aggregator_state, runStateLabel(job.aggregator_state).text, runStateLabel(job.aggregator_state).hint, runStateLabel(job.aggregator_state).mark)}
-          ${job.aggregator_model ? `<code class="metric">${escapeHtml(job.aggregator_model)}</code>` : ""}
-          ${job.aggregator_provider ? `<span class="muted"> · <code class="metric">${escapeHtml(job.aggregator_provider)}</code></span>` : ""}
+          ${job.aggregator_model ? `<div><code class="metric">${escapeHtml(job.aggregator_model)}</code>${job.aggregator_provider ? `<span class="muted"> · <code class="metric">${escapeHtml(job.aggregator_provider)}</code></span>` : ""}</div>` : ""}
+          <div class="metric">${escapeHtml(aggregatorUsageCopy(job))}</div>
         </dd>
       </div>
       <div>
@@ -133,9 +134,11 @@ export function renderJob(
       </div>
     </dl>
     ${job.failure_reason ? `<p class="error" role="alert"><strong>Failure:</strong> ${escapeHtml(job.failure_reason)}</p>` : ""}
-    <h2>Reviewers</h2>
+    <div class="section-head">
+      <h2>Reviewers</h2>
+      ${failedToRetry > 0 ? renderJobRetry(job.id, failedToRetry) : ""}
+    </div>
     <p class="muted">${escapeHtml(progressCopy(metrics))}</p>
-    ${failedToRetry > 0 ? renderJobRetry(job.id, failedToRetry) : ""}
     <div class="cards">
       ${runs.map((run) => renderRun(run, canRetryRun(job, run))).join("")}
     </div>
@@ -180,7 +183,7 @@ function renderQueueCard(job: JobRow, metrics: JobMetrics): string {
         <span class="pair">Cost <strong class="metric">${escapeHtml(formatCost(metrics.cost))}</strong></span>
       </div>
       ${renderDiagnosis(metrics, job.aggregator_state)}
-      ${renderSeverityChips(metrics.findings)}
+      ${renderSeverityChips(metrics.findings, !metrics.findingsConfirmed)}
     </article>
   </li>`;
 }
@@ -198,11 +201,11 @@ function renderDiagnosis(metrics: JobMetrics, aggregatorState: string): string {
     <span>Reviewers <strong>${metrics.reviewersDone} / ${metrics.reviewersTotal}</strong></span>
     <span class="join" aria-hidden="true">→</span>
     <span>Aggregator ${renderState(aggregatorState, agg.text, agg.hint, agg.mark)}</span>
-    <span class="muted">${escapeHtml(observationsCopy(metrics.findings.total))}</span>
+    <span class="muted">${escapeHtml(observationsCopy(metrics.findings.total, !metrics.findingsConfirmed))}</span>
   </div>`;
 }
 
-function renderSeverityChips(counts: SeverityCounts): string {
+function renderSeverityChips(counts: SeverityCounts, unconfirmed = false): string {
   if (counts.total === 0) return `<div class="meta-row"><span class="muted">No suspicious findings</span></div>`;
   const keys = ["blocker", "high", "medium", "low", "info"] as const;
   const chips = keys
@@ -212,11 +215,19 @@ function renderSeverityChips(counts: SeverityCounts): string {
       return `<span class="sev sev-${key}"><span class="mark" aria-hidden="true">${label.mark}</span> ${label.text} ${counts[key]}</span>`;
     })
     .join(" ");
-  return `<div class="meta-row" aria-label="Findings by severity">${chips}</div>`;
+  const mark = unconfirmed
+    ? `<span class="unconfirmed" title="Specialist observations not yet validated by the aggregator">Unconfirmed</span> `
+    : "";
+  return `<div class="meta-row${unconfirmed ? " is-unconfirmed" : ""}" aria-label="${unconfirmed ? "Unconfirmed findings by severity" : "Findings by severity"}">${mark}${chips}</div>`;
 }
 
 function renderState(stateClass: string, text: string, hint: string, mark: string): string {
   return `<span class="state state-${escapeHtml(stateClass)}" title="${escapeHtml(hint)}"><span class="mark" aria-hidden="true">${escapeHtml(mark)}</span> ${escapeHtml(text)}</span>`;
+}
+
+function aggregatorUsageCopy(job: JobRow): string {
+  const tokens = (job.aggregator_prompt_tokens ?? 0) + (job.aggregator_completion_tokens ?? 0);
+  return `${formatTokens(tokens)} tokens · ${formatCost(job.aggregator_cost)}`;
 }
 
 function progressCopy(metrics: JobMetrics): string {
@@ -251,16 +262,7 @@ function renderRun(run: ReviewerRunRow, showRetry = false): string {
   return `<article class="card">
     <header>
       <span class="role">${roleGlyph(run.role)} <strong>${escapeHtml(run.title || run.role)}</strong> <span class="muted">(${escapeHtml(run.role)})</span></span>
-      <span class="run-actions">
-        ${renderState(run.state, state.text, state.hint, state.mark)}
-        ${
-          showRetry
-            ? `<form class="retry" method="post" action="/jobs/${run.job_id}/reviewers/${run.id}/retry">
-                 <button type="submit">Retry</button>
-               </form>`
-            : ""
-        }
-      </span>
+      ${renderState(run.state, state.text, state.hint, state.mark)}
     </header>
     <p class="muted">
       model <code class="metric">${escapeHtml(run.model || "default model")}</code>
@@ -272,6 +274,13 @@ function renderRun(run: ReviewerRunRow, showRetry = false): string {
       · ${findingCount} finding(s)
     </p>
     ${run.validation_error ? `<p class="error" role="alert"><strong>Validation error:</strong> ${escapeHtml(run.validation_error)}</p>` : ""}
+    ${
+      showRetry
+        ? `<form class="retry" method="post" action="/jobs/${run.job_id}/reviewers/${run.id}/retry">
+             <button type="submit">Retry</button>
+           </form>`
+        : ""
+    }
     ${parsed?.summary ? `<p>${escapeHtml(parsed.summary)}</p>` : ""}
     ${run.normalized_json ? `<details><summary>Normalized JSON</summary><pre class="log-panel">${escapeHtml(run.normalized_json)}</pre></details>` : ""}
     ${run.raw_output && run.raw_output !== run.normalized_json ? `<details><summary>Raw output</summary><pre class="log-panel">${escapeHtml(run.raw_output)}</pre></details>` : ""}
@@ -298,6 +307,7 @@ function renderAggregator(job: JobRow, metrics: JobMetrics): string {
       ${job.aggregator_model ? `model <code class="metric">${escapeHtml(job.aggregator_model)}</code>` : "model pending"}
       ${job.aggregator_provider ? ` · provider <code class="metric">${escapeHtml(job.aggregator_provider)}</code>` : ""}
       · <span class="metric">${escapeHtml(formatDuration(job.aggregator_duration_ms))}</span>
+      · <span class="metric">${escapeHtml(aggregatorUsageCopy(job))}</span>
     </p>
     <p><strong>${escapeHtml(heading)}</strong></p>
     ${agg?.summary ? `<pre class="log-panel">${escapeHtml(agg.summary)}</pre>` : job.aggregator_normalized || job.aggregator_raw ? "" : `<p class="muted">(pending)</p>`}
@@ -307,25 +317,38 @@ function renderAggregator(job: JobRow, metrics: JobMetrics): string {
 }
 
 function renderFindings(metrics: JobMetrics): string {
-  const items = metrics.aggregator?.findings?.length
-    ? metrics.aggregator.findings.map((finding) => ({ ...finding, role: finding.category, reason: finding.body ?? "" }))
+  const unconfirmed = !metrics.findingsConfirmed;
+  const items = metrics.findingsConfirmed
+    ? (metrics.aggregator?.findings ?? []).map((finding) => ({
+        ...finding,
+        role: finding.category,
+        reason: finding.body ?? "",
+      }))
     : metrics.specialistFindings.map((finding) => ({ ...finding, reason: finding.reason }));
 
   if (items.length === 0) {
     return `<p class="muted">${metrics.aggregator?.verdict === "clean" ? "No suspicious findings" : "No normalized findings yet."}</p>`;
   }
 
-  return items
-    .map((finding) => {
-      const sev = severityLabel(finding.severity);
-      const loc = findingLocation(finding);
-      const attention = finding.severity === "blocker" || finding.severity === "high" ? "Finding requires attention" : "";
-      const reason = "reason" in finding ? finding.reason : "";
-      const suggested = "suggested_check" in finding ? finding.suggested_check : undefined;
-      const agreed = "reviewers_agreed" in finding && Array.isArray(finding.reviewers_agreed) ? finding.reviewers_agreed : [];
-      return `<article class="finding">
+  const banner = unconfirmed
+    ? `<p class="findings-provisional" role="status">${escapeHtml(unconfirmedFindingsBanner())}</p>`
+    : "";
+
+  return (
+    banner +
+    items
+      .map((finding) => {
+        const sev = severityLabel(finding.severity);
+        const loc = findingLocation(finding);
+        const attention = finding.severity === "blocker" || finding.severity === "high" ? "Finding requires attention" : "";
+        const reason = "reason" in finding ? finding.reason : "";
+        const suggested = "suggested_check" in finding ? finding.suggested_check : undefined;
+        const agreed =
+          "reviewers_agreed" in finding && Array.isArray(finding.reviewers_agreed) ? finding.reviewers_agreed : [];
+        return `<article class="finding${unconfirmed ? " is-unconfirmed" : ""}">
         <div class="finding-head">
           <span class="sev sev-${escapeHtml(finding.severity)}"><span class="mark" aria-hidden="true">${sev.mark}</span> ${sev.text}</span>
+          ${unconfirmed ? `<span class="unconfirmed">Unconfirmed</span>` : ""}
           <span>· ${escapeHtml(finding.category || finding.role)}</span>
           ${agreed.length ? `<span class="muted">reviewers: ${escapeHtml(agreed.join(", "))}</span>` : ""}
         </div>
@@ -335,6 +358,7 @@ function renderFindings(metrics: JobMetrics): string {
         ${reason ? `<p>${escapeHtml(reason)}</p>` : ""}
         ${suggested ? `<p class="muted">Suggested check: ${escapeHtml(suggested)}</p>` : ""}
       </article>`;
-    })
-    .join("");
+      })
+      .join("")
+  );
 }

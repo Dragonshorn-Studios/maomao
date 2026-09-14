@@ -1,4 +1,4 @@
-import { mkdtemp, writeFile, chmod, readFile, rm, stat } from "node:fs/promises";
+import { mkdtemp, writeFile, chmod, readFile, rm, stat, mkdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -8,6 +8,7 @@ import {
   execFile,
   gitAuthSecrets,
   gitHttpAuthArgs,
+  removeTree,
 } from "./checkout.js";
 
 const TOKEN = "ghs_testtoken_abcdefgh";
@@ -155,6 +156,31 @@ esac
       }
     } finally {
       await rm(tmp, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("removeTree", () => {
+  it("deletes a leftover 0555 checkout including nested .github/workflows", async () => {
+    const tmp = await mkdtemp(join(tmpdir(), "maomao-rm-"));
+    const leftover = join(tmp, "job-3-22e8a392b397");
+    const workflows = join(leftover, "repo", ".github", "workflows");
+    try {
+      await mkdir(workflows, { recursive: true });
+      await writeFile(join(workflows, "ci.yml"), "name: ci\n");
+      await mkdir(join(leftover, "repo", "src"), { recursive: true });
+      await writeFile(join(leftover, "repo", "src", "index.ts"), "export {};\n");
+      await chmodTree(join(leftover, "repo"), 0o555);
+      await chmod(join(leftover, "repo"), 0o755);
+
+      await expect(rm(leftover, { recursive: true, force: true })).rejects.toMatchObject({
+        code: "EACCES",
+      });
+
+      await removeTree(leftover);
+      await expect(stat(leftover)).rejects.toMatchObject({ code: "ENOENT" });
+    } finally {
+      await removeTree(tmp);
     }
   });
 });

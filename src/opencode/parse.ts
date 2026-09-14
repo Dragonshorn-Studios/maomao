@@ -54,7 +54,32 @@ function maybeUsage(value: unknown): OpenCodeUsage {
 }
 
 function num(value: unknown): number | undefined {
-  return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  if (typeof value === "string" && value.trim() !== "") {
+    const parsed = Number(value);
+    if (Number.isFinite(parsed)) return parsed;
+  }
+  return undefined;
+}
+
+function mergeUsage(into: OpenCodeUsage, extra: OpenCodeUsage): OpenCodeUsage {
+  return {
+    promptTokens: extra.promptTokens ?? into.promptTokens,
+    completionTokens: extra.completionTokens ?? into.completionTokens,
+    cost: extra.cost ?? into.cost,
+  };
+}
+
+function usageFromUnknown(value: unknown, depth = 0): OpenCodeUsage {
+  let usage = maybeUsage(value);
+  if (depth >= 4 || !value || typeof value !== "object") return usage;
+  const record = value as Record<string, unknown>;
+  for (const key of ["part", "usage", "tokens", "info", "data", "message"]) {
+    if (record[key] && typeof record[key] === "object") {
+      usage = mergeUsage(usage, usageFromUnknown(record[key], depth + 1));
+    }
+  }
+  return usage;
 }
 
 export function parseOpenCodeOutput(stdout: string): { text: string; usage: OpenCodeUsage } {
@@ -72,9 +97,7 @@ export function parseOpenCodeOutput(stdout: string): { text: string; usage: Open
         const part = event.part as { text?: string } | undefined;
         if (part?.text) texts.push(part.text);
       }
-      if (event.type === "step_finish" || event.type === "tool_use") {
-        usage = { ...usage, ...maybeUsage(event.part), ...maybeUsage(event) };
-      }
+      usage = mergeUsage(usage, usageFromUnknown(event));
       if (typeof event.text === "string") texts.push(event.text);
     } catch {
       // not an event line
