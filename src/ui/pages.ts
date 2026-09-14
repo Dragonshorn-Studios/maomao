@@ -9,6 +9,8 @@ import {
   severityLabel,
   staleBanner,
   unconfirmedFindingsBanner,
+  usageIncompleteCopy,
+  usageReportedCopy,
 } from "./copy.js";
 import { roleGlyph } from "./glyphs.js";
 import { layout, type PageOptions } from "./layout.js";
@@ -16,6 +18,7 @@ import {
   findingLocation,
   formatCost,
   formatTokens,
+  formatUsageBreakdown,
   jobMetrics,
   jobMetricsFromRuns,
   parseReviewerResult,
@@ -120,7 +123,13 @@ export function renderJob(
       </div>
       <div>
         <dt>Tokens / cost</dt>
-        <dd class="metric">${escapeHtml(formatTokens(metrics.tokens))} · ${escapeHtml(formatCost(metrics.cost))}</dd>
+        <dd class="metric">${escapeHtml(formatTokens(metrics.tokens))} · ${escapeHtml(formatCost(metrics.cost))}${
+          metrics.usageComplete ? "" : " · incomplete"
+        }
+          ${usageBreakdownHtml(metrics)}
+          ${metrics.usageComplete ? "" : `<div class="usage-incomplete">${escapeHtml(metrics.usageWarning || usageIncompleteCopy())}</div>`}
+          <div class="muted usage-note">${escapeHtml(usageReportedCopy())}</div>
+        </dd>
       </div>
       <div>
         <dt>GitHub review</dt>
@@ -179,7 +188,7 @@ function renderQueueCard(job: JobRow, metrics: JobMetrics): string {
         <span class="pair">Elapsed <strong class="metric">${escapeHtml(elapsed)}</strong></span>
         <span class="pair">Model <strong><code class="metric">${escapeHtml(metrics.model || "—")}</code></strong></span>
         ${metrics.provider ? `<span class="pair">Provider <strong><code class="metric">${escapeHtml(metrics.provider)}</code></strong></span>` : ""}
-        <span class="pair">Tokens <strong class="metric">${escapeHtml(formatTokens(metrics.tokens))}</strong></span>
+        <span class="pair">Tokens <strong class="metric">${escapeHtml(formatTokens(metrics.tokens))}${metrics.usageComplete ? "" : "+"}</strong></span>
         <span class="pair">Cost <strong class="metric">${escapeHtml(formatCost(metrics.cost))}</strong></span>
       </div>
       ${renderDiagnosis(metrics, job.aggregator_state)}
@@ -226,8 +235,19 @@ function renderState(stateClass: string, text: string, hint: string, mark: strin
 }
 
 function aggregatorUsageCopy(job: JobRow): string {
-  const tokens = (job.aggregator_prompt_tokens ?? 0) + (job.aggregator_completion_tokens ?? 0);
-  return `${formatTokens(tokens)} tokens · ${formatCost(job.aggregator_cost)}`;
+  const tokens = tokenTotalFromAggregator(job);
+  const incomplete = job.aggregator_usage_complete === 0 ? " · incomplete" : "";
+  return `${formatTokens(tokens)} tokens · ${formatCost(job.aggregator_cost)}${incomplete}`;
+}
+
+function tokenTotalFromAggregator(job: JobRow): number {
+  if (job.aggregator_total_tokens != null) return job.aggregator_total_tokens;
+  return (job.aggregator_prompt_tokens ?? 0) + (job.aggregator_completion_tokens ?? 0);
+}
+
+function usageBreakdownHtml(metrics: JobMetrics): string {
+  const breakdown = formatUsageBreakdown(metrics);
+  return breakdown ? `<div class="usage-breakdown">${escapeHtml(breakdown)}</div>` : "";
 }
 
 function progressCopy(metrics: JobMetrics): string {
@@ -255,10 +275,21 @@ function renderRun(run: ReviewerRunRow, showRetry = false): string {
   const parsed = parseReviewerResult(run.normalized_json);
   const findingCount = parsed?.findings.length ?? 0;
   const state = runStateLabel(run.state);
-  const tokens =
-    (run.prompt_tokens ?? 0) + (run.completion_tokens ?? 0) > 0
-      ? `${formatTokens((run.prompt_tokens ?? 0) + (run.completion_tokens ?? 0))} tokens`
-      : null;
+  const tokenCount =
+    run.total_tokens ??
+    (run.prompt_tokens ?? 0) +
+      (run.completion_tokens ?? 0) +
+      (run.reasoning_tokens ?? 0) +
+      (run.cache_read_tokens ?? 0) +
+      (run.cache_write_tokens ?? 0);
+  const tokens = tokenCount > 0 ? `${formatTokens(tokenCount)} tokens${run.usage_complete === 0 ? "+" : ""}` : null;
+  const breakdown = formatUsageBreakdown({
+    promptTokens: run.prompt_tokens ?? 0,
+    completionTokens: run.completion_tokens ?? 0,
+    reasoningTokens: run.reasoning_tokens ?? 0,
+    cacheReadTokens: run.cache_read_tokens ?? 0,
+    cacheWriteTokens: run.cache_write_tokens ?? 0,
+  });
   return `<article class="card">
     <header>
       <span class="role">${roleGlyph(run.role)} <strong>${escapeHtml(run.title || run.role)}</strong> <span class="muted">(${escapeHtml(run.role)})</span></span>
@@ -273,6 +304,8 @@ function renderRun(run: ReviewerRunRow, showRetry = false): string {
       ${run.cost != null ? ` · <span class="metric">${escapeHtml(formatCost(run.cost))}</span>` : ""}
       · ${findingCount} finding(s)
     </p>
+    ${breakdown ? `<p class="muted usage-breakdown">${escapeHtml(breakdown)}</p>` : ""}
+    ${run.usage_complete === 0 ? `<p class="usage-incomplete">${escapeHtml(run.usage_warning || usageIncompleteCopy())}</p>` : ""}
     ${run.validation_error ? `<p class="error" role="alert"><strong>Validation error:</strong> ${escapeHtml(run.validation_error)}</p>` : ""}
     ${
       showRetry

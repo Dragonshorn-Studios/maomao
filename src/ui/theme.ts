@@ -292,6 +292,8 @@ button, input, textarea {
 .notice { border-color: var(--jade); background: var(--jade-soft); }
 .error { border-color: var(--cinnabar); background: var(--cinnabar-soft); color: var(--ink); }
 .warn { border-color: var(--amber); background: var(--amber-soft); }
+.usage-incomplete { color: var(--amber); font-size: 0.9em; margin: 0.35rem 0 0; }
+.usage-breakdown, .usage-note { font-size: 0.9em; margin: 0.25rem 0 0; }
 
 .login, .trigger, .specimen, .card, .meta-grid > div, .finding, .empty {
   background: var(--surface);

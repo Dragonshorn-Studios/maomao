@@ -70,6 +70,14 @@ export function unconfirmedFindingsBanner(): string {
   return "Unconfirmed specialist observations. The aggregator has not validated these yet.";
 }
 
+export function usageIncompleteCopy(): string {
+  return "Usage incomplete: OpenCode did not emit a final step_finish. Figures are the minimum observed, not a complete total.";
+}
+
+export function usageReportedCopy(): string {
+  return "Token and cost figures are OpenCode/provider-reported usage, not an independently calculated invoice.";
+}
+
 export function staleBanner(): string {
   return "This job reviewed an older commit. A newer head SHA exists for this pull request; do not treat this result as current.";
 }

@@ -97,6 +97,9 @@ describe("monitoring pages", () => {
     expect(html).toContain("cookie-flags");
     expect(html).not.toContain("Unconfirmed");
     expect(html).toContain("10.3k tokens · $0.12");
+    expect(html).toContain("independently calculated invoice");
+    expect(html).toContain("reasoning");
+    expect(html).toContain("cache r");
   });
 
   it("marks specialist findings unconfirmed until the aggregator finishes", () => {
@@ -142,6 +145,9 @@ describe("job metrics", () => {
     expect(metrics.findings.medium).toBe(1);
     expect(metrics.tokens).toBeGreaterThan(10_000);
     expect(metrics.cost).toBeGreaterThan(0.2);
+    expect(metrics.usageComplete).toBe(true);
+    expect(metrics.reasoningTokens).toBe(120);
+    expect(metrics.cacheReadTokens).toBe(800);
     expect(formatTokens(12_400)).toMatch(/k$/);
     expect(formatCost(0.18)).toBe("$0.18");
   });
@@ -154,5 +160,21 @@ describe("job metrics", () => {
     expect(live.findings.medium).toBe(1);
     const done = store.listJobs(20).find((row) => row.pr_number === 412)!;
     expect(jobMetrics(done, store).findingsConfirmed).toBe(true);
+  });
+
+  it("treats a run with usage_complete=0 as incomplete job usage", () => {
+    const store = seededStore();
+    const job = store.listJobs(20).find((row) => row.pr_number === 412)!;
+    const run = store.listReviewerRuns(job.id)[0];
+    store.patchReviewer(run.id, {
+      usage_complete: 0,
+      usage_warning: "Usage incomplete: stream ended without a matching step_finish",
+    });
+    const metrics = jobMetrics(job, store);
+    expect(metrics.usageComplete).toBe(false);
+    expect(metrics.usageWarning).toMatch(/incomplete/i);
+    const html = renderJob(job, store.listReviewerRuns(job.id), store.listLogs(job.id));
+    expect(html).toContain("incomplete");
+    expect(html).toContain("step_finish");
   });
 });
