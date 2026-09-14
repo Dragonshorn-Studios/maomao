@@ -38,6 +38,12 @@ export interface JobRow {
   aggregator_prompt_tokens: number | null;
   aggregator_completion_tokens: number | null;
   aggregator_cost: number | null;
+  aggregator_reasoning_tokens: number | null;
+  aggregator_cache_read_tokens: number | null;
+  aggregator_cache_write_tokens: number | null;
+  aggregator_total_tokens: number | null;
+  aggregator_usage_complete: number | null;
+  aggregator_usage_warning: string | null;
   created_at: string;
   updated_at: string;
   started_at: string | null;
@@ -65,6 +71,12 @@ export interface ReviewerRunRow {
   prompt_tokens: number | null;
   completion_tokens: number | null;
   cost: number | null;
+  reasoning_tokens: number | null;
+  cache_read_tokens: number | null;
+  cache_write_tokens: number | null;
+  total_tokens: number | null;
+  usage_complete: number | null;
+  usage_warning: string | null;
 }
 
 export interface JobLogRow {
@@ -244,6 +256,12 @@ export class JobStore {
           aggregator_prompt_tokens = COALESCE(?, aggregator_prompt_tokens),
           aggregator_completion_tokens = COALESCE(?, aggregator_completion_tokens),
           aggregator_cost = COALESCE(?, aggregator_cost),
+          aggregator_reasoning_tokens = COALESCE(?, aggregator_reasoning_tokens),
+          aggregator_cache_read_tokens = COALESCE(?, aggregator_cache_read_tokens),
+          aggregator_cache_write_tokens = COALESCE(?, aggregator_cache_write_tokens),
+          aggregator_total_tokens = COALESCE(?, aggregator_total_tokens),
+          aggregator_usage_complete = COALESCE(?, aggregator_usage_complete),
+          aggregator_usage_warning = COALESCE(?, aggregator_usage_warning),
           started_at = ?,
           finished_at = ?,
           updated_at = ?
@@ -266,6 +284,12 @@ export class JobStore {
         extra.aggregator_prompt_tokens ?? null,
         extra.aggregator_completion_tokens ?? null,
         extra.aggregator_cost ?? null,
+        extra.aggregator_reasoning_tokens ?? null,
+        extra.aggregator_cache_read_tokens ?? null,
+        extra.aggregator_cache_write_tokens ?? null,
+        extra.aggregator_total_tokens ?? null,
+        extra.aggregator_usage_complete ?? null,
+        extra.aggregator_usage_warning ?? null,
         startedAt,
         finishedAt,
         updatedAt,
@@ -330,7 +354,9 @@ export class JobStore {
            state = 'queued', attempt = 0, validation_error = NULL, raw_output = NULL,
            normalized_json = NULL, stdout = NULL, stderr = NULL, exit_code = NULL,
            started_at = NULL, finished_at = NULL, duration_ms = NULL,
-           prompt_tokens = NULL, completion_tokens = NULL, cost = NULL
+           prompt_tokens = NULL, completion_tokens = NULL, cost = NULL,
+           reasoning_tokens = NULL, cache_read_tokens = NULL, cache_write_tokens = NULL,
+           total_tokens = NULL, usage_complete = NULL, usage_warning = NULL
          WHERE id = ?`,
       );
       for (const run of targets) reset.run(run.id);
@@ -340,6 +366,10 @@ export class JobStore {
              state = 'queued', failure_reason = NULL, started_at = NULL, finished_at = NULL,
              aggregator_state = 'queued', aggregator_started_at = NULL, aggregator_finished_at = NULL,
              aggregator_raw = NULL, aggregator_normalized = NULL, aggregator_duration_ms = NULL,
+             aggregator_prompt_tokens = NULL, aggregator_completion_tokens = NULL, aggregator_cost = NULL,
+             aggregator_reasoning_tokens = NULL, aggregator_cache_read_tokens = NULL,
+             aggregator_cache_write_tokens = NULL, aggregator_total_tokens = NULL,
+             aggregator_usage_complete = NULL, aggregator_usage_warning = NULL,
              updated_at = ?
            WHERE id = ?`,
         )

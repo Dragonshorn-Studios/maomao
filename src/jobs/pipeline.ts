@@ -3,7 +3,12 @@ import type { JobStore, JobRow, ReviewerRunRow } from "./store.js";
 import type { GithubPort } from "../github/client.js";
 import { buildReviewBody, findExistingReview, toInlineComments } from "../github/client.js";
 import type { CheckoutPort } from "../checkout.js";
-import type { OpenCodePort, OpenCodeRunResult } from "../opencode/parse.js";
+import {
+  aggregatorUsagePersistence,
+  usagePersistence,
+  type OpenCodePort,
+  type OpenCodeRunResult,
+} from "../opencode/parse.js";
 import { buildAggregatorPrompt, buildReviewerPrompt } from "../prompts.js";
 import {
   fallbackAggregator,
@@ -253,9 +258,7 @@ async function runReviewer(
         exit_code: result.exitCode,
         finished_at: nowIso(),
         duration_ms: Date.now() - started,
-        prompt_tokens: result.usage.promptTokens ?? null,
-        completion_tokens: result.usage.completionTokens ?? null,
-        cost: result.usage.cost ?? null,
+        ...usagePersistence(result.usage),
         validation_error: null,
       });
       deps.store.log(
@@ -264,6 +267,9 @@ async function runReviewer(
         "info",
         run.id,
       );
+      if (result.usage.complete === false && result.usage.warning) {
+        deps.store.log(job.id, result.usage.warning, "warn", run.id);
+      }
       return;
     } catch (error) {
       lastError = formatError(error);
@@ -277,6 +283,7 @@ async function runReviewer(
         exit_code: result?.exitCode ?? null,
         finished_at: nowIso(),
         duration_ms: Date.now() - started,
+        ...(result ? usagePersistence(result.usage) : {}),
       });
       deps.store.log(
         job.id,
@@ -327,9 +334,7 @@ async function runAggregator(
       aggregator_state: "done",
       aggregator_finished_at: nowIso(),
       aggregator_duration_ms: Date.now() - started,
-      aggregator_prompt_tokens: result.usage.promptTokens ?? null,
-      aggregator_completion_tokens: result.usage.completionTokens ?? null,
-      aggregator_cost: result.usage.cost ?? null,
+      ...aggregatorUsagePersistence(result.usage),
     });
     return parsed;
   } catch (error) {

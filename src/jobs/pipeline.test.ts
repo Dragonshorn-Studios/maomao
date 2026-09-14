@@ -156,6 +156,81 @@ describe("pipeline", () => {
     expect(JSON.parse(job?.aggregator_normalized ?? "{}").verdict).toBe("comment");
   });
 
+  it("persists the OpenCode token breakdown and incomplete usage flag", async () => {
+    const config = loadConfig({
+      REVIEWER_ROLES: "correctness",
+      OPENCODE_REVIEWER_MODEL: "test/model",
+      POST_EMPTY_REVIEW: "true",
+    });
+    const store = new JobStore(openDb(":memory:"));
+    const created = store.enqueue({
+      repoFullName: "acme/widgets",
+      repoOwner: "acme",
+      repoName: "widgets",
+      installationId: 9,
+      prNumber: 4,
+      prTitle: "Change example",
+      prBody: "",
+      prHtmlUrl: "",
+      prAuthor: "dev",
+      baseSha: "base",
+      headSha: "cafebabe",
+      baseRef: "main",
+      headRef: "feat",
+      reviewers: [{ role: "correctness", title: "Correctness" }],
+    });
+    await createPipeline({
+      config,
+      store,
+      github: {
+        getInstallationToken: async () => "token",
+        getPullDiff: async () => "diff",
+        listReviews: async () => [],
+        createCommentReview: async () => ({ id: "1", url: "u" }),
+      },
+      checkout: await fixtureCheckout(),
+      opencode: {
+        async run(input) {
+          const specialist = input.prompt.includes("Role id:");
+          const text = specialist
+            ? reviewerJson("correctness")
+            : JSON.stringify({ verdict: "comment", summary: "ok", findings: [] });
+          return {
+            stdout: text,
+            stderr: "",
+            exitCode: 0,
+            text,
+            usage: specialist
+              ? {
+                  promptTokens: 10,
+                  completionTokens: 4,
+                  reasoningTokens: 2,
+                  cacheReadTokens: 6,
+                  cacheWriteTokens: 1,
+                  totalTokens: 23,
+                  cost: 0.01,
+                  complete: false,
+                  warning: "Usage incomplete: stream ended without a matching step_finish",
+                  steps: 1,
+                }
+              : { promptTokens: 8, completionTokens: 3, totalTokens: 11, cost: 0.02, complete: true },
+          };
+        },
+      },
+    }).run(created.job.id);
+    const run = store.listReviewerRuns(created.job.id)[0];
+    expect(run?.total_tokens).toBe(23);
+    expect(run?.reasoning_tokens).toBe(2);
+    expect(run?.cache_read_tokens).toBe(6);
+    expect(run?.cache_write_tokens).toBe(1);
+    expect(run?.usage_complete).toBe(0);
+    expect(run?.usage_warning).toMatch(/incomplete/i);
+    const job = store.getJob(created.job.id);
+    expect(job?.aggregator_total_tokens).toBe(11);
+    expect(job?.aggregator_usage_complete).toBe(1);
+    expect(job?.state).toBe("completed");
+  });
+
   it("does not publish after a job is marked stale", async () => {
     const config = loadConfig({
       REVIEWER_ROLES: "correctness",
