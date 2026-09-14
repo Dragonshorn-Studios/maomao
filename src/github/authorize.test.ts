@@ -4,6 +4,7 @@ import {
   authorizationLogLine,
   authorizeGithubTarget,
   logAuthorizationRejection,
+  logRateLimited,
 } from "./authorize.js";
 
 function config(env: Record<string, string> = {}) {
@@ -85,5 +86,15 @@ describe("authorization logging", () => {
       reason: "unauthorized repository",
     });
     expect(line).toBe("installation_id=7 repository_id=8 reason=unauthorized repository");
+  });
+
+  it("logs rate limits under a distinct message", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    logRateLimited({ installationId: 42, repositoryId: 99 });
+    const line = String(warn.mock.calls[0]?.[0]);
+    expect(line).toContain('"msg":"github rate limited"');
+    expect(line).toContain('"reason":"rate limited"');
+    expect(line).not.toContain("github authorization rejected");
+    warn.mockRestore();
   });
 });

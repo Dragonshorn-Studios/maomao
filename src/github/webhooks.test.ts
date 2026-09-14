@@ -271,6 +271,116 @@ describe("webhook handling", () => {
     expect(second.body).toEqual({ ok: true, ignored: true, reason: "rate limited" });
     expect(second.enqueue).toBeUndefined();
     expect(store.listJobs()).toHaveLength(1);
+    const log = String(warn.mock.calls[0]?.[0]);
+    expect(log).toContain("rate limited");
+    expect(log).toContain('"msg":"github rate limited"');
+    expect(log).not.toContain("github authorization rejected");
     warn.mockRestore();
+  });
+
+  it("ignores signed payloads that omit repository.id when rate limiting is enabled", async () => {
+    const secret = "s3cret";
+    const config = loadConfig({
+      GITHUB_WEBHOOK_SECRET: secret,
+      REVIEWER_ROLES: "correctness",
+      REPO_RATE_LIMIT_PER_WINDOW: "1",
+      REPO_RATE_WINDOW_MS: "60000",
+    });
+    const store = new JobStore(openDb(":memory:"));
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const { id: _omitted, ...repository } = prPayload().repository as { id: number } & Record<string, unknown>;
+    const rawBody = JSON.stringify(prPayload({ repository }));
+    const result = await handleGithubWebhook({
+      config,
+      store,
+      rateLimiter: new RepoRateLimiter(),
+      request: {
+        event: "pull_request",
+        deliveryId: "d-missing-repo-id",
+        signature: sign(secret, rawBody),
+        rawBody,
+      },
+    });
+    expect(result.status).toBe(202);
+    expect(result.body).toEqual({ ok: true, ignored: true, reason: "missing repository id" });
+    expect(result.enqueue).toBeUndefined();
+    expect(store.listJobs()).toEqual([]);
+    warn.mockRestore();
+  });
+
+  it("does not consume rate-limit quota for duplicate deliveries", async () => {
+    const secret = "s3cret";
+    const config = loadConfig({
+      GITHUB_WEBHOOK_SECRET: secret,
+      REVIEWER_ROLES: "correctness",
+      REPO_RATE_LIMIT_PER_WINDOW: "2",
+      REPO_RATE_WINDOW_MS: "60000",
+    });
+    const store = new JobStore(openDb(":memory:"));
+    const limiter = new RepoRateLimiter();
+    const firstBody = JSON.stringify(prPayload());
+    const first = await handleGithubWebhook({
+      config,
+      store,
+      rateLimiter: limiter,
+      request: {
+        event: "pull_request",
+        deliveryId: "d-dup-1",
+        signature: sign(secret, firstBody),
+        rawBody: firstBody,
+      },
+    });
+    expect(first.body.created).toBe(true);
+
+    const dup = await handleGithubWebhook({
+      config,
+      store,
+      rateLimiter: limiter,
+      request: {
+        event: "pull_request",
+        deliveryId: "d-dup-2",
+        signature: sign(secret, firstBody),
+        rawBody: firstBody,
+      },
+    });
+    expect(dup.body.created).toBe(false);
+
+    const secondBody = JSON.stringify(
+      prPayload({
+        pull_request: { ...prPayload().pull_request, head: { sha: "head-other", ref: "feature" }, number: 8 },
+      }),
+    );
+    const second = await handleGithubWebhook({
+      config,
+      store,
+      rateLimiter: limiter,
+      request: {
+        event: "pull_request",
+        deliveryId: "d-dup-3",
+        signature: sign(secret, secondBody),
+        rawBody: secondBody,
+      },
+    });
+    expect(second.body.created).toBe(true);
+
+    const thirdBody = JSON.stringify(
+      prPayload({
+        pull_request: { ...prPayload().pull_request, head: { sha: "head-third", ref: "feature" }, number: 9 },
+      }),
+    );
+    const third = await handleGithubWebhook({
+      config,
+      store,
+      rateLimiter: limiter,
+      request: {
+        event: "pull_request",
+        deliveryId: "d-dup-4",
+        signature: sign(secret, thirdBody),
+        rawBody: thirdBody,
+      },
+    });
+    expect(third.status).toBe(202);
+    expect(third.body).toEqual({ ok: true, ignored: true, reason: "rate limited" });
+    expect(store.listJobs()).toHaveLength(2);
   });
 });

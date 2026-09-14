@@ -18,4 +18,24 @@ describe("RepoRateLimiter", () => {
     expect(limiter.allow(11, 0, 1_000)).toBe(true);
     expect(limiter.allow(11, 0, 1_000)).toBe(true);
   });
+
+  it("peeks without recording and prunes expired repository windows", () => {
+    let now = 1_000;
+    const limiter = new RepoRateLimiter(() => now);
+    expect(limiter.wouldAllow(11, 1, 1_000)).toBe(true);
+    expect(limiter.size()).toBe(0);
+    expect(limiter.allow(11, 1, 1_000)).toBe(true);
+    expect(limiter.wouldAllow(11, 1, 1_000)).toBe(false);
+    expect(limiter.size()).toBe(1);
+    now = 2_001;
+    expect(limiter.wouldAllow(11, 1, 1_000)).toBe(true);
+    expect(limiter.size()).toBe(0);
+  });
+
+  it("fails closed for missing repository ids when limiting is enabled", () => {
+    const limiter = new RepoRateLimiter();
+    expect(limiter.wouldAllow(0, 1, 1_000)).toBe(false);
+    expect(limiter.wouldAllow(Number.NaN, 1, 1_000)).toBe(false);
+    expect(limiter.wouldAllow(0, 0, 1_000)).toBe(true);
+  });
 });

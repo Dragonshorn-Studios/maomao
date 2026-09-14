@@ -47,14 +47,28 @@ export function parseCsv(value: string | undefined): string[] {
     .filter(Boolean);
 }
 
-/** Positive GitHub numeric IDs from a comma/whitespace list. Non-numeric tokens are ignored. */
-export function parseIdList(value: string | undefined): number[] {
+/** Positive GitHub REST numeric IDs from a comma/whitespace list. Invalid tokens fail fast. */
+export function parseIdList(value: string | undefined, source = "GitHub ID list"): number[] {
   if (!value?.trim()) return [];
   const ids: number[] = [];
+  const invalid: string[] = [];
   for (const token of value.split(/[\s,]+/)) {
-    if (!token || !/^\d+$/.test(token)) continue;
+    if (!token) continue;
+    if (!/^\d+$/.test(token)) {
+      invalid.push(token);
+      continue;
+    }
     const n = Number.parseInt(token, 10);
     if (Number.isSafeInteger(n) && n > 0) ids.push(n);
+    else invalid.push(token);
+  }
+  if (invalid.length > 0) {
+    throw new Error(
+      `${source} contains non-numeric GitHub IDs (${invalid.join(", ")}). Use REST numeric IDs such as 123456, not owner/repo names or GraphQL node IDs.`,
+    );
+  }
+  if (ids.length === 0) {
+    throw new Error(`${source} is set but contains no positive GitHub REST numeric IDs.`);
   }
   return [...new Set(ids)];
 }

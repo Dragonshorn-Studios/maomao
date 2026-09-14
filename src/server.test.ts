@@ -373,6 +373,33 @@ describe("manual review trigger", () => {
     expect(github.calls).toEqual({ installation: 1, repository: 1, pull: 1 });
   });
 
+  it("does not spend a rate-limit slot when getPull fails", async () => {
+    const github = mockGithub();
+    const original = github.getPull;
+    let pulls = 0;
+    github.getPull = async (...args) => {
+      pulls += 1;
+      if (pulls === 1) throw new Error("GitHub unavailable");
+      return original(...args);
+    };
+    const { app, enqueued } = testApp({ REPO_RATE_LIMIT_PER_WINDOW: "1", REPO_RATE_WINDOW_MS: "60000" }, github);
+    const failed = await app.request("/reviews", {
+      method: "POST",
+      headers: { "content-type": "application/x-www-form-urlencoded" },
+      body: "url=https%3A%2F%2Fgithub.com%2Facme%2Fwidgets%2Fpull%2F12",
+    });
+    expect(failed.status).toBe(400);
+    expect(enqueued).toEqual([]);
+
+    const ok = await app.request("/reviews", {
+      method: "POST",
+      headers: { "content-type": "application/x-www-form-urlencoded" },
+      body: "url=https%3A%2F%2Fgithub.com%2Facme%2Fwidgets%2Fpull%2F12",
+    });
+    expect(ok.status).toBe(302);
+    expect(enqueued).toEqual([1]);
+  });
+
   it("retries failed reviewers and enqueues the job", async () => {
     const { app, store, enqueued } = testApp();
     const created = store.enqueue({

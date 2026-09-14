@@ -163,13 +163,17 @@ Use a webhook secret and put it in `GITHUB_WEBHOOK_SECRET`. Download the app pri
 Install the app on the repositories you want reviewed. Then set **numeric** GitHub allowlists on the Maomao host so a webhook from some other installation cannot enqueue work:
 
 ```bash
-# User or organization node ids (installation.account.id). Comma-separated.
+# User or organization REST numeric ids (installation.account.id). Comma-separated.
 ALLOWED_GITHUB_ACCOUNT_IDS=123456
-# Repository node ids (repository.id). Comma-separated.
+# Repository REST numeric ids (repository.id). Comma-separated.
 ALLOWED_GITHUB_REPOSITORY_IDS=987654321
 ```
 
-Find those IDs from a signed webhook payload (`installation.account.id`, `repository.id`), from `GET /orgs/{org}` / `GET /repos/{owner}/{repo}`, or from the GitHub UI. Prefer IDs over `owner/repo` names: a rename or transfer must not change who Maomao will review. Empty allowlists mean “unrestricted on that axis” (local/dev); Maomao warns at startup if both are empty.
+Use **REST numeric IDs** (`123456`), not `owner/repo` names and not GraphQL node IDs (`U_kwDO…`, `R_kgDO…`). Find them from a signed webhook payload (`installation.account.id`, `repository.id`), from `GET /orgs/{org}` / `GET /users/{login}` / `GET /repos/{owner}/{repo}`, or from the GitHub UI. Prefer IDs over names: a rename or transfer must not change who Maomao will review.
+
+Empty allowlists mean “unrestricted on that axis” (local/dev); Maomao warns at startup if both are empty. A non-empty allowlist env var that contains junk (names, node IDs, zeros) **fails startup** instead of silently becoming unrestricted. The paste-URL path always requires a numeric `installation.account.id` from `GET /repos/{owner}/{repo}/installation`, even when both allowlists are empty.
+
+If you turn on an allowlist while jobs are already queued from before this schema existed, those rows have `NULL` GitHub IDs and the pipeline **fails them closed** (`unauthorized: missing account id`) rather than reviewing them.
 
 Valid signatures for an unauthorized installation or repository receive **`202`** with `{ "ok": true, "ignored": true, "reason": "..." }`. Maomao logs only `installation_id`, `repository_id`, and the reason — never the repository name, URL, or author. The operator paste-URL form (`POST /reviews`) uses the same policy and cannot bypass it.
 
@@ -202,7 +206,7 @@ Default specialist roles (override with `REVIEWER_ROLES`):
 - `api` — backwards compatibility
 - `maintainer` — merge blockers
 
-Each run has a timeout (`OPENCODE_TIMEOUT_MS`), retries (`OPENCODE_MAX_RETRIES`, capped at 5), and a concurrency cap (`OPENCODE_REVIEWER_CONCURRENCY`). Oversized pull request diffs are rejected before OpenCode (`MAX_DIFF_BYTES`, default 1 MiB). Per-repository enqueue rate limits (`REPO_RATE_LIMIT_PER_WINDOW` / `REPO_RATE_WINDOW_MS`) sit in front of the job queue.
+Each run has a timeout (`OPENCODE_TIMEOUT_MS`), retries (`OPENCODE_MAX_RETRIES`, capped at 5), and a concurrency cap (`OPENCODE_REVIEWER_CONCURRENCY`). Oversized pull request diffs are aborted during download (`MAX_DIFF_BYTES`, default 1 MiB; `0` disables) using `Content-Length` and a streamed body cap, then rejected before checkout/OpenCode. Per-repository enqueue rate limits (`REPO_RATE_LIMIT_PER_WINDOW` / `REPO_RATE_WINDOW_MS`) sit in front of the job queue. The limiter is **in-memory and per process**: replicas do not share quota, a restart resets the window, and only **created** jobs consume a slot (duplicate deliveries do not). When the limiter is on, a signed payload that omits `repository.id` is ignored (`missing repository id`) rather than skipping the cap.
 
 Maomao records OpenCode `step_finish` usage across every unique agent step (including tool-call steps). Token totals include input, output, reasoning, and cache read/write when the CLI reports them. **These figures are provider/OpenCode-reported usage, not an independently calculated invoice.** If the JSON stream ends without a matching `step_finish` (see [opencode#26855](https://github.com/anomalyco/opencode/issues/26855)), the UI marks usage incomplete and treats the stored numbers as a minimum.
 
@@ -264,7 +268,7 @@ If both variables are unset, the UI stays open so `npm run dev` on loopback stil
 
 Checked-out PR code is **untrusted input**. For MVP, reviewers are for static inspection:
 
-- GitHub App installations and repositories are authorized by **numeric ID allowlists** (`ALLOWED_GITHUB_ACCOUNT_IDS`, `ALLOWED_GITHUB_REPOSITORY_IDS`) after webhook signature verification and before enqueue, installation tokens, checkout, or OpenCode
+- GitHub App installations and repositories are authorized by **REST numeric ID allowlists** (`ALLOWED_GITHUB_ACCOUNT_IDS`, `ALLOWED_GITHUB_REPOSITORY_IDS`) after webhook signature verification and before enqueue, installation tokens, checkout, or OpenCode
 - git hooks are disabled (`core.hooksPath=/dev/null`); submodules are not fetched
 - installation tokens authenticate `git fetch` as HTTP Basic (`x-access-token`, not Bearer), then `origin` is removed so the token never stays in the workspace remote URL
 - GitHub private keys, webhook secrets, UI passwords, session secrets, and installation tokens are stripped from the OpenCode environment

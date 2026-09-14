@@ -52,13 +52,13 @@ export interface Config {
   maxInlineComments: number;
   uiPassword: string;
   uiSessionSecret: string;
-  /** GitHub user/org node ids (`installation.account.id`). Empty = unrestricted on this axis. */
+  /** GitHub user/org REST numeric ids (`installation.account.id`). Empty = unrestricted on this axis. */
   allowedGithubAccountIds: number[];
-  /** GitHub repository node ids (`repository.id`). Empty = unrestricted on this axis. */
+  /** GitHub repository REST numeric ids (`repository.id`). Empty = unrestricted on this axis. */
   allowedGithubRepositoryIds: number[];
-  /** Max pull-request diff size in bytes before OpenCode. `0` disables the cap. */
+  /** Max pull-request diff size in bytes; download aborts at this cap. `0` disables. */
   maxDiffBytes: number;
-  /** Max review jobs accepted per repository id inside `repoRateWindowMs`. `0` disables. */
+  /** Max created jobs per repository id inside `repoRateWindowMs` (per process). `0` disables. */
   repoRateLimitPerWindow: number;
   repoRateWindowMs: number;
 }
@@ -145,8 +145,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     maxInlineComments: Math.max(0, parseInteger(env.MAX_INLINE_COMMENTS, 12)),
     uiPassword: env.UI_PASSWORD?.trim() || env.MAOMAO_UI_PASSWORD?.trim() || "",
     uiSessionSecret: env.UI_SESSION_SECRET?.trim() || env.MAOMAO_UI_SESSION_SECRET?.trim() || "",
-    allowedGithubAccountIds: parseIdList(env.ALLOWED_GITHUB_ACCOUNT_IDS),
-    allowedGithubRepositoryIds: parseIdList(env.ALLOWED_GITHUB_REPOSITORY_IDS),
+    allowedGithubAccountIds: parseIdList(env.ALLOWED_GITHUB_ACCOUNT_IDS, "ALLOWED_GITHUB_ACCOUNT_IDS"),
+    allowedGithubRepositoryIds: parseIdList(env.ALLOWED_GITHUB_REPOSITORY_IDS, "ALLOWED_GITHUB_REPOSITORY_IDS"),
     maxDiffBytes: clamp(parseInteger(env.MAX_DIFF_BYTES, 1_048_576), 0, 50 * 1024 * 1024),
     repoRateLimitPerWindow: Math.max(0, parseInteger(env.REPO_RATE_LIMIT_PER_WINDOW, 6)),
     repoRateWindowMs: Math.max(0, parseInteger(env.REPO_RATE_WINDOW_MS, 60 * 60 * 1000)),

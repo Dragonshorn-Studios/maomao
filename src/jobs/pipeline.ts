@@ -97,7 +97,13 @@ async function runJob(deps: PipelineDeps, jobId: number, signal: AbortSignal): P
     const token = deps.getInstallationToken
       ? await deps.getInstallationToken(job.installation_id)
       : await deps.github.getInstallationToken(job.installation_id);
-    const diff = await deps.github.getPullDiff(job.installation_id, job.repo_owner, job.repo_name, job.pr_number);
+    const diff = await deps.github.getPullDiff(
+      job.installation_id,
+      job.repo_owner,
+      job.repo_name,
+      job.pr_number,
+      config.maxDiffBytes,
+    );
     const diffBytes = Buffer.byteLength(diff, "utf8");
     if (config.maxDiffBytes > 0 && diffBytes > config.maxDiffBytes) {
       throw new Error(`diff exceeds MAX_DIFF_BYTES (${diffBytes} > ${config.maxDiffBytes})`);

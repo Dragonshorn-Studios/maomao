@@ -1,6 +1,7 @@
 import { createAppAuth } from "@octokit/auth-app";
 import { Octokit } from "@octokit/rest";
 import type { Config } from "../config.js";
+import { limitedGithubFetch, unwrapDiffTooLarge } from "./diff-limit.js";
 import { reviewMarker } from "../prompts.js";
 
 export interface PullReviewComment {
@@ -45,7 +46,13 @@ export interface ManualTriggerPort {
 
 export interface GithubPort {
   getInstallationToken(installationId: number): Promise<string>;
-  getPullDiff(installationId: number, owner: string, repo: string, pullNumber: number): Promise<string>;
+  getPullDiff(
+    installationId: number,
+    owner: string,
+    repo: string,
+    pullNumber: number,
+    maxBytes?: number,
+  ): Promise<string>;
   listReviews(
     installationId: number,
     owner: string,
@@ -96,6 +103,10 @@ export class GithubClient implements GithubPort, ManualTriggerPort {
     return result.token;
   }
 
+  /**
+   * JWT-authenticated App lookup. Requires a numeric `account.id` even when
+   * allowlists are empty, so later authorization can fail closed on that axis.
+   */
   async getRepoInstallation(
     owner: string,
     repo: string,
@@ -177,15 +188,28 @@ export class GithubClient implements GithubPort, ManualTriggerPort {
     }
   }
 
-  async getPullDiff(installationId: number, owner: string, repo: string, pullNumber: number): Promise<string> {
+  async getPullDiff(
+    installationId: number,
+    owner: string,
+    repo: string,
+    pullNumber: number,
+    maxBytes = 0,
+  ): Promise<string> {
     const octokit = this.installationOctokit(installationId);
-    const response = await octokit.rest.pulls.get({
-      owner,
-      repo,
-      pull_number: pullNumber,
-      mediaType: { format: "diff" },
-    });
-    return String(response.data);
+    try {
+      const response = await octokit.rest.pulls.get({
+        owner,
+        repo,
+        pull_number: pullNumber,
+        mediaType: { format: "diff" },
+        request: maxBytes > 0 ? { fetch: limitedGithubFetch(maxBytes) } : undefined,
+      });
+      return String(response.data);
+    } catch (error) {
+      const tooLarge = unwrapDiffTooLarge(error);
+      if (tooLarge) throw tooLarge;
+      throw error;
+    }
   }
 
   async listReviews(

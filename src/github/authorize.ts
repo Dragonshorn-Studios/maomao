@@ -58,3 +58,27 @@ export function logAuthorizationRejection(subject: GithubAuthSubject & { reason:
 export function authorizationLogLine(subject: GithubAuthSubject & { reason: string }): string {
   return `installation_id=${subject.installationId ?? "none"} repository_id=${subject.repositoryId ?? "none"} reason=${subject.reason}`;
 }
+
+export function logRateLimited(subject: GithubAuthSubject): void {
+  console.warn(
+    JSON.stringify({
+      msg: "github rate limited",
+      installation_id: subject.installationId ?? null,
+      repository_id: subject.repositoryId ?? null,
+      reason: "rate limited",
+    }),
+  );
+}
+
+export function positiveGithubId(value: unknown): number | undefined {
+  const n = typeof value === "number" ? value : Number(value);
+  return Number.isSafeInteger(n) && n > 0 ? n : undefined;
+}
+
+export function rejectUnauthorized(config: Config, subject: GithubAuthSubject): GithubAuthDecision {
+  const decision = authorizeGithubTarget(config, subject);
+  if (!decision.ok) {
+    logAuthorizationRejection({ ...subject, reason: decision.reason });
+  }
+  return decision;
+}

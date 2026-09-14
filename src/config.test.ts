@@ -29,7 +29,7 @@ describe("loadConfig", () => {
 
   it("parses numeric GitHub allowlists and defense-in-depth limits", () => {
     const config = loadConfig({
-      ALLOWED_GITHUB_ACCOUNT_IDS: "1001, not-an-id, 2002, 1001",
+      ALLOWED_GITHUB_ACCOUNT_IDS: "1001, 2002, 1001",
       ALLOWED_GITHUB_REPOSITORY_IDS: " 555 777 ",
       MAX_DIFF_BYTES: "2048",
       REPO_RATE_LIMIT_PER_WINDOW: "3",
@@ -42,6 +42,19 @@ describe("loadConfig", () => {
     expect(config.repoRateLimitPerWindow).toBe(3);
     expect(config.repoRateWindowMs).toBe(1000);
     expect(config.opencode.maxRetries).toBe(5);
+  });
+
+  it("fails fast when an allowlist contains non-numeric tokens", () => {
+    expect(() =>
+      loadConfig({
+        ALLOWED_GITHUB_ACCOUNT_IDS: "1001, not-an-id, 2002",
+      }),
+    ).toThrow(/ALLOWED_GITHUB_ACCOUNT_IDS/);
+    expect(() =>
+      loadConfig({
+        ALLOWED_GITHUB_REPOSITORY_IDS: "R_kgDOabc",
+      }),
+    ).toThrow(/REST numeric IDs/);
   });
 
   it("reads UI password aliases and rejects a half-configured gate", () => {
@@ -84,9 +97,15 @@ describe("env parsers", () => {
     expect(parseCsv("a, b,,c")).toEqual(["a", "b", "c"]);
   });
 
-  it("parses positive numeric GitHub ids and ignores junk", () => {
+  it("parses positive numeric GitHub ids and fails fast on junk", () => {
     expect(parseIdList("")).toEqual([]);
-    expect(parseIdList("1, 02, -3, foo, 1")).toEqual([1, 2]);
+    expect(parseIdList("1, 02, 1")).toEqual([1, 2]);
     expect(parseIdList(" 9\n10 ")).toEqual([9, 10]);
+    expect(() => parseIdList("1, -3, foo", "ALLOWED_GITHUB_ACCOUNT_IDS")).toThrow(
+      /ALLOWED_GITHUB_ACCOUNT_IDS contains non-numeric/,
+    );
+    expect(() => parseIdList(",", "ALLOWED_GITHUB_REPOSITORY_IDS")).toThrow(
+      /ALLOWED_GITHUB_REPOSITORY_IDS is set but contains no positive/,
+    );
   });
 });

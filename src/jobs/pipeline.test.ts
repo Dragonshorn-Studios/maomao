@@ -9,6 +9,7 @@ import type { CheckoutPort } from "../checkout.js";
 import type { OpenCodePort } from "../opencode/parse.js";
 import { createPipeline } from "./pipeline.js";
 import { JobStore } from "./store.js";
+import { DiffTooLargeError } from "../github/diff-limit.js";
 
 async function fixtureCheckout(): Promise<CheckoutPort> {
   return {
@@ -521,6 +522,114 @@ describe("pipeline", () => {
     warn.mockRestore();
   });
 
+  it("runs OpenCode when stored GitHub ids match the allowlists", async () => {
+    const config = loadConfig({
+      REVIEWER_ROLES: "correctness",
+      OPENCODE_REVIEWER_MODEL: "test/model",
+      POST_EMPTY_REVIEW: "true",
+      ALLOWED_GITHUB_ACCOUNT_IDS: "1001",
+      ALLOWED_GITHUB_REPOSITORY_IDS: "2002",
+    });
+    const store = new JobStore(openDb(":memory:"));
+    const created = store.enqueue({
+      repoFullName: "acme/widgets",
+      repoOwner: "acme",
+      repoName: "widgets",
+      installationId: 9,
+      githubAccountId: 1001,
+      githubRepositoryId: 2002,
+      prNumber: 4,
+      prTitle: "t",
+      prBody: "",
+      prHtmlUrl: "",
+      prAuthor: "dev",
+      baseSha: "base",
+      headSha: "abc",
+      baseRef: "main",
+      headRef: "feat",
+      reviewers: [{ role: "correctness", title: "Correctness" }],
+    });
+    let opencode = 0;
+    await createPipeline({
+      config,
+      store,
+      github: {
+        getInstallationToken: async () => "token",
+        getPullDiff: async () => "diff",
+        listReviews: async () => [],
+        createCommentReview: async () => ({ id: "1", url: "u" }),
+      },
+      checkout: await fixtureCheckout(),
+      opencode: {
+        async run(input) {
+          opencode += 1;
+          const specialist = input.prompt.includes("Role id:");
+          const text = specialist
+            ? reviewerJson("correctness")
+            : JSON.stringify({ verdict: "comment", summary: "ok", findings: [] });
+          return { stdout: text, stderr: "", exitCode: 0, text, usage: {} };
+        },
+      },
+    }).run(created.job.id);
+    expect(opencode).toBeGreaterThan(0);
+    expect(store.getJob(created.job.id)?.state).toBe("completed");
+  });
+
+  it("fails closed on legacy NULL GitHub ids once an allowlist is set", async () => {
+    const config = loadConfig({
+      REVIEWER_ROLES: "correctness",
+      ALLOWED_GITHUB_ACCOUNT_IDS: "1001",
+    });
+    const store = new JobStore(openDb(":memory:"));
+    const created = store.enqueue({
+      repoFullName: "acme/widgets",
+      repoOwner: "acme",
+      repoName: "widgets",
+      installationId: 9,
+      prNumber: 4,
+      prTitle: "t",
+      prBody: "",
+      prHtmlUrl: "",
+      prAuthor: "dev",
+      baseSha: "base",
+      headSha: "abc",
+      baseRef: "main",
+      headRef: "feat",
+      reviewers: [{ role: "correctness", title: "Correctness" }],
+    });
+    let tokens = 0;
+    let opencode = 0;
+    await createPipeline({
+      config,
+      store,
+      github: {
+        getInstallationToken: async () => {
+          tokens += 1;
+          return "token";
+        },
+        getPullDiff: async () => "diff",
+        listReviews: async () => [],
+        createCommentReview: async () => ({ id: "x", url: "u" }),
+      },
+      checkout: {
+        async prepare() {
+          throw new Error("should not checkout");
+        },
+        async cleanup() {},
+      },
+      opencode: {
+        async run() {
+          opencode += 1;
+          throw new Error("should not run");
+        },
+      },
+    }).run(created.job.id);
+    expect(created.job.github_account_id).toBeNull();
+    expect(tokens).toBe(0);
+    expect(opencode).toBe(0);
+    expect(store.getJob(created.job.id)?.failure_reason).toBe("unauthorized: missing account id");
+  });
+
   it("fails the job when the pull diff exceeds MAX_DIFF_BYTES without calling OpenCode", async () => {
     const config = loadConfig({
       REVIEWER_ROLES: "correctness",
@@ -570,6 +679,164 @@ describe("pipeline", () => {
     }).run(created.job.id);
     expect(prepared).toBe(0);
     expect(opencode).toBe(0);
+    expect(store.getJob(created.job.id)?.state).toBe("failed");
+    expect(store.getJob(created.job.id)?.failure_reason).toContain("MAX_DIFF_BYTES");
+  });
+
+  it("allows a diff whose UTF-8 size equals MAX_DIFF_BYTES", async () => {
+    const config = loadConfig({
+      REVIEWER_ROLES: "correctness",
+      POST_EMPTY_REVIEW: "true",
+      MAX_DIFF_BYTES: "4",
+    });
+    const store = new JobStore(openDb(":memory:"));
+    const created = store.enqueue({
+      repoFullName: "acme/widgets",
+      repoOwner: "acme",
+      repoName: "widgets",
+      installationId: 9,
+      prNumber: 4,
+      prTitle: "t",
+      prBody: "",
+      prHtmlUrl: "",
+      prAuthor: "dev",
+      baseSha: "base",
+      headSha: "abc",
+      baseRef: "main",
+      headRef: "feat",
+      reviewers: [{ role: "correctness", title: "Correctness" }],
+    });
+    let maxBytesSeen: number | undefined;
+    let opencode = 0;
+    await createPipeline({
+      config,
+      store,
+      github: {
+        getInstallationToken: async () => "token",
+        getPullDiff: async (_installationId, _owner, _repo, _pullNumber, maxBytes) => {
+          maxBytesSeen = maxBytes;
+          return "abcd";
+        },
+        listReviews: async () => [],
+        createCommentReview: async () => ({ id: "1", url: "u" }),
+      },
+      checkout: await fixtureCheckout(),
+      opencode: {
+        async run(input) {
+          opencode += 1;
+          const text = input.prompt.includes("Role id:")
+            ? reviewerJson("correctness")
+            : JSON.stringify({ verdict: "comment", summary: "ok", findings: [] });
+          return { stdout: text, stderr: "", exitCode: 0, text, usage: {} };
+        },
+      },
+    }).run(created.job.id);
+    expect(maxBytesSeen).toBe(4);
+    expect(opencode).toBeGreaterThan(0);
+    expect(store.getJob(created.job.id)?.state).toBe("completed");
+  });
+
+  it("disables the diff cap when MAX_DIFF_BYTES is 0", async () => {
+    const config = loadConfig({
+      REVIEWER_ROLES: "correctness",
+      POST_EMPTY_REVIEW: "true",
+      MAX_DIFF_BYTES: "0",
+    });
+    const store = new JobStore(openDb(":memory:"));
+    const created = store.enqueue({
+      repoFullName: "acme/widgets",
+      repoOwner: "acme",
+      repoName: "widgets",
+      installationId: 9,
+      prNumber: 4,
+      prTitle: "t",
+      prBody: "",
+      prHtmlUrl: "",
+      prAuthor: "dev",
+      baseSha: "base",
+      headSha: "abc",
+      baseRef: "main",
+      headRef: "feat",
+      reviewers: [{ role: "correctness", title: "Correctness" }],
+    });
+    let prepared = 0;
+    await createPipeline({
+      config,
+      store,
+      github: {
+        getInstallationToken: async () => "token",
+        getPullDiff: async () => "this diff is definitely larger than eight bytes",
+        listReviews: async () => [],
+        createCommentReview: async () => ({ id: "1", url: "u" }),
+      },
+      checkout: {
+        async prepare(input) {
+          prepared += 1;
+          return (await fixtureCheckout()).prepare(input);
+        },
+        async cleanup() {},
+      },
+      opencode: {
+        async run(input) {
+          const text = input.prompt.includes("Role id:")
+            ? reviewerJson("correctness")
+            : JSON.stringify({ verdict: "comment", summary: "ok", findings: [] });
+          return { stdout: text, stderr: "", exitCode: 0, text, usage: {} };
+        },
+      },
+    }).run(created.job.id);
+    expect(prepared).toBe(1);
+    expect(store.getJob(created.job.id)?.state).toBe("completed");
+  });
+
+  it("fails the job when getPullDiff aborts an oversized download", async () => {
+    const config = loadConfig({
+      REVIEWER_ROLES: "correctness",
+      MAX_DIFF_BYTES: "8",
+    });
+    const store = new JobStore(openDb(":memory:"));
+    const created = store.enqueue({
+      repoFullName: "acme/widgets",
+      repoOwner: "acme",
+      repoName: "widgets",
+      installationId: 9,
+      prNumber: 4,
+      prTitle: "t",
+      prBody: "",
+      prHtmlUrl: "",
+      prAuthor: "dev",
+      baseSha: "base",
+      headSha: "abc",
+      baseRef: "main",
+      headRef: "feat",
+      reviewers: [{ role: "correctness", title: "Correctness" }],
+    });
+    let prepared = 0;
+    await createPipeline({
+      config,
+      store,
+      github: {
+        getInstallationToken: async () => "token",
+        getPullDiff: async () => {
+          throw new DiffTooLargeError(64, 8);
+        },
+        listReviews: async () => [],
+        createCommentReview: async () => ({ id: "x", url: "u" }),
+      },
+      checkout: {
+        async prepare() {
+          prepared += 1;
+          throw new Error("should not checkout an oversized diff");
+        },
+        async cleanup() {},
+      },
+      opencode: {
+        async run() {
+          throw new Error("should not run");
+        },
+      },
+    }).run(created.job.id);
+    expect(prepared).toBe(0);
     expect(store.getJob(created.job.id)?.state).toBe("failed");
     expect(store.getJob(created.job.id)?.failure_reason).toContain("MAX_DIFF_BYTES");
   });
