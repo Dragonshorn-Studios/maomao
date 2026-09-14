@@ -111,9 +111,9 @@ body {
     repeating-linear-gradient(
       to bottom,
       transparent 0,
-      transparent calc(1.35rem - 1px),
-      color-mix(in srgb, var(--line) 55%, transparent) calc(1.35rem - 1px),
-      color-mix(in srgb, var(--line) 55%, transparent) 1.35rem
+      transparent calc(1.4rem - 1px),
+      color-mix(in srgb, var(--line) 32%, transparent) calc(1.4rem - 1px),
+      color-mix(in srgb, var(--line) 32%, transparent) 1.4rem
     ),
     var(--paper);
   background-attachment: local;
@@ -243,7 +243,7 @@ code, .sha, .metric, kbd {
   font-family: var(--font-mono);
   font-size: 0.86em;
 }
-.sha { font-size: 0.9em; word-break: break-all; }
+.sha { font-size: 0.9em; overflow-wrap: anywhere; word-break: break-all; }
 
 button, input, textarea {
   font: inherit;
@@ -538,7 +538,8 @@ details summary { cursor: pointer; color: var(--ink-muted); }
 @media (max-width: 720px) {
   .top { padding: 0.65rem 0.8rem; }
   main { padding: 1rem 0.8rem 2.5rem; }
-  .tag { display: none; }
+  .tag, .top-link { display: none; }
+  .appearance button { padding: 0.22rem 0.38rem; font-size: 0.68rem; }
   .meta-grid { grid-template-columns: 1fr; }
 }
 

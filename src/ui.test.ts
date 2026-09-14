@@ -56,6 +56,7 @@ describe("monitoring pages", () => {
     expect(html).toContain("acme/ledger#412");
     expect(html).toContain("c0ffee1a2b");
     expect(html).toContain("HIGH");
+    expect(html).toContain("MEDIUM");
     expect(html).toContain("Reviewers");
     expect(html).toContain("Aggregator");
     expect(html).toContain("anthropic/claude-sonnet-4-5");
@@ -96,6 +97,7 @@ describe("monitoring pages", () => {
     const staleHtml = renderJob(stale!, store.listReviewerRuns(stale!.id), store.listLogs(stale!.id));
     expect(staleHtml).toContain("newer head SHA");
     expect(staleHtml).toContain("pull request");
+    expect(staleHtml).toContain("6 / 6 reviewers done");
   });
 });
 

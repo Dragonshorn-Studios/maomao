@@ -12,12 +12,13 @@ import { seedDemoJobs } from "./fixtures.js";
  *   npm run demo
  *   MAOMAO_DEMO_EMPTY=1 npm run demo   # empty queue
  */
+const openUi = process.env.MAOMAO_DEMO_OPEN === "1";
 const config = loadConfig({
   GITHUB_APP_ID: process.env.GITHUB_APP_ID || "1",
   GITHUB_APP_PRIVATE_KEY: process.env.GITHUB_APP_PRIVATE_KEY || "demo-key",
   GITHUB_WEBHOOK_SECRET: process.env.GITHUB_WEBHOOK_SECRET || "demo-webhook",
-  UI_PASSWORD: process.env.UI_PASSWORD || "demo",
-  UI_SESSION_SECRET: process.env.UI_SESSION_SECRET || "demo-session-secret-not-for-production",
+  UI_PASSWORD: openUi ? "" : process.env.UI_PASSWORD || "demo",
+  UI_SESSION_SECRET: openUi ? "" : process.env.UI_SESSION_SECRET || "demo-session-secret-not-for-production",
   HOST: process.env.HOST || "127.0.0.1",
   PORT: process.env.PORT || "3000",
   DATABASE_PATH: process.env.DATABASE_PATH || ":memory:",

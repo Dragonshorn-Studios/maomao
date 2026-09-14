@@ -32,7 +32,7 @@ const RUN_STATES: Record<ReviewerState, LabeledState> = {
 const SEVERITY: Record<Severity, { text: string; mark: string }> = {
   blocker: { text: "BLOCKER", mark: "■" },
   high: { text: "HIGH", mark: "▲" },
-  medium: { text: "MED", mark: "◆" },
+  medium: { text: "MEDIUM", mark: "◆" },
   low: { text: "LOW", mark: "●" },
   info: { text: "INFO", mark: "·" },
 };
@@ -52,7 +52,7 @@ export function severityLabel(severity: string): { text: string; mark: string } 
 export function emptyQueueCopy(): { title: string; body: string } {
   return {
     title: "Nothing is under examination.",
-    body: "Waiting for a GitHub pull_request webhook, or paste a pull request URL below.",
+    body: "Waiting for a GitHub pull_request webhook, or paste a pull request URL above.",
   };
 }
 

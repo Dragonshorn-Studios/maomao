@@ -280,9 +280,26 @@ function seedStalePredecessor(store: JobStore): void {
       headRef: "recount",
     }),
   );
+  const started = ago(80);
+  const finished = ago(70);
+  for (const run of store.listReviewerRuns(job.id)) {
+    store.patchReviewer(run.id, {
+      state: "done",
+      attempt: 1,
+      model: MODEL,
+      provider: PROVIDER,
+      started_at: started,
+      finished_at: finished,
+      duration_ms: 60_000,
+      prompt_tokens: 2100,
+      completion_tokens: 80,
+      cost: 0.01,
+      normalized_json: clean(run.role),
+    });
+  }
   store.setJobState(job.id, "completed", {
-    started_at: ago(80),
-    finished_at: ago(70),
+    started_at: started,
+    finished_at: finished,
     aggregator_state: "done",
     aggregator_model: AGG_MODEL,
     aggregator_provider: PROVIDER,

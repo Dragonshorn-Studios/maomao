@@ -14,7 +14,9 @@ export interface PageOptions {
 const APPEARANCE_BOOT = `
 (function () {
   var KEY = "maomao-appearance";
-  var mode = localStorage.getItem(KEY) || "system";
+  var params = new URLSearchParams(location.search);
+  var mode = params.get("appearance") || localStorage.getItem(KEY) || "system";
+  if (mode !== "light" && mode !== "dark" && mode !== "system") mode = "system";
   function resolved(m) {
     if (m === "light" || m === "dark") return m;
     return window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
@@ -29,7 +31,7 @@ const APPEARANCE_BOOT = `
   window.__maomaoAppearance = {
     key: KEY,
     apply: apply,
-    get: function () { return localStorage.getItem(KEY) || "system"; },
+    get: function () { return document.documentElement.dataset.appearance || localStorage.getItem(KEY) || "system"; },
     set: function (m) { localStorage.setItem(KEY, m); apply(m); sync(); },
   };
   function sync() {
@@ -60,21 +62,23 @@ export function layout(title: string, body: string, options: PageOptions = {}): 
     : "";
   const script = live
     ? `<script>
-    const events = new EventSource("/events");
-    events.addEventListener("message", () => {});
-    events.onmessage = (event) => {
-      try {
-        const data = JSON.parse(event.data);
-        if (data.type === "hello") return;
-        if (location.pathname === "/" && (data.type === "jobs" || data.type === "job")) {
-          location.reload();
-        }
-        if (location.pathname.startsWith("/jobs/") && (data.type === "job" || data.type === "log")) {
-          const id = Number(location.pathname.split("/")[2]);
-          if (!data.jobId || data.jobId === id) location.reload();
-        }
-      } catch {}
-    };
+    if (!new URLSearchParams(location.search).has("static")) {
+      const events = new EventSource("/events");
+      events.addEventListener("message", () => {});
+      events.onmessage = (event) => {
+        try {
+          const data = JSON.parse(event.data);
+          if (data.type === "hello") return;
+          if (location.pathname === "/" && (data.type === "jobs" || data.type === "job")) {
+            location.reload();
+          }
+          if (location.pathname.startsWith("/jobs/") && (data.type === "job" || data.type === "log")) {
+            const id = Number(location.pathname.split("/")[2]);
+            if (!data.jobId || data.jobId === id) location.reload();
+          }
+        } catch {}
+      };
+    }
   </script>`
     : "";
   return `<!doctype html>

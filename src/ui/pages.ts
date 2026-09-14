@@ -138,7 +138,7 @@ export function renderJob(
     </div>
     <h2>Aggregator</h2>
     ${renderAggregator(job, metrics)}
-    <h2>Findings</h2>
+    <h2 id="findings">Findings</h2>
     ${findingsHtml}
     <h2>Logs</h2>
     <ol class="logs" aria-label="Job logs">
