@@ -61,7 +61,7 @@ async function runJob(deps: PipelineDeps, jobId: number, signal: AbortSignal): P
 
     const token = deps.getInstallationToken
       ? await deps.getInstallationToken(job.installation_id)
-      : await deps.github.getInstallationToken(job.installation_id).catch(() => undefined);
+      : await deps.github.getInstallationToken(job.installation_id);
     const workspace = await deps.checkout.prepare({
       jobId,
       installationId: job.installation_id,

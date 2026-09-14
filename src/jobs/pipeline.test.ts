@@ -321,4 +321,53 @@ describe("pipeline", () => {
     expect(store.getJob(created.job.id)?.state).toBe("failed");
     expect(store.listReviewerRuns(created.job.id).every((run) => run.state === "failed")).toBe(true);
   });
+
+  it("fails the job when the installation token cannot be minted", async () => {
+    const config = loadConfig({ REVIEWER_ROLES: "correctness" });
+    const store = new JobStore(openDb(":memory:"));
+    let prepared = 0;
+    const created = store.enqueue({
+      repoFullName: "acme/widgets",
+      repoOwner: "acme",
+      repoName: "widgets",
+      installationId: 9,
+      prNumber: 4,
+      prTitle: "t",
+      prBody: "",
+      prHtmlUrl: "",
+      prAuthor: "dev",
+      baseSha: "base",
+      headSha: "abc",
+      baseRef: "main",
+      headRef: "feat",
+      reviewers: [{ role: "correctness", title: "Correctness" }],
+    });
+    await createPipeline({
+      config,
+      store,
+      github: {
+        getInstallationToken: async () => {
+          throw new Error("could not mint installation token");
+        },
+        getPullDiff: async () => "diff",
+        listReviews: async () => [],
+        createCommentReview: async () => ({ id: "x", url: "u" }),
+      },
+      checkout: {
+        async prepare() {
+          prepared += 1;
+          throw new Error("should not checkout without a token");
+        },
+        async cleanup() {},
+      },
+      opencode: {
+        async run() {
+          throw new Error("should not run");
+        },
+      },
+    }).run(created.job.id);
+    expect(prepared).toBe(0);
+    expect(store.getJob(created.job.id)?.state).toBe("failed");
+    expect(store.getJob(created.job.id)?.failure_reason).toContain("installation token");
+  });
 });

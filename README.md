@@ -252,7 +252,7 @@ If both variables are unset, the UI stays open so `npm run dev` on loopback stil
 Checked-out PR code is **untrusted input**. For MVP, reviewers are for static inspection:
 
 - git hooks are disabled (`core.hooksPath=/dev/null`); submodules are not fetched
-- installation tokens are used as a one-shot HTTP header, then the `origin` remote is removed
+- installation tokens authenticate `git fetch` as HTTP Basic (`x-access-token`, not Bearer), then `origin` is removed so the token never stays in the workspace remote URL
 - GitHub private keys, webhook secrets, UI passwords, session secrets, and installation tokens are stripped from the OpenCode environment
 - untrusted `opencode.json` / `.opencode` / `.claude` from the PR are deleted before review
 - OpenCode is launched with permissions that **deny** `bash`, `edit`, `write`, `webfetch`, and related tools; `read` / `glob` / `grep` are allowed

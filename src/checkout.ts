@@ -117,6 +117,19 @@ export interface CheckoutPort {
   cleanup(dir: string): Promise<void>;
 }
 
+/** GitHub git HTTPS wants Basic `x-access-token:<installation token>`, not Bearer. */
+export function gitHttpAuthArgs(token?: string): string[] {
+  if (!token) return [];
+  const basic = Buffer.from(`x-access-token:${token}`, "utf8").toString("base64");
+  return ["-c", "credential.helper=", "-c", `http.extraHeader=AUTHORIZATION: basic ${basic}`];
+}
+
+export function gitAuthSecrets(token?: string): string[] {
+  if (!token) return [];
+  const basic = Buffer.from(`x-access-token:${token}`, "utf8").toString("base64");
+  return [token, basic, `x-access-token:${token}`];
+}
+
 export function createCheckout(workspaceRoot: string, gitBin = "git"): CheckoutPort {
   return {
     async prepare(input) {
@@ -132,7 +145,8 @@ export function createCheckout(workspaceRoot: string, gitBin = "git"): CheckoutP
         GIT_CONFIG_VALUE_0: "/dev/null",
         LC_ALL: "C",
       });
-      const secrets = input.secrets ?? [];
+      const secrets = [...(input.secrets ?? []), ...gitAuthSecrets(input.token)];
+      const extraHeader = gitHttpAuthArgs(input.token);
       const git = (args: string[]) =>
         execFile(gitBin, args, { env, timeoutMs: 120_000, signal: input.signal, secrets });
 
@@ -145,7 +159,6 @@ export function createCheckout(workspaceRoot: string, gitBin = "git"): CheckoutP
       const addRemote = await git(["-C", repoDir, "remote", "add", "origin", origin]);
       if (addRemote.exitCode !== 0) throw new Error(`git remote add failed: ${addRemote.stderr}`);
 
-      const extraHeader = input.token ? [`-c`, `http.extraHeader=AUTHORIZATION: bearer ${input.token}`] : [];
       const fetchPr = await git([
         "-C",
         repoDir,
