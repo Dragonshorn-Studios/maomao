@@ -8,7 +8,7 @@ import type { ManualTriggerPort } from "./github/client.js";
 import { parseGithubPullUrl, PullUrlError } from "./github/pull-url.js";
 import { dispatchEnqueue, enqueuePullJob } from "./jobs/enqueue.js";
 import { subscribe } from "./events.js";
-import { renderHome, renderJob, renderLogin } from "./ui.js";
+import { renderHome, renderJob, renderLogin, THEME_CSS } from "./ui/index.js";
 import type { JobQueue } from "./jobs/queue.js";
 import {
   SESSION_COOKIE,
@@ -82,6 +82,13 @@ export function createApp(ctx: ServerContext): Hono {
       ok: true,
       uptimeSec: Math.round((Date.now() - ctx.startedAt) / 1000),
       service: "maomao",
+    }),
+  );
+
+  app.get("/assets/maomao.css", (c) =>
+    c.newResponse(THEME_CSS, 200, {
+      "content-type": "text/css; charset=utf-8",
+      "cache-control": "public, max-age=3600",
     }),
   );
 

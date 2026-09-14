@@ -1,0 +1,116 @@
+import { describe, expect, it } from "vitest";
+import { openDb } from "./db.js";
+import { seedDemoJobs } from "./demo/fixtures.js";
+import { JobStore } from "./jobs/store.js";
+import { THEME_CSS } from "./ui/theme.js";
+import { renderHome, renderJob, renderLogin } from "./ui/pages.js";
+import { formatCost, formatTokens, jobMetrics } from "./ui/metrics.js";
+
+function seededStore() {
+  const store = new JobStore(openDb(":memory:"));
+  seedDemoJobs(store);
+  return store;
+}
+
+describe("theme tokens", () => {
+  it("defines palette, light/dark, reduced motion, and system fonts", () => {
+    expect(THEME_CSS).toContain("--paper:");
+    expect(THEME_CSS).toContain("--ink:");
+    expect(THEME_CSS).toContain("--jade:");
+    expect(THEME_CSS).toContain("--herb:");
+    expect(THEME_CSS).toContain("--plum:");
+    expect(THEME_CSS).toContain("--cinnabar:");
+    expect(THEME_CSS).toContain("--amber:");
+    expect(THEME_CSS).toContain("--ash:");
+    expect(THEME_CSS).toContain('html[data-theme="dark"]');
+    expect(THEME_CSS).toContain("prefers-reduced-motion");
+    expect(THEME_CSS).toContain("--font-mono:");
+    expect(THEME_CSS).not.toContain("fonts.googleapis.com");
+    expect(THEME_CSS).not.toContain("cdn.");
+  });
+});
+
+describe("monitoring pages", () => {
+  it("renders login with appearance controls and no live SSE", () => {
+    const html = renderLogin(false, "/jobs/1");
+    expect(html).toContain("Sign in");
+    expect(html).toContain('data-appearance="light"');
+    expect(html).toContain('data-appearance="dark"');
+    expect(html).toContain('data-appearance="system"');
+    expect(html).toContain("/assets/maomao.css");
+    expect(html).not.toContain("EventSource");
+    expect(html).toContain("Skip to content");
+  });
+
+  it("renders the empty queue with restrained flavor", () => {
+    const store = new JobStore(openDb(":memory:"));
+    const html = renderHome([], store);
+    expect(html).toContain("Nothing is under examination.");
+    expect(html).toContain("Queue a GitHub pull request");
+    expect(html).toContain("Review jobs");
+  });
+
+  it("renders scannable specimen cards with SHA, progress, and severity text", () => {
+    const store = seededStore();
+    const html = renderHome(store.listJobs(20), store);
+    expect(html).toContain("acme/ledger#412");
+    expect(html).toContain("c0ffee1a2b");
+    expect(html).toContain("HIGH");
+    expect(html).toContain("Reviewers");
+    expect(html).toContain("Aggregator");
+    expect(html).toContain("anthropic/claude-sonnet-4-5");
+    expect(html).toContain("class=\"sha\"");
+    expect(html).toContain("class=\"metric\"");
+    expect(html).toContain("Stale");
+    expect(html).toContain("Failed");
+    expect(html).toContain("Examining PR #418");
+    expect(html).toContain("No suspicious findings");
+  });
+
+  it("renders job detail with reviewer cards, findings, and a log panel", () => {
+    const store = seededStore();
+    const job = store.listJobs(20).find((row) => row.pr_number === 412);
+    expect(job).toBeTruthy();
+    const html = renderJob(job!, store.listReviewerRuns(job!.id), store.listLogs(job!.id));
+    expect(html).toContain("c0ffee1a2b3c4d5e6f708192a3b4c5d6e7f8091a");
+    expect(html).toContain("src/auth.ts:54");
+    expect(html).toContain("Finding requires attention");
+    expect(html).toContain("Correctness / regression hunter");
+    expect(html).toContain("(correctness)");
+    expect(html).toContain("Normalized JSON");
+    expect(html).toContain("aria-label=\"Job logs\"");
+    expect(html).toContain("class=\"logs\"");
+    expect(html).toContain("provider");
+    expect(html).toContain("main");
+    expect(html).toContain("cookie-flags");
+  });
+
+  it("puts the technical failure first on a failed job and warns on stale SHAs", () => {
+    const store = seededStore();
+    const failed = store.listJobs(20).find((row) => row.state === "failed");
+    const stale = store.listJobs(20).find((row) => row.state === "stale");
+    expect(failed && stale).toBeTruthy();
+    const failedHtml = renderJob(failed!, store.listReviewerRuns(failed!.id), store.listLogs(failed!.id));
+    expect(failedHtml).toContain("OpenCode exited 1 after 2 attempts");
+    expect(failedHtml.indexOf("OpenCode exited 1")).toBeLessThan(failedHtml.indexOf("Validation error:"));
+    const staleHtml = renderJob(stale!, store.listReviewerRuns(stale!.id), store.listLogs(stale!.id));
+    expect(staleHtml).toContain("newer head SHA");
+    expect(staleHtml).toContain("pull request");
+  });
+});
+
+describe("job metrics", () => {
+  it("sums tokens and groups findings by severity", () => {
+    const store = seededStore();
+    const job = store.listJobs(20).find((row) => row.pr_number === 412)!;
+    const metrics = jobMetrics(job, store);
+    expect(metrics.reviewersDone).toBe(6);
+    expect(metrics.reviewersTotal).toBe(6);
+    expect(metrics.findings.high).toBe(1);
+    expect(metrics.findings.medium).toBe(1);
+    expect(metrics.tokens).toBeGreaterThan(10_000);
+    expect(metrics.cost).toBeGreaterThan(0.2);
+    expect(formatTokens(12_400)).toMatch(/k$/);
+    expect(formatCost(0.18)).toBe("$0.18");
+  });
+});

@@ -38,6 +38,7 @@ describe("session helpers", () => {
     expect(isPublicPath("/")).toBe(false);
     expect(isPublicPath("/api/jobs")).toBe(false);
     expect(isPublicPath("/events")).toBe(false);
+    expect(isPublicPath("/assets/maomao.css")).toBe(true);
   });
 
   it("sets Secure only for HTTPS", () => {

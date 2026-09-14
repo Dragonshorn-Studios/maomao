@@ -107,6 +107,8 @@ describe("HTTP app", () => {
 
     expect((await app.request("/health")).status).toBe(200);
     expect((await app.request("/login")).status).toBe(200);
+    expect((await app.request("/assets/maomao.css")).status).toBe(200);
+    expect(await (await app.request("/assets/maomao.css")).text()).toContain("--jade:");
 
     const webhook = await app.request("/webhooks/github", {
       method: "POST",
