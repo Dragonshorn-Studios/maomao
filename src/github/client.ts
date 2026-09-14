@@ -15,6 +15,28 @@ export interface PostedReview {
   url: string;
 }
 
+export interface ResolvedPull {
+  installationId: number;
+  repoOwner: string;
+  repoName: string;
+  repoFullName: string;
+  prNumber: number;
+  prTitle: string;
+  prBody: string;
+  prHtmlUrl: string;
+  prAuthor: string;
+  baseSha: string;
+  headSha: string;
+  baseRef: string;
+  headRef: string;
+  draft: boolean;
+}
+
+export interface ManualTriggerPort {
+  getRepoInstallationId(owner: string, repo: string): Promise<number>;
+  getPull(installationId: number, owner: string, repo: string, pullNumber: number): Promise<ResolvedPull>;
+}
+
 export interface GithubPort {
   getInstallationToken(installationId: number): Promise<string>;
   getPullDiff(installationId: number, owner: string, repo: string, pullNumber: number): Promise<string>;
@@ -35,8 +57,18 @@ export interface GithubPort {
   }): Promise<PostedReview>;
 }
 
-export class GithubClient implements GithubPort {
+export class GithubClient implements GithubPort, ManualTriggerPort {
   constructor(private readonly config: Config) {}
+
+  private appOctokit(): Octokit {
+    return new Octokit({
+      authStrategy: createAppAuth,
+      auth: {
+        appId: this.config.github.appId,
+        privateKey: this.config.github.privateKey,
+      },
+    });
+  }
 
   private installationOctokit(installationId: number): Octokit {
     return new Octokit({
@@ -56,6 +88,60 @@ export class GithubClient implements GithubPort {
     });
     const result = await auth({ type: "installation", installationId });
     return result.token;
+  }
+
+  async getRepoInstallationId(owner: string, repo: string): Promise<number> {
+    try {
+      const response = await this.appOctokit().rest.apps.getRepoInstallation({ owner, repo });
+      return response.data.id;
+    } catch (error) {
+      const status = error && typeof error === "object" && "status" in error ? Number(error.status) : 0;
+      if (status === 404) {
+        throw new Error(`GitHub App is not installed on ${owner}/${repo}`);
+      }
+      throw error instanceof Error ? error : new Error(`Could not resolve installation for ${owner}/${repo}`);
+    }
+  }
+
+  async getPull(
+    installationId: number,
+    owner: string,
+    repo: string,
+    pullNumber: number,
+  ): Promise<ResolvedPull> {
+    try {
+      const response = await this.installationOctokit(installationId).rest.pulls.get({
+        owner,
+        repo,
+        pull_number: pullNumber,
+      });
+      const pr = response.data;
+      if (!pr.head?.sha || !pr.base?.sha) {
+        throw new Error("pull request is missing base or head SHA");
+      }
+      return {
+        installationId,
+        repoOwner: owner,
+        repoName: repo,
+        repoFullName: `${owner}/${repo}`,
+        prNumber: pr.number,
+        prTitle: pr.title ?? "",
+        prBody: pr.body ?? "",
+        prHtmlUrl: pr.html_url ?? `https://github.com/${owner}/${repo}/pull/${pr.number}`,
+        prAuthor: pr.user?.login ?? "",
+        baseSha: pr.base.sha,
+        headSha: pr.head.sha,
+        baseRef: pr.base.ref ?? "",
+        headRef: pr.head.ref ?? "",
+        draft: Boolean(pr.draft),
+      };
+    } catch (error) {
+      const status = error && typeof error === "object" && "status" in error ? Number(error.status) : 0;
+      if (status === 404) {
+        throw new Error(`Pull request ${owner}/${repo}#${pullNumber} was not found`);
+      }
+      throw error instanceof Error ? error : new Error(`Could not load ${owner}/${repo}#${pullNumber}`);
+    }
   }
 
   async getPullDiff(installationId: number, owner: string, repo: string, pullNumber: number): Promise<string> {

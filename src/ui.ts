@@ -5,6 +5,9 @@ import type { ReviewerResult } from "./schema.js";
 export interface PageOptions {
   showLogout?: boolean;
   live?: boolean;
+  notice?: string;
+  error?: string;
+  reviewUrl?: string;
 }
 
 export function layout(title: string, body: string, options: PageOptions = {}): string {
@@ -92,6 +95,15 @@ export function renderHome(jobs: JobRow[], store: JobStore, options: PageOptions
   const body = `
     <h1>Review jobs</h1>
     <p class="lede">Recent pull request reviews. Jobs are anchored to an exact head SHA.</p>
+    ${options.notice ? `<p class="notice">${escapeHtml(options.notice)}</p>` : ""}
+    ${options.error ? `<p class="error">${escapeHtml(options.error)}</p>` : ""}
+    <form class="trigger" method="post" action="/reviews">
+      <label>
+        Queue a GitHub pull request
+        <input type="url" name="url" placeholder="https://github.com/owner/repo/pull/123" value="${escapeHtml(options.reviewUrl ?? "")}" required/>
+      </label>
+      <button type="submit">Queue review</button>
+    </form>
     <table>
       <thead>
         <tr>
@@ -114,6 +126,7 @@ export function renderJob(
   const findings = collectFindings(runs);
   const body = `
     <p class="crumb"><a href="/">Jobs</a> / job ${job.id}</p>
+    ${options.notice ? `<p class="notice">${escapeHtml(options.notice)}</p>` : ""}
     <h1>${escapeHtml(job.repo_full_name)}#${job.pr_number}</h1>
     <p class="lede">${escapeHtml(job.pr_title || "")}</p>
     <section class="meta">
@@ -217,7 +230,11 @@ function css(): string {
     details { margin:.4rem 0; }
     .login { max-width: 22rem; display:grid; gap:.8rem; background:var(--card); padding:1rem; border:1px solid var(--line); }
     .login input { width:100%; margin-top:.3rem; padding:.45rem .5rem; background:#0c0e14; color:var(--fg); border:1px solid var(--line); }
-    .login button, .logout button { background:var(--acc); color:#111; border:0; padding:.45rem .8rem; font-weight:600; cursor:pointer; }
+    .login button, .logout button, .trigger button { background:var(--acc); color:#111; border:0; padding:.45rem .8rem; font-weight:600; cursor:pointer; }
     .logout { margin:0; }
+    .notice { color:#b7f0cc; }
+    .trigger { display:flex; gap:.6rem; align-items:end; flex-wrap:wrap; margin:1rem 0 1.2rem; background:var(--card); border:1px solid var(--line); padding:.8rem 1rem; }
+    .trigger label { flex:1; min-width:16rem; color:var(--muted); font-size:.85rem; }
+    .trigger input { width:100%; margin-top:.3rem; padding:.45rem .5rem; background:#0c0e14; color:var(--fg); border:1px solid var(--line); }
   `;
 }

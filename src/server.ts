@@ -4,6 +4,9 @@ import { deleteCookie, getCookie, setCookie } from "hono/cookie";
 import type { Config } from "./config.js";
 import type { JobStore } from "./jobs/store.js";
 import { handleGithubWebhook } from "./github/webhooks.js";
+import type { ManualTriggerPort } from "./github/client.js";
+import { parseGithubPullUrl, PullUrlError } from "./github/pull-url.js";
+import { dispatchEnqueue, enqueuePullJob } from "./jobs/enqueue.js";
 import { subscribe } from "./events.js";
 import { renderHome, renderJob, renderLogin } from "./ui.js";
 import type { JobQueue } from "./jobs/queue.js";
@@ -24,6 +27,7 @@ export interface ServerContext {
   store: JobStore;
   queue: JobQueue;
   startedAt: number;
+  github?: ManualTriggerPort;
 }
 
 export function createApp(ctx: ServerContext): Hono {
@@ -93,25 +97,87 @@ export function createApp(ctx: ServerContext): Hono {
         rawBody,
       },
     });
-    if (result.enqueue?.created) {
-      ctx.queue.enqueue(result.enqueue.job.id);
-    }
-    if (result.enqueue?.staleJobIds.length) {
-      ctx.queue.abortMany(result.enqueue.staleJobIds);
+    if (result.enqueue) {
+      dispatchEnqueue(ctx.queue, result.enqueue);
     }
     return c.json(result.body, result.status as 200);
   });
 
+  app.get("/reviews", (c) => c.redirect("/", 302));
+
+  app.post("/reviews", async (c) => {
+    const body = await c.req.parseBody();
+    const rawUrl = typeof body.url === "string" ? body.url : "";
+    const home = (extra: { error?: string; notice?: string; reviewUrl?: string } = {}) =>
+      c.html(
+        renderHome(ctx.store.listJobs(75), ctx.store, { ...pageOpts, ...extra, reviewUrl: extra.reviewUrl ?? rawUrl }),
+        extra.error ? 400 : 200,
+      );
+
+    let parsed: { owner: string; repo: string; number: number };
+    try {
+      parsed = parseGithubPullUrl(rawUrl);
+    } catch (error) {
+      const message = error instanceof PullUrlError ? error.message : "Could not parse that pull request URL.";
+      return home({ error: message });
+    }
+
+    if (!ctx.github) {
+      return home({ error: "GitHub App client is not configured on this process." });
+    }
+
+    try {
+      const installationId = await ctx.github.getRepoInstallationId(parsed.owner, parsed.repo);
+      const pull = await ctx.github.getPull(installationId, parsed.owner, parsed.repo, parsed.number);
+      if (pull.draft && !ctx.config.reviewDrafts) {
+        return home({ error: "Ignored draft pull request (set REVIEW_DRAFTS=true to review drafts)." });
+      }
+      const enqueue = enqueuePullJob(ctx.store, ctx.config, {
+        repoFullName: pull.repoFullName,
+        repoOwner: pull.repoOwner,
+        repoName: pull.repoName,
+        installationId: pull.installationId,
+        prNumber: pull.prNumber,
+        prTitle: pull.prTitle,
+        prBody: pull.prBody,
+        prHtmlUrl: pull.prHtmlUrl,
+        prAuthor: pull.prAuthor,
+        baseSha: pull.baseSha,
+        headSha: pull.headSha,
+        baseRef: pull.baseRef,
+        headRef: pull.headRef,
+        webhookEvent: "manual.ui",
+      });
+      dispatchEnqueue(ctx.queue, enqueue);
+      const notice = enqueue.created ? "queued" : "exists";
+      return c.redirect(`/jobs/${enqueue.job.id}?notice=${notice}`, 302);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      return home({ error: message });
+    }
+  });
+
   app.get("/", (c) => {
     const jobs = ctx.store.listJobs(75);
-    return c.html(renderHome(jobs, ctx.store, pageOpts));
+    return c.html(
+      renderHome(jobs, ctx.store, {
+        ...pageOpts,
+        notice: noticeText(c.req.query("notice")),
+        error: c.req.query("error") || undefined,
+      }),
+    );
   });
 
   app.get("/jobs/:id", (c) => {
     const id = Number(c.req.param("id"));
     const job = ctx.store.getJob(id);
     if (!job) return c.text("Not found", 404);
-    return c.html(renderJob(job, ctx.store.listReviewerRuns(id), ctx.store.listLogs(id), pageOpts));
+    return c.html(
+      renderJob(job, ctx.store.listReviewerRuns(id), ctx.store.listLogs(id), {
+        ...pageOpts,
+        notice: noticeText(c.req.query("notice"), job.repo_full_name, job.pr_number, job.head_sha),
+      }),
+    );
   });
 
   app.get("/api/jobs", (c) => {
@@ -154,4 +220,21 @@ export function createApp(ctx: ServerContext): Hono {
   );
 
   return app;
+}
+
+function noticeText(
+  code: string | undefined,
+  repo?: string,
+  pr?: number,
+  sha?: string,
+): string | undefined {
+  if (code === "queued") {
+    const target = repo && pr != null ? ` ${repo}#${pr}` : "";
+    const short = sha ? ` (${sha.slice(0, 12)})` : "";
+    return `Queued a review${target}${short} for this exact head SHA.`;
+  }
+  if (code === "exists") {
+    return "A job already exists for this repository, pull request, and head SHA.";
+  }
+  return undefined;
 }

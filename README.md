@@ -142,6 +142,8 @@ USER node
 
 `/jobs/:id` shows per-reviewer state, models, findings, raw/normalized JSON, stdout/stderr, aggregator output, and logs. The pages refresh over SSE.
 
+The home page also has an operator form to paste a GitHub pull request URL (`https://github.com/owner/repo/pull/123`). Maomao resolves that PR through the GitHub App installation, then enqueues through the **same** job store and queue as webhooks (same `(repo, PR, head SHA)` idempotency and stale handling). Drafts follow `REVIEW_DRAFTS`. This is for testing before webhooks are wired; it is behind the same session gate as the rest of the UI.
+
 ### Session password (required in production)
 
 `/`, `/jobs/*`, `/api/*`, and `/events` can be left open for local development. **If you expose Maomao beyond localhost, set both:**

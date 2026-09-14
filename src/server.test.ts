@@ -6,12 +6,13 @@ import { JobStore } from "./jobs/store.js";
 import type { JobQueue } from "./jobs/queue.js";
 import { createApp } from "./server.js";
 import { SESSION_COOKIE } from "./auth.js";
+import type { ManualTriggerPort, ResolvedPull } from "./github/client.js";
 
 function sign(secret: string, body: string): string {
   return `sha256=${createHmac("sha256", secret).update(body).digest("hex")}`;
 }
 
-function testApp(env: Record<string, string> = {}) {
+function testApp(env: Record<string, string> = {}, github?: ManualTriggerPort) {
   const webhookSecret = "s3cret";
   const config = loadConfig({
     GITHUB_WEBHOOK_SECRET: webhookSecret,
@@ -28,7 +29,7 @@ function testApp(env: Record<string, string> = {}) {
     },
     abortMany() {},
   } as unknown as JobQueue;
-  const app = createApp({ config, store, queue, startedAt: Date.now() });
+  const app = createApp({ config, store, queue, github, startedAt: Date.now() });
   return { app, store, enqueued, webhookSecret };
 }
 
@@ -65,7 +66,7 @@ describe("HTTP app", () => {
 
     const home = await app.request("/");
     expect(home.status).toBe(200);
-    expect(await home.text()).toContain("Review jobs");
+    expect(await home.text()).toContain("Queue a GitHub pull request");
 
     const webhook = await app.request("/webhooks/github", {
       method: "POST",
@@ -157,5 +158,118 @@ describe("HTTP app", () => {
       headers: { cookie: `${SESSION_COOKIE}=v1.9999999999999.not-a-real-sig` },
     });
     expect(tampered.status).toBe(401);
+  });
+});
+
+function fakePull(overrides: Partial<ResolvedPull> = {}): ResolvedPull {
+  return {
+    installationId: 42,
+    repoOwner: "acme",
+    repoName: "widgets",
+    repoFullName: "acme/widgets",
+    prNumber: 12,
+    prTitle: "Add frob",
+    prBody: "does a thing",
+    prHtmlUrl: "https://github.com/acme/widgets/pull/12",
+    prAuthor: "octocat",
+    baseSha: "base111",
+    headSha: "head222head222head222head222head222head222",
+    baseRef: "main",
+    headRef: "feature",
+    draft: false,
+    ...overrides,
+  };
+}
+
+function mockGithub(pull: ResolvedPull = fakePull()): ManualTriggerPort {
+  return {
+    getRepoInstallationId: async () => pull.installationId,
+    getPull: async () => pull,
+  };
+}
+
+describe("manual review trigger", () => {
+  it("enqueues through the same job store path and reports an existing SHA", async () => {
+    const { app, store, enqueued } = testApp({}, mockGithub());
+    const first = await app.request("/reviews", {
+      method: "POST",
+      headers: { "content-type": "application/x-www-form-urlencoded" },
+      body: "url=https%3A%2F%2Fgithub.com%2Facme%2Fwidgets%2Fpull%2F12",
+    });
+    expect(first.status).toBe(302);
+    expect(first.headers.get("location")).toMatch(/\/jobs\/1\?notice=queued/);
+    expect(enqueued).toEqual([1]);
+    expect(store.getJob(1)?.webhook_event).toBe("manual.ui");
+    expect(store.getJob(1)?.head_sha).toBe("head222head222head222head222head222head222");
+
+    const again = await app.request("/reviews", {
+      method: "POST",
+      headers: { "content-type": "application/x-www-form-urlencoded" },
+      body: "url=https%3A%2F%2Fgithub.com%2Facme%2Fwidgets%2Fpull%2F12",
+    });
+    expect(again.status).toBe(302);
+    expect(again.headers.get("location")).toMatch(/\/jobs\/1\?notice=exists/);
+    expect(enqueued).toEqual([1]);
+
+    const detail = await app.request("/jobs/1?notice=queued");
+    expect(await detail.text()).toContain("Queued a review");
+  });
+
+  it("rejects a non-GitHub URL without touching the queue", async () => {
+    const github = mockGithub();
+    const { app, enqueued } = testApp({}, github);
+    const res = await app.request("/reviews", {
+      method: "POST",
+      headers: { "content-type": "application/x-www-form-urlencoded" },
+      body: "url=https%3A%2F%2Fgitlab.com%2Facme%2Fwidgets%2Fpull%2F1",
+    });
+    expect(res.status).toBe(400);
+    expect(await res.text()).toContain("github.com");
+    expect(enqueued).toEqual([]);
+  });
+
+  it("requires session auth for the paste-URL form when the UI gate is on", async () => {
+    const { app, enqueued } = testApp(
+      { UI_PASSWORD: "hunter2", UI_SESSION_SECRET: "session-secret-for-tests" },
+      mockGithub(),
+    );
+    const denied = await app.request("/reviews", {
+      method: "POST",
+      headers: { "content-type": "application/x-www-form-urlencoded" },
+      body: "url=https%3A%2F%2Fgithub.com%2Facme%2Fwidgets%2Fpull%2F12",
+    });
+    expect(denied.status).toBe(302);
+    expect(denied.headers.get("location")).toContain("/login");
+    expect(enqueued).toEqual([]);
+
+    const login = await app.request("/login", {
+      method: "POST",
+      headers: { "content-type": "application/x-www-form-urlencoded" },
+      body: "password=hunter2&next=%2F",
+    });
+    const cookie = cookieFrom(login);
+    const allowed = await app.request("/reviews", {
+      method: "POST",
+      headers: {
+        cookie,
+        "content-type": "application/x-www-form-urlencoded",
+      },
+      body: "url=https%3A%2F%2Fgithub.com%2Facme%2Fwidgets%2Fpull%2F12",
+    });
+    expect(allowed.status).toBe(302);
+    expect(allowed.headers.get("location")).toMatch(/notice=queued/);
+    expect(enqueued).toEqual([1]);
+  });
+
+  it("respects REVIEW_DRAFTS for manual triggers", async () => {
+    const { app, enqueued } = testApp({}, mockGithub(fakePull({ draft: true })));
+    const res = await app.request("/reviews", {
+      method: "POST",
+      headers: { "content-type": "application/x-www-form-urlencoded" },
+      body: "url=https%3A%2F%2Fgithub.com%2Facme%2Fwidgets%2Fpull%2F12",
+    });
+    expect(res.status).toBe(400);
+    expect(await res.text()).toContain("draft");
+    expect(enqueued).toEqual([]);
   });
 });

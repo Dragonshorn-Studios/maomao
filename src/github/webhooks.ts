@@ -1,7 +1,7 @@
 import { verify } from "@octokit/webhooks-methods";
 import type { Config, PullRequestAction } from "../config.js";
-import type { JobStore } from "../jobs/store.js";
-import type { EnqueueResult } from "../jobs/store.js";
+import type { EnqueueResult, JobStore } from "../jobs/store.js";
+import { enqueuePullJob } from "../jobs/enqueue.js";
 
 export interface WebhookRequest {
   event: string;
@@ -135,15 +135,10 @@ export async function handleGithubWebhook(input: {
 
   try {
     const parsed = parsePullRequestPayload(payload);
-    const enqueue = input.store.enqueue({
+    const enqueue = enqueuePullJob(input.store, input.config, {
       ...parsed,
       webhookDeliveryId: input.request.deliveryId,
       webhookEvent: `${input.request.event}.${payload.action}`,
-      reviewers: input.config.reviewers.map((role) => ({
-        role: role.id,
-        title: role.title,
-        model: role.model || input.config.opencode.reviewerModel || undefined,
-      })),
     });
     return {
       status: enqueue.created ? 202 : 200,
