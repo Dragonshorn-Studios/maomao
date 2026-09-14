@@ -19,6 +19,8 @@ export const THEME_CSS = `
   --cinnabar-soft: #f3d6d6;
   --amber: #8a5a10;
   --amber-soft: #f1e4c4;
+  --working: #246e78;
+  --working-soft: #d5ebee;
   --ash: #7a776b;
   --line: #cfc8b6;
   --line-strong: #b7b09c;
@@ -26,7 +28,7 @@ export const THEME_CSS = `
   --shadow: 0 1px 0 rgba(26, 34, 28, 0.04);
   --code-bg: #eae4d4;
   --code-fg: #1a221c;
-  --live: #1f6a4e;
+  --live: var(--working);
   --btn-fg: #f3efe3;
   --radius: 3px;
   --font-display: "Iowan Old Style", Palatino, "Palatino Linotype", "Book Antiqua", Georgia, "Times New Roman", serif;
@@ -57,6 +59,8 @@ html[data-theme="dark"] {
   --cinnabar-soft: #3a2224;
   --amber: #e0b45c;
   --amber-soft: #3a3220;
+  --working: #6ecad6;
+  --working-soft: #173033;
   --ash: #8c8a7e;
   --line: #2e352e;
   --line-strong: #4a524a;
@@ -64,7 +68,7 @@ html[data-theme="dark"] {
   --shadow: 0 1px 0 rgba(0, 0, 0, 0.25);
   --code-bg: #0e120e;
   --code-fg: #d9d4c4;
-  --live: #7dcea0;
+  --live: var(--working);
   --btn-fg: #121612;
 }
 
@@ -85,6 +89,8 @@ html[data-theme="dark"] {
     --cinnabar-soft: #3a2224;
     --amber: #e0b45c;
     --amber-soft: #3a3220;
+    --working: #6ecad6;
+    --working-soft: #173033;
     --ash: #8c8a7e;
     --line: #2e352e;
     --line-strong: #4a524a;
@@ -92,7 +98,7 @@ html[data-theme="dark"] {
     --shadow: 0 1px 0 rgba(0, 0, 0, 0.25);
     --code-bg: #0e120e;
     --code-fg: #d9d4c4;
-    --live: #7dcea0;
+    --live: var(--working);
     --btn-fg: #121612;
   }
 }
@@ -227,6 +233,21 @@ h2 {
   border-bottom: 1px solid var(--line);
   padding-bottom: 0.3rem;
 }
+.section-head {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 0.55rem 1rem;
+  flex-wrap: wrap;
+  margin: 1.6rem 0 0.7rem;
+  border-bottom: 1px solid var(--line);
+  padding-bottom: 0.3rem;
+}
+.section-head h2 {
+  margin: 0;
+  border: none;
+  padding: 0;
+}
 .lede, .muted, .crumb { color: var(--ink-muted); }
 .crumb { margin: 0 0 0.6rem; font-size: 0.88rem; }
 
@@ -249,7 +270,7 @@ button, input, textarea {
   font: inherit;
 }
 
-.btn, .login button, .trigger button, .logout button.primary, .retry-job button {
+.btn, .login button, .trigger button, .logout button.primary {
   background: var(--jade);
   color: var(--btn-fg);
   border: 1px solid color-mix(in srgb, var(--jade) 70%, var(--ink));
@@ -258,7 +279,7 @@ button, input, textarea {
   cursor: pointer;
   letter-spacing: 0.02em;
 }
-.btn:hover, .login button:hover, .trigger button:hover, .retry-job button:hover {
+.btn:hover, .login button:hover, .trigger button:hover {
   filter: brightness(1.05);
 }
 
@@ -378,7 +399,13 @@ button, input, textarea {
   display: inline-block;
 }
 .tick.done { background: var(--jade); border-color: var(--jade); }
-.tick.running { background: var(--amber); border-color: var(--amber); animation: breathe 1.8s ease-in-out infinite; }
+.tick.running {
+  border-radius: 50%;
+  background: transparent;
+  border: 1.5px solid color-mix(in srgb, var(--working) 28%, var(--line));
+  border-top-color: var(--working);
+  animation: spin 0.8s linear infinite;
+}
 .tick.failed { background: var(--cinnabar); border-color: var(--cinnabar); }
 .join { color: var(--plum); letter-spacing: 0.08em; }
 
@@ -400,8 +427,26 @@ button, input, textarea {
 .state-failed { background: var(--cinnabar-soft); border-color: var(--cinnabar); }
 .state-stale, .state-cancelled { background: var(--amber-soft); border-color: var(--amber); }
 .state-reviewing, .state-aggregating, .state-publishing, .state-running, .state-preparing {
-  background: color-mix(in srgb, var(--herb) 16%, var(--surface));
-  border-color: var(--herb);
+  background: var(--working-soft);
+  border-color: var(--working);
+}
+.state-preparing .mark,
+.state-reviewing .mark,
+.state-aggregating .mark,
+.state-publishing .mark,
+.state-running .mark {
+  width: 0.65rem;
+  height: 0.65rem;
+  padding: 0;
+  font-size: 0;
+  color: transparent;
+  overflow: hidden;
+  border-radius: 50%;
+  border: 1.5px solid color-mix(in srgb, var(--working) 28%, var(--surface));
+  border-top-color: var(--working);
+  background: transparent;
+  animation: spin 0.8s linear infinite;
+  flex: none;
 }
 .state-queued { background: var(--surface-2); }
 
@@ -453,12 +498,6 @@ button, input, textarea {
   align-items: center;
   flex-wrap: wrap;
 }
-.run-actions {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.55rem;
-  flex-wrap: wrap;
-}
 form.retry, form.retry-job {
   margin: 0;
   background: none;
@@ -467,17 +506,18 @@ form.retry, form.retry-job {
   padding: 0;
   display: inline-flex;
 }
-.retry button {
+.retry button, .retry-job button {
   background: var(--paper);
   color: var(--ink);
   border: 1px solid var(--line-strong);
-  padding: 0.22rem 0.6rem;
+  padding: 0.22rem 0.65rem;
   font-size: 0.78rem;
   font-weight: 600;
   cursor: pointer;
+  white-space: nowrap;
 }
-.retry button:hover { color: var(--jade); border-color: var(--jade); }
-.retry-job { margin: 0.35rem 0 0.85rem; }
+.retry button:hover, .retry-job button:hover { color: var(--jade); border-color: var(--jade); }
+.card .retry { margin-top: 0.55rem; }
 .role {
   display: inline-flex;
   align-items: center;
@@ -549,6 +589,9 @@ details summary { cursor: pointer; color: var(--ink-muted); }
   0%, 100% { opacity: 1; }
   50% { opacity: 0.45; }
 }
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
 
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after {
@@ -558,6 +601,16 @@ details summary { cursor: pointer; color: var(--ink-muted); }
     scroll-behavior: auto !important;
   }
   .specimen.is-live::before { animation: none; opacity: 1; }
+  .tick.running,
+  .state-preparing .mark,
+  .state-reviewing .mark,
+  .state-aggregating .mark,
+  .state-publishing .mark,
+  .state-running .mark {
+    animation: none !important;
+    background: var(--working);
+    border-color: var(--working);
+  }
 }
 
 @media (max-width: 720px) {

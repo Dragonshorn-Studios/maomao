@@ -21,6 +21,12 @@ describe("theme tokens", () => {
     expect(THEME_CSS).toContain("--plum:");
     expect(THEME_CSS).toContain("--cinnabar:");
     expect(THEME_CSS).toContain("--amber:");
+    expect(THEME_CSS).toContain("--working:");
+    expect(THEME_CSS).toContain("@keyframes spin");
+    expect(THEME_CSS).toContain(".section-head");
+    expect(THEME_CSS).toMatch(/\.tick\.running[\s\S]*var\(--working\)/);
+    expect(THEME_CSS).toMatch(/\.state-reviewing[\s\S]*var\(--working-soft\)/);
+    expect(THEME_CSS).not.toMatch(/\.tick\.running \{ background: var\(--amber\)/);
     expect(THEME_CSS).toContain("--ash:");
     expect(THEME_CSS).toContain('html[data-theme="dark"]');
     expect(THEME_CSS).toContain("prefers-reduced-motion");
@@ -94,8 +100,11 @@ describe("monitoring pages", () => {
     const failedHtml = renderJob(failed!, store.listReviewerRuns(failed!.id), store.listLogs(failed!.id));
     expect(failedHtml).toContain("OpenCode exited 1 after 2 attempts");
     expect(failedHtml.indexOf("OpenCode exited 1")).toBeLessThan(failedHtml.indexOf("Validation error:"));
+    expect(failedHtml).toContain('class="section-head"');
+    expect(failedHtml).toContain("Retry failed reviewer");
     expect(failedHtml).toContain(">Retry</button>");
     expect(failedHtml).toContain(`/jobs/${failed!.id}/retry`);
+    expect(failedHtml.indexOf("Validation error:")).toBeLessThan(failedHtml.lastIndexOf(">Retry</button>"));
     const staleHtml = renderJob(stale!, store.listReviewerRuns(stale!.id), store.listLogs(stale!.id));
     expect(staleHtml).toContain("newer head SHA");
     expect(staleHtml).toContain("pull request");

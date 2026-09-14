@@ -67,6 +67,19 @@ export async function execFile(
 }
 
 export async function chmodTree(root: string, mode: number): Promise<void> {
+  let info;
+  try {
+    info = await lstat(root);
+  } catch {
+    return;
+  }
+  if (info.isSymbolicLink()) return;
+  try {
+    await chmod(root, mode);
+  } catch {
+    // still walk children when we own them
+  }
+  if (!info.isDirectory()) return;
   let entries: string[] = [];
   try {
     entries = await readdir(root);
@@ -74,21 +87,22 @@ export async function chmodTree(root: string, mode: number): Promise<void> {
     return;
   }
   for (const entry of entries) {
-    const full = join(root, entry);
-    const info = await lstat(full);
-    if (info.isSymbolicLink()) continue;
-    if (info.isDirectory()) {
-      await chmodTree(full, mode);
-      await chmod(full, mode);
-    } else if (info.isFile()) {
-      await chmod(full, mode);
-    }
+    await chmodTree(join(root, entry), mode);
   }
+}
+
+/**
+ * Node's recursive `rm` does not add write bits. Nested dirs left at 0555
+ * (post-checkout hardening) fail with `EACCES: permission denied, rmdir
+ * '.../repo/.github/workflows'` when a retry re-prepares the same workspace.
+ */
+export async function removeTree(dir: string): Promise<void> {
   try {
-    await chmod(root, mode);
+    await chmodTree(dir, 0o755);
   } catch {
-    // ignore
+    // still try to delete
   }
+  await rm(dir, { recursive: true, force: true });
 }
 
 export interface Workspace {
@@ -135,7 +149,7 @@ export function createCheckout(workspaceRoot: string, gitBin = "git"): CheckoutP
     async prepare(input) {
       const dir = join(workspaceRoot, `job-${input.jobId}-${input.headSha.slice(0, 12)}`);
       const repoDir = join(dir, "repo");
-      await rm(dir, { recursive: true, force: true });
+      await removeTree(dir);
       await mkdir(repoDir, { recursive: true });
 
       const env = sanitizeChildEnv(process.env, {
@@ -247,12 +261,7 @@ export function createCheckout(workspaceRoot: string, gitBin = "git"): CheckoutP
       return { dir, repoDir, diffPath, metaPath };
     },
     async cleanup(dir: string) {
-      try {
-        await chmodTree(dir, 0o755);
-      } catch {
-        // still try to delete
-      }
-      await rm(dir, { recursive: true, force: true });
+      await removeTree(dir);
     },
   };
 }
@@ -281,8 +290,7 @@ export async function sweepWorkspaces(root: string, retentionHours: number): Pro
     try {
       const info = await stat(full);
       if (!info.isDirectory() || info.mtimeMs > cutoff) continue;
-      await chmodTree(full, 0o755);
-      await rm(full, { recursive: true, force: true });
+      await removeTree(full);
       removed += 1;
     } catch {
       // leave it for the next sweep
