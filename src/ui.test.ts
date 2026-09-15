@@ -107,7 +107,10 @@ describe("monitoring pages", () => {
       store.listReviewerRuns(observation!.id),
       store.listLogs(observation!.id),
     );
-    expect(observationWithPolicy).not.toContain("Poison alert");
+    // A policy without observed channels still renders the card, with both channels queued.
+    expect(observationWithPolicy).toContain("Poison alert");
+    expect(observationWithPolicy).toContain("laboratory re-check, then external dispatch");
+    expect(observationWithPolicy).toContain("Waiting on specialists and the aggregator");
   });
 
   it("renders job detail with reviewer cards, findings, and a log panel", () => {
@@ -136,8 +139,8 @@ describe("monitoring pages", () => {
     expect(html).toMatch(/Reconciliation<\/dt>\s*<dd>—<\/dd>/);
     expect(html).toContain("internal_and_external");
     expect(html).toContain("anthropic/claude-opus-4-6");
-    expect(html).toContain("dispatched (notification accepted)");
-    expect(html).toContain("does not track whether an external reviewer finished");
+    expect(html).toContain("Dispatched");
+    expect(html).toContain("Fire-and-forget: Maomao records only the immediate notification outcome");
   });
 
   it("collapses buried and resolved findings under a compact summary", () => {
@@ -264,5 +267,106 @@ describe("job metrics", () => {
     const html = renderJob(job, store.listReviewerRuns(job.id), store.listLogs(job.id));
     expect(html).toContain("incomplete");
     expect(html).toContain("step_finish");
+  });
+});
+
+describe("poison alert card", () => {
+  function jobByTitle(store: JobStore, title: string) {
+    const job = store.listJobs(50).find((row) => row.pr_title === title);
+    if (!job) throw new Error(`fixture job not found: ${title}`);
+    return job;
+  }
+
+  it("hides the card entirely for ordinary (observation) jobs", () => {
+    const store = seededStore();
+    const job = jobByTitle(store, "Deprecate v1 list endpoint");
+    const html = renderJob(job, store.listReviewerRuns(job.id), store.listLogs(job.id));
+    expect(html).not.toContain("Poison alert");
+  });
+
+  it("renders only the internal channel for internal_only policies", () => {
+    const store = seededStore();
+    const job = jobByTitle(store, "Rotate billing webhook signing keys");
+    const html = renderJob(job, store.listReviewerRuns(job.id), store.listLogs(job.id));
+    expect(html).toContain("Poison alert");
+    expect(html).toContain("laboratory re-check only");
+    expect(html).toContain("Internal model");
+    expect(html).toContain("Laboratory re-check finished");
+    expect(html).not.toContain("External dispatch");
+    expect(html).not.toContain("0 tokens");
+    expect(html).not.toContain("not requested");
+  });
+
+  it("renders both channels with badges when the policy requests them", () => {
+    const store = seededStore();
+    const job = store.listJobs(50).find((row) => row.poison_alert_policy === "internal_and_external");
+    if (!job) throw new Error("fixture job not found: internal_and_external");
+    const html = renderJob(job, store.listReviewerRuns(job.id), store.listLogs(job.id));
+    const card = html.slice(html.indexOf("<h2>Poison alert</h2>"));
+    expect(card).toContain("laboratory re-check, then external dispatch");
+    expect(card).toContain("Internal model");
+    expect(card).toContain("External dispatch");
+    expect(card).toContain("Dispatched");
+    expect(card).toContain("mention @repository-owner");
+    // The routing reason belongs to the Routing card, not the escalation status.
+    expect(card).not.toContain("Authentication flow changed");
+  });
+
+  it("renders external-only jobs without an internal block", () => {
+    const store = seededStore();
+    const job = jobByTitle(store, "Rotate billing webhook signing keys");
+    store.patchJob(job.id, {
+      poison_alert_policy: "external_only",
+      internal_escalation_state: "not_requested",
+      internal_escalation_model: null,
+      internal_escalation_reason: null,
+      external_dispatch_status: "dispatched",
+      external_dispatch_targets: JSON.stringify([{ type: "command", recipient: "@oncall", command: "review" }]),
+    });
+    const updated = store.getJob(job.id)!;
+    const html = renderJob(updated, store.listReviewerRuns(job.id), store.listLogs(job.id));
+    expect(html).toContain("external dispatch only");
+    expect(html).toContain("External dispatch");
+    expect(html).toContain("Dispatched");
+    expect(html).toContain("command @oncall review");
+    expect(html).not.toContain("Internal model");
+  });
+
+  it("shows queued channels while an in-progress job has not reached them", () => {
+    const store = seededStore();
+    const job = jobByTitle(store, "Deprecate v1 list endpoint");
+    store.patchJob(job.id, {
+      poison_alert_policy: "internal_and_external",
+      routing_profile: "poison-alert",
+      internal_escalation_state: "not_requested",
+      external_dispatch_status: "not_requested",
+    });
+    const updated = store.getJob(job.id)!;
+    const html = renderJob(updated, store.listReviewerRuns(job.id), store.listLogs(job.id));
+    expect(html).toContain("laboratory re-check, then external dispatch");
+    expect(html).toContain("Waiting on specialists and the aggregator");
+    expect(html).toContain("Dispatches after the GitHub review is posted");
+  });
+
+  it("gives sniffing jobs their own state, flavor, and running lab badge", () => {
+    const store = seededStore();
+    const job = jobByTitle(store, "Add deferred payment capture endpoint");
+    expect(job.state).toBe("sniffing");
+    const html = renderJob(job, store.listReviewerRuns(job.id), store.listLogs(job.id));
+    expect(html).toContain("Sniffing");
+    expect(html).toContain("Laboratory re-check for PR #96");
+    expect(html).toContain("Laboratory model in flight");
+    expect(html).toContain("Internal model");
+    expect(html).toContain("External dispatch");
+    expect(html).toContain("Dispatches after the GitHub review is posted");
+    expect(html).not.toContain("Aggregating");
+  });
+
+  it("keeps aggregating flavor distinct from sniffing", () => {
+    const store = seededStore();
+    const aggregating = jobByTitle(store, "Deprecate v1 list endpoint");
+    const html = renderJob(aggregating, store.listReviewerRuns(aggregating.id), store.listLogs(aggregating.id));
+    expect(html).toContain("Aggregation in progress");
+    expect(html).not.toContain("Laboratory re-check for PR #88");
   });
 });

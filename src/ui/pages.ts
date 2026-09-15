@@ -4,13 +4,14 @@ import { fingerprintFinding } from "../findings/identity.js";
 import { elapsedMs, escapeHtml, formatDuration, shortSha } from "../util.js";
 import {
   emptyQueueCopy,
+  externalDispatchBadge,
   findingOverrideNote,
   findingStatusLabel,
   flavorForJob,
+  internalEscalationBadge,
   jobStateLabel,
   observationsCopy,
   routingProfileLabel,
-  dispatchStatusLabel,
   runStateLabel,
   severityLabel,
   settledFindingsCopy,
@@ -219,7 +220,7 @@ export function renderJob(
 function renderQueueCard(job: JobRow, metrics: JobMetrics): string {
   const state = jobStateLabel(job.state);
   const elapsed = formatDuration(elapsedMs(job.started_at, job.finished_at) ?? elapsedMs(job.created_at));
-  const live = ["preparing", "reconciling", "routing", "reviewing", "aggregating", "publishing"].includes(job.state);
+  const live = ["preparing", "reconciling", "routing", "reviewing", "aggregating", "sniffing", "publishing"].includes(job.state);
   const flavor = flavorForJob(job.state, job.pr_number);
   return `<li>
     <article class="specimen${live ? " is-live" : ""}">
@@ -271,45 +272,71 @@ function renderRouting(job: JobRow): string {
 }
 
 function renderEscalation(job: JobRow): string {
-  const show =
-    job.routing_profile === "poison-alert" ||
-    (job.internal_escalation_state && job.internal_escalation_state !== "not_requested") ||
-    (job.external_dispatch_status && job.external_dispatch_status !== "not_requested") ||
-    Boolean(job.manual_escalate_requested);
+  const policy = job.poison_alert_policy || "";
+  const manual = Boolean(job.manual_escalate_requested);
+  const internalState = job.internal_escalation_state;
+  const externalStatus = job.external_dispatch_status;
+  const internalObserved = Boolean(internalState && internalState !== "not_requested");
+  const externalObserved = Boolean(externalStatus && externalStatus !== "not_requested");
+  const show = Boolean(policy) || manual || internalObserved || externalObserved;
   if (!show) return "";
-  const targets = safeParseTargets(job.external_dispatch_targets);
-  const targetText =
-    targets.length > 0
-      ? targets
-          .map((target) => {
-            if (target.type === "mention") return `mention ${target.recipient}`;
-            if (target.type === "command") return `command ${target.recipient} ${target.command}`;
-            return `webhook ${target.urlSecretRef}`;
-          })
-          .join("; ")
-      : "none configured";
-  return `<h2>Poison alert</h2>
-    <article class="card">
-      <p><strong>Policy</strong> ${escapeHtml(job.poison_alert_policy || "—")}</p>
-      <p class="muted">${escapeHtml(job.routing_reason || "High-risk routing selected poison-alert.")}</p>
-      <h3>Internal model</h3>
-      <p class="muted">
-        state ${escapeHtml(job.internal_escalation_state || "not_requested")}
-        ${job.internal_escalation_model ? ` · model <code class="metric">${escapeHtml(job.internal_escalation_model)}</code>` : ""}
-        ${job.internal_escalation_provider ? ` · provider <code class="metric">${escapeHtml(job.internal_escalation_provider)}</code>` : ""}
-        · ${escapeHtml(formatTokens(job.internal_escalation_total_tokens))} tokens
-        · ${escapeHtml(formatCost(job.internal_escalation_cost))}
+
+  const internalRequested =
+    ["internal_only", "internal_then_external", "internal_and_external"].includes(policy) ||
+    (policy === "manual" && manual) ||
+    internalObserved;
+  const externalRequested =
+    ["external_only", "internal_then_external", "internal_and_external"].includes(policy) ||
+    (policy === "manual" && manual) ||
+    externalObserved;
+
+  const plan = internalRequested && externalRequested
+    ? "laboratory re-check, then external dispatch"
+    : internalRequested
+      ? "laboratory re-check only"
+      : externalRequested
+        ? "external dispatch only"
+        : "waiting for a manual @maomao escalate";
+
+  const channels: string[] = [];
+  if (internalRequested) {
+    const badge = internalEscalationBadge(internalState);
+    const ran = internalState === "done" || internalState === "failed";
+    channels.push(`<h3>Internal model</h3>
+      <p>${renderState(badge.stateClass, badge.text, badge.hint, badge.mark)}
+        ${job.internal_escalation_model ? ` <code class="metric">${escapeHtml(job.internal_escalation_model)}</code>` : ""}
+        ${job.internal_escalation_provider ? `<span class="muted"> · <code class="metric">${escapeHtml(job.internal_escalation_provider)}</code></span>` : ""}
       </p>
-      ${job.internal_escalation_reason ? `<p>${escapeHtml(job.internal_escalation_reason)}</p>` : ""}
-      <p class="muted">Internal usage is recorded separately from specialist and aggregator totals.</p>
-      <h3>External dispatch</h3>
-      <p class="muted">
-        ${escapeHtml(dispatchStatusLabel(job.external_dispatch_status))}
-        · targets ${escapeHtml(targetText)}
+      ${
+        ran
+          ? `<p class="muted">${escapeHtml(formatTokens(job.internal_escalation_total_tokens))} tokens · ${escapeHtml(formatCost(job.internal_escalation_cost))}</p>`
+          : ""
+      }
+      ${job.internal_escalation_reason ? `<p>${escapeHtml(job.internal_escalation_reason)}</p>` : ""}`);
+  }
+  if (externalRequested) {
+    const badge = externalDispatchBadge(externalStatus);
+    const targets = safeParseTargets(job.external_dispatch_targets);
+    const targetText = targets
+      .map((target) => {
+        if (target.type === "mention") return `mention ${target.recipient}`;
+        if (target.type === "command") return `command ${target.recipient} ${target.command}`;
+        return `webhook ${target.urlSecretRef}`;
+      })
+      .join("; ");
+    channels.push(`<h3>External dispatch</h3>
+      <p>${renderState(badge.stateClass, badge.text, badge.hint, badge.mark)}
+        ${externalStatus === "dispatching" || externalStatus === "dispatched" || externalStatus === "dispatch_failed" ? `<span class="muted">${targetText ? ` · ${escapeHtml(targetText)}` : ""}</span>` : ""}
       </p>
       ${job.external_dispatch_reason ? `<p>${escapeHtml(job.external_dispatch_reason)}</p>` : ""}
       ${job.external_dispatch_error ? `<p class="error">${escapeHtml(job.external_dispatch_error)}</p>` : ""}
-      <p class="muted">Maomao records only the immediate notification outcome. It does not track whether an external reviewer finished.</p>
+      <p class="muted">Fire-and-forget: Maomao records only the immediate notification outcome, not whether an external reviewer finished.</p>`);
+  }
+
+  return `<h2>Poison alert</h2>
+    <article class="card">
+      <p><strong>Policy</strong> ${escapeHtml(policy || "manual")} — ${escapeHtml(plan)}${manual ? " · <strong>manual escalate requested</strong>" : ""}</p>
+      ${channels.join("\n")}
     </article>`;
 }
 

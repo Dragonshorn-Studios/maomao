@@ -676,6 +676,8 @@ async function runInternalEscalation(
     return firstPass;
   }
 
+  // The lab model runs as its own stage so the UI can say "Sniffing" instead of "Aggregating".
+  deps.store.setJobState(job.id, "sniffing");
   const started = Date.now();
   deps.store.patchJob(job.id, {
     internal_escalation_state: "running",
