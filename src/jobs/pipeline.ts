@@ -1,4 +1,3 @@
-import { readFile } from "node:fs/promises";
 import type { Config } from "../config.js";
 import type { JobStore, JobRow, ReviewerRunRow } from "./store.js";
 import type { GithubPort } from "../github/client.js";
@@ -27,6 +26,7 @@ import type { ReconciliationSnapshot } from "../findings/types.js";
 import { currentFindingsForRisk } from "../findings/types.js";
 import { mapLimit, nowIso, sleep, truncate } from "../util.js";
 import { ZodError } from "zod";
+import { authorizationLogLine, authorizeGithubTarget, logAuthorizationRejection } from "../github/authorize.js";
 import { scanRoutingSignals, relevantDiffHunks } from "../routing/signals.js";
 import {
   diagnosisFallback,
@@ -106,6 +106,35 @@ async function runJob(deps: PipelineDeps, jobId: number, signal: AbortSignal): P
     return;
   }
 
+  const auth = authorizeGithubTarget(config, {
+    installationId: job.installation_id,
+    accountId: job.github_account_id ?? undefined,
+    repositoryId: job.github_repository_id ?? undefined,
+  });
+  if (!auth.ok) {
+    const subject = {
+      installationId: job.installation_id,
+      repositoryId: job.github_repository_id ?? undefined,
+      reason: auth.reason,
+    };
+    logAuthorizationRejection(subject);
+    store.log(jobId, authorizationLogLine(subject), "warn");
+    for (const run of store.listReviewerRuns(jobId)) {
+      if (run.state === "queued" || run.state === "running") {
+        store.patchReviewer(run.id, {
+          state: "failed",
+          validation_error: `unauthorized: ${auth.reason}`,
+          finished_at: nowIso(),
+        });
+      }
+    }
+    store.setJobState(jobId, "failed", {
+      failure_reason: `unauthorized: ${auth.reason}`,
+      finished_at: nowIso(),
+    });
+    return;
+  }
+
   try {
     store.setJobState(jobId, "preparing", { started_at: nowIso() });
     store.log(jobId, `Preparing isolated workspace for ${job.repo_full_name}#${job.pr_number} @ ${job.head_sha}`);
@@ -114,6 +143,17 @@ async function runJob(deps: PipelineDeps, jobId: number, signal: AbortSignal): P
     const token = deps.getInstallationToken
       ? await deps.getInstallationToken(job.installation_id)
       : await deps.github.getInstallationToken(job.installation_id);
+    const diff = await deps.github.getPullDiff(
+      job.installation_id,
+      job.repo_owner,
+      job.repo_name,
+      job.pr_number,
+      config.maxDiffBytes,
+    );
+    const diffBytes = Buffer.byteLength(diff, "utf8");
+    if (config.maxDiffBytes > 0 && diffBytes > config.maxDiffBytes) {
+      throw new Error(`diff exceeds MAX_DIFF_BYTES (${diffBytes} > ${config.maxDiffBytes})`);
+    }
     const workspace = await deps.checkout.prepare({
       jobId,
       installationId: job.installation_id,
@@ -125,7 +165,7 @@ async function runJob(deps: PipelineDeps, jobId: number, signal: AbortSignal): P
       token,
       secrets: token ? [token, ...githubKeySecrets(config)] : githubKeySecrets(config),
       signal,
-      fetchDiff: () => deps.github.getPullDiff(job.installation_id, job.repo_owner, job.repo_name, job.pr_number),
+      fetchDiff: async () => diff,
       metadata: {
         repo: job.repo_full_name,
         pr: job.pr_number,
@@ -138,7 +178,6 @@ async function runJob(deps: PipelineDeps, jobId: number, signal: AbortSignal): P
     store.log(jobId, `Checked out ${job.head_sha} into ${workspace.dir}`);
     throwIfStale(store, jobId, signal);
 
-    const diff = await readFile(workspace.diffPath, "utf8");
     const snapshot = await reconcileAndRoute(deps, job, workspace.repoDir, workspace.dir, diff, signal);
     throwIfStale(store, jobId, signal);
     await routeSpecialists(deps, job, diff, workspace.repoDir, [workspace.diffPath, workspace.metaPath], signal);

@@ -165,7 +165,22 @@ https://<your-host>/webhooks/github
 
 Use a webhook secret and put it in `GITHUB_WEBHOOK_SECRET`. Download the app private key and set either `GITHUB_APP_PRIVATE_KEY` (PEM, `\n` newlines are fine) or `GITHUB_APP_PRIVATE_KEY_PATH`. Set `GITHUB_APP_ID` to the numeric app id.
 
-Install the app on the repositories you want reviewed.
+Install the app on the repositories you want reviewed. Then set **numeric** GitHub allowlists on the Maomao host so a webhook from some other installation cannot enqueue work:
+
+```bash
+# User or organization REST numeric ids (installation.account.id). Comma-separated.
+ALLOWED_GITHUB_ACCOUNT_IDS=123456
+# Repository REST numeric ids (repository.id). Comma-separated.
+ALLOWED_GITHUB_REPOSITORY_IDS=987654321
+```
+
+Use **REST numeric IDs** (`123456`), not `owner/repo` names and not GraphQL node IDs (`U_kwDO…`, `R_kgDO…`). Find them from a signed webhook payload (`installation.account.id`, `repository.id`), from `GET /orgs/{org}` / `GET /users/{login}` / `GET /repos/{owner}/{repo}`, or from the GitHub UI. Prefer IDs over names: a rename or transfer must not change who Maomao will review.
+
+Empty allowlists mean “unrestricted on that axis” (local/dev); Maomao warns at startup if both are empty. A non-empty allowlist env var that contains junk (names, node IDs, zeros) **fails startup** instead of silently becoming unrestricted. The paste-URL path always requires a numeric `installation.account.id` from `GET /repos/{owner}/{repo}/installation`, even when both allowlists are empty.
+
+If you turn on an allowlist while jobs are already queued from before this schema existed, those rows have `NULL` GitHub IDs and the pipeline **fails them closed** (`unauthorized: missing account id`) rather than reviewing them.
+
+Valid signatures for an unauthorized installation or repository receive **`202`** with `{ "ok": true, "ignored": true, "reason": "..." }`. Maomao logs only `installation_id`, `repository_id`, and the reason — never the repository name, URL, or author. The operator paste-URL form (`POST /reviews`) uses the same policy and cannot bypass it.
 
 Events handled by default: `opened`, `reopened`, `synchronize`, `ready_for_review`. Draft PRs are ignored unless `REVIEW_DRAFTS=true`. Also subscribe the app to **Pull request review comment** so thread replies can bury or reopen findings.
 
@@ -196,7 +211,7 @@ Default specialist roles (override with `REVIEWER_ROLES`):
 - `api` — backwards compatibility
 - `maintainer` — merge blockers
 
-Each run has a timeout (`OPENCODE_TIMEOUT_MS`), retries (`OPENCODE_MAX_RETRIES`), and a concurrency cap (`OPENCODE_REVIEWER_CONCURRENCY`).
+Each run has a timeout (`OPENCODE_TIMEOUT_MS`), retries (`OPENCODE_MAX_RETRIES`, capped at 5), and a concurrency cap (`OPENCODE_REVIEWER_CONCURRENCY`). Oversized pull request diffs are aborted during download (`MAX_DIFF_BYTES`, default 1 MiB; `0` disables) using `Content-Length` and a streamed body cap, then rejected before checkout/OpenCode. Per-repository enqueue rate limits (`REPO_RATE_LIMIT_PER_WINDOW` / `REPO_RATE_WINDOW_MS`) sit in front of the job queue. The limiter is **in-memory and per process**: replicas do not share quota, a restart resets the window, and only **created** jobs consume a slot (duplicate deliveries do not). When the limiter is on, a signed payload that omits `repository.id` is ignored (`missing repository id`) rather than skipping the cap.
 
 ### Risk-aware specialist routing
 
@@ -265,7 +280,7 @@ npm run demo
 # MAOMAO_DEMO_EMPTY=1 npm run demo   # empty queue
 ```
 
-The home page also has an operator form to paste a GitHub pull request URL (`https://github.com/owner/repo/pull/123`). Maomao resolves that PR through the GitHub App installation, then enqueues through the **same** job store and queue as webhooks (same `(repo, PR, head SHA)` idempotency and stale handling). Drafts follow `REVIEW_DRAFTS`. This is for testing before webhooks are wired; it is behind the same session gate as the rest of the UI.
+The home page also has an operator form to paste a GitHub pull request URL (`https://github.com/owner/repo/pull/123`). Maomao resolves that PR through the GitHub App installation, applies the **same** account/repository allowlists and per-repository rate limit as webhooks, then enqueues through the **same** job store and queue (same `(repo, PR, head SHA)` idempotency and stale handling). Drafts follow `REVIEW_DRAFTS`. This is for testing before webhooks are wired; it is behind the same session gate as the rest of the UI.
 
 ### Session password (required in production)
 
@@ -286,6 +301,7 @@ If both variables are unset, the UI stays open so `npm run dev` on loopback stil
 
 Checked-out PR code is **untrusted input**. For MVP, reviewers are for static inspection:
 
+- GitHub App installations and repositories are authorized by **REST numeric ID allowlists** (`ALLOWED_GITHUB_ACCOUNT_IDS`, `ALLOWED_GITHUB_REPOSITORY_IDS`) after webhook signature verification and before enqueue, installation tokens, checkout, or OpenCode
 - git hooks are disabled (`core.hooksPath=/dev/null`); submodules are not fetched
 - installation tokens authenticate `git fetch` as HTTP Basic (`x-access-token`, not Bearer), then `origin` is removed so the token never stays in the workspace remote URL
 - GitHub private keys, webhook secrets, UI passwords, session secrets, and installation tokens are stripped from the OpenCode environment
@@ -357,7 +373,7 @@ The verifier only receives the prior finding plus nearby current file/diff conte
 
 ## Configuration reference
 
-See `.env.example`. Notable knobs: `REVIEW_DRAFTS`, `POST_EMPTY_REVIEW`, `JOB_CONCURRENCY`, `WORKSPACE_ROOT`, `DATABASE_PATH`, `MAX_INLINE_COMMENTS`, `PULL_REQUEST_ACTIONS`, `OPENCODE_VERIFIER_MODEL`, `RECONCILE_MIN_CONFIDENCE`, `UI_PASSWORD`, `UI_SESSION_SECRET`, `REVIEWER_ROUTING`, `POISON_ALERT_POLICY`.
+See `.env.example`. Notable knobs: `ALLOWED_GITHUB_ACCOUNT_IDS`, `ALLOWED_GITHUB_REPOSITORY_IDS`, `MAX_DIFF_BYTES`, `REPO_RATE_LIMIT_PER_WINDOW`, `REPO_RATE_WINDOW_MS`, `OPENCODE_MAX_RETRIES`, `REVIEW_DRAFTS`, `POST_EMPTY_REVIEW`, `JOB_CONCURRENCY`, `WORKSPACE_ROOT`, `DATABASE_PATH`, `MAX_INLINE_COMMENTS`, `PULL_REQUEST_ACTIONS`, `OPENCODE_VERIFIER_MODEL`, `RECONCILE_MIN_CONFIDENCE`, `UI_PASSWORD`, `UI_SESSION_SECRET`, `REVIEWER_ROUTING`, `POISON_ALERT_POLICY`.
 
 ## Follow-ups (not in this MVP)
 

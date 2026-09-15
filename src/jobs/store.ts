@@ -10,6 +10,8 @@ export interface JobRow {
   repo_owner: string;
   repo_name: string;
   installation_id: number;
+  github_account_id: number | null;
+  github_repository_id: number | null;
   pr_number: number;
   pr_title: string;
   pr_body: string;
@@ -134,6 +136,8 @@ export interface NewJobInput {
   repoOwner: string;
   repoName: string;
   installationId: number;
+  githubAccountId?: number;
+  githubRepositoryId?: number;
   prNumber: number;
   prTitle: string;
   prBody: string;
@@ -291,16 +295,18 @@ export class JobStore {
       const insert = this.db
         .prepare(
           `INSERT INTO jobs (
-            repo_full_name, repo_owner, repo_name, installation_id, pr_number,
+            repo_full_name, repo_owner, repo_name, installation_id, github_account_id, github_repository_id, pr_number,
             pr_title, pr_body, pr_html_url, pr_author, base_sha, head_sha, base_ref, head_ref,
             webhook_delivery_id, webhook_event, state, created_at, updated_at
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?)`,
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?)`,
         )
         .run(
           input.repoFullName,
           input.repoOwner,
           input.repoName,
           input.installationId,
+          input.githubAccountId ?? null,
+          input.githubRepositoryId ?? null,
           input.prNumber,
           input.prTitle,
           input.prBody,

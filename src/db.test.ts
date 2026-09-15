@@ -109,6 +109,8 @@ describe("usage schema migration", () => {
       expect(job?.aggregator_cost).toBe(0.01);
       expect(job?.aggregator_total_tokens).toBeNull();
       expect(job?.aggregator_usage_complete).toBeNull();
+      expect(job?.github_account_id).toBeNull();
+      expect(job?.github_repository_id).toBeNull();
       const run = store.listReviewerRuns(1)[0];
       expect(run?.prompt_tokens).toBe(4);
       expect(run?.total_tokens).toBeNull();

@@ -61,6 +61,8 @@ function migrate(db: SqliteDb): void {
       updated_at TEXT NOT NULL,
       started_at TEXT,
       finished_at TEXT,
+      github_account_id INTEGER,
+      github_repository_id INTEGER,
       routing_state TEXT NOT NULL DEFAULT 'queued',
       routing_mode TEXT,
       routing_profile TEXT,
@@ -218,6 +220,8 @@ function migrate(db: SqliteDb): void {
       created_at TEXT NOT NULL
     );
   `);
+  ensureColumn(db, "jobs", "github_account_id", "INTEGER");
+  ensureColumn(db, "jobs", "github_repository_id", "INTEGER");
   ensureColumn(db, "jobs", "reconciliation_json", "TEXT");
   ensureColumn(db, "jobs", "risk_profile", "TEXT");
   ensureColumn(db, "jobs", "risk_reason", "TEXT");

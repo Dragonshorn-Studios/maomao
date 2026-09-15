@@ -1,6 +1,6 @@
 import { readFileSync, existsSync } from "node:fs";
 import { resolve } from "node:path";
-import { parseBoolean, parseCsv, parseInteger, parseNumber, replaceEscapedNewlines } from "./util.js";
+import { clamp, parseBoolean, parseCsv, parseIdList, parseInteger, parseNumber, replaceEscapedNewlines } from "./util.js";
 import { DEFAULT_REVIEWER_ROLES, KNOWN_REVIEWER_ROLES, type ReviewerRole } from "./prompts.js";
 import { parseExternalTargetsJson, validateCommandText } from "./routing/escalation.js";
 import {
@@ -69,6 +69,15 @@ export interface Config {
   reconcileMinConfidence: number;
   uiPassword: string;
   uiSessionSecret: string;
+  /** GitHub user/org REST numeric ids (`installation.account.id`). Empty = unrestricted on this axis. */
+  allowedGithubAccountIds: number[];
+  /** GitHub repository REST numeric ids (`repository.id`). Empty = unrestricted on this axis. */
+  allowedGithubRepositoryIds: number[];
+  /** Max pull-request diff size in bytes; download aborts at this cap. `0` disables. */
+  maxDiffBytes: number;
+  /** Max created jobs per repository id inside `repoRateWindowMs` (per process). `0` disables. */
+  repoRateLimitPerWindow: number;
+  repoRateWindowMs: number;
 }
 
 const DEFAULT_ACTIONS: PullRequestAction[] = [
@@ -202,7 +211,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
       extraArgs: parseCsv(env.OPENCODE_EXTRA_ARGS).flatMap((arg) => arg.split(" ")).filter(Boolean),
       timeoutMs: parseInteger(env.OPENCODE_TIMEOUT_MS, 10 * 60 * 1000),
       verifierTimeoutMs: parseInteger(env.OPENCODE_VERIFIER_TIMEOUT_MS, 2 * 60 * 1000),
-      maxRetries: parseInteger(env.OPENCODE_MAX_RETRIES, 1),
+      maxRetries: clamp(parseInteger(env.OPENCODE_MAX_RETRIES, 1), 0, 5),
       reviewerConcurrency: Math.max(1, parseInteger(env.OPENCODE_REVIEWER_CONCURRENCY, 2)),
     },
     reviewers: loadReviewers(env),
@@ -216,6 +225,11 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     reconcileMinConfidence: clamp01(env.RECONCILE_MIN_CONFIDENCE, 0.7),
     uiPassword: env.UI_PASSWORD?.trim() || env.MAOMAO_UI_PASSWORD?.trim() || "",
     uiSessionSecret: env.UI_SESSION_SECRET?.trim() || env.MAOMAO_UI_SESSION_SECRET?.trim() || "",
+    allowedGithubAccountIds: parseIdList(env.ALLOWED_GITHUB_ACCOUNT_IDS, "ALLOWED_GITHUB_ACCOUNT_IDS"),
+    allowedGithubRepositoryIds: parseIdList(env.ALLOWED_GITHUB_REPOSITORY_IDS, "ALLOWED_GITHUB_REPOSITORY_IDS"),
+    maxDiffBytes: clamp(parseInteger(env.MAX_DIFF_BYTES, 1_048_576), 0, 50 * 1024 * 1024),
+    repoRateLimitPerWindow: Math.max(0, parseInteger(env.REPO_RATE_LIMIT_PER_WINDOW, 6)),
+    repoRateWindowMs: Math.max(0, parseInteger(env.REPO_RATE_WINDOW_MS, 60 * 60 * 1000)),
   };
 }
 

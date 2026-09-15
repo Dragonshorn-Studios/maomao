@@ -40,6 +40,11 @@ serve({ fetch: app.fetch, hostname: config.host, port: config.port }, (info) => 
       "UI_PASSWORD and UI_SESSION_SECRET are unset; / , /jobs, /api, and /events are open. Set both before exposing Maomao.",
     );
   }
+  if (config.allowedGithubAccountIds.length === 0 && config.allowedGithubRepositoryIds.length === 0) {
+    console.warn(
+      "ALLOWED_GITHUB_ACCOUNT_IDS and ALLOWED_GITHUB_REPOSITORY_IDS are empty; any reachable GitHub App installation can enqueue reviews. Set numeric account and/or repository IDs before exposing Maomao.",
+    );
+  }
 });
 
 function shutdown(signal: string) {

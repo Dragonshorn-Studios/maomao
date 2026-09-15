@@ -1,5 +1,5 @@
 import { createHmac } from "node:crypto";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { loadConfig } from "./config.js";
 import { openDb } from "./db.js";
 import { JobStore } from "./jobs/store.js";
@@ -42,8 +42,8 @@ function cookieFrom(response: Response): string {
 
 const openedPayload = JSON.stringify({
   action: "opened",
-  installation: { id: 1 },
-  repository: { full_name: "acme/widgets", name: "widgets", owner: { login: "acme" } },
+  installation: { id: 1, account: { id: 1001 } },
+  repository: { id: 2002, full_name: "acme/widgets", name: "widgets", owner: { login: "acme", id: 1001 } },
   pull_request: {
     number: 8,
     title: "Hello",
@@ -168,6 +168,8 @@ describe("HTTP app", () => {
 function fakePull(overrides: Partial<ResolvedPull> = {}): ResolvedPull {
   return {
     installationId: 42,
+    accountId: 1001,
+    repositoryId: 2002,
     repoOwner: "acme",
     repoName: "widgets",
     repoFullName: "acme/widgets",
@@ -185,10 +187,24 @@ function fakePull(overrides: Partial<ResolvedPull> = {}): ResolvedPull {
   };
 }
 
-function mockGithub(pull: ResolvedPull = fakePull()): ManualTriggerPort {
+function mockGithub(pull: ResolvedPull = fakePull()): ManualTriggerPort & {
+  calls: { installation: number; repository: number; pull: number };
+} {
+  const calls = { installation: 0, repository: 0, pull: 0 };
   return {
-    getRepoInstallationId: async () => pull.installationId,
-    getPull: async () => pull,
+    calls,
+    getRepoInstallation: async () => {
+      calls.installation += 1;
+      return { installationId: pull.installationId, accountId: pull.accountId };
+    },
+    getRepository: async () => {
+      calls.repository += 1;
+      return { id: pull.repositoryId };
+    },
+    getPull: async () => {
+      calls.pull += 1;
+      return pull;
+    },
   };
 }
 
@@ -205,6 +221,8 @@ describe("manual review trigger", () => {
     expect(enqueued).toEqual([1]);
     expect(store.getJob(1)?.webhook_event).toBe("manual.ui");
     expect(store.getJob(1)?.head_sha).toBe("head222head222head222head222head222head222");
+    expect(store.getJob(1)?.github_account_id).toBe(1001);
+    expect(store.getJob(1)?.github_repository_id).toBe(2002);
 
     const again = await app.request("/reviews", {
       method: "POST",
@@ -275,6 +293,111 @@ describe("manual review trigger", () => {
     expect(res.status).toBe(400);
     expect(await res.text()).toContain("draft");
     expect(enqueued).toEqual([]);
+  });
+
+  it("rejects unauthorized accounts without pulling the PR, enqueueing, or fetching the repository", async () => {
+    const github = mockGithub();
+    const { app, store, enqueued } = testApp({ ALLOWED_GITHUB_ACCOUNT_IDS: "1" }, github);
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const res = await app.request("/reviews", {
+      method: "POST",
+      headers: { "content-type": "application/x-www-form-urlencoded" },
+      body: "url=https%3A%2F%2Fgithub.com%2Facme%2Fwidgets%2Fpull%2F12",
+    });
+    expect(res.status).toBe(400);
+    expect(await res.text()).toContain("Not authorized");
+    expect(github.calls).toEqual({ installation: 1, repository: 0, pull: 0 });
+    expect(enqueued).toEqual([]);
+    expect(store.listJobs()).toEqual([]);
+    const log = String(warn.mock.calls[0]?.[0]);
+    expect(log).toContain("unauthorized account");
+    expect(log).not.toContain("acme/widgets");
+    warn.mockRestore();
+  });
+
+  it("rejects unauthorized repositories after the account check without pulling the PR", async () => {
+    const github = mockGithub();
+    const { app, store, enqueued } = testApp(
+      { ALLOWED_GITHUB_ACCOUNT_IDS: "1001", ALLOWED_GITHUB_REPOSITORY_IDS: "1" },
+      github,
+    );
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const res = await app.request("/reviews", {
+      method: "POST",
+      headers: { "content-type": "application/x-www-form-urlencoded" },
+      body: "url=https%3A%2F%2Fgithub.com%2Facme%2Fwidgets%2Fpull%2F12",
+    });
+    expect(res.status).toBe(400);
+    expect(await res.text()).toContain("Not authorized");
+    expect(github.calls.installation).toBe(1);
+    expect(github.calls.repository).toBe(1);
+    expect(github.calls.pull).toBe(0);
+    expect(enqueued).toEqual([]);
+    expect(store.listJobs()).toEqual([]);
+    warn.mockRestore();
+  });
+
+  it("does not enqueue webhook deliveries for unauthorized repository ids", async () => {
+    const { app, store, enqueued, webhookSecret } = testApp({ ALLOWED_GITHUB_REPOSITORY_IDS: "9" });
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const webhook = await app.request("/webhooks/github", {
+      method: "POST",
+      headers: {
+        "x-github-event": "pull_request",
+        "x-github-delivery": "abc",
+        "x-hub-signature-256": sign(webhookSecret, openedPayload),
+        "content-type": "application/json",
+      },
+      body: openedPayload,
+    });
+    expect(webhook.status).toBe(202);
+    expect(await webhook.json()).toEqual({ ok: true, ignored: true, reason: "unauthorized repository" });
+    expect(enqueued).toEqual([]);
+    expect(store.listJobs()).toEqual([]);
+    warn.mockRestore();
+  });
+
+  it("enqueues a manual review when numeric allowlists match", async () => {
+    const github = mockGithub();
+    const { app, enqueued } = testApp(
+      { ALLOWED_GITHUB_ACCOUNT_IDS: "1001", ALLOWED_GITHUB_REPOSITORY_IDS: "2002" },
+      github,
+    );
+    const res = await app.request("/reviews", {
+      method: "POST",
+      headers: { "content-type": "application/x-www-form-urlencoded" },
+      body: "url=https%3A%2F%2Fgithub.com%2Facme%2Fwidgets%2Fpull%2F12",
+    });
+    expect(res.status).toBe(302);
+    expect(enqueued).toEqual([1]);
+    expect(github.calls).toEqual({ installation: 1, repository: 1, pull: 1 });
+  });
+
+  it("does not spend a rate-limit slot when getPull fails", async () => {
+    const github = mockGithub();
+    const original = github.getPull;
+    let pulls = 0;
+    github.getPull = async (...args) => {
+      pulls += 1;
+      if (pulls === 1) throw new Error("GitHub unavailable");
+      return original(...args);
+    };
+    const { app, enqueued } = testApp({ REPO_RATE_LIMIT_PER_WINDOW: "1", REPO_RATE_WINDOW_MS: "60000" }, github);
+    const failed = await app.request("/reviews", {
+      method: "POST",
+      headers: { "content-type": "application/x-www-form-urlencoded" },
+      body: "url=https%3A%2F%2Fgithub.com%2Facme%2Fwidgets%2Fpull%2F12",
+    });
+    expect(failed.status).toBe(400);
+    expect(enqueued).toEqual([]);
+
+    const ok = await app.request("/reviews", {
+      method: "POST",
+      headers: { "content-type": "application/x-www-form-urlencoded" },
+      body: "url=https%3A%2F%2Fgithub.com%2Facme%2Fwidgets%2Fpull%2F12",
+    });
+    expect(ok.status).toBe(302);
+    expect(enqueued).toEqual([1]);
   });
 
   it("retries failed reviewers and enqueues the job", async () => {
