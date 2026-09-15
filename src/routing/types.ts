@@ -13,6 +13,16 @@ export const POISON_ALERT_POLICIES = [
 ] as const;
 export type PoisonAlertPolicy = (typeof POISON_ALERT_POLICIES)[number];
 
+/** Policies whose plan includes the internal laboratory re-check (manual only after @maomao escalate). */
+export const POLICIES_WITH_INTERNAL = [
+  "internal_only",
+  "internal_then_external",
+  "internal_and_external",
+] as const;
+
+/** Policies whose plan includes the external fire-and-forget dispatch (manual only after @maomao escalate). */
+export const POLICIES_WITH_EXTERNAL = ["external_only", "internal_then_external", "internal_and_external"] as const;
+
 export const EXTERNAL_DISPATCH_STATUSES = ["not_requested", "dispatching", "dispatched", "dispatch_failed"] as const;
 export type ExternalDispatchStatus = (typeof EXTERNAL_DISPATCH_STATUSES)[number];
 

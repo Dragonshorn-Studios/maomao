@@ -20,6 +20,7 @@ export type JobState =
   | "reconciling"
   | "reviewing"
   | "aggregating"
+  | "sniffing"
   | "publishing"
   | "completed"
   | "failed"

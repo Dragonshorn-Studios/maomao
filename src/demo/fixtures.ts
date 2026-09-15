@@ -83,6 +83,8 @@ export function seedDemoJobs(store: JobStore): void {
   seedRouting(store);
   seedFailed(store);
   seedClean(store);
+  seedPoisonInternalOnly(store);
+  seedPoisonSniffing(store);
 }
 
 function seedCompletedWithFindings(store: JobStore): void {
@@ -610,4 +612,113 @@ function seedClean(store: JobStore): void {
     routing_reviewers: JSON.stringify(["correctness"]),
     routing_signals: JSON.stringify({ families: ["docs"], hardRiskFamilies: [] }),
   });
+}
+
+function seedPoisonInternalOnly(store: JobStore): void {
+  const { job } = store.enqueue(
+    baseJob({
+      repoFullName: "novacorp/api",
+      repoOwner: "novacorp",
+      repoName: "api",
+      prNumber: 94,
+      prTitle: "Rotate billing webhook signing keys",
+      prHtmlUrl: "https://github.com/novacorp/api/pull/94",
+      headSha: "5afe5afe5afe5afe5afe5afe5afe5afe5afe5afe",
+      headRef: "rotate-keys",
+    }),
+  );
+  const started = ago(30);
+  for (const run of store.listReviewerRuns(job.id)) {
+    store.patchReviewer(run.id, {
+      state: "done",
+      attempt: 1,
+      model: MODEL,
+      provider: PROVIDER,
+      started_at: started,
+      finished_at: ago(6),
+      duration_ms: 88_000,
+      prompt_tokens: 2800,
+      completion_tokens: 210,
+      cost: 0.018,
+      normalized_json: clean(run.role),
+    });
+  }
+  store.setJobState(job.id, "completed", {
+    started_at: started,
+    finished_at: ago(5),
+    aggregator_state: "done",
+    aggregator_model: AGG_MODEL,
+    aggregator_provider: PROVIDER,
+    aggregator_total_tokens: 8100,
+    aggregator_cost: 0.09,
+    aggregator_normalized: JSON.stringify({ schema_version: 1, verdict: "comment", summary: "No suspicious findings after the laboratory re-check.", findings: [] }, null, 2),
+    routing_state: "done",
+    routing_mode: "hybrid",
+    routing_profile: "poison-alert",
+    routing_source: "hard-rule",
+    routing_reason: "Billing and secrets families changed",
+    routing_confidence: 0.91,
+    routing_signals: JSON.stringify({ families: ["billing", "secrets"], hardRiskFamilies: ["billing", "secrets"] }),
+    poison_alert_policy: "internal_only",
+    internal_escalation_state: "done",
+    internal_escalation_model: AGG_MODEL,
+    internal_escalation_provider: PROVIDER,
+    internal_escalation_total_tokens: 3900,
+    internal_escalation_cost: 0.07,
+    internal_escalation_alert_cleared: 1,
+    internal_escalation_reason: "internal pass cleared the alert",
+    external_dispatch_status: "not_requested",
+  });
+  store.log(job.id, "Internal poison-alert pass done: alert_cleared=1 findings=0");
+}
+
+function seedPoisonSniffing(store: JobStore): void {
+  const { job } = store.enqueue(
+    baseJob({
+      repoFullName: "novacorp/api",
+      repoOwner: "novacorp",
+      repoName: "api",
+      prNumber: 96,
+      prTitle: "Add deferred payment capture endpoint",
+      prHtmlUrl: "https://github.com/novacorp/api/pull/96",
+      headSha: "6060606060606060606060606060606060606060",
+      headRef: "deferred-capture",
+    }),
+  );
+  const started = ago(9);
+  for (const run of store.listReviewerRuns(job.id)) {
+    store.patchReviewer(run.id, {
+      state: "done",
+      attempt: 1,
+      model: MODEL,
+      provider: PROVIDER,
+      started_at: started,
+      finished_at: ago(2),
+      duration_ms: 91_000,
+      prompt_tokens: 3200,
+      completion_tokens: 260,
+      cost: 0.024,
+      normalized_json: clean(run.role),
+    });
+  }
+  store.setJobState(job.id, "sniffing", {
+    started_at: started,
+    aggregator_state: "done",
+    aggregator_model: AGG_MODEL,
+    aggregator_provider: PROVIDER,
+    aggregator_total_tokens: 7600,
+    aggregator_cost: 0.08,
+    routing_state: "done",
+    routing_mode: "hybrid",
+    routing_profile: "poison-alert",
+    routing_source: "hard-rule",
+    routing_reason: "Payments flow changed under high risk",
+    routing_confidence: 0.93,
+    routing_signals: JSON.stringify({ families: ["billing"], hardRiskFamilies: ["billing"] }),
+    poison_alert_policy: "internal_then_external",
+    internal_escalation_state: "running",
+    internal_escalation_model: AGG_MODEL,
+    internal_escalation_provider: PROVIDER,
+  });
+  store.log(job.id, `Internal poison-alert pass model=${AGG_MODEL}`);
 }

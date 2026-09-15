@@ -1011,6 +1011,11 @@ describe("retryFailedReviewers", () => {
     store.patchReviewer(run.id, { state: "failed" });
     store.setJobState(created.job.id, "reviewing");
     expect(store.retryFailedReviewers(created.job.id).ok).toBe(false);
+    // A sniffing (laboratory re-check) job is mid-flight: retries must be refused, not reset.
+    store.setJobState(created.job.id, "sniffing");
+    const sniffing = store.retryFailedReviewers(created.job.id);
+    expect(sniffing.ok).toBe(false);
+    if (!sniffing.ok) expect(sniffing.error).toBe("job is still running");
     store.setJobState(created.job.id, "failed", { failure_reason: "x" });
     store.setJobState(created.job.id, "stale");
     expect(store.retryFailedReviewers(created.job.id).ok).toBe(false);
@@ -1497,6 +1502,7 @@ describe("pre-review routing and poison-alert", () => {
     const created = store.enqueue({ ...jobInput("lab"), reviewers: [] });
     let comments = 0;
     let labCalls = 0;
+    const stateDuringLab: string[] = [];
     await createPipeline({
       config,
       store,
@@ -1514,6 +1520,7 @@ describe("pre-review routing and poison-alert", () => {
         async run(input) {
           if (input.prompt.includes("laboratory re-check")) {
             labCalls += 1;
+            stateDuringLab.push(store.getJob(created.job.id)?.state ?? "unknown");
             expect(input.model).toBe("test/strong");
             expect(input.model).not.toMatch(/glm-5\.3/i);
             const text = JSON.stringify({
@@ -1538,7 +1545,10 @@ describe("pre-review routing and poison-alert", () => {
     }).run(created.job.id);
     expect(labCalls).toBe(1);
     expect(comments).toBe(0);
+    // The laboratory pass runs as its own "sniffing" stage, not inside "aggregating".
+    expect(stateDuringLab).toEqual(["sniffing"]);
     const job = store.getJob(created.job.id);
+    expect(job?.state).toBe("completed");
     expect(job?.internal_escalation_state).toBe("done");
     expect(job?.internal_escalation_alert_cleared).toBe(1);
     expect(job?.external_dispatch_status).toBe("not_requested");
