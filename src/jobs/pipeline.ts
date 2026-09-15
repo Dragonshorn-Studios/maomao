@@ -1,4 +1,3 @@
-import { readFile } from "node:fs/promises";
 import type { Config } from "../config.js";
 import type { JobStore, JobRow, ReviewerRunRow } from "./store.js";
 import type { GithubPort } from "../github/client.js";
@@ -179,7 +178,6 @@ async function runJob(deps: PipelineDeps, jobId: number, signal: AbortSignal): P
     store.log(jobId, `Checked out ${job.head_sha} into ${workspace.dir}`);
     throwIfStale(store, jobId, signal);
 
-    const diff = await readFile(workspace.diffPath, "utf8");
     const snapshot = await reconcileAndRoute(deps, job, workspace.repoDir, workspace.dir, diff, signal);
     throwIfStale(store, jobId, signal);
     await routeSpecialists(deps, job, diff, workspace.repoDir, [workspace.diffPath, workspace.metaPath], signal);
