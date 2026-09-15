@@ -4,6 +4,7 @@ import { seedDemoJobs } from "./demo/fixtures.js";
 import { JobStore } from "./jobs/store.js";
 import { THEME_CSS } from "./ui/theme.js";
 import { renderHome, renderJob, renderLogin } from "./ui/pages.js";
+import { settledFindingsCopy } from "./ui/copy.js";
 import { formatCost, formatTokens, jobMetrics } from "./ui/metrics.js";
 
 function seededStore() {
@@ -25,6 +26,8 @@ describe("theme tokens", () => {
     expect(THEME_CSS).toContain("--working: var(--plum)");
     expect(THEME_CSS).not.toContain("#6ecad6");
     expect(THEME_CSS).toContain(".finding.is-unconfirmed");
+    expect(THEME_CSS).toContain("details.finding");
+    expect(THEME_CSS).toContain(".settled-findings-label");
     expect(THEME_CSS).toContain("@keyframes spin");
     expect(THEME_CSS).toContain(".section-head");
     expect(THEME_CSS).toMatch(/\.tick\.running[\s\S]*var\(--working\)/);
@@ -126,6 +129,38 @@ describe("monitoring pages", () => {
     expect(html).toContain("anthropic/claude-opus-4-6");
     expect(html).toContain("dispatched (notification accepted)");
     expect(html).toContain("does not track whether an external reviewer finished");
+  });
+
+  it("collapses buried and resolved findings under a compact summary", () => {
+    const store = seededStore();
+    const job = store.listJobs(20).find((row) => row.pr_number === 412);
+    expect(job).toBeTruthy();
+    const html = renderJob(job!, store.listReviewerRuns(job!.id), store.listLogs(job!.id), {
+      prFindings: store.listFindings(job!.repo_full_name, job!.pr_number),
+    });
+    const findingsSection = html.slice(html.indexOf('id="findings"'));
+    expect(findingsSection).toContain("Session cookie Secure flag can be dropped");
+    expect(findingsSection).toContain("Finding requires attention");
+    expect(findingsSection).toMatch(/<article class="finding(?![^"]*(?:is-buried|is-resolved))/);
+    expect(findingsSection).toContain("<details class=\"finding is-buried");
+    expect(findingsSection).toContain("<details class=\"finding is-resolved");
+    expect(findingsSection).toContain("<summary>");
+    expect(findingsSection).not.toMatch(/<details[^>]*\sopen[\s>]/);
+    expect(findingsSection).toContain("Dismissed");
+    expect(findingsSection).toContain("Production cookie note omits the forwarded-proto caveat");
+    expect(findingsSection).toContain("Buried by octocat via @maomao bury");
+    expect(findingsSection).toContain("Intentionally ignored, not marked fixed");
+    expect(findingsSection).toContain("Resolved");
+    expect(findingsSection).toContain("null deref after fix");
+    expect(findingsSection).toContain("1 buried, 1 resolved");
+    expect(findingsSection).toContain("expand a row for details");
+    expect(html).not.toContain("Finding ledger");
+  });
+
+  it("summarizes collapsed buried and resolved rows", () => {
+    expect(settledFindingsCopy(1, 1)).toBe("1 buried, 1 resolved — expand a row for details");
+    expect(settledFindingsCopy(2, 0)).toBe("2 buried — expand a row for details");
+    expect(settledFindingsCopy(0, 3)).toBe("3 resolved — expand a row for details");
   });
 
   it("marks specialist findings unconfirmed until the aggregator finishes", () => {

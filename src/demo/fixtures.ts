@@ -1,5 +1,6 @@
 import type { ReviewerRole } from "../prompts.js";
 import { DEFAULT_REVIEWER_ROLES } from "../prompts.js";
+import { fingerprintFinding } from "../findings/identity.js";
 import type { JobStore, NewJobInput } from "../jobs/store.js";
 
 const MODEL = "anthropic/claude-sonnet-4-5";
@@ -299,6 +300,47 @@ function seedCompletedWithFindings(store: JobStore): void {
   store.log(job.id, "Checked out c0ffee1a2b3c4d5e6f708192a3b4c5d6e7f8091a");
   store.log(job.id, "6 reviewer runs finished");
   store.log(job.id, "Aggregator posted COMMENT review 424242");
+  seedSettledFindingsForCompletedJob(store, job.repo_full_name, job.pr_number, job.head_sha);
+}
+
+function seedSettledFindingsForCompletedJob(
+  store: JobStore,
+  repoFullName: string,
+  prNumber: number,
+  reviewedSha: string,
+): void {
+  const docs = {
+    category: "docs",
+    file: "README.md",
+    summary: "Production cookie note omits the forwarded-proto caveat",
+    body: "A one-line README fix would prevent operators from assuming any TLS terminator is sufficient.",
+  };
+  store.dismissFinding({
+    repoFullName,
+    prNumber,
+    fingerprint: fingerprintFinding(docs),
+    actor: "octocat",
+    command: "bury",
+    reviewedSha,
+    summary: docs.summary,
+    path: docs.file,
+    line: 147,
+    category: docs.category,
+    severity: "low",
+    body: docs.body,
+  });
+  store.upsertFinding({
+    repoFullName,
+    prNumber,
+    fingerprint: "resolvedfid00001",
+    status: "resolved",
+    reviewedSha,
+    summary: "null deref after fix",
+    currentPath: "src/session.ts",
+    currentLine: 18,
+    category: "correctness",
+    severity: "medium",
+  });
 }
 
 function seedStalePredecessor(store: JobStore): void {

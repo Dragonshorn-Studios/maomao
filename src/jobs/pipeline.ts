@@ -2,7 +2,7 @@ import { readFile } from "node:fs/promises";
 import type { Config } from "../config.js";
 import type { JobStore, JobRow, ReviewerRunRow } from "./store.js";
 import type { GithubPort } from "../github/client.js";
-import { buildReviewBody, findExistingReview, toInlineComments } from "../github/client.js";
+import { buildReviewBody, findExistingReview, toInlineComments, inlineCommentFingerprints } from "../github/client.js";
 import type { CheckoutPort } from "../checkout.js";
 import {
   aggregatorUsagePersistence,
@@ -21,6 +21,10 @@ import {
   type AggregatorResult,
   type ReviewerResult,
 } from "../schema.js";
+import { classifyPriorFindings, collectPriorFindings, findingsForPublish } from "../findings/reconcile.js";
+import { applyReconciliationThreads, persistClassifications, persistThreadsAsFindings } from "../findings/apply.js";
+import type { ReconciliationSnapshot } from "../findings/types.js";
+import { currentFindingsForRisk } from "../findings/types.js";
 import { mapLimit, nowIso, sleep, truncate } from "../util.js";
 import { ZodError } from "zod";
 import { scanRoutingSignals, relevantDiffHunks } from "../routing/signals.js";
@@ -134,7 +138,19 @@ async function runJob(deps: PipelineDeps, jobId: number, signal: AbortSignal): P
     throwIfStale(store, jobId, signal);
 
     const diff = await readFile(workspace.diffPath, "utf8");
+    const snapshot = await reconcileAndRoute(deps, job, workspace.repoDir, workspace.dir, diff, signal);
+    throwIfStale(store, jobId, signal);
     await routeSpecialists(deps, job, diff, workspace.repoDir, [workspace.diffPath, workspace.metaPath], signal);
+    const routed = store.getJob(jobId);
+    const currentFindings = currentFindingsForRisk(snapshot.items);
+    store.patchJob(jobId, {
+      risk_profile: routed?.routing_profile ?? null,
+      risk_reason: routed?.routing_reason ?? null,
+    });
+    store.log(
+      jobId,
+      `Risk route: ${routed?.routing_profile ?? "diagnosis"} — ${routed?.routing_reason ?? ""}; current findings=${currentFindings.length} (resolved/dismissed excluded)`,
+    );
     throwIfStale(store, jobId, signal);
 
     store.setJobState(jobId, "reviewing");
@@ -165,9 +181,9 @@ async function runJob(deps: PipelineDeps, jobId: number, signal: AbortSignal): P
     let aggregated = await runAggregator(deps, job, parsedReviewers, workspace.repoDir, [workspace.diffPath], signal);
     throwIfStale(store, jobId, signal);
 
-    const routed = store.getJob(jobId);
-    if (routed && shouldRunInternal(config.poisonAlert.policy, config.poisonAlert.internal.enabled, routed.routing_profile ?? "")) {
-      aggregated = await runInternalEscalation(deps, routed, aggregated, diff, workspace.repoDir, signal);
+    const afterReviewers = store.getJob(jobId);
+    if (afterReviewers && shouldRunInternal(config.poisonAlert.policy, config.poisonAlert.internal.enabled, afterReviewers.routing_profile ?? "")) {
+      aggregated = await runInternalEscalation(deps, afterReviewers, aggregated, diff, workspace.repoDir, signal);
       throwIfStale(store, jobId, signal);
     }
 
@@ -178,15 +194,50 @@ async function runJob(deps: PipelineDeps, jobId: number, signal: AbortSignal): P
     store.patchJob(jobId, { aggregator_normalized: JSON.stringify(aggregated, null, 2) });
 
     store.setJobState(jobId, "publishing", { aggregator_state: "done" });
-    const posted = await publishReview(deps, job, aggregated, parsedReviewers.length);
+    const posted = await publishReview(deps, job, aggregated, parsedReviewers.length, snapshot);
     const afterPublish = store.getJob(jobId) ?? job;
     if (posted) {
       store.patchJob(jobId, { github_review_id: posted.id, github_review_url: posted.url });
     }
     store.log(jobId, posted ? `Published COMMENT review ${posted.id}` : "No GitHub review posted");
+    if (store.isStale(jobId)) {
+      throw new Error("stale");
+    }
+    persistClassifications(store, job, snapshot.items);
+    try {
+      const threads = await deps.github.listReviewThreads(
+        job.installation_id,
+        job.repo_owner,
+        job.repo_name,
+        job.pr_number,
+      );
+      persistThreadsAsFindings({
+        store,
+        job,
+        threads,
+        publishedFingerprints: posted?.postedFingerprints ?? [],
+      });
+    } catch (error) {
+      store.log(jobId, `Could not refresh finding thread ids: ${formatError(error)}`, "warn");
+    }
+    try {
+      const applied = await applyReconciliationThreads({
+        github: deps.github,
+        job,
+        snapshot,
+        postedFingerprints: posted?.postedFingerprints ?? [],
+      });
+      if (applied.resolved.length > 0) {
+        store.log(
+          jobId,
+          `Resolved ${applied.resolved.length} prior thread(s) after successful review (${applied.resolved.join(", ")})`,
+        );
+      }
+    } catch (error) {
+      store.log(jobId, `Thread resolve deferred: ${formatError(error)}`, "warn");
+    }
 
     await dispatchExternalEscalation(deps, store.getJob(jobId) ?? afterPublish, aggregated);
-
     store.setJobState(jobId, "completed", {
       github_review_id: posted?.id ?? store.getJob(jobId)?.github_review_id ?? null,
       github_review_url: posted?.url ?? store.getJob(jobId)?.github_review_url ?? null,
@@ -237,6 +288,8 @@ function persistDecision(store: JobStore, jobId: number, decision: RoutingDecisi
     routing_reviewers: JSON.stringify(decision.reviewers),
     routing_source: decision.source,
     routing_raw: decision.modelRaw ? truncate(decision.modelRaw, 20_000) : extra.routing_raw,
+    risk_profile: decision.profile,
+    risk_reason: decision.reason,
     ...extra,
   });
 }
@@ -362,6 +415,50 @@ async function routeSpecialists(
     job.id,
     `Routed profile=${decision.profile} source=${decision.source} reviewers=${decision.reviewers.join(", ")} reason=${decision.reason}`,
   );
+}
+
+async function reconcileAndRoute(
+  deps: PipelineDeps,
+  job: JobRow,
+  repoDir: string,
+  workspaceDir: string,
+  diff: string,
+  signal: AbortSignal,
+): Promise<ReconciliationSnapshot> {
+  deps.store.setJobState(job.id, "reconciling");
+  const threads = await deps.github.listReviewThreads(
+    job.installation_id,
+    job.repo_owner,
+    job.repo_name,
+    job.pr_number,
+  );
+  const stored = deps.store.listFindings(job.repo_full_name, job.pr_number);
+  const priors = collectPriorFindings({ threads, stored });
+  deps.store.log(
+    job.id,
+    `Reconciling ${priors.length} prior finding(s) for ${job.repo_full_name}#${job.pr_number} @ ${job.head_sha}`,
+  );
+  const items = await classifyPriorFindings({
+    config: deps.config,
+    opencode: deps.opencode,
+    job,
+    repoDir,
+    diff,
+    workspaceDir,
+    priors,
+    signal,
+  });
+  const snapshot: ReconciliationSnapshot = { headSha: job.head_sha, items };
+  for (const item of items) {
+    deps.store.log(
+      job.id,
+      `Finding ${item.fingerprint} classified ${item.status} (confidence=${item.confidence}): ${item.reason}`,
+    );
+  }
+  deps.store.patchJob(job.id, {
+    reconciliation_json: JSON.stringify(snapshot),
+  });
+  return snapshot;
 }
 
 async function runReviewer(
@@ -635,18 +732,25 @@ async function publishReview(
   job: JobRow,
   aggregated: AggregatorResult,
   reviewerCount: number,
-): Promise<{ id: string; url: string } | undefined> {
+  snapshot: ReconciliationSnapshot,
+): Promise<{ id: string; url: string; postedFingerprints: string[] } | undefined> {
   if (deps.store.isStale(job.id)) return undefined;
 
   const existing = await deps.github.listReviews(job.installation_id, job.repo_owner, job.repo_name, job.pr_number);
   const already = findExistingReview(existing, job.head_sha);
   if (already) {
     deps.store.log(job.id, `Review already exists for ${job.head_sha}; skipping publish`);
-    return already;
+    return { ...already, postedFingerprints: [] };
   }
 
-  const findingsCount = aggregated.findings.length;
-  if (findingsCount === 0 && aggregated.verdict === "clean" && !deps.config.postEmptyReview) {
+  const publishable = findingsForPublish(aggregated.findings, snapshot);
+  const dismissedCount = snapshot.items.filter((item) => item.status === "dismissed").length;
+  if (dismissedCount > 0) {
+    deps.store.log(job.id, `Omitting ${dismissedCount} dismissed finding(s) from this review`);
+  }
+  const findingsCount = publishable.length;
+  const verdict = findingsCount === 0 && aggregated.verdict === "clean" ? "clean" : aggregated.verdict;
+  if (findingsCount === 0 && verdict === "clean" && !deps.config.postEmptyReview) {
     deps.store.log(job.id, "Clean review with no findings; POST_EMPTY_REVIEW is false, not posting");
     return undefined;
   }
@@ -657,8 +761,9 @@ async function publishReview(
     findingsCount,
     reviewerCount,
   });
-  const comments = toInlineComments(aggregated.findings, deps.config.maxInlineComments);
-  return deps.github.createCommentReview({
+  const comments = toInlineComments(publishable, deps.config.maxInlineComments, job.head_sha);
+  const postedFingerprints = inlineCommentFingerprints(comments);
+  const posted = await deps.github.createCommentReview({
     installationId: job.installation_id,
     owner: job.repo_owner,
     repo: job.repo_name,
@@ -667,6 +772,7 @@ async function publishReview(
     body,
     comments,
   });
+  return { ...posted, postedFingerprints };
 }
 
 async function dispatchExternalEscalation(

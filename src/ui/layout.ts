@@ -1,4 +1,5 @@
 import { escapeHtml } from "../util.js";
+import type { FindingRow } from "../findings/types.js";
 import { PRODUCT_TAGLINE } from "./copy.js";
 import { brandMark } from "./glyphs.js";
 import { THEME_HREF } from "./theme.js";
@@ -9,6 +10,7 @@ export interface PageOptions {
   notice?: string;
   error?: string;
   reviewUrl?: string;
+  prFindings?: FindingRow[];
 }
 
 const APPEARANCE_BOOT = `

@@ -4,7 +4,7 @@ import { deleteCookie, getCookie, setCookie } from "hono/cookie";
 import type { Config } from "./config.js";
 import type { JobStore } from "./jobs/store.js";
 import { handleGithubWebhook } from "./github/webhooks.js";
-import type { ManualTriggerPort } from "./github/client.js";
+import type { ManualTriggerPort, GithubPort } from "./github/client.js";
 import { parseGithubPullUrl, PullUrlError } from "./github/pull-url.js";
 import { dispatchEnqueue, enqueuePullJob } from "./jobs/enqueue.js";
 import { subscribe } from "./events.js";
@@ -27,7 +27,7 @@ export interface ServerContext {
   store: JobStore;
   queue: JobQueue;
   startedAt: number;
-  github?: ManualTriggerPort;
+  github?: ManualTriggerPort & Partial<GithubPort>;
 }
 
 export function createApp(ctx: ServerContext): Hono {
@@ -97,6 +97,7 @@ export function createApp(ctx: ServerContext): Hono {
     const result = await handleGithubWebhook({
       config: ctx.config,
       store: ctx.store,
+      github: isReviewGithub(ctx.github) ? ctx.github : undefined,
       request: {
         event: c.req.header("x-github-event") ?? "",
         deliveryId: c.req.header("x-github-delivery") ?? "",
@@ -186,6 +187,7 @@ export function createApp(ctx: ServerContext): Hono {
       renderJob(job, ctx.store.listReviewerRuns(id), ctx.store.listLogs(id), {
         ...pageOpts,
         notice: noticeText(c.req.query("notice"), job.repo_full_name, job.pr_number, job.head_sha),
+        prFindings: ctx.store.listFindings(job.repo_full_name, job.pr_number),
       }),
     );
   });
@@ -213,6 +215,7 @@ export function createApp(ctx: ServerContext): Hono {
       job,
       reviewers: ctx.store.listReviewerRuns(id),
       logs: ctx.store.listLogs(id),
+      findings: ctx.store.listFindings(job.repo_full_name, job.pr_number),
       ...ctx.store.jobSummary(job),
     });
   });
@@ -268,10 +271,20 @@ function retryJob(c: Context, ctx: ServerContext, jobId: number, runId?: number)
       renderJob(job, ctx.store.listReviewerRuns(jobId), ctx.store.listLogs(jobId), {
         showLogout: uiGateEnabled(ctx.config.uiPassword, ctx.config.uiSessionSecret),
         error: result.error,
+        prFindings: ctx.store.listFindings(job.repo_full_name, job.pr_number),
       }),
       400,
     );
   }
   ctx.queue.enqueue(jobId);
   return c.redirect(`/jobs/${jobId}?notice=retry`, 302);
+}
+
+function isReviewGithub(github: (ManualTriggerPort & Partial<GithubPort>) | undefined): github is ManualTriggerPort & GithubPort {
+  return Boolean(
+    github &&
+      typeof github.listReviewThreads === "function" &&
+      typeof github.resolveReviewThread === "function" &&
+      typeof github.getCollaboratorPermission === "function",
+  );
 }

@@ -11,6 +11,10 @@ GitHub pull_request webhook
         ↓
 checkout exact PR head SHA into an isolated workspace
         ↓
+reconcile prior Maomao findings (verify / bury) on this SHA
+        ↓
+risk route (poison-alert insertion point; currently the configured reviewer set)
+        ↓
 spawn N OpenCode reviewer runs (bounded concurrency)
         ↓
 validate structured JSON + persist raw output
@@ -30,7 +34,7 @@ The service is a single Node.js process:
 - **git fetch** of `refs/pull/<n>/head` plus the job SHA into a per-job workspace
 - **OpenCode CLI** spawned as a worker (`opencode run`), not forked or vendored
 
-Job states: `queued` → `preparing` → `reviewing` → `aggregating` → `publishing` → `completed`, plus `failed`, `stale`, `cancelled`.
+Job states: `queued` → `preparing` → `reconciling` → `reviewing` → `aggregating` → `publishing` → `completed`, plus `failed`, `stale`, `cancelled`.
 
 Every job is unique on `(repository, PR number, head SHA)`. A new `synchronize` SHA creates a new job and marks the previous one stale. Stale jobs never publish a review for the new commit.
 
@@ -153,7 +157,7 @@ Create a GitHub App for your user or org. Maomao needs **least privilege**:
 
 Do **not** grant Contents write, Actions write, Administration, Secrets, merge, or branch push. The strongest action Maomao can take is posting a pull request review.
 
-Subscribe the app to the **Pull request** webhook event. If you use `@maomao escalate` in `manual` poison-alert policy, also subscribe to **Issue comment**. Set the webhook URL to:
+Subscribe the app to **Pull request**, **Pull request review comment**, and **Issue comment** (for `@maomao escalate` in `manual` poison-alert policy). Set the webhook URL to:
 
 ```text
 https://<your-host>/webhooks/github
@@ -163,7 +167,7 @@ Use a webhook secret and put it in `GITHUB_WEBHOOK_SECRET`. Download the app pri
 
 Install the app on the repositories you want reviewed.
 
-Events handled by default: `opened`, `reopened`, `synchronize`, `ready_for_review`. Draft PRs are ignored unless `REVIEW_DRAFTS=true`.
+Events handled by default: `opened`, `reopened`, `synchronize`, `ready_for_review`. Draft PRs are ignored unless `REVIEW_DRAFTS=true`. Also subscribe the app to **Pull request review comment** so thread replies can bury or reopen findings.
 
 ## Configure OpenCode models
 
@@ -312,10 +316,48 @@ OpenCode is still a powerful process. Keep Maomao on a locked-down host and do n
 - No findings → silent unless `POST_EMPTY_REVIEW=true`
 - **Never** `APPROVE` or `REQUEST_CHANGES` in this version
 - Duplicate webhook deliveries reuse the existing job; publication also looks for a `<!-- maomao-review sha=... -->` marker
+- Inline comments include `<!-- maomao-finding id=<fingerprint> sha=<reviewed-sha> -->` so later reviews can reconcile the same finding after the line moves
+
+## Finding reconciliation and `@maomao bury`
+
+When a later commit arrives, Maomao fetches its own **unresolved** review threads, applies any human overrides, and re-checks remaining findings against the **current head SHA** with a narrow verifier. Only then does it risk-route (the `poison-alert` insertion point) and run specialists.
+
+Classifications:
+
+| Status | Meaning | GitHub thread |
+| --- | --- | --- |
+| `resolved` | Verifier has enough evidence the problem is gone | Resolved after the job succeeds |
+| `still_valid` | Same problem still applies | Left open |
+| `moved` | Same problem at a new path/line | New inline comment, then the old thread is resolved |
+| `uncertain` | Not enough evidence to close safely | Left open |
+| `dismissed` | An authorized human buried it | Resolved when the command is accepted |
+
+Model absence is non-evidence: a finding disappearing from a new generative review is **not** by itself proof it was fixed. Failed or stale jobs never close existing threads.
+
+### Manual overrides
+
+Reply **inside a Maomao review thread** (not on a human comment, and not as a reaction):
+
+| Comment body | Effect |
+| --- | --- |
+| `@maomao ignore` | Dismiss this finding |
+| `@maomao bury` | Same as ignore |
+| `🌱` (nothing else in the comment) | Same as ignore |
+| `@maomao reopen` | Clear the dismissal and unresolve the thread when GitHub allows it |
+
+`dismissed` means “acknowledged and intentionally ignored”, not “fixed”. `resolved` and `dismissed` stay distinct in SQLite, logs, and the job Findings list. Open findings stay full cards; buried and resolved rows collapse under a muted count until you expand them (status badge, location, and title stay visible in the summary).
+
+Dismissal is scoped to that **finding fingerprint on that pull request**, not the whole repository. The same fingerprint will not be re-reported on later SHAs of that PR unless someone `@maomao reopen`s it.
+
+Who may issue commands: repository `write`, `maintain`, or `admin`. A personal-repository `OWNER` association is accepted only when the collaborator API reports `none` (GitHub 404s some owners); it never upgrades an explicit `read`/`triage` permission. Org members who 404 the collaborator API are ignored (fail closed). Webhook signatures are verified. Duplicate deliveries and repeated commands are no-ops.
+
+The fingerprint is based on normalized path, category, and code identifiers (camelCase / snake_case) in the finding text — not solely the line number. When no code identifiers are present it falls back to normalized summary wording.
+
+The verifier only receives the prior finding plus nearby current file/diff context, and it finishes before risk routing so a buried or already-fixed finding cannot inflate the next review into `poison-alert`.
 
 ## Configuration reference
 
-See `.env.example`. Notable knobs: `REVIEW_DRAFTS`, `POST_EMPTY_REVIEW`, `JOB_CONCURRENCY`, `WORKSPACE_ROOT`, `DATABASE_PATH`, `MAX_INLINE_COMMENTS`, `PULL_REQUEST_ACTIONS`, `UI_PASSWORD`, `UI_SESSION_SECRET`, `REVIEWER_ROUTING`, `POISON_ALERT_POLICY`.
+See `.env.example`. Notable knobs: `REVIEW_DRAFTS`, `POST_EMPTY_REVIEW`, `JOB_CONCURRENCY`, `WORKSPACE_ROOT`, `DATABASE_PATH`, `MAX_INLINE_COMMENTS`, `PULL_REQUEST_ACTIONS`, `OPENCODE_VERIFIER_MODEL`, `RECONCILE_MIN_CONFIDENCE`, `UI_PASSWORD`, `UI_SESSION_SECRET`, `REVIEWER_ROUTING`, `POISON_ALERT_POLICY`.
 
 ## Follow-ups (not in this MVP)
 
@@ -325,7 +367,6 @@ See `.env.example`. Notable knobs: `REVIEW_DRAFTS`, `POST_EMPTY_REVIEW`, `JOB_CO
 - Resume a reviewer run mid-job instead of re-running after process restart
 - Forges other than GitHub
 - Marller registration as a trusted review source
-- Finding lifecycle / bury commands across revisions
 
 ## License
 

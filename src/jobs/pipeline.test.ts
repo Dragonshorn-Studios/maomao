@@ -7,6 +7,7 @@ import { openDb } from "../db.js";
 import type { GithubPort } from "../github/client.js";
 import type { CheckoutPort } from "../checkout.js";
 import type { OpenCodePort } from "../opencode/parse.js";
+import { findingMarker, fingerprintFinding } from "../findings/identity.js";
 import { createPipeline } from "./pipeline.js";
 import { JobStore } from "./store.js";
 
@@ -24,6 +25,20 @@ async function fixtureCheckout(): Promise<CheckoutPort> {
       return { dir, repoDir, diffPath, metaPath };
     },
     async cleanup() {},
+  };
+}
+
+function githubPort(overrides: Partial<GithubPort> = {}): GithubPort {
+  return {
+    getInstallationToken: async () => "token",
+    getPullDiff: async () => "diff --git a/example.ts b/example.ts\n",
+    listReviews: async () => [],
+    createCommentReview: async () => ({ id: "99", url: "https://example.test/reviews/99" }),
+    listReviewThreads: async () => [],
+    resolveReviewThread: async () => {},
+    unresolveReviewThread: async () => {},
+    getCollaboratorPermission: async () => "none",
+    ...overrides,
   };
 }
 
@@ -88,7 +103,7 @@ describe("pipeline", () => {
     });
     const store = new JobStore(openDb(":memory:"));
     const posted: { event?: string; commitId: string; body: string }[] = [];
-    const github: GithubPort = {
+    const github: GithubPort = githubPort({
       getInstallationToken: async () => "token",
       getPullDiff: async () => "diff --git a/example.ts b/example.ts\n",
       listReviews: async () => [],
@@ -97,7 +112,7 @@ describe("pipeline", () => {
         expect(input.body).toContain("maomao-review");
         return { id: "99", url: "https://example.test/reviews/99" };
       },
-    };
+    });
     const opencode: OpenCodePort = {
       async run(input) {
         const roleMatch = input.prompt.match(/Role id: (\w+)/);
@@ -182,12 +197,11 @@ describe("pipeline", () => {
     await createPipeline({
       config,
       store,
-      github: {
-        getInstallationToken: async () => "token",
+      github: githubPort({
         getPullDiff: async () => "diff",
         listReviews: async () => [],
         createCommentReview: async () => ({ id: "1", url: "u" }),
-      },
+      }),
       checkout: await fixtureCheckout(),
       opencode: {
         async run(input) {
@@ -238,7 +252,7 @@ describe("pipeline", () => {
     });
     const store = new JobStore(openDb(":memory:"));
     let reviews = 0;
-    const github: GithubPort = {
+    const github: GithubPort = githubPort({
       getInstallationToken: async () => "token",
       getPullDiff: async () => "diff",
       listReviews: async () => [],
@@ -246,7 +260,7 @@ describe("pipeline", () => {
         reviews += 1;
         return { id: "1", url: "u" };
       },
-    };
+    });
     const opencode: OpenCodePort = {
       async run() {
         store.enqueue({
@@ -306,7 +320,7 @@ describe("pipeline", () => {
     const config = loadConfig({ REVIEWER_ROLES: "correctness", POST_EMPTY_REVIEW: "true" });
     const store = new JobStore(openDb(":memory:"));
     let creates = 0;
-    const github: GithubPort = {
+    const github: GithubPort = githubPort({
       getInstallationToken: async () => "token",
       getPullDiff: async () => "diff",
       listReviews: async () => [{ id: 5, body: "<!-- maomao-review sha=abc -->", htmlUrl: "https://r" }],
@@ -314,7 +328,7 @@ describe("pipeline", () => {
         creates += 1;
         return { id: "x", url: "u" };
       },
-    };
+    });
     const opencode: OpenCodePort = {
       async run(input) {
         const text = input.prompt.includes("aggregator")
@@ -375,12 +389,11 @@ describe("pipeline", () => {
     await createPipeline({
       config,
       store,
-      github: {
-        getInstallationToken: async () => "token",
+      github: githubPort({
         getPullDiff: async () => "diff",
         listReviews: async () => [],
         createCommentReview: async () => ({ id: "x", url: "u" }),
-      },
+      }),
       checkout: {
         async prepare() {
           throw new Error("boom");
@@ -420,14 +433,14 @@ describe("pipeline", () => {
     await createPipeline({
       config,
       store,
-      github: {
+      github: githubPort({
         getInstallationToken: async () => {
           throw new Error("could not mint installation token");
         },
         getPullDiff: async () => "diff",
         listReviews: async () => [],
         createCommentReview: async () => ({ id: "x", url: "u" }),
-      },
+      }),
       checkout: {
         async prepare() {
           prepared += 1;
@@ -468,12 +481,11 @@ describe("pipeline", () => {
     await createPipeline({
       config,
       store,
-      github: {
-        getInstallationToken: async () => "token",
+      github: githubPort({
         getPullDiff: async () => "diff",
         listReviews: async () => [],
         createCommentReview: async () => ({ id: "x", url: "u" }),
-      },
+      }),
       checkout: await fixtureCheckout(),
       opencode: {
         async run() {
@@ -535,12 +547,11 @@ describe("pipeline", () => {
     await createPipeline({
       config,
       store,
-      github: {
-        getInstallationToken: async () => "token",
+      github: githubPort({
         getPullDiff: async () => "diff",
         listReviews: async () => [],
         createCommentReview: async () => ({ id: "1", url: "u" }),
-      },
+      }),
       checkout: await fixtureCheckout(),
       opencode: {
         async run(input) {
@@ -656,12 +667,11 @@ describe("pre-review routing and poison-alert", () => {
     await createPipeline({
       config: hybrid,
       store,
-      github: {
-        getInstallationToken: async () => "token",
+      github: githubPort({
         getPullDiff: async () => README_DIFF,
         listReviews: async () => [],
         createCommentReview: async () => ({ id: "1", url: "https://r/1" }),
-      },
+      }),
       checkout: await fixtureCheckout(),
       opencode: {
         async run(input) {
@@ -712,12 +722,11 @@ describe("pre-review routing and poison-alert", () => {
     await createPipeline({
       config: fixed,
       store: store2,
-      github: {
-        getInstallationToken: async () => "token",
+      github: githubPort({
         getPullDiff: async () => README_DIFF,
         listReviews: async () => [],
         createCommentReview: async () => ({ id: "2", url: "https://r/2" }),
-      },
+      }),
       checkout: await fixtureCheckout(),
       opencode: {
         async run(input) {
@@ -746,13 +755,12 @@ describe("pre-review routing and poison-alert", () => {
     await createPipeline({
       config,
       store,
-      github: {
-        getInstallationToken: async () => "token",
+      github: githubPort({
         getPullDiff: async () =>
           Array.from({ length: 6 }, (_, index) => `diff --git a/src/m${index}.ts b/src/m${index}.ts\n+line\n`).join(""),
         listReviews: async () => [],
         createCommentReview: async () => ({ id: "3", url: "u" }),
-      },
+      }),
       checkout: await fixtureCheckout(),
       opencode: {
         async run(input) {
@@ -789,12 +797,11 @@ describe("pre-review routing and poison-alert", () => {
     await createPipeline({
       config,
       store,
-      github: {
-        getInstallationToken: async () => "token",
+      github: githubPort({
         getPullDiff: async () => AUTH_DIFF,
         listReviews: async () => [],
         createCommentReview: async () => ({ id: "4", url: "u" }),
-      },
+      }),
       checkout: await fixtureCheckout(),
       opencode: {
         async run(input) {
@@ -854,8 +861,7 @@ describe("pre-review routing and poison-alert", () => {
     await createPipeline({
       config,
       store,
-      github: {
-        getInstallationToken: async () => "token",
+      github: githubPort({
         getPullDiff: async () => AUTH_DIFF,
         listReviews: async () => [],
         createCommentReview: async () => {
@@ -872,7 +878,7 @@ describe("pre-review routing and poison-alert", () => {
           expect(input.body).not.toMatch(/marller/i);
           return { id: "c1", url: "https://github.com/acme/widgets/issues/4#issuecomment-1" };
         },
-      },
+      }),
       checkout: await fixtureCheckout(),
       fetchImpl: async () => {
         events.push("webhook");
@@ -920,8 +926,7 @@ describe("pre-review routing and poison-alert", () => {
     await createPipeline({
       config,
       store,
-      github: {
-        getInstallationToken: async () => "token",
+      github: githubPort({
         getPullDiff: async () => AUTH_DIFF,
         listReviews: async () => [],
         createCommentReview: async () => ({ id: "x", url: "x" }),
@@ -929,7 +934,7 @@ describe("pre-review routing and poison-alert", () => {
           events.push("comment");
           return { id: "c2", url: "u" };
         },
-      },
+      }),
       checkout: await fixtureCheckout(),
       opencode: { async run() { throw new Error("should not rerun"); } },
     }).dispatchExternal(created.job.id);
@@ -955,8 +960,7 @@ describe("pre-review routing and poison-alert", () => {
     await createPipeline({
       config,
       store,
-      github: {
-        getInstallationToken: async () => "token",
+      github: githubPort({
         getPullDiff: async () => AUTH_DIFF,
         listReviews: async () => [],
         createCommentReview: async () => ({ id: "9", url: "https://r/9" }),
@@ -964,7 +968,7 @@ describe("pre-review routing and poison-alert", () => {
           comments += 1;
           return { id: "c", url: "u" };
         },
-      },
+      }),
       checkout: await fixtureCheckout(),
       opencode: {
         async run(input) {
@@ -1001,3 +1005,531 @@ describe("pre-review routing and poison-alert", () => {
     expect(job?.github_review_id).toBe("9");
   });
 });
+
+function enqueueJob(store: JobStore, config: ReturnType<typeof loadConfig>, headSha = "cafebabe") {
+  return store.enqueue({
+    repoFullName: "acme/widgets",
+    repoOwner: "acme",
+    repoName: "widgets",
+    installationId: 9,
+    prNumber: 4,
+    prTitle: "Change example",
+    prBody: "",
+    prHtmlUrl: "",
+    prAuthor: "dev",
+    baseSha: "base",
+    headSha,
+    baseRef: "main",
+    headRef: "feat",
+    reviewers: config.reviewers.map((role) => ({ role: role.id, title: role.title })),
+  });
+}
+
+function threadFor(fingerprint: string, summary = "bug") {
+  return {
+    id: `thread-${fingerprint}`,
+    isResolved: false,
+    path: "example.ts",
+    line: 1,
+    comments: [
+      {
+        id: "n1",
+        databaseId: 11,
+        body: `${findingMarker(fingerprint, "oldsha")}\n**high**: ${summary}`,
+        path: "example.ts",
+        line: 1,
+        authorLogin: "maomao[bot]",
+      },
+    ],
+  };
+}
+
+describe("finding reconciliation", () => {
+  const finding = {
+    severity: "high" as const,
+    confidence: 0.9,
+    category: "correctness",
+    file: "example.ts",
+    line: 1,
+    summary: "bug",
+  };
+
+  it("resolves a fixed finding only after verification and a successful publish", async () => {
+    const fingerprint = fingerprintFinding(finding);
+    const config = loadConfig({
+      REVIEWER_ROLES: "correctness",
+      OPENCODE_REVIEWER_MODEL: "test/model",
+      POST_EMPTY_REVIEW: "true",
+    });
+    const store = new JobStore(openDb(":memory:"));
+    const created = enqueueJob(store, config);
+    const resolved: string[] = [];
+    await createPipeline({
+      config,
+      store,
+      github: githubPort({
+        listReviewThreads: async () => [threadFor(fingerprint)],
+        resolveReviewThread: async (_id, threadId) => {
+          resolved.push(threadId);
+        },
+        createCommentReview: async () => ({ id: "9", url: "u" }),
+      }),
+      checkout: await fixtureCheckout(),
+      opencode: {
+        async run(input) {
+          if (input.prompt.includes("finding verifier")) {
+            return {
+              stdout: "",
+              stderr: "",
+              exitCode: 0,
+              text: JSON.stringify({
+                classifications: [
+                  { fingerprint, status: "resolved", confidence: 0.95, reason: "the bug is gone" },
+                ],
+              }),
+              usage: {},
+            };
+          }
+          if (input.prompt.includes("Role id:")) {
+            expect(store.getJob(created.job.id)?.risk_profile).toBe("diagnosis");
+            return {
+              stdout: "",
+              stderr: "",
+              exitCode: 0,
+              text: reviewerJson("correctness"),
+              usage: {},
+            };
+          }
+          return {
+            stdout: "",
+            stderr: "",
+            exitCode: 0,
+            text: JSON.stringify({ verdict: "clean", summary: "fixed", findings: [] }),
+            usage: {},
+          };
+        },
+      },
+    }).run(created.job.id);
+    expect(store.getJob(created.job.id)?.state).toBe("completed");
+    expect(resolved).toEqual([`thread-${fingerprint}`]);
+    expect(store.getFinding("acme/widgets", 4, fingerprint)?.status).toBe("resolved");
+    const logs = store.listLogs(created.job.id).map((row) => row.message);
+    const reconcileAt = logs.findIndex((line) => line.includes("Reconciling"));
+    const riskAt = logs.findIndex((line) => line.includes("Risk route:"));
+    const reviewAt = logs.findIndex((line) => line.includes("Reviewer correctness"));
+    expect(reconcileAt).toBeGreaterThanOrEqual(0);
+    expect(riskAt).toBeGreaterThan(reconcileAt);
+    expect(reviewAt).toBeGreaterThan(riskAt);
+    expect(logs.join("\n")).toContain("resolved/dismissed excluded");
+  });
+
+  it("keeps still-valid and uncertain threads open", async () => {
+    const fingerprint = fingerprintFinding(finding);
+    const config = loadConfig({ REVIEWER_ROLES: "correctness", OPENCODE_REVIEWER_MODEL: "test/model" });
+    const store = new JobStore(openDb(":memory:"));
+    const created = enqueueJob(store, config, "newsha");
+    const resolved: string[] = [];
+    await createPipeline({
+      config,
+      store,
+      github: githubPort({
+        listReviewThreads: async () => [threadFor(fingerprint)],
+        resolveReviewThread: async (_id, threadId) => {
+          resolved.push(threadId);
+        },
+      }),
+      checkout: await fixtureCheckout(),
+      opencode: {
+        async run(input) {
+          if (input.prompt.includes("finding verifier")) {
+            return {
+              stdout: "",
+              stderr: "",
+              exitCode: 0,
+              text: JSON.stringify({
+                classifications: [
+                  { fingerprint, status: "still_valid", confidence: 0.9, reason: "still present" },
+                ],
+              }),
+              usage: {},
+            };
+          }
+          if (input.prompt.includes("Role id:")) {
+            return { stdout: "", stderr: "", exitCode: 0, text: reviewerJson("correctness"), usage: {} };
+          }
+          return {
+            stdout: "",
+            stderr: "",
+            exitCode: 0,
+            text: JSON.stringify({
+              verdict: "comment",
+              summary: "still broken",
+              findings: [finding],
+            }),
+            usage: {},
+          };
+        },
+      },
+    }).run(created.job.id);
+    expect(store.getJob(created.job.id)?.state).toBe("completed");
+    expect(resolved).toEqual([]);
+    expect(store.getFinding("acme/widgets", 4, fingerprint)?.status).toBe("still_valid");
+  });
+
+  it("preserves a moved finding at the new location without duplicate open threads", async () => {
+    const fingerprint = fingerprintFinding(finding);
+    const config = loadConfig({ REVIEWER_ROLES: "correctness", OPENCODE_REVIEWER_MODEL: "test/model" });
+    const store = new JobStore(openDb(":memory:"));
+    const created = enqueueJob(store, config, "movedsha");
+    const resolved: string[] = [];
+    const posted: { path: string; line: number }[] = [];
+    await createPipeline({
+      config,
+      store,
+      github: githubPort({
+        listReviewThreads: async () => [threadFor(fingerprint)],
+        resolveReviewThread: async (_id, threadId) => {
+          resolved.push(threadId);
+        },
+        createCommentReview: async (input) => {
+          posted.push(...input.comments.map((comment) => ({ path: comment.path, line: comment.line })));
+          return { id: "2", url: "u" };
+        },
+      }),
+      checkout: await fixtureCheckout(),
+      opencode: {
+        async run(input) {
+          if (input.prompt.includes("finding verifier")) {
+            return {
+              stdout: "",
+              stderr: "",
+              exitCode: 0,
+              text: JSON.stringify({
+                classifications: [
+                  {
+                    fingerprint,
+                    status: "moved",
+                    confidence: 0.92,
+                    reason: "relocated",
+                    file: "example.ts",
+                    line: 8,
+                  },
+                ],
+              }),
+              usage: {},
+            };
+          }
+          if (input.prompt.includes("Role id:")) {
+            return { stdout: "", stderr: "", exitCode: 0, text: reviewerJson("correctness"), usage: {} };
+          }
+          return {
+            stdout: "",
+            stderr: "",
+            exitCode: 0,
+            text: JSON.stringify({ verdict: "comment", summary: "moved", findings: [] }),
+            usage: {},
+          };
+        },
+      },
+    }).run(created.job.id);
+    expect(posted).toEqual([{ path: "example.ts", line: 8 }]);
+    expect(resolved).toEqual([`thread-${fingerprint}`]);
+  });
+
+  it("does not re-verify a stored resolved finding when no thread is open", async () => {
+    const fingerprint = fingerprintFinding(finding);
+    const config = loadConfig({
+      REVIEWER_ROLES: "correctness",
+      OPENCODE_REVIEWER_MODEL: "test/model",
+      POST_EMPTY_REVIEW: "true",
+    });
+    const store = new JobStore(openDb(":memory:"));
+    const created = enqueueJob(store, config, "nextsha");
+    store.upsertFinding({
+      repoFullName: created.job.repo_full_name,
+      prNumber: created.job.pr_number,
+      fingerprint,
+      status: "resolved",
+      reviewedSha: "oldsha",
+      summary: finding.summary,
+      githubThreadId: `thread-${fingerprint}`,
+    });
+    let verified = false;
+    await createPipeline({
+      config,
+      store,
+      github: githubPort({
+        listReviewThreads: async () => [],
+        resolveReviewThread: async () => {
+          throw new Error("should not resolve a settled finding");
+        },
+      }),
+      checkout: await fixtureCheckout(),
+      opencode: {
+        async run(input) {
+          if (input.prompt.includes("finding verifier")) {
+            verified = true;
+            throw new Error("verifier should not run for settled resolved findings");
+          }
+          if (input.prompt.includes("Role id:")) {
+            return { stdout: "", stderr: "", exitCode: 0, text: reviewerJson("correctness"), usage: {} };
+          }
+          return {
+            stdout: "",
+            stderr: "",
+            exitCode: 0,
+            text: JSON.stringify({ verdict: "clean", summary: "still gone", findings: [] }),
+            usage: {},
+          };
+        },
+      },
+    }).run(created.job.id);
+    expect(verified).toBe(false);
+    expect(store.getJob(created.job.id)?.state).toBe("completed");
+    expect(store.getFinding("acme/widgets", 4, fingerprint)?.status).toBe("resolved");
+  });
+
+  it("does not resolve a moved thread when the replacement comment is capped out", async () => {
+    const fingerprint = fingerprintFinding(finding);
+    const config = loadConfig({
+      REVIEWER_ROLES: "correctness",
+      OPENCODE_REVIEWER_MODEL: "test/model",
+      MAX_INLINE_COMMENTS: "0",
+    });
+    const store = new JobStore(openDb(":memory:"));
+    const created = enqueueJob(store, config, "capsha");
+    const resolved: string[] = [];
+    const posted: { path: string; line: number }[] = [];
+    await createPipeline({
+      config,
+      store,
+      github: githubPort({
+        listReviewThreads: async () => [threadFor(fingerprint)],
+        resolveReviewThread: async (_id, threadId) => {
+          resolved.push(threadId);
+        },
+        createCommentReview: async (input) => {
+          posted.push(...input.comments.map((comment) => ({ path: comment.path, line: comment.line })));
+          return { id: "2", url: "u" };
+        },
+      }),
+      checkout: await fixtureCheckout(),
+      opencode: {
+        async run(input) {
+          if (input.prompt.includes("finding verifier")) {
+            return {
+              stdout: "",
+              stderr: "",
+              exitCode: 0,
+              text: JSON.stringify({
+                classifications: [
+                  {
+                    fingerprint,
+                    status: "moved",
+                    confidence: 0.92,
+                    reason: "relocated",
+                    file: "example.ts",
+                    line: 8,
+                  },
+                ],
+              }),
+              usage: {},
+            };
+          }
+          if (input.prompt.includes("Role id:")) {
+            return { stdout: "", stderr: "", exitCode: 0, text: reviewerJson("correctness"), usage: {} };
+          }
+          return {
+            stdout: "",
+            stderr: "",
+            exitCode: 0,
+            text: JSON.stringify({ verdict: "comment", summary: "moved", findings: [] }),
+            usage: {},
+          };
+        },
+      },
+    }).run(created.job.id);
+    expect(posted).toEqual([]);
+    expect(resolved).toEqual([]);
+    expect(store.getJob(created.job.id)?.state).toBe("completed");
+  });
+
+  it("does not close threads when the job fails or becomes stale", async () => {
+    const fingerprint = fingerprintFinding(finding);
+    const config = loadConfig({
+      REVIEWER_ROLES: "correctness",
+      OPENCODE_REVIEWER_MODEL: "test/model",
+      OPENCODE_MAX_RETRIES: "0",
+    });
+    const store = new JobStore(openDb(":memory:"));
+    const failed = enqueueJob(store, config, "failsha");
+    const resolved: string[] = [];
+    const github = githubPort({
+      listReviewThreads: async () => [threadFor(fingerprint)],
+      resolveReviewThread: async (_id, threadId) => {
+        resolved.push(threadId);
+      },
+    });
+    await createPipeline({
+      config,
+      store,
+      github,
+      checkout: await fixtureCheckout(),
+      opencode: {
+        async run(input) {
+          if (input.prompt.includes("finding verifier")) {
+            return {
+              stdout: "",
+              stderr: "",
+              exitCode: 0,
+              text: JSON.stringify({
+                classifications: [{ fingerprint, status: "resolved", confidence: 0.99, reason: "gone" }],
+              }),
+              usage: {},
+            };
+          }
+          throw new Error("reviewer exploded");
+        },
+      },
+    }).run(failed.job.id);
+    expect(store.getJob(failed.job.id)?.state).toBe("failed");
+    expect(resolved).toEqual([]);
+
+    const staleJob = enqueueJob(store, config, "stalesha");
+    await createPipeline({
+      config,
+      store,
+      github,
+      checkout: await fixtureCheckout(),
+      opencode: {
+        async run(input) {
+          if (input.prompt.includes("finding verifier")) {
+            store.enqueue({
+              repoFullName: "acme/widgets",
+              repoOwner: "acme",
+              repoName: "widgets",
+              installationId: 9,
+              prNumber: 4,
+              prTitle: "newer",
+              prBody: "",
+              prHtmlUrl: "",
+              prAuthor: "dev",
+              baseSha: "base",
+              headSha: "newer",
+              baseRef: "main",
+              headRef: "feat",
+              reviewers: [{ role: "correctness", title: "Correctness" }],
+            });
+            return {
+              stdout: "",
+              stderr: "",
+              exitCode: 0,
+              text: JSON.stringify({
+                classifications: [{ fingerprint, status: "resolved", confidence: 0.99, reason: "gone" }],
+              }),
+              usage: {},
+            };
+          }
+          return { stdout: "", stderr: "", exitCode: 0, text: reviewerJson("correctness"), usage: {} };
+        },
+      },
+    }).run(staleJob.job.id);
+    expect(store.getJob(staleJob.job.id)?.state).toBe("stale");
+    expect(resolved).toEqual([]);
+  });
+
+  it("does not re-report a dismissed fingerprint and excludes it from risk routing", async () => {
+    const fingerprint = fingerprintFinding(finding);
+    const config = loadConfig({ REVIEWER_ROLES: "correctness", OPENCODE_REVIEWER_MODEL: "test/model" });
+    const store = new JobStore(openDb(":memory:"));
+    store.dismissFinding({
+      repoFullName: "acme/widgets",
+      prNumber: 4,
+      fingerprint,
+      actor: "octocat",
+      command: "bury",
+      reviewedSha: "oldsha",
+      summary: "bug",
+    });
+    const created = enqueueJob(store, config, "nextsha");
+    const postedBodies: string[] = [];
+    let verifierCalls = 0;
+    await createPipeline({
+      config,
+      store,
+      github: githubPort({
+        listReviewThreads: async () => [threadFor(fingerprint)],
+        createCommentReview: async (input) => {
+          postedBodies.push(...input.comments.map((comment) => comment.body));
+          return { id: "3", url: "u" };
+        },
+      }),
+      checkout: await fixtureCheckout(),
+      opencode: {
+        async run(input) {
+          if (input.prompt.includes("finding verifier")) {
+            verifierCalls += 1;
+            throw new Error("should not verify dismissed findings");
+          }
+          if (input.prompt.includes("Role id:")) {
+            return { stdout: "", stderr: "", exitCode: 0, text: reviewerJson("correctness"), usage: {} };
+          }
+          return {
+            stdout: "",
+            stderr: "",
+            exitCode: 0,
+            text: JSON.stringify({ verdict: "comment", summary: "again", findings: [finding] }),
+            usage: {},
+          };
+        },
+      },
+    }).run(created.job.id);
+    expect(verifierCalls).toBe(0);
+    expect(postedBodies.some((body) => body.includes(fingerprint))).toBe(false);
+    expect(store.getJob(created.job.id)?.risk_profile).not.toBe("poison-alert");
+    expect(store.getJob(created.job.id)?.routing_profile).not.toBe("poison-alert");
+    const snapshot = JSON.parse(store.getJob(created.job.id)?.reconciliation_json ?? "{}") as {
+      items: { fingerprint: string; status: string }[];
+    };
+    expect(snapshot.items[0]?.status).toBe("dismissed");
+    expect(store.getFinding("acme/widgets", 4, fingerprint)?.status).toBe("dismissed");
+  });
+
+  it("treats verifier failure as uncertain rather than resolved", async () => {
+    const fingerprint = fingerprintFinding(finding);
+    const config = loadConfig({ REVIEWER_ROLES: "correctness", OPENCODE_REVIEWER_MODEL: "test/model" });
+    const store = new JobStore(openDb(":memory:"));
+    const created = enqueueJob(store, config, "uncsha");
+    const resolved: string[] = [];
+    await createPipeline({
+      config,
+      store,
+      github: githubPort({
+        listReviewThreads: async () => [threadFor(fingerprint)],
+        resolveReviewThread: async (_id, threadId) => {
+          resolved.push(threadId);
+        },
+      }),
+      checkout: await fixtureCheckout(),
+      opencode: {
+        async run(input) {
+          if (input.prompt.includes("finding verifier")) throw new Error("verifier down");
+          if (input.prompt.includes("Role id:")) {
+            return { stdout: "", stderr: "", exitCode: 0, text: reviewerJson("correctness"), usage: {} };
+          }
+          return {
+            stdout: "",
+            stderr: "",
+            exitCode: 0,
+            text: JSON.stringify({ verdict: "clean", summary: "ok", findings: [] }),
+            usage: {},
+          };
+        },
+      },
+    }).run(created.job.id);
+    expect(resolved).toEqual([]);
+    expect(store.getFinding("acme/widgets", 4, fingerprint)?.status).toBe("uncertain");
+  });
+});
+
+
