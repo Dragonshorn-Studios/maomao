@@ -79,6 +79,7 @@ export function seedDemoJobs(store: JobStore): void {
   seedReviewing(store);
   seedAggregating(store);
   seedQueued(store);
+  seedRouting(store);
   seedFailed(store);
   seedClean(store);
 }
@@ -285,8 +286,8 @@ function seedCompletedWithFindings(store: JobStore): void {
     routing_signals: JSON.stringify({ families: ["auth"], hardRiskFamilies: ["auth"] }),
     poison_alert_policy: "internal_and_external",
     internal_escalation_state: "done",
-    internal_escalation_model: "provider/strong-model",
-    internal_escalation_provider: "provider",
+    internal_escalation_model: AGG_MODEL,
+    internal_escalation_provider: PROVIDER,
     internal_escalation_cost: 0.08,
     internal_escalation_total_tokens: 4200,
     internal_escalation_alert_cleared: 0,
@@ -453,6 +454,28 @@ function seedQueued(store: JobStore): void {
   );
 }
 
+function seedRouting(store: JobStore): void {
+  const { job } = store.enqueue(
+    baseJob({
+      prNumber: 422,
+      prTitle: "Rotate session signing keys",
+      headSha: "a11ce0ffeea11ce0ffeea11ce0ffeea11ce0ffee",
+      headRef: "rotate-keys",
+      reviewers: [],
+    }),
+  );
+  store.setJobState(job.id, "routing", {
+    started_at: ago(1),
+    routing_state: "running",
+    routing_mode: "hybrid",
+    routing_model: "anthropic/claude-haiku-4-5",
+    routing_provider: "anthropic",
+    routing_reason: "Scanner found auth and secrets; router model still choosing a profile.",
+    routing_signals: JSON.stringify({ families: ["auth", "secrets"], hardRiskFamilies: ["auth", "secrets"] }),
+  });
+  store.log(job.id, "Choosing specialists from deterministic signals + router model");
+}
+
 function seedFailed(store: JobStore): void {
   const { job } = store.enqueue(
     baseJob({
@@ -498,6 +521,7 @@ function seedClean(store: JobStore): void {
       prTitle: "Fix typo in ledger README",
       headSha: "feedfacecafe1234feedfacecafe1234feedface",
       headRef: "readme-typo",
+      reviewers: [{ role: "correctness", title: "Correctness / regression hunter", model: MODEL }],
     }),
   );
   const started = ago(120);

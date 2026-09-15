@@ -74,9 +74,30 @@ describe("monitoring pages", () => {
     expect(html).toContain("Stale");
     expect(html).toContain("Failed");
     expect(html).toContain("Examining PR #418");
+    expect(html).toContain("Choosing specialists for PR #422");
     expect(html).toContain("No suspicious findings");
     expect(html).toContain("Unconfirmed");
     expect(html).toContain("unconfirmed observation");
+  });
+
+  it("renders routing-in-progress and observation profiles on job detail", () => {
+    const store = seededStore();
+    const routing = store.listJobs(20).find((row) => row.pr_number === 422);
+    const observation = store.listJobs(20).find((row) => row.pr_number === 401);
+    expect(routing && observation).toBeTruthy();
+    const routingHtml = renderJob(routing!, store.listReviewerRuns(routing!.id), store.listLogs(routing!.id));
+    expect(routingHtml).toContain("Profile</strong> pending");
+    expect(routingHtml).toContain("Scanner found auth and secrets");
+    expect(routingHtml).toContain("reviewers pending");
+    expect(routingHtml).toContain("anthropic/claude-haiku-4-5");
+    const observationHtml = renderJob(
+      observation!,
+      store.listReviewerRuns(observation!.id),
+      store.listLogs(observation!.id),
+    );
+    expect(observationHtml).toContain("Profile</strong> observation");
+    expect(observationHtml).toContain("reviewers correctness");
+    expect(observationHtml).not.toContain("Poison alert");
   });
 
   it("renders job detail with reviewer cards, findings, and a log panel", () => {
@@ -102,7 +123,7 @@ describe("monitoring pages", () => {
     expect(html).toContain("cache r");
     expect(html).toContain("poison-alert");
     expect(html).toContain("internal_and_external");
-    expect(html).toContain("provider/strong-model");
+    expect(html).toContain("anthropic/claude-opus-4-6");
     expect(html).toContain("dispatched (notification accepted)");
     expect(html).toContain("does not track whether an external reviewer finished");
   });

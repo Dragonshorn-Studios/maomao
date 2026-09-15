@@ -96,7 +96,7 @@ export function routingProfileLabel(profile: string | null | undefined): string 
   if (profile === "diagnosis") return "diagnosis";
   if (profile === "poison-alert") return "poison-alert";
   if (profile === "fixed") return "fixed";
-  return profile || "unset";
+  return profile || "pending";
 }
 
 export function dispatchStatusLabel(status: string | null | undefined): string {
