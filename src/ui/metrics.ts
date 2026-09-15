@@ -105,6 +105,28 @@ export function jobMetricsFromRuns(job: JobRow, runs: ReviewerRunRow[]): JobMetr
   const warnings: string[] = [];
   if (job.aggregator_usage_warning) warnings.push(job.aggregator_usage_warning);
 
+  tokens += tokenTotalFromRow({
+    total_tokens: job.routing_total_tokens,
+    prompt_tokens: job.routing_prompt_tokens,
+    completion_tokens: job.routing_completion_tokens,
+  });
+  promptTokens += job.routing_prompt_tokens ?? 0;
+  completionTokens += job.routing_completion_tokens ?? 0;
+  if (job.routing_cost != null) cost = (cost ?? 0) + job.routing_cost;
+  completeness.push(job.routing_usage_complete);
+  if (job.routing_usage_warning) warnings.push(job.routing_usage_warning);
+
+  tokens += tokenTotalFromRow({
+    total_tokens: job.internal_escalation_total_tokens,
+    prompt_tokens: job.internal_escalation_prompt_tokens,
+    completion_tokens: job.internal_escalation_completion_tokens,
+  });
+  promptTokens += job.internal_escalation_prompt_tokens ?? 0;
+  completionTokens += job.internal_escalation_completion_tokens ?? 0;
+  if (job.internal_escalation_cost != null) cost = (cost ?? 0) + job.internal_escalation_cost;
+  completeness.push(job.internal_escalation_usage_complete);
+  if (job.internal_escalation_usage_warning) warnings.push(job.internal_escalation_usage_warning);
+
   for (const run of runs) {
     promptTokens += run.prompt_tokens ?? 0;
     completionTokens += run.completion_tokens ?? 0;

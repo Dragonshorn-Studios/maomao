@@ -11,6 +11,10 @@ GitHub pull_request webhook
         ↓
 checkout exact PR head SHA into an isolated workspace
         ↓
+reconcile prior Maomao findings (verify / bury) on this SHA
+        ↓
+risk route (poison-alert insertion point; currently the configured reviewer set)
+        ↓
 spawn N OpenCode reviewer runs (bounded concurrency)
         ↓
 validate structured JSON + persist raw output
@@ -30,7 +34,7 @@ The service is a single Node.js process:
 - **git fetch** of `refs/pull/<n>/head` plus the job SHA into a per-job workspace
 - **OpenCode CLI** spawned as a worker (`opencode run`), not forked or vendored
 
-Job states: `queued` → `preparing` → `reviewing` → `aggregating` → `publishing` → `completed`, plus `failed`, `stale`, `cancelled`.
+Job states: `queued` → `preparing` → `reconciling` → `reviewing` → `aggregating` → `publishing` → `completed`, plus `failed`, `stale`, `cancelled`.
 
 Every job is unique on `(repository, PR number, head SHA)`. A new `synchronize` SHA creates a new job and marks the previous one stale. Stale jobs never publish a review for the new commit.
 
@@ -149,10 +153,11 @@ Create a GitHub App for your user or org. Maomao needs **least privilege**:
 | Metadata | Read | Identify the installation / repository |
 | Contents | **Read** | Fetch the PR head into a workspace |
 | Pull requests | Read & write | Read the diff; post a `COMMENT` review |
+| Issues | Write (optional) | Poison-alert mention/command comments on the PR conversation |
 
 Do **not** grant Contents write, Actions write, Administration, Secrets, merge, or branch push. The strongest action Maomao can take is posting a pull request review.
 
-Subscribe the app to the **Pull request** webhook event. Set the webhook URL to:
+Subscribe the app to **Pull request**, **Pull request review comment**, and **Issue comment** (for `@maomao escalate` in `manual` poison-alert policy). Set the webhook URL to:
 
 ```text
 https://<your-host>/webhooks/github
@@ -177,7 +182,7 @@ If you turn on an allowlist while jobs are already queued from before this schem
 
 Valid signatures for an unauthorized installation or repository receive **`202`** with `{ "ok": true, "ignored": true, "reason": "..." }`. Maomao logs only `installation_id`, `repository_id`, and the reason — never the repository name, URL, or author. The operator paste-URL form (`POST /reviews`) uses the same policy and cannot bypass it.
 
-Events handled by default: `opened`, `reopened`, `synchronize`, `ready_for_review`. Draft PRs are ignored unless `REVIEW_DRAFTS=true`.
+Events handled by default: `opened`, `reopened`, `synchronize`, `ready_for_review`. Draft PRs are ignored unless `REVIEW_DRAFTS=true`. Also subscribe the app to **Pull request review comment** so thread replies can bury or reopen findings.
 
 ## Configure OpenCode models
 
@@ -207,6 +212,34 @@ Default specialist roles (override with `REVIEWER_ROLES`):
 - `maintainer` — merge blockers
 
 Each run has a timeout (`OPENCODE_TIMEOUT_MS`), retries (`OPENCODE_MAX_RETRIES`, capped at 5), and a concurrency cap (`OPENCODE_REVIEWER_CONCURRENCY`). Oversized pull request diffs are aborted during download (`MAX_DIFF_BYTES`, default 1 MiB; `0` disables) using `Content-Length` and a streamed body cap, then rejected before checkout/OpenCode. Per-repository enqueue rate limits (`REPO_RATE_LIMIT_PER_WINDOW` / `REPO_RATE_WINDOW_MS`) sit in front of the job queue. The limiter is **in-memory and per process**: replicas do not share quota, a restart resets the window, and only **created** jobs consume a slot (duplicate deliveries do not). When the limiter is on, a signed payload that omits `repository.id` is ignored (`missing repository id`) rather than skipping the cap.
+
+### Risk-aware specialist routing
+
+By default Maomao runs a **pre-review router** before specialists. A deterministic scanner extracts cheap signals (file/line counts, languages, auth/secrets/billing/migrations/deploy, lockfiles, tests, PR title/body). An optional low-cost router model may refine the set. Output is a profile plus allowlisted role ids:
+
+- `observation` — 1–2 specialists for trivial or narrow changes
+- `diagnosis` — 3–4 relevant specialists for ordinary changes
+- `poison-alert` — relevant specialists plus optional escalation for high-risk or large changes
+
+Set `REVIEWER_ROUTING=fixed` to keep the previous always-on reviewer list. `deterministic` uses only the scanner; `model` uses the router model with hard-risk override; `hybrid` (default) uses both.
+
+Hard-risk **file paths** (auth, secrets, billing, migrations, deploy) can escalate the profile. PR title and body are untrusted hints only and cannot force that escalate. The model cannot downgrade file/diff hard-risk triggers. Invalid or failed routing falls back to `diagnosis` and still runs a review.
+
+Optional: `OPENCODE_ROUTER_MODEL`, `ROUTER_TIMEOUT_MS`, `ROUTER_MAX_DIFF_CHARS`, `ROUTER_MAX_REVIEWERS`.
+
+### Poison-alert escalation
+
+`poison-alert` can use two independent channels. Neither has a hardcoded model, provider, username, or bot.
+
+Internal: a second, bounded pass with `POISON_ALERT_INTERNAL_MODEL` (any configured `provider/model`), separate cost/token/timeout/retry caps, and a distinct usage record. It verifies or refines first-pass findings. If the model is missing or over budget, Maomao keeps the first pass unless `POISON_ALERT_INTERNAL_FALLBACK=fail`. Over-budget is not retried.
+
+External: fire-and-forget **after** Maomao publishes its own review. Targets are JSON in `POISON_ALERT_EXTERNAL_TARGETS_JSON` (`mention`, `command`, or signed `webhook`). Webhook URLs/secrets are env refs; HTTPS is required and private/loopback destinations are rejected. Mention/command fields are validated so configuration cannot inject comment content.
+
+Policies: `internal_only`, `external_only`, `internal_then_external` (external only if the internal pass still meets `POISON_ALERT_EXTERNAL_MIN_SEVERITY`), `internal_and_external`, `manual` (`@maomao escalate` from write/maintain/admin collaborators, or a personal-repo OWNER when the collaborator API 404s, loop-safe against bot/marker comments). Partial target failure is stored as `dispatch_failed` and can be retried.
+
+Maomao does not queue, claim, poll, or ingest external review results. The UI shows immediate dispatch status only.
+
+Mention/command dispatch uses a GitHub issue comment and needs **Issues: Write** on the GitHub App. Webhook-only escalation does not.
 
 Maomao records OpenCode `step_finish` usage across every unique agent step (including tool-call steps). Token totals include input, output, reasoning, and cache read/write when the CLI reports them. **These figures are provider/OpenCode-reported usage, not an independently calculated invoice.** If the JSON stream ends without a matching `step_finish` (see [opencode#26855](https://github.com/anomalyco/opencode/issues/26855)), the UI marks usage incomplete and treats the stored numbers as a minimum.
 
@@ -299,10 +332,48 @@ OpenCode is still a powerful process. Keep Maomao on a locked-down host and do n
 - No findings → silent unless `POST_EMPTY_REVIEW=true`
 - **Never** `APPROVE` or `REQUEST_CHANGES` in this version
 - Duplicate webhook deliveries reuse the existing job; publication also looks for a `<!-- maomao-review sha=... -->` marker
+- Inline comments include `<!-- maomao-finding id=<fingerprint> sha=<reviewed-sha> -->` so later reviews can reconcile the same finding after the line moves
+
+## Finding reconciliation and `@maomao bury`
+
+When a later commit arrives, Maomao fetches its own **unresolved** review threads, applies any human overrides, and re-checks remaining findings against the **current head SHA** with a narrow verifier. Only then does it risk-route (the `poison-alert` insertion point) and run specialists.
+
+Classifications:
+
+| Status | Meaning | GitHub thread |
+| --- | --- | --- |
+| `resolved` | Verifier has enough evidence the problem is gone | Resolved after the job succeeds |
+| `still_valid` | Same problem still applies | Left open |
+| `moved` | Same problem at a new path/line | New inline comment, then the old thread is resolved |
+| `uncertain` | Not enough evidence to close safely | Left open |
+| `dismissed` | An authorized human buried it | Resolved when the command is accepted |
+
+Model absence is non-evidence: a finding disappearing from a new generative review is **not** by itself proof it was fixed. Failed or stale jobs never close existing threads.
+
+### Manual overrides
+
+Reply **inside a Maomao review thread** (not on a human comment, and not as a reaction):
+
+| Comment body | Effect |
+| --- | --- |
+| `@maomao ignore` | Dismiss this finding |
+| `@maomao bury` | Same as ignore |
+| `🌱` (nothing else in the comment) | Same as ignore |
+| `@maomao reopen` | Clear the dismissal and unresolve the thread when GitHub allows it |
+
+`dismissed` means “acknowledged and intentionally ignored”, not “fixed”. `resolved` and `dismissed` stay distinct in SQLite, logs, and the job Findings list. Open findings stay full cards; buried and resolved rows collapse under a muted count until you expand them (status badge, location, and title stay visible in the summary).
+
+Dismissal is scoped to that **finding fingerprint on that pull request**, not the whole repository. The same fingerprint will not be re-reported on later SHAs of that PR unless someone `@maomao reopen`s it.
+
+Who may issue commands: repository `write`, `maintain`, or `admin`. A personal-repository `OWNER` association is accepted only when the collaborator API reports `none` (GitHub 404s some owners); it never upgrades an explicit `read`/`triage` permission. Org members who 404 the collaborator API are ignored (fail closed). Webhook signatures are verified. Duplicate deliveries and repeated commands are no-ops.
+
+The fingerprint is based on normalized path, category, and code identifiers (camelCase / snake_case) in the finding text — not solely the line number. When no code identifiers are present it falls back to normalized summary wording.
+
+The verifier only receives the prior finding plus nearby current file/diff context, and it finishes before risk routing so a buried or already-fixed finding cannot inflate the next review into `poison-alert`.
 
 ## Configuration reference
 
-See `.env.example`. Notable knobs: `ALLOWED_GITHUB_ACCOUNT_IDS`, `ALLOWED_GITHUB_REPOSITORY_IDS`, `MAX_DIFF_BYTES`, `REPO_RATE_LIMIT_PER_WINDOW`, `REPO_RATE_WINDOW_MS`, `OPENCODE_MAX_RETRIES`, `REVIEW_DRAFTS`, `POST_EMPTY_REVIEW`, `JOB_CONCURRENCY`, `WORKSPACE_ROOT`, `DATABASE_PATH`, `MAX_INLINE_COMMENTS`, `PULL_REQUEST_ACTIONS`, `UI_PASSWORD`, `UI_SESSION_SECRET`.
+See `.env.example`. Notable knobs: `ALLOWED_GITHUB_ACCOUNT_IDS`, `ALLOWED_GITHUB_REPOSITORY_IDS`, `MAX_DIFF_BYTES`, `REPO_RATE_LIMIT_PER_WINDOW`, `REPO_RATE_WINDOW_MS`, `OPENCODE_MAX_RETRIES`, `REVIEW_DRAFTS`, `POST_EMPTY_REVIEW`, `JOB_CONCURRENCY`, `WORKSPACE_ROOT`, `DATABASE_PATH`, `MAX_INLINE_COMMENTS`, `PULL_REQUEST_ACTIONS`, `OPENCODE_VERIFIER_MODEL`, `RECONCILE_MIN_CONFIDENCE`, `UI_PASSWORD`, `UI_SESSION_SECRET`, `REVIEWER_ROUTING`, `POISON_ALERT_POLICY`.
 
 ## Follow-ups (not in this MVP)
 

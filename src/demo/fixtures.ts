@@ -1,5 +1,6 @@
 import type { ReviewerRole } from "../prompts.js";
 import { DEFAULT_REVIEWER_ROLES } from "../prompts.js";
+import { fingerprintFinding } from "../findings/identity.js";
 import type { JobStore, NewJobInput } from "../jobs/store.js";
 
 const MODEL = "anthropic/claude-sonnet-4-5";
@@ -79,6 +80,7 @@ export function seedDemoJobs(store: JobStore): void {
   seedReviewing(store);
   seedAggregating(store);
   seedQueued(store);
+  seedRouting(store);
   seedFailed(store);
   seedClean(store);
 }
@@ -275,10 +277,70 @@ function seedCompletedWithFindings(store: JobStore): void {
     aggregator_raw: JSON.stringify(aggregator),
     github_review_id: "424242",
     github_review_url: "https://github.com/acme/ledger/pull/412#pullrequestreview-424242",
+    routing_state: "done",
+    routing_mode: "hybrid",
+    routing_profile: "poison-alert",
+    routing_source: "hard-rule",
+    routing_reason: "Authentication flow changed",
+    routing_confidence: 0.94,
+    routing_reviewers: JSON.stringify(["correctness", "security", "tests", "architecture", "api", "maintainer"]),
+    routing_signals: JSON.stringify({ families: ["auth"], hardRiskFamilies: ["auth"] }),
+    poison_alert_policy: "internal_and_external",
+    internal_escalation_state: "done",
+    internal_escalation_model: AGG_MODEL,
+    internal_escalation_provider: PROVIDER,
+    internal_escalation_cost: 0.08,
+    internal_escalation_total_tokens: 4200,
+    internal_escalation_alert_cleared: 0,
+    internal_escalation_reason: "internal pass confirmed risk",
+    external_dispatch_status: "dispatched",
+    external_dispatch_reason: "immediate dispatch completed",
+    external_dispatch_targets: JSON.stringify([{ type: "mention", recipient: "@repository-owner" }]),
   });
   store.log(job.id, "Checked out c0ffee1a2b3c4d5e6f708192a3b4c5d6e7f8091a");
   store.log(job.id, "6 reviewer runs finished");
   store.log(job.id, "Aggregator posted COMMENT review 424242");
+  seedSettledFindingsForCompletedJob(store, job.repo_full_name, job.pr_number, job.head_sha);
+}
+
+function seedSettledFindingsForCompletedJob(
+  store: JobStore,
+  repoFullName: string,
+  prNumber: number,
+  reviewedSha: string,
+): void {
+  const docs = {
+    category: "docs",
+    file: "README.md",
+    summary: "Production cookie note omits the forwarded-proto caveat",
+    body: "A one-line README fix would prevent operators from assuming any TLS terminator is sufficient.",
+  };
+  store.dismissFinding({
+    repoFullName,
+    prNumber,
+    fingerprint: fingerprintFinding(docs),
+    actor: "octocat",
+    command: "bury",
+    reviewedSha,
+    summary: docs.summary,
+    path: docs.file,
+    line: 147,
+    category: docs.category,
+    severity: "low",
+    body: docs.body,
+  });
+  store.upsertFinding({
+    repoFullName,
+    prNumber,
+    fingerprint: "resolvedfid00001",
+    status: "resolved",
+    reviewedSha,
+    summary: "null deref after fix",
+    currentPath: "src/session.ts",
+    currentLine: 18,
+    category: "correctness",
+    severity: "medium",
+  });
 }
 
 function seedStalePredecessor(store: JobStore): void {
@@ -434,6 +496,28 @@ function seedQueued(store: JobStore): void {
   );
 }
 
+function seedRouting(store: JobStore): void {
+  const { job } = store.enqueue(
+    baseJob({
+      prNumber: 422,
+      prTitle: "Rotate session signing keys",
+      headSha: "a11ce0ffeea11ce0ffeea11ce0ffeea11ce0ffee",
+      headRef: "rotate-keys",
+      reviewers: [],
+    }),
+  );
+  store.setJobState(job.id, "routing", {
+    started_at: ago(1),
+    routing_state: "running",
+    routing_mode: "hybrid",
+    routing_model: "anthropic/claude-haiku-4-5",
+    routing_provider: "anthropic",
+    routing_reason: "Scanner found auth and secrets; router model still choosing a profile.",
+    routing_signals: JSON.stringify({ families: ["auth", "secrets"], hardRiskFamilies: ["auth", "secrets"] }),
+  });
+  store.log(job.id, "Choosing specialists from deterministic signals + router model");
+}
+
 function seedFailed(store: JobStore): void {
   const { job } = store.enqueue(
     baseJob({
@@ -479,6 +563,7 @@ function seedClean(store: JobStore): void {
       prTitle: "Fix typo in ledger README",
       headSha: "feedfacecafe1234feedfacecafe1234feedface",
       headRef: "readme-typo",
+      reviewers: [{ role: "correctness", title: "Correctness / regression hunter", model: MODEL }],
     }),
   );
   const started = ago(120);
@@ -516,5 +601,13 @@ function seedClean(store: JobStore): void {
     }),
     github_review_id: "4001",
     github_review_url: "https://github.com/acme/ledger/pull/401#pullrequestreview-4001",
+    routing_state: "done",
+    routing_mode: "hybrid",
+    routing_profile: "observation",
+    routing_source: "deterministic",
+    routing_reason: "Narrow change: 1 file(s), 2 line(s)",
+    routing_confidence: 0.7,
+    routing_reviewers: JSON.stringify(["correctness"]),
+    routing_signals: JSON.stringify({ families: ["docs"], hardRiskFamilies: [] }),
   });
 }

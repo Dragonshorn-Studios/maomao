@@ -63,7 +63,65 @@ function migrate(db: SqliteDb): void {
       finished_at TEXT,
       github_account_id INTEGER,
       github_repository_id INTEGER,
+      routing_state TEXT NOT NULL DEFAULT 'queued',
+      routing_mode TEXT,
+      routing_profile TEXT,
+      routing_reason TEXT,
+      routing_confidence REAL,
+      routing_signals TEXT,
+      routing_reviewers TEXT,
+      routing_source TEXT,
+      routing_model TEXT,
+      routing_provider TEXT,
+      routing_raw TEXT,
+      routing_prompt_tokens INTEGER,
+      routing_completion_tokens INTEGER,
+      routing_cost REAL,
+      routing_total_tokens INTEGER,
+      routing_usage_complete INTEGER,
+      routing_usage_warning TEXT,
+      routing_duration_ms INTEGER,
+      internal_escalation_state TEXT NOT NULL DEFAULT 'not_requested',
+      internal_escalation_reason TEXT,
+      internal_escalation_model TEXT,
+      internal_escalation_provider TEXT,
+      internal_escalation_raw TEXT,
+      internal_escalation_normalized TEXT,
+      internal_escalation_prompt_tokens INTEGER,
+      internal_escalation_completion_tokens INTEGER,
+      internal_escalation_cost REAL,
+      internal_escalation_total_tokens INTEGER,
+      internal_escalation_usage_complete INTEGER,
+      internal_escalation_usage_warning TEXT,
+      internal_escalation_duration_ms INTEGER,
+      internal_escalation_alert_cleared INTEGER,
+      external_dispatch_status TEXT NOT NULL DEFAULT 'not_requested',
+      external_dispatch_reason TEXT,
+      external_dispatch_targets TEXT,
+      external_dispatch_error TEXT,
+      escalation_id TEXT,
+      poison_alert_policy TEXT,
+      manual_escalate_requested INTEGER NOT NULL DEFAULT 0,
       UNIQUE (repo_full_name, pr_number, head_sha)
+    );
+
+    CREATE TABLE IF NOT EXISTS escalation_dispatches (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      escalation_id TEXT NOT NULL,
+      job_id INTEGER NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
+      provider TEXT NOT NULL,
+      instance TEXT NOT NULL,
+      repo_full_name TEXT NOT NULL,
+      pr_number INTEGER NOT NULL,
+      head_sha TEXT NOT NULL,
+      policy TEXT NOT NULL,
+      target_key TEXT NOT NULL,
+      target_type TEXT NOT NULL,
+      status TEXT NOT NULL,
+      detail TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      UNIQUE (provider, instance, repo_full_name, pr_number, head_sha, policy, target_key)
     );
 
     CREATE TABLE IF NOT EXISTS reviewer_runs (
@@ -109,9 +167,64 @@ function migrate(db: SqliteDb): void {
     CREATE INDEX IF NOT EXISTS idx_jobs_state ON jobs(state);
     CREATE INDEX IF NOT EXISTS idx_logs_job ON job_logs(job_id, id);
     CREATE INDEX IF NOT EXISTS idx_runs_job ON reviewer_runs(job_id);
+
+    CREATE TABLE IF NOT EXISTS findings (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      repo_full_name TEXT NOT NULL,
+      pr_number INTEGER NOT NULL,
+      fingerprint TEXT NOT NULL,
+      status TEXT NOT NULL,
+      reviewed_sha TEXT NOT NULL,
+      current_sha TEXT,
+      github_thread_id TEXT,
+      github_comment_id TEXT,
+      original_path TEXT,
+      original_line INTEGER,
+      current_path TEXT,
+      current_line INTEGER,
+      category TEXT,
+      summary TEXT NOT NULL DEFAULT '',
+      body TEXT,
+      severity TEXT,
+      confidence REAL,
+      dismissed_by TEXT,
+      dismissed_at TEXT,
+      dismiss_command TEXT,
+      reopened_by TEXT,
+      reopened_at TEXT,
+      reopen_command TEXT,
+      reconciliation_confidence REAL,
+      reconciliation_reason TEXT,
+      last_job_id INTEGER,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      UNIQUE (repo_full_name, pr_number, fingerprint)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_findings_pr ON findings(repo_full_name, pr_number, status);
+    CREATE INDEX IF NOT EXISTS idx_findings_thread ON findings(github_thread_id);
+    CREATE INDEX IF NOT EXISTS idx_findings_comment ON findings(github_comment_id);
+
+    CREATE TABLE IF NOT EXISTS webhook_deliveries (
+      delivery_id TEXT PRIMARY KEY,
+      event TEXT NOT NULL,
+      result TEXT NOT NULL,
+      created_at TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS processed_review_commands (
+      comment_id TEXT PRIMARY KEY,
+      delivery_id TEXT,
+      command TEXT NOT NULL,
+      result TEXT NOT NULL,
+      created_at TEXT NOT NULL
+    );
   `);
   ensureColumn(db, "jobs", "github_account_id", "INTEGER");
   ensureColumn(db, "jobs", "github_repository_id", "INTEGER");
+  ensureColumn(db, "jobs", "reconciliation_json", "TEXT");
+  ensureColumn(db, "jobs", "risk_profile", "TEXT");
+  ensureColumn(db, "jobs", "risk_reason", "TEXT");
   ensureColumn(db, "jobs", "aggregator_reasoning_tokens", "INTEGER");
   ensureColumn(db, "jobs", "aggregator_cache_read_tokens", "INTEGER");
   ensureColumn(db, "jobs", "aggregator_cache_write_tokens", "INTEGER");
@@ -124,6 +237,48 @@ function migrate(db: SqliteDb): void {
   ensureColumn(db, "reviewer_runs", "total_tokens", "INTEGER");
   ensureColumn(db, "reviewer_runs", "usage_complete", "INTEGER");
   ensureColumn(db, "reviewer_runs", "usage_warning", "TEXT");
+  const jobColumns: Array<[string, string]> = [
+    ["routing_state", "TEXT NOT NULL DEFAULT 'queued'"],
+    ["routing_mode", "TEXT"],
+    ["routing_profile", "TEXT"],
+    ["routing_reason", "TEXT"],
+    ["routing_confidence", "REAL"],
+    ["routing_signals", "TEXT"],
+    ["routing_reviewers", "TEXT"],
+    ["routing_source", "TEXT"],
+    ["routing_model", "TEXT"],
+    ["routing_provider", "TEXT"],
+    ["routing_raw", "TEXT"],
+    ["routing_prompt_tokens", "INTEGER"],
+    ["routing_completion_tokens", "INTEGER"],
+    ["routing_cost", "REAL"],
+    ["routing_total_tokens", "INTEGER"],
+    ["routing_usage_complete", "INTEGER"],
+    ["routing_usage_warning", "TEXT"],
+    ["routing_duration_ms", "INTEGER"],
+    ["internal_escalation_state", "TEXT NOT NULL DEFAULT 'not_requested'"],
+    ["internal_escalation_reason", "TEXT"],
+    ["internal_escalation_model", "TEXT"],
+    ["internal_escalation_provider", "TEXT"],
+    ["internal_escalation_raw", "TEXT"],
+    ["internal_escalation_normalized", "TEXT"],
+    ["internal_escalation_prompt_tokens", "INTEGER"],
+    ["internal_escalation_completion_tokens", "INTEGER"],
+    ["internal_escalation_cost", "REAL"],
+    ["internal_escalation_total_tokens", "INTEGER"],
+    ["internal_escalation_usage_complete", "INTEGER"],
+    ["internal_escalation_usage_warning", "TEXT"],
+    ["internal_escalation_duration_ms", "INTEGER"],
+    ["internal_escalation_alert_cleared", "INTEGER"],
+    ["external_dispatch_status", "TEXT NOT NULL DEFAULT 'not_requested'"],
+    ["external_dispatch_reason", "TEXT"],
+    ["external_dispatch_targets", "TEXT"],
+    ["external_dispatch_error", "TEXT"],
+    ["escalation_id", "TEXT"],
+    ["poison_alert_policy", "TEXT"],
+    ["manual_escalate_requested", "INTEGER NOT NULL DEFAULT 0"],
+  ];
+  for (const [name, ddl] of jobColumns) ensureColumn(db, "jobs", name, ddl);
 }
 
 function columnNames(db: SqliteDb, table: string): Set<string> {

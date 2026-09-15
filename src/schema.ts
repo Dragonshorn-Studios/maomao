@@ -26,6 +26,7 @@ export const reviewerResultSchema = z.object({
 export type ReviewerResult = z.infer<typeof reviewerResultSchema>;
 
 export const aggregatorFindingSchema = z.object({
+  id: z.string().min(1).optional(),
   severity: severitySchema,
   confidence: z.number().min(0).max(1).optional().default(0.5),
   category: z.string().min(1).optional().default("general"),
@@ -44,6 +45,26 @@ export const aggregatorResultSchema = z.object({
   findings: z.array(aggregatorFindingSchema).default([]),
 });
 export type AggregatorResult = z.infer<typeof aggregatorResultSchema>;
+
+export const verifierClassificationSchema = z.object({
+  fingerprint: z.string().min(1),
+  status: z.enum(["resolved", "still_valid", "moved", "uncertain"]),
+  confidence: z.number().min(0).max(1),
+  reason: z.string().min(1),
+  file: z.string().min(1).optional(),
+  line: z.number().int().positive().optional(),
+});
+export type VerifierClassification = z.infer<typeof verifierClassificationSchema>;
+
+export const verifierResultSchema = z.object({
+  schema_version: z.number().int().optional().default(1),
+  classifications: z.array(verifierClassificationSchema).default([]),
+});
+export type VerifierResult = z.infer<typeof verifierResultSchema>;
+
+export function parseVerifierResult(raw: string): VerifierResult {
+  return verifierResultSchema.parse(extractJsonFromText(raw));
+}
 
 export class SchemaValidationError extends Error {
   readonly issues: string;

@@ -13,6 +13,8 @@ export interface LabeledState {
 const JOB_STATES: Record<JobState, LabeledState> = {
   queued: { text: "Queued", hint: "Waiting to examine this pull request", mark: "○" },
   preparing: { text: "Preparing", hint: "Checking out the reviewed head SHA", mark: "◌" },
+  routing: { text: "Routing", hint: "Selecting a review profile and specialists", mark: "◎" },
+  reconciling: { text: "Reconciling", hint: "Checking prior findings against this SHA", mark: "◍" },
   reviewing: { text: "Reviewing", hint: "Examining this pull request", mark: "◉" },
   aggregating: { text: "Aggregating", hint: "Aggregation in progress", mark: "◎" },
   publishing: { text: "Publishing", hint: "Posting the GitHub COMMENT review", mark: "▣" },
@@ -84,7 +86,82 @@ export function staleBanner(): string {
 
 export function flavorForJob(state: string, prNumber: number): string | undefined {
   if (state === "reviewing" || state === "preparing") return `Examining PR #${prNumber}…`;
+  if (state === "routing") return `Choosing specialists for PR #${prNumber}…`;
+  if (state === "reconciling") return `Reconciling prior findings for PR #${prNumber}`;
   if (state === "aggregating") return "Aggregation in progress";
   if (state === "queued") return `PR #${prNumber} is queued for examination`;
   return undefined;
+}
+
+export function routingProfileLabel(profile: string | null | undefined): string {
+  if (profile === "observation") return "observation";
+  if (profile === "diagnosis") return "diagnosis";
+  if (profile === "poison-alert") return "poison-alert";
+  if (profile === "fixed") return "fixed";
+  return profile || "pending";
+}
+
+export function dispatchStatusLabel(status: string | null | undefined): string {
+  switch (status) {
+    case "dispatching":
+      return "dispatching";
+    case "dispatched":
+      return "dispatched (notification accepted)";
+    case "dispatch_failed":
+      return "dispatch failed";
+    default:
+      return "not requested";
+  }
+}
+
+export function findingStatusLabel(status: string): { text: string; hint: string } {
+  switch (status) {
+    case "resolved":
+      return { text: "Resolved", hint: "Verifier confirmed the problem is gone" };
+    case "dismissed":
+      return { text: "Dismissed", hint: "Acknowledged and intentionally ignored" };
+    case "still_valid":
+      return { text: "Still valid", hint: "The finding still applies on the current SHA" };
+    case "moved":
+      return { text: "Moved", hint: "Same finding at a new location" };
+    case "uncertain":
+      return { text: "Uncertain", hint: "Not enough evidence to close safely" };
+    default:
+      return { text: "Open", hint: "Outstanding finding" };
+  }
+}
+
+export function findingCommandLabel(command: string | null | undefined): string {
+  if (!command) return "";
+  if (command === "seedling") return "🌱";
+  if (command === "ignore" || command === "bury" || command === "reopen") return `@maomao ${command}`;
+  return command;
+}
+
+export function findingOverrideNote(finding: {
+  status: string;
+  dismissed_by?: string | null;
+  dismiss_command?: string | null;
+  reopened_by?: string | null;
+}): string | undefined {
+  if (finding.status === "dismissed") {
+    const who = finding.dismissed_by ? ` by ${finding.dismissed_by}` : "";
+    const via = findingCommandLabel(finding.dismiss_command);
+    return `Buried${who}${via ? ` via ${via}` : ""}. Intentionally ignored, not marked fixed.`;
+  }
+  if (finding.status === "resolved") {
+    return "Verifier confirmed the problem is gone.";
+  }
+  if (finding.reopened_by) {
+    return `Reopened by ${finding.reopened_by}.`;
+  }
+  return undefined;
+}
+
+export function settledFindingsCopy(buried: number, resolved: number): string {
+  const parts: string[] = [];
+  if (buried) parts.push(buried === 1 ? "1 buried" : `${buried} buried`);
+  if (resolved) parts.push(resolved === 1 ? "1 resolved" : `${resolved} resolved`);
+  if (parts.length === 0) return "Settled findings";
+  return `${parts.join(", ")} — expand a row for details`;
 }

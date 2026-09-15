@@ -2,8 +2,11 @@ import type { Config } from "../config.js";
 import type { EnqueueResult, JobStore, NewJobInput } from "./store.js";
 import type { JobQueue } from "./queue.js";
 
-export function reviewerSpecs(config: Config): NewJobInput["reviewers"] {
-  return config.reviewers.map((role) => ({
+export function reviewerSpecs(config: Config, roleIds?: string[]): NewJobInput["reviewers"] {
+  const selected = roleIds
+    ? config.reviewers.filter((role) => roleIds.includes(role.id))
+    : config.reviewers;
+  return selected.map((role) => ({
     role: role.id,
     title: role.title,
     model: role.model || config.opencode.reviewerModel || undefined,
@@ -15,9 +18,10 @@ export function enqueuePullJob(
   config: Config,
   input: Omit<NewJobInput, "reviewers">,
 ): EnqueueResult {
+  const reviewers = config.routing.mode === "fixed" ? reviewerSpecs(config) : [];
   return store.enqueue({
     ...input,
-    reviewers: reviewerSpecs(config),
+    reviewers,
   });
 }
 
