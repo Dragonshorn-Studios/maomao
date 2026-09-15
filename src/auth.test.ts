@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  OAuthStateStore,
   cookieSecure,
   csrfExemptPath,
   csrfRejectReason,
@@ -7,10 +8,12 @@ import {
   issueCsrfToken,
   passwordsMatch,
   safeNextPath,
+  signOAuthSession,
   signSession,
   uiGateEnabled,
   verifyCsrfRequest,
   verifyCsrfToken,
+  verifyOAuthSession,
   verifySession,
 } from "./auth.js";
 
@@ -106,5 +109,50 @@ describe("csrf tokens", () => {
     expect(csrfExemptPath("/login")).toBe(false);
     expect(csrfExemptPath("/reviews")).toBe(false);
     expect(csrfExemptPath("/health")).toBe(false);
+  });
+});
+
+describe("oauth sessions", () => {
+  const session = { id: 1001, login: "octocat", avatarUrl: "https://avatars.githubusercontent.com/u/1001" };
+
+  it("round-trips an oauth session and rejects tampering or expiry", () => {
+    const token = signOAuthSession("secret", session, 1_000, 60_000);
+    expect(verifyOAuthSession("secret", token, 1_500)).toEqual(session);
+    expect(verifyOAuthSession("other", token, 1_500)).toBeUndefined();
+    const tampered = token.slice(0, -1) + (token.endsWith("a") ? "b" : "a");
+    expect(verifyOAuthSession("secret", tampered, 1_500)).toBeUndefined();
+    expect(verifyOAuthSession("secret", token, 61_000)).toBeUndefined();
+    expect(verifyOAuthSession("secret", undefined, 1_500)).toBeUndefined();
+    expect(verifyOAuthSession("secret", "garbage", 1_500)).toBeUndefined();
+  });
+
+  it("keeps avatar urls only when they are https", () => {
+    const without = signOAuthSession("secret", { ...session, avatarUrl: null }, 1_000, 60_000);
+    expect(verifyOAuthSession("secret", without, 1_500)?.avatarUrl).toBeNull();
+    const insecure = signOAuthSession("secret", { ...session, avatarUrl: "http://evil.test/a.png" }, 1_000, 60_000);
+    expect(verifyOAuthSession("secret", insecure, 1_500)?.avatarUrl).toBeNull();
+  });
+
+  it("issues a fresh value on every login (rotation)", () => {
+    const first = signOAuthSession("secret", session, 1_000, 60_000);
+    const second = signOAuthSession("secret", session, 1_000, 60_000);
+    expect(first).not.toBe(second);
+  });
+});
+
+describe("oauth state store", () => {
+  it("consumes a state exactly once and returns its next path", () => {
+    const states = new OAuthStateStore();
+    const nonce = states.issue(1_000, 60_000, "/jobs/3");
+    expect(states.consume(nonce, 1_500)).toBe("/jobs/3");
+    expect(states.consume(nonce, 1_500)).toBeUndefined();
+  });
+
+  it("rejects expired, missing, or foreign states", () => {
+    const states = new OAuthStateStore();
+    const nonce = states.issue(1_000, 60_000);
+    expect(states.consume(nonce, 61_000)).toBeUndefined();
+    expect(states.consume(undefined)).toBeUndefined();
+    expect(states.consume("not-a-nonce")).toBeUndefined();
   });
 });

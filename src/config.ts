@@ -69,6 +69,15 @@ export interface Config {
   reconcileMinConfidence: number;
   uiPassword: string;
   uiSessionSecret: string;
+  /** GitHub OAuth (operator login). Empty strings = OAuth disabled. */
+  oauthClientId: string;
+  oauthClientSecret: string;
+  /** GitHub user REST numeric ids allowed to operate the UI. Empty denies all OAuth logins. */
+  adminGithubIds: number[];
+  /** Emergency shared-password form on the login page. Only honored while OAuth is enabled. */
+  uiLocalLogin: boolean;
+  /** Public base URL used to build the exact OAuth callback URL. */
+  publicUrl: string;
   /** GitHub user/org REST numeric ids (`installation.account.id`). Empty = unrestricted on this axis. */
   allowedGithubAccountIds: number[];
   /** GitHub repository REST numeric ids (`repository.id`). Empty = unrestricted on this axis. */
@@ -225,6 +234,11 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     reconcileMinConfidence: clamp01(env.RECONCILE_MIN_CONFIDENCE, 0.7),
     uiPassword: env.UI_PASSWORD?.trim() || env.MAOMAO_UI_PASSWORD?.trim() || "",
     uiSessionSecret: env.UI_SESSION_SECRET?.trim() || env.MAOMAO_UI_SESSION_SECRET?.trim() || "",
+    oauthClientId: env.GITHUB_OAUTH_CLIENT_ID?.trim() || "",
+    oauthClientSecret: env.GITHUB_OAUTH_CLIENT_SECRET?.trim() || "",
+    adminGithubIds: parseIdList(env.MAOMAO_ADMIN_GITHUB_IDS, "MAOMAO_ADMIN_GITHUB_IDS"),
+    uiLocalLogin: parseBoolean(env.UI_LOCAL_LOGIN, false),
+    publicUrl: env.MAOMAO_PUBLIC_URL?.trim().replace(/\/+$/, "") || "",
     allowedGithubAccountIds: parseIdList(env.ALLOWED_GITHUB_ACCOUNT_IDS, "ALLOWED_GITHUB_ACCOUNT_IDS"),
     allowedGithubRepositoryIds: parseIdList(env.ALLOWED_GITHUB_REPOSITORY_IDS, "ALLOWED_GITHUB_REPOSITORY_IDS"),
     maxDiffBytes: clamp(parseInteger(env.MAX_DIFF_BYTES, 1_048_576), 0, 50 * 1024 * 1024),
@@ -252,13 +266,34 @@ export function assertRuntimeConfig(config: Config): void {
   }
   const passwordSet = Boolean(config.uiPassword);
   const secretSet = Boolean(config.uiSessionSecret);
-  if (passwordSet !== secretSet) {
-    throw new Error("Set both UI_PASSWORD and UI_SESSION_SECRET (or neither, for an open local UI)");
+  if (passwordSet && !secretSet) {
+    throw new Error("UI_PASSWORD requires UI_SESSION_SECRET (or unset both, for an open local UI)");
+  }
+  const oauthIdSet = Boolean(config.oauthClientId);
+  const oauthSecretSet = Boolean(config.oauthClientSecret);
+  if (oauthIdSet !== oauthSecretSet) {
+    throw new Error("Set both GITHUB_OAUTH_CLIENT_ID and GITHUB_OAUTH_CLIENT_SECRET (or neither)");
+  }
+  if (oauthIdSet) {
+    if (!secretSet) {
+      throw new Error("GitHub OAuth requires UI_SESSION_SECRET for session signing");
+    }
+    if (config.adminGithubIds.length === 0) {
+      throw new Error("GitHub OAuth requires MAOMAO_ADMIN_GITHUB_IDS (numeric GitHub user ids)");
+    }
+    if (!config.publicUrl) {
+      throw new Error("GitHub OAuth requires MAOMAO_PUBLIC_URL to build the exact callback URL");
+    }
+  }
+  if (config.uiLocalLogin && (!passwordSet || !secretSet)) {
+    throw new Error("UI_LOCAL_LOGIN requires both UI_PASSWORD and UI_SESSION_SECRET");
   }
 }
 
 export function githubSecrets(config: Config): string[] {
-  return [config.github.privateKey, config.github.webhookSecret].filter((value) => value.length >= 4);
+  return [config.github.privateKey, config.github.webhookSecret, config.oauthClientSecret].filter(
+    (value) => value.length >= 4,
+  );
 }
 
 function clamp01(value: string | undefined, fallback: number): number {

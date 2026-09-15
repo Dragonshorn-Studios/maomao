@@ -35,14 +35,35 @@ import {
 
 export type { PageOptions };
 
-export function renderLogin(error?: "invalid" | "csrf", nextPath: string = "/", csrfToken?: string): string {
-  const errorCopy =
-    error === "csrf" ? "Your form session expired. Submit the form again." : error === "invalid" ? "Invalid password." : "";
-  const body = `
-    <h1>Sign in</h1>
-    <p class="lede">Enter the monitoring password to view jobs, logs, and APIs.</p>
-    ${errorCopy ? `<p class="error" role="alert">${escapeHtml(errorCopy)}</p>` : ""}
-    <form class="login" method="post" action="/login">
+export type LoginError = "invalid" | "csrf" | "oauth-state" | "oauth-denied" | "oauth-failed";
+
+const LOGIN_ERRORS: Record<LoginError, string> = {
+  invalid: "Invalid password.",
+  csrf: "Your form session expired. Submit the form again.",
+  "oauth-state": "Sign-in could not be verified (the state was missing, expired, or replayed). Start again.",
+  "oauth-denied":
+    "Your GitHub account is not authorized to operate this Maomao instance. Ask an operator to add your GitHub user id, or sign in as a different user.",
+  "oauth-failed": "GitHub sign-in failed. Try again shortly.",
+};
+
+export interface LoginOptions {
+  error?: LoginError;
+  nextPath?: string;
+  csrfToken?: string;
+  showGithub?: boolean;
+  showPassword?: boolean;
+}
+
+export function renderLogin(options: LoginOptions = {}): string {
+  const { error, nextPath = "/", csrfToken, showGithub = false, showPassword = false } = options;
+  const errorCopy = error ? LOGIN_ERRORS[error] : "";
+  const githubButton = showGithub
+    ? `<a class="button github-login" href="/login/github${
+        nextPath !== "/" ? `?next=${encodeURIComponent(nextPath)}` : ""
+      }">Sign in with GitHub</a>`
+    : "";
+  const passwordForm = showPassword
+    ? `<form class="login" method="post" action="/login">
       ${csrfInput(csrfToken)}
       <input type="hidden" name="next" value="${escapeHtml(nextPath)}"/>
       <label>
@@ -50,7 +71,15 @@ export function renderLogin(error?: "invalid" | "csrf", nextPath: string = "/", 
         <input type="password" name="password" autocomplete="current-password" autofocus required/>
       </label>
       <button type="submit">Sign in</button>
-    </form>`;
+    </form>`
+    : "";
+  const body = `
+    <h1>Sign in</h1>
+    <p class="lede">Sign in to view jobs, logs, and APIs.</p>
+    ${errorCopy ? `<p class="error" role="alert">${escapeHtml(errorCopy)}</p>` : ""}
+    ${githubButton}
+    ${githubButton && passwordForm ? `<p class="muted">or</p>` : ""}
+    ${passwordForm}`;
   return layout("Maomao sign in", body, { live: false });
 }
 

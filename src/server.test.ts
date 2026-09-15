@@ -12,7 +12,7 @@ function sign(secret: string, body: string): string {
   return `sha256=${createHmac("sha256", secret).update(body).digest("hex")}`;
 }
 
-function testApp(env: Record<string, string> = {}, github?: ManualTriggerPort) {
+function testApp(env: Record<string, string> = {}, github?: ManualTriggerPort, oauthFetch?: typeof fetch) {
   const webhookSecret = "s3cret";
   const config = loadConfig({
     GITHUB_WEBHOOK_SECRET: webhookSecret,
@@ -29,8 +29,30 @@ function testApp(env: Record<string, string> = {}, github?: ManualTriggerPort) {
     },
     abortMany() {},
   } as unknown as JobQueue;
-  const app = createApp({ config, store, queue, github, startedAt: Date.now() });
+  const app = createApp({ config, store, queue, github, startedAt: Date.now(), oauthFetch });
   return { app, store, enqueued, webhookSecret };
+}
+
+function mockOauthFetch(
+  user: { id: number; login: string; avatar_url?: string },
+  options: { tokenFail?: boolean } = {},
+): typeof fetch {
+  return (async (input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => {
+    const url = String(input);
+    if (url === "https://github.com/login/oauth/access_token") {
+      if (options.tokenFail) return new Response("nope", { status: 500 });
+      const body = JSON.parse(String(init?.body)) as { code?: string };
+      if (body.code !== "good-code") return new Response(JSON.stringify({ error: "bad_verification_code" }), { status: 200 });
+      return new Response(JSON.stringify({ access_token: "human-access-token" }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    }
+    if (url === "https://api.github.com/user") {
+      return new Response(JSON.stringify(user), { status: 200, headers: { "content-type": "application/json" } });
+    }
+    return new Response("not found", { status: 404 });
+  }) as typeof fetch;
 }
 
 function cookieFrom(response: Response, name = SESSION_COOKIE): string {
@@ -630,5 +652,148 @@ describe("manual review trigger", () => {
     const again = await app.request(`/jobs/${created.job.id}/retry`, { method: "POST" });
     expect(again.status).toBe(400);
     expect(await again.text()).toContain("still running");
+  });
+});
+
+describe("oauth operator login", () => {
+  const oauthEnv = {
+    UI_SESSION_SECRET: "session-secret-for-tests",
+    GITHUB_OAUTH_CLIENT_ID: "cid",
+    GITHUB_OAUTH_CLIENT_SECRET: "csecret",
+    MAOMAO_ADMIN_GITHUB_IDS: "1001",
+    MAOMAO_PUBLIC_URL: "https://maomao.example",
+  };
+
+  function stateFrom(location: string | null): string {
+    const match = location?.match(/state=([^&]+)/);
+    if (!match?.[1]) throw new Error(`missing state in ${location}`);
+    return match[1];
+  }
+
+  it("logs in an allowlisted GitHub user and rotates the session", async () => {
+    const { app } = testApp(oauthEnv, undefined, mockOauthFetch({ id: 1001, login: "octocat" }));
+
+    const loginPage = await app.request("/login");
+    const pageHtml = await loginPage.text();
+    expect(pageHtml).toContain("Sign in with GitHub");
+    expect(pageHtml).not.toContain('name="password"');
+
+    const start = await app.request("/login/github?next=%2Fjobs%2F9");
+    expect(start.status).toBe(302);
+    const authorize = start.headers.get("location") ?? "";
+    expect(authorize).toContain("https://github.com/login/oauth/authorize");
+    expect(authorize).toContain("client_id=cid");
+    expect(decodeURIComponent(authorize)).toContain("https://maomao.example/login/github/callback");
+    const state = stateFrom(authorize);
+
+    const callback = await app.request(`/login/github/callback?code=good-code&state=${state}`);
+    expect(callback.status).toBe(302);
+    expect(callback.headers.get("location")).toBe("/jobs/9");
+    const sessionCookie = cookieFrom(callback);
+    const setCookie = callback.headers.get("set-cookie") ?? "";
+    expect(setCookie).toContain("HttpOnly");
+    expect(setCookie).toMatch(/samesite=lax/i);
+
+    const home = await app.request("/", { headers: { cookie: sessionCookie } });
+    const homeHtml = await home.text();
+    expect(homeHtml).toContain("signed in as <strong>octocat</strong>");
+    expect(homeHtml).not.toContain("human-access-token");
+  });
+
+  it("denies a valid GitHub user who is not on the admin id allowlist", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const { app } = testApp(oauthEnv, undefined, mockOauthFetch({ id: 4242, login: "outsider" }));
+    const start = await app.request("/login/github");
+    const state = stateFrom(start.headers.get("location"));
+    const callback = await app.request(`/login/github/callback?code=good-code&state=${state}`);
+    expect(callback.status).toBe(403);
+    expect(await callback.text()).toContain("not authorized to operate this Maomao instance");
+    expect(callback.headers.get("set-cookie") ?? "").not.toContain(SESSION_COOKIE);
+    expect(String(warn.mock.calls.find(([msg]) => String(msg).includes("oauth login denied"))?.[0])).toContain("id=4242");
+    warn.mockRestore();
+  });
+
+  it("rejects replayed, foreign, and failed states single-use", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const { app } = testApp(oauthEnv, undefined, mockOauthFetch({ id: 1001, login: "octocat" }));
+    const start = await app.request("/login/github");
+    const state = stateFrom(start.headers.get("location"));
+
+    const first = await app.request(`/login/github/callback?code=good-code&state=${state}`);
+    expect(first.status).toBe(302);
+
+    const replay = await app.request(`/login/github/callback?code=good-code&state=${state}`);
+    expect(replay.status).toBe(403);
+    expect(await replay.text()).toContain("could not be verified");
+
+    const foreign = await app.request(`/login/github/callback?code=good-code&state=bogus`);
+    expect(foreign.status).toBe(403);
+    warn.mockRestore();
+  });
+
+  it("renders a provider failure without leaking secrets", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const { app } = testApp(oauthEnv, undefined, mockOauthFetch({ id: 1001, login: "octocat" }, { tokenFail: true }));
+    const start = await app.request("/login/github");
+    const state = stateFrom(start.headers.get("location"));
+    const callback = await app.request(`/login/github/callback?code=good-code&state=${state}`);
+    expect(callback.status).toBe(502);
+    const html = await callback.text();
+    expect(html).toContain("GitHub sign-in failed");
+    expect(html).not.toContain("csecret");
+    expect(html).not.toContain("human-access-token");
+    warn.mockRestore();
+  });
+
+  it("rate limits repeated callback failures", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const { app } = testApp(oauthEnv, undefined, mockOauthFetch({ id: 1001, login: "octocat" }));
+    for (let i = 0; i < 10; i += 1) {
+      const res = await app.request(`/login/github/callback?code=good-code&state=bogus`);
+      expect(res.status).toBe(403);
+    }
+    const blocked = await app.request(`/login/github/callback?code=good-code&state=bogus`);
+    expect(blocked.status).toBe(429);
+    warn.mockRestore();
+  });
+
+  it("revokes live sessions as soon as the id leaves the allowlist", async () => {
+    const { app } = testApp(oauthEnv, undefined, mockOauthFetch({ id: 1001, login: "octocat" }));
+    const start = await app.request("/login/github");
+    const state = stateFrom(start.headers.get("location"));
+    const callback = await app.request(`/login/github/callback?code=good-code&state=${state}`);
+    const cookie = cookieFrom(callback);
+
+    const revoked = testApp(
+      { ...oauthEnv, MAOMAO_ADMIN_GITHUB_IDS: "9999" },
+      undefined,
+      mockOauthFetch({ id: 1001, login: "octocat" }),
+    );
+    const denied = await revoked.app.request("/", { headers: { cookie } });
+    expect(denied.status).toBe(403);
+    const api = await revoked.app.request("/api/jobs", { headers: { cookie } });
+    expect(api.status).toBe(403);
+  });
+
+  it("keeps the emergency local login hidden unless explicitly enabled", async () => {
+    const { app } = testApp(oauthEnv, undefined, mockOauthFetch({ id: 1001, login: "octocat" }));
+
+    const hidden = await app.request("/login");
+    expect((await hidden.text())).not.toContain('name="password"');
+
+    const forcedPost = await app.request("/login", {
+      method: "POST",
+      headers: { "content-type": "application/x-www-form-urlencoded" },
+      body: "password=hunter2&next=%2F",
+    });
+    // The csrf gate rejects the tokenless post before the password route is even reached.
+    expect(forcedPost.status).toBe(403);
+    expect(forcedPost.headers.get("set-cookie") ?? "").not.toContain(SESSION_COOKIE);
+
+    const enabled = testApp({ ...oauthEnv, UI_LOCAL_LOGIN: "true", UI_PASSWORD: "hunter2" });
+    const page = await enabled.app.request("/login");
+    const html = await page.text();
+    expect(html).toContain("Sign in with GitHub");
+    expect(html).toContain('name="password"');
   });
 });

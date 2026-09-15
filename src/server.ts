@@ -6,7 +6,7 @@ import type { JobStore } from "./jobs/store.js";
 import { handleGithubWebhook } from "./github/webhooks.js";
 import type { ManualTriggerPort, GithubPort } from "./github/client.js";
 import { authorizeGithubAccount, logAuthorizationRejection, logRateLimited, rejectUnauthorized } from "./github/authorize.js";
-import { repoRateLimitActive, RepoRateLimiter } from "./github/rate-limit.js";
+import { repoRateLimitActive, RepoRateLimiter, WindowRateLimiter } from "./github/rate-limit.js";
 import { parseGithubPullUrl, PullUrlError } from "./github/pull-url.js";
 import { dispatchEnqueue, enqueuePullJob } from "./jobs/enqueue.js";
 import { subscribe } from "./events.js";
@@ -16,6 +16,7 @@ import {
   CSRF_COOKIE,
   CSRF_FIELD,
   CSRF_TTL_MS,
+  OAuthStateStore,
   SESSION_COOKIE,
   SESSION_TTL_MS,
   cookieSecure,
@@ -25,12 +26,17 @@ import {
   issueCsrfToken,
   passwordsMatch,
   safeNextPath,
+  signOAuthSession,
   signSession,
   uiGateEnabled,
   verifyCsrfRequest,
   verifyCsrfToken,
+  verifyOAuthSession,
   verifySession,
+  type OAuthSession,
 } from "./auth.js";
+import { exchangeOauthCode, fetchGithubUser, oauthAuthorizeUrl, oauthEnabled } from "./oauth.js";
+import type { LoginError } from "./ui/index.js";
 
 export interface ServerContext {
   config: Config;
@@ -39,17 +45,44 @@ export interface ServerContext {
   startedAt: number;
   github?: ManualTriggerPort & Partial<GithubPort>;
   rateLimiter?: RepoRateLimiter;
+  /** Injectable transport for the GitHub OAuth operator-login endpoints (tests). */
+  oauthFetch?: typeof fetch;
 }
 
-export function createApp(ctx: ServerContext): Hono {
-  const app = new Hono();
-  const gateOn = uiGateEnabled(ctx.config.uiPassword, ctx.config.uiSessionSecret);
+const OAUTH_STATE_TTL_MS = 10 * 60 * 1000;
+const OAUTH_START_LIMIT = 30;
+const OAUTH_FAIL_LIMIT = 10;
+const OAUTH_WINDOW_MS = 10 * 60 * 1000;
+
+export function createApp(ctx: ServerContext): Hono<{ Variables: { identity?: OAuthSession } }> {
+  const app = new Hono<{ Variables: { identity?: OAuthSession } }>();
+  const oauthOn = oauthEnabled(ctx.config);
+  const passwordGateOn = uiGateEnabled(ctx.config.uiPassword, ctx.config.uiSessionSecret);
+  const gateOn = oauthOn || passwordGateOn;
+  const passwordLoginOn = passwordGateOn && (!oauthOn || ctx.config.uiLocalLogin);
   const pageOpts = { showLogout: gateOn };
+  const loginPageOpts = { showGithub: oauthOn, showPassword: passwordLoginOn };
+  const renderLoginDenied = (c: Context) => c.html(renderLogin({ ...loginPageOpts, error: "oauth-denied" }), 403);
   const rateLimiter = ctx.rateLimiter ?? new RepoRateLimiter();
+  const authLimiter = new WindowRateLimiter();
+  const oauthStates = new OAuthStateStore();
 
   app.use("*", async (c, next) => {
     if (!gateOn || isPublicPath(c.req.path)) return next();
     const token = getCookie(c, SESSION_COOKIE);
+    const oauthSession = verifyOAuthSession(ctx.config.uiSessionSecret, token);
+    if (oauthSession) {
+      // Re-check the allowlist on every request so removing an id revokes live sessions immediately.
+      if (!ctx.config.adminGithubIds.includes(oauthSession.id)) {
+        console.warn(`auth: session denied (not allowlisted) id=${oauthSession.id} login=${oauthSession.login}`);
+        if (c.req.path.startsWith("/api/") || c.req.path === "/events") {
+          return c.json({ error: "forbidden" }, 403);
+        }
+        return renderLoginDenied(c);
+      }
+      c.set("identity", oauthSession);
+      return next();
+    }
     if (verifySession(ctx.config.uiSessionSecret, token)) return next();
     if (c.req.path.startsWith("/api/") || c.req.path === "/events") {
       return c.json({ error: "unauthorized" }, 401);
@@ -79,7 +112,12 @@ export function createApp(ctx: ServerContext): Hono {
       console.warn(`csrf rejected: ${csrfRejectReason(cookieToken, fieldToken)} path=${c.req.path}`);
       if (c.req.path === "/login") {
         return c.html(
-          renderLogin("csrf", safeNextPath(bodyNext ?? c.req.query("next")), ensureCsrfToken(c, ctx.config.uiSessionSecret)),
+          renderLogin({
+            ...loginPageOpts,
+            error: "csrf",
+            nextPath: safeNextPath(bodyNext ?? c.req.query("next")),
+            csrfToken: passwordLoginOn ? ensureCsrfToken(c, ctx.config.uiSessionSecret) : undefined,
+          }),
           403,
         );
       }
@@ -92,17 +130,33 @@ export function createApp(ctx: ServerContext): Hono {
     if (!gateOn) return c.redirect("/", 302);
     const token = getCookie(c, SESSION_COOKIE);
     const nextPath = safeNextPath(c.req.query("next"));
-    if (verifySession(ctx.config.uiSessionSecret, token)) return c.redirect(nextPath, 302);
-    return c.html(renderLogin(undefined, nextPath, ensureCsrfToken(c, ctx.config.uiSessionSecret)));
+    if (verifySession(ctx.config.uiSessionSecret, token) || verifyOAuthSession(ctx.config.uiSessionSecret, token)) {
+      return c.redirect(nextPath, 302);
+    }
+    return c.html(
+      renderLogin({
+        ...loginPageOpts,
+        nextPath,
+        csrfToken: passwordLoginOn ? ensureCsrfToken(c, ctx.config.uiSessionSecret) : undefined,
+      }),
+    );
   });
 
   app.post("/login", async (c) => {
-    if (!gateOn) return c.redirect("/", 302);
+    if (!passwordLoginOn) return c.redirect("/login", 302);
     const body = await c.req.parseBody();
     const password = typeof body.password === "string" ? body.password : "";
     const nextPath = safeNextPath(typeof body.next === "string" ? body.next : c.req.query("next"));
     if (!passwordsMatch(password, ctx.config.uiPassword)) {
-      return c.html(renderLogin("invalid", nextPath, ensureCsrfToken(c, ctx.config.uiSessionSecret)), 401);
+      return c.html(
+        renderLogin({
+          ...loginPageOpts,
+          error: "invalid",
+          nextPath,
+          csrfToken: ensureCsrfToken(c, ctx.config.uiSessionSecret),
+        }),
+        401,
+      );
     }
     setCookie(c, SESSION_COOKIE, signSession(ctx.config.uiSessionSecret), {
       httpOnly: true,
@@ -114,7 +168,63 @@ export function createApp(ctx: ServerContext): Hono {
     return c.redirect(nextPath, 302);
   });
 
+  app.get("/login/github", (c) => {
+    if (!oauthOn) return c.redirect("/login", 302);
+    if (!authLimiter.wouldAllow("oauth-start", OAUTH_START_LIMIT, OAUTH_WINDOW_MS)) {
+      return c.text("Too many sign-in attempts; try again later.", 429);
+    }
+    authLimiter.record("oauth-start", OAUTH_START_LIMIT, OAUTH_WINDOW_MS);
+    const state = oauthStates.issue(Date.now(), OAUTH_STATE_TTL_MS, safeNextPath(c.req.query("next")));
+    return c.redirect(oauthAuthorizeUrl(ctx.config, state), 302);
+  });
+
+  app.get("/login/github/callback", async (c) => {
+    if (!oauthOn) return c.redirect("/login", 302);
+    if (!authLimiter.wouldAllow("oauth-fail", OAUTH_FAIL_LIMIT, OAUTH_WINDOW_MS)) {
+      return c.text("Too many failed sign-ins; try again later.", 429);
+    }
+    const url = new URL(c.req.url);
+    const code = url.searchParams.get("code") ?? "";
+    const next = oauthStates.consume(url.searchParams.get("state") ?? undefined);
+    if (next === undefined) {
+      authLimiter.record("oauth-fail", OAUTH_FAIL_LIMIT, OAUTH_WINDOW_MS);
+      console.warn("auth: oauth state rejected (missing, expired, or replayed)");
+      return c.html(renderLogin({ ...loginPageOpts, error: "oauth-state" }), 403);
+    }
+    const fetchImpl = ctx.oauthFetch ?? fetch;
+    const accessToken = await exchangeOauthCode(ctx.config, code, fetchImpl).catch(() => undefined);
+    const user = accessToken ? await fetchGithubUser(accessToken, fetchImpl).catch(() => undefined) : undefined;
+    if (!user) {
+      authLimiter.record("oauth-fail", OAUTH_FAIL_LIMIT, OAUTH_WINDOW_MS);
+      console.warn("auth: oauth token exchange or user lookup failed");
+      return c.html(renderLogin({ ...loginPageOpts, error: "oauth-failed" }), 502);
+    }
+    if (!ctx.config.adminGithubIds.includes(user.id)) {
+      authLimiter.record("oauth-fail", OAUTH_FAIL_LIMIT, OAUTH_WINDOW_MS);
+      console.warn(`auth: oauth login denied id=${user.id} login=${user.login}`);
+      return renderLoginDenied(c);
+    }
+    // Rotation: always issue a fresh session value at login; the human access token above is
+    // used once for identity and never stored.
+    setCookie(
+      c,
+      SESSION_COOKIE,
+      signOAuthSession(ctx.config.uiSessionSecret, { id: user.id, login: user.login, avatarUrl: user.avatarUrl }),
+      {
+        httpOnly: true,
+        sameSite: "Lax",
+        secure: cookieSecure(c.req.url, c.req.header("x-forwarded-proto")),
+        path: "/",
+        maxAge: Math.floor(SESSION_TTL_MS / 1000),
+      },
+    );
+    console.log(`auth: oauth login id=${user.id} login=${user.login}`);
+    return c.redirect(safeNextPath(next), 302);
+  });
+
   app.post("/logout", (c) => {
+    const identity = c.get("identity");
+    if (identity) console.log(`auth: logout id=${identity.id} login=${identity.login}`);
     deleteCookie(c, SESSION_COOKIE, { path: "/" });
     return c.redirect(gateOn ? "/login" : "/", 302);
   });
@@ -163,10 +273,12 @@ export function createApp(ctx: ServerContext): Hono {
     const body = await c.req.parseBody();
     const rawUrl = typeof body.url === "string" ? body.url : "";
     const csrfToken = gateOn ? ensureCsrfToken(c, ctx.config.uiSessionSecret) : undefined;
+    const identity = c.get("identity");
     const home = (extra: { error?: string; notice?: string; reviewUrl?: string } = {}) =>
       c.html(
         renderHome(ctx.store.listJobs(75), ctx.store, {
           ...pageOpts,
+          identity,
           csrfToken,
           ...extra,
           reviewUrl: extra.reviewUrl ?? rawUrl,
@@ -290,6 +402,7 @@ export function createApp(ctx: ServerContext): Hono {
     return c.html(
       renderHome(jobs, ctx.store, {
         ...pageOpts,
+        identity: c.get("identity"),
         csrfToken: gateOn ? ensureCsrfToken(c, ctx.config.uiSessionSecret) : undefined,
         notice: noticeText(c.req.query("notice")),
         error: c.req.query("error") || undefined,
@@ -304,6 +417,7 @@ export function createApp(ctx: ServerContext): Hono {
     return c.html(
       renderJob(job, ctx.store.listReviewerRuns(id), ctx.store.listLogs(id), {
         ...pageOpts,
+        identity: c.get("identity"),
         csrfToken: gateOn ? ensureCsrfToken(c, ctx.config.uiSessionSecret) : undefined,
         notice: noticeText(c.req.query("notice"), job.repo_full_name, job.pr_number, job.head_sha),
         prFindings: ctx.store.listFindings(job.repo_full_name, job.pr_number),
@@ -401,10 +515,11 @@ function retryJob(c: Context, ctx: ServerContext, jobId: number, runId?: number)
   if (!job) return c.text("Not found", 404);
   const result = ctx.store.retryFailedReviewers(jobId, runId);
   if (!result.ok) {
-    const gate = uiGateEnabled(ctx.config.uiPassword, ctx.config.uiSessionSecret);
+    const gate = oauthEnabled(ctx.config) || uiGateEnabled(ctx.config.uiPassword, ctx.config.uiSessionSecret);
     return c.html(
       renderJob(job, ctx.store.listReviewerRuns(jobId), ctx.store.listLogs(jobId), {
         showLogout: gate,
+        identity: c.get("identity"),
         csrfToken: gate ? ensureCsrfToken(c, ctx.config.uiSessionSecret) : undefined,
         error: result.error,
         prFindings: ctx.store.listFindings(job.repo_full_name, job.pr_number),

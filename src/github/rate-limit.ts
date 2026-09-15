@@ -64,3 +64,34 @@ export class RepoRateLimiter {
 export function repoRateLimitActive(limit: number, windowMs: number): boolean {
   return limit > 0 && windowMs > 0;
 }
+
+/** In-memory sliding window keyed by an arbitrary string (e.g. OAuth flow counters). Per-process only. */
+export class WindowRateLimiter {
+  private readonly hits = new Map<string, number[]>();
+
+  constructor(private readonly clock: () => number = Date.now) {}
+
+  wouldAllow(key: string, limit: number, windowMs: number): boolean {
+    if (limit <= 0 || windowMs <= 0) return true;
+    return this.windowed(key, windowMs).length < limit;
+  }
+
+  record(key: string, limit: number, windowMs: number): void {
+    if (limit <= 0 || windowMs <= 0) return;
+    const now = this.clock();
+    const prior = this.windowed(key, windowMs);
+    prior.push(now);
+    this.hits.set(key, prior);
+  }
+
+  private windowed(key: string, windowMs: number): number[] {
+    const now = this.clock();
+    const windowStart = now - windowMs;
+    for (const [existingKey, stamps] of this.hits) {
+      const kept = stamps.filter((stamp) => stamp > windowStart);
+      if (kept.length === 0) this.hits.delete(existingKey);
+      else this.hits.set(existingKey, kept);
+    }
+    return (this.hits.get(key) ?? []).filter((stamp) => stamp > now - windowMs);
+  }
+}
