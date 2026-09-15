@@ -81,6 +81,126 @@ export function extractDiffHunks(diff: string, filePath: string, maxChars = 6_00
   return `${text.slice(0, maxChars)}\n[truncated]`;
 }
 
+export interface AnchoredHunk {
+  lines: string[];
+  oldStart: number | null;
+  newStart: number | null;
+  truncated: boolean;
+}
+
+export type AnchoredHunkResult =
+  | { ok: true; hunk: AnchoredHunk }
+  | { ok: false; reason: "file_unchanged" | "binary" | "outside_hunk" };
+
+interface HunkLine {
+  marker: "+" | "-" | " ";
+  text: string;
+  oldNo: number | null;
+  newNo: number | null;
+}
+
+const HUNK_HEADER = /^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@/;
+
+/**
+ * Extracts a small unified hunk around `line` for `filePath` from the authoritative PR diff,
+ * for display on finding cards. The model-reported line is only a hint: it must fall inside a
+ * real hunk of the reviewed SHA's diff, otherwise nothing is shown (no silent remapping).
+ */
+export function anchoredDiffHunk(
+  diff: string,
+  filePath: string | null | undefined,
+  line: number | null | undefined,
+  contextLines = 4,
+  maxChars = 1_600,
+): AnchoredHunkResult {
+  if (!diff || !filePath) return { ok: false, reason: "file_unchanged" };
+  const normalized = normalizePath(filePath);
+  const section: string[] = [];
+  let inFile = false;
+  for (const raw of diff.split("\n")) {
+    if (raw.startsWith("diff --git ")) {
+      if (inFile) break;
+      inFile =
+        raw.includes(`a/${normalized}`) ||
+        raw.includes(`b/${normalized}`) ||
+        raw.endsWith(`/${normalized}`) ||
+        raw.endsWith(` ${normalized}`);
+      continue;
+    }
+    if (inFile) section.push(raw);
+  }
+  if (!inFile) return { ok: false, reason: "file_unchanged" };
+  if (section.some((l) => l.startsWith("GIT binary patch") || l.startsWith("Binary files"))) {
+    return { ok: false, reason: "binary" };
+  }
+
+  const hunks: HunkLine[][] = [];
+  let current: HunkLine[] | undefined;
+  let oldNo = 0;
+  let newNo = 0;
+  for (const raw of section) {
+    const header = HUNK_HEADER.exec(raw);
+    if (header) {
+      current = [];
+      hunks.push(current);
+      oldNo = Number(header[1]);
+      newNo = Number(header[3]);
+      continue;
+    }
+    if (!current) continue;
+    const marker = raw[0];
+    if (marker === "+") {
+      current.push({ marker: "+", text: raw.slice(1), oldNo: null, newNo: newNo++ });
+    } else if (marker === "-") {
+      current.push({ marker: "-", text: raw.slice(1), oldNo: oldNo++, newNo: null });
+    } else if (marker === " " || raw === "") {
+      current.push({ marker: " ", text: marker === " " ? raw.slice(1) : "", oldNo: oldNo++, newNo: newNo++ });
+    }
+  }
+  if (hunks.length === 0) return { ok: false, reason: "file_unchanged" };
+
+  let target: { hunk: HunkLine[]; index: number } | undefined;
+  if (line != null && line >= 1) {
+    for (const hunk of hunks) {
+      const index = hunk.findIndex((entry) => entry.newNo === line || entry.oldNo === line);
+      if (index >= 0) {
+        target = { hunk, index };
+        break;
+      }
+    }
+    if (!target) return { ok: false, reason: "outside_hunk" };
+  } else {
+    target = { hunk: hunks[0], index: 0 };
+  }
+
+  const start = Math.max(0, target.index - contextLines);
+  const end = Math.min(target.hunk.length, target.index + contextLines + 1);
+  const window = target.hunk.slice(start, end);
+  const lines = window.map((entry) => `${entry.marker} ${entry.text}`);
+  const first = window[0];
+  let truncated = start > 0 || end < target.hunk.length;
+  if (lines.join("\n").length > maxChars) {
+    let total = 0;
+    let keep = 0;
+    for (const text of lines) {
+      if (total + text.length > maxChars) break;
+      total += text.length;
+      keep += 1;
+    }
+    lines.length = Math.max(1, keep);
+    truncated = true;
+  }
+  return {
+    ok: true,
+    hunk: {
+      lines,
+      oldStart: first.oldNo,
+      newStart: first.newNo,
+      truncated,
+    },
+  };
+}
+
 export async function resolveSafeRepoPath(repoDir: string, filePath: string): Promise<string | undefined> {
   const full = resolve(repoDir, filePath);
   const rel = relative(repoDir, full);

@@ -1,8 +1,38 @@
 import type { GithubPort, ReviewThread } from "../github/client.js";
 import { isMaomaoThread, threadRoot } from "../github/client.js";
 import type { JobRow, JobStore } from "../jobs/store.js";
+import { anchoredDiffHunk } from "./context.js";
 import { parseFindingMarker } from "./identity.js";
 import type { ClassifiedFinding, FindingStatus, ReconciliationSnapshot } from "./types.js";
+
+const HUNK_NOTE_TEXT = {
+  file_unchanged: "File is not part of the reviewed diff.",
+  binary: "Binary file; no diff preview.",
+  outside_hunk: "Reported line is outside the reviewed diff hunks.",
+  truncated: "Diff preview truncated.",
+} as const;
+
+export type FindingDiffNote = keyof typeof HUNK_NOTE_TEXT;
+
+export function findingDiffContext(
+  diff: string | undefined,
+  path: string | null | undefined,
+  line: number | null | undefined,
+): { diffHunk: string | null; diffNote: string | null } {
+  if (!diff) return { diffHunk: null, diffNote: null };
+  const result = anchoredDiffHunk(diff, path, line);
+  if (result.ok) {
+    const header =
+      result.hunk.oldStart != null && result.hunk.newStart != null
+        ? `@@ -${result.hunk.oldStart} +${result.hunk.newStart} @@\n`
+        : "";
+    return {
+      diffHunk: header + result.hunk.lines.join("\n"),
+      diffNote: result.hunk.truncated ? "truncated" : null,
+    };
+  }
+  return { diffHunk: null, diffNote: result.reason };
+}
 
 export async function applyReconciliationThreads(input: {
   github: GithubPort;
@@ -32,7 +62,12 @@ export async function applyReconciliationThreads(input: {
   return { resolved, skipped };
 }
 
-export function persistClassifications(store: JobStore, job: JobRow, items: ClassifiedFinding[]): void {
+export function persistClassifications(
+  store: JobStore,
+  job: JobRow,
+  items: ClassifiedFinding[],
+  diff?: string,
+): void {
   for (const item of items) {
     const status: FindingStatus =
       item.status === "dismissed"
@@ -50,6 +85,9 @@ export function persistClassifications(store: JobStore, job: JobRow, items: Clas
       const existing = store.getFinding(job.repo_full_name, job.pr_number, item.fingerprint);
       if (existing?.status === "dismissed") continue;
     }
+    const path = item.currentPath ?? item.originalPath;
+    const line = item.currentLine ?? item.originalLine;
+    const context = findingDiffContext(diff, path, line);
     store.upsertFinding({
       repoFullName: job.repo_full_name,
       prNumber: job.pr_number,
@@ -70,6 +108,8 @@ export function persistClassifications(store: JobStore, job: JobRow, items: Clas
       confidence: item.confidence,
       reconciliationConfidence: item.confidence,
       reconciliationReason: item.reason,
+      diffHunk: context.diffHunk,
+      diffNote: context.diffNote,
       lastJobId: job.id,
     });
   }
@@ -79,9 +119,10 @@ export function persistThreadsAsFindings(input: {
   store: JobStore;
   job: JobRow;
   threads: ReviewThread[];
-  publishedFingerprints: string[];
+  postedFingerprints: string[];
+  diff?: string;
 }): void {
-  const published = new Set(input.publishedFingerprints);
+  const published = new Set(input.postedFingerprints);
   for (const thread of input.threads) {
     if (!isMaomaoThread(thread)) continue;
     const root = threadRoot(thread);
@@ -98,6 +139,9 @@ export function persistThreadsAsFindings(input: {
       }
     }
     const status = existing?.status === "moved" && published.has(marker.id) ? "moved" : existing?.status === "still_valid" ? "still_valid" : existing?.status === "uncertain" ? "uncertain" : published.has(marker.id) ? "open" : (existing?.status ?? "open");
+    const threadPath = root?.path ?? thread.path ?? existing?.current_path;
+    const threadLine = root?.line ?? thread.line ?? existing?.current_line;
+    const context = findingDiffContext(input.diff, threadPath, threadLine);
     input.store.upsertFinding({
       repoFullName: input.job.repo_full_name,
       prNumber: input.job.pr_number,
@@ -109,9 +153,11 @@ export function persistThreadsAsFindings(input: {
       githubCommentId: root?.databaseId != null ? String(root.databaseId) : existing?.github_comment_id,
       originalPath: existing?.original_path ?? root?.path ?? thread.path,
       originalLine: existing?.original_line ?? root?.line ?? thread.line,
-      currentPath: root?.path ?? thread.path ?? existing?.current_path,
-      currentLine: root?.line ?? thread.line ?? existing?.current_line,
+      currentPath: threadPath,
+      currentLine: threadLine,
       summary: existing?.summary || (root?.body ?? marker.id).slice(0, 240),
+      diffHunk: context.diffHunk,
+      diffNote: context.diffNote,
       lastJobId: input.job.id,
     });
   }

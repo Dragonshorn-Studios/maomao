@@ -35,6 +35,10 @@ export interface FindingRow {
   reopen_command: string | null;
   reconciliation_confidence: number | null;
   reconciliation_reason: string | null;
+  /** Unified mini-diff around the finding, taken from the authoritative diff of `reviewed_sha`. */
+  diff_hunk: string | null;
+  /** Why no mini-diff is available: "file_unchanged", "binary", "outside_hunk", or "truncated". */
+  diff_note: string | null;
   last_job_id: number | null;
   created_at: string;
   updated_at: string;

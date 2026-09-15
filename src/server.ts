@@ -451,11 +451,13 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
     const id = Number(c.req.param("id"));
     const job = ctx.store.getJob(id);
     if (!job) return c.text("Not found", 404);
+    const latest = ctx.store.findLatestJobForPull(job.repo_full_name, job.pr_number);
     return c.html(
       renderJob(job, ctx.store.listReviewerRuns(id), ctx.store.listLogs(id), {
         ...pageOpts,
         identity: c.get("identity"),
         csrfToken: gateOn ? ensureCsrfToken(c, ctx.config.uiSessionSecret) : undefined,
+        prHeadSha: latest?.head_sha ?? job.head_sha,
         notice: noticeText(c.req.query("notice"), job.repo_full_name, job.pr_number, job.head_sha),
         prFindings: ctx.store.listFindings(job.repo_full_name, job.pr_number),
       }),

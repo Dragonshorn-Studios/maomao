@@ -405,3 +405,84 @@ describe("poison alert card", () => {
     expect(html).toContain("Policy</strong> pending");
   });
 });
+
+describe("finding mini diffs", () => {
+  const hunk = "@@ -50,6 +50,7 @@\n   const prior = 1;\n+  console.log(\"leak\", secret);\n   return token();";
+
+  it("renders the stored hunk, permalink, and stale marking on finding cards", () => {
+    const store = seededStore();
+    const job = store.listJobs(50).find((row) => row.state === "completed")!;
+    store.upsertFinding({
+      repoFullName: job.repo_full_name,
+      prNumber: job.pr_number,
+      fingerprint: "fp-hunk-test",
+      status: "open",
+      reviewedSha: job.head_sha,
+      currentSha: job.head_sha,
+      originalPath: "src/auth.ts",
+      originalLine: 51,
+      currentPath: "src/auth.ts",
+      currentLine: 51,
+      summary: "secret leaks into the log",
+      severity: "high",
+    });
+    store.upsertFinding({
+      repoFullName: job.repo_full_name,
+      prNumber: job.pr_number,
+      fingerprint: "fp-hunk-test",
+      status: "open",
+      reviewedSha: job.head_sha,
+      summary: "secret leaks into the log",
+      diffHunk: hunk,
+    });
+    const row = store.listFindings(job.repo_full_name, job.pr_number).find((f) => f.fingerprint === "fp-hunk-test")!;
+
+    const html = renderJob(job, store.listReviewerRuns(job.id), store.listLogs(job.id), {
+      prFindings: [row],
+      prHeadSha: job.head_sha,
+    });
+    expect(html).toContain("Show diff");
+    expect(html).toContain("diff-panel");
+    expect(html).toContain("+  console.log(&quot;leak&quot;, secret);");
+    expect(html).toContain(`blob/${job.head_sha}/src/auth.ts#L51`);
+    expect(html).toContain("view at this SHA");
+    expect(html).not.toContain("Older SHA");
+
+    const staleHtml = renderJob(job, store.listReviewerRuns(job.id), store.listLogs(job.id), {
+      prFindings: [row],
+      prHeadSha: "0000000newersha",
+    });
+    expect(staleHtml).toContain("Older SHA");
+    expect(staleHtml).toContain("is-stale-sha");
+  });
+
+  it("explains when no diff preview is possible instead of guessing", () => {
+    const store = seededStore();
+    const job = store.listJobs(50).find((row) => row.state === "completed")!;
+    store.upsertFinding({
+      repoFullName: job.repo_full_name,
+      prNumber: job.pr_number,
+      fingerprint: "fp-no-hunk",
+      status: "open",
+      reviewedSha: job.head_sha,
+      currentPath: "assets/logo.png",
+      summary: "binary asset finding",
+    });
+    store.upsertFinding({
+      repoFullName: job.repo_full_name,
+      prNumber: job.pr_number,
+      fingerprint: "fp-no-hunk",
+      status: "open",
+      reviewedSha: job.head_sha,
+      summary: "binary asset finding",
+      diffNote: "binary",
+    });
+    const row = store.listFindings(job.repo_full_name, job.pr_number).find((f) => f.fingerprint === "fp-no-hunk")!;
+    const html = renderJob(job, store.listReviewerRuns(job.id), store.listLogs(job.id), {
+      prFindings: [row],
+      prHeadSha: job.head_sha,
+    });
+    expect(html).toContain("No diff preview: binary file.");
+    expect(html).not.toContain("Show diff");
+  });
+});

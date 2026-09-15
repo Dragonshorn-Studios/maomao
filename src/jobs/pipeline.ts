@@ -243,7 +243,7 @@ async function runJob(deps: PipelineDeps, jobId: number, signal: AbortSignal): P
     if (store.isStale(jobId)) {
       throw new Error("stale");
     }
-    persistClassifications(store, job, snapshot.items);
+    persistClassifications(store, job, snapshot.items, diff);
     try {
       const threads = await deps.github.listReviewThreads(
         job.installation_id,
@@ -255,7 +255,8 @@ async function runJob(deps: PipelineDeps, jobId: number, signal: AbortSignal): P
         store,
         job,
         threads,
-        publishedFingerprints: posted?.postedFingerprints ?? [],
+        postedFingerprints: posted?.postedFingerprints ?? [],
+        diff,
       });
     } catch (error) {
       store.log(jobId, `Could not refresh finding thread ids: ${formatError(error)}`, "warn");
