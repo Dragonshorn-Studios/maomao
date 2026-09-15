@@ -673,7 +673,7 @@ function renderFindingCard(
   );
   const permalink = githubFileLink(
     context.prHtmlUrl,
-    record?.reviewed_sha ?? context.prHeadSha,
+    record?.reviewed_sha,
     input.file ?? "",
     input.line ?? null,
   );
@@ -713,6 +713,7 @@ function renderFindingCard(
     return `<details class="${classes}">
         <summary>
           ${statusBadge}
+          ${staleBadge}
           <span class="sev sev-${escapeHtml(input.severity)}"><span class="mark" aria-hidden="true">${sev.mark}</span> ${sev.text}</span>
           ${loc ? `<span class="loc">${escapeHtml(loc)}</span>` : ""}
           <span class="finding-title">${escapeHtml(input.summary)}</span>
@@ -738,12 +739,11 @@ function renderFindingCard(
 
 function renderFindingDiff(record?: FindingRow): string {
   if (!record) return "";
-  const hunk = record.diff_hunk;
-  const note = !hunk || record.diff_note === "truncated" ? diffUnavailableCopy(record.diff_note) : undefined;
-  if (!hunk) {
+  const note = diffUnavailableCopy(record.diff_note);
+  if (!record.diff_hunk) {
     return note ? `<p class="muted diff-note">${escapeHtml(note)}</p>` : "";
   }
-  const lines = hunk
+  const lines = record.diff_hunk
     .split("\n")
     .map((line) => {
       const cls = line.startsWith("+") ? "add" : line.startsWith("-") ? "del" : "ctx";

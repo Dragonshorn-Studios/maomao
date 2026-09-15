@@ -3,22 +3,13 @@ import { isMaomaoThread, threadRoot } from "../github/client.js";
 import type { JobRow, JobStore } from "../jobs/store.js";
 import { anchoredDiffHunk } from "./context.js";
 import { parseFindingMarker } from "./identity.js";
-import type { ClassifiedFinding, FindingStatus, ReconciliationSnapshot } from "./types.js";
-
-const HUNK_NOTE_TEXT = {
-  file_unchanged: "File is not part of the reviewed diff.",
-  binary: "Binary file; no diff preview.",
-  outside_hunk: "Reported line is outside the reviewed diff hunks.",
-  truncated: "Diff preview truncated.",
-} as const;
-
-export type FindingDiffNote = keyof typeof HUNK_NOTE_TEXT;
+import type { ClassifiedFinding, FindingDiffNote, FindingStatus, ReconciliationSnapshot } from "./types.js";
 
 export function findingDiffContext(
   diff: string | undefined,
   path: string | null | undefined,
   line: number | null | undefined,
-): { diffHunk: string | null; diffNote: string | null } {
+): { diffHunk: string | null; diffNote: FindingDiffNote | null } {
   if (!diff) return { diffHunk: null, diffNote: null };
   const result = anchoredDiffHunk(diff, path, line);
   if (result.ok) {
@@ -30,6 +21,14 @@ export function findingDiffContext(
       diffHunk: header + result.hunk.lines.join("\n"),
       diffNote: result.hunk.truncated ? "truncated" : null,
     };
+  }
+  if (result.reason === "missing_location") {
+    // No usable location hint: fall back to the file's first hunk, but say so on the card.
+    const fallback = anchoredDiffHunk(diff, path, null);
+    if (fallback.ok) {
+      return { diffHunk: `@@ first hunk (no line recorded)\n${fallback.hunk.lines.join("\n")}`, diffNote: "no_line" };
+    }
+    return { diffHunk: null, diffNote: result.reason };
   }
   return { diffHunk: null, diffNote: result.reason };
 }

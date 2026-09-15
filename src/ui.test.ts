@@ -444,6 +444,8 @@ describe("finding mini diffs", () => {
     expect(html).toContain("Show diff");
     expect(html).toContain("diff-panel");
     expect(html).toContain("+  console.log(&quot;leak&quot;, secret);");
+    expect(html).toContain('class="diff-add"');
+    expect(html).toContain('class="diff-ctx"');
     expect(html).toContain(`blob/${job.head_sha}/src/auth.ts#L51`);
     expect(html).toContain("view at this SHA");
     expect(html).not.toContain("Older SHA");
@@ -454,6 +456,27 @@ describe("finding mini diffs", () => {
     });
     expect(staleHtml).toContain("Older SHA");
     expect(staleHtml).toContain("is-stale-sha");
+  });
+
+  it("escapes diff content so findings cannot inject HTML", () => {
+    const store = seededStore();
+    const job = store.listJobs(50).find((row) => row.state === "completed")!;
+    store.upsertFinding({
+      repoFullName: job.repo_full_name,
+      prNumber: job.pr_number,
+      fingerprint: "fp-xss-test",
+      status: "open",
+      reviewedSha: job.head_sha,
+      summary: "script injection attempt",
+      diffHunk: '@@ -1 +1 @@\n+<script>alert(1)</script><img src=x onerror=alert(2)>',
+    });
+    const row = store.listFindings(job.repo_full_name, job.pr_number).find((f) => f.fingerprint === "fp-xss-test")!;
+    const html = renderJob(job, store.listReviewerRuns(job.id), store.listLogs(job.id), {
+      prFindings: [row],
+      prHeadSha: job.head_sha,
+    });
+    expect(html).toContain("&lt;script&gt;");
+    expect(html).not.toContain("<script>alert(1)</script>");
   });
 
   it("explains when no diff preview is possible instead of guessing", () => {

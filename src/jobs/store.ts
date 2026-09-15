@@ -717,8 +717,14 @@ export class JobStore {
           reopen_command = excluded.reopen_command,
           reconciliation_confidence = COALESCE(excluded.reconciliation_confidence, findings.reconciliation_confidence),
           reconciliation_reason = COALESCE(excluded.reconciliation_reason, findings.reconciliation_reason),
-          diff_hunk = COALESCE(excluded.diff_hunk, findings.diff_hunk),
-          diff_note = COALESCE(excluded.diff_note, findings.diff_note),
+          diff_hunk = CASE
+            WHEN excluded.diff_hunk IS NULL AND excluded.diff_note IS NULL THEN findings.diff_hunk
+            ELSE excluded.diff_hunk
+          END,
+          diff_note = CASE
+            WHEN excluded.diff_hunk IS NULL AND excluded.diff_note IS NULL THEN findings.diff_note
+            ELSE excluded.diff_note
+          END,
           last_job_id = COALESCE(excluded.last_job_id, findings.last_job_id),
           updated_at = excluded.updated_at`,
       )

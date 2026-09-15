@@ -270,7 +270,7 @@ The monitoring UI is a small server-rendered apothecary-notebook console (muted 
 
 `/` lists recent jobs as specimen cards: repo, PR, SHA, state, elapsed time, `n / m` reviewers, aggregator, model/provider, token/cost totals, and findings by severity.
 
-`/jobs/:id` shows the immutable reviewed SHA, base/head refs, per-reviewer cards (role, state, duration, model, provider, token breakdown, cost, raw vs normalized output), aggregator diagnosis, findings, and a monospace log panel. Pages refresh over SSE. Token and cost figures are OpenCode/provider-reported usage, not an invoice.
+`/jobs/:id` shows the immutable reviewed SHA, base/head refs, per-reviewer cards (role, state, duration, model, provider, token breakdown, cost, raw vs normalized output), aggregator diagnosis, findings, and a monospace log panel. Each finding card can show a small diff hunk anchored in the reviewed SHA's diff (or an explicit note when none is available) plus a GitHub permalink at that SHA; findings reviewed against an older head SHA are badged "Older SHA". Pages refresh over SSE. Token and cost figures are OpenCode/provider-reported usage, not an invoice.
 
 To preview the UI with fixture jobs (no GitHub App or OpenCode required):
 

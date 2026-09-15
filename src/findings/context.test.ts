@@ -91,3 +91,60 @@ ${padded}`;
     expect(result.hunk.lines.length).toBeGreaterThan(0);
   });
 });
+
+describe("anchored diff hunk edge cases", () => {
+  it("resolves renamed files by either header path without cross-file matching", () => {
+    const renameDiff = `diff --git a/old/name.ts b/new/name.ts
+similarity index 90%
+rename from old/name.ts
+rename to new/name.ts
+--- a/old/name.ts
++++ b/new/name.ts
+@@ -1,3 +1,3 @@
+  keep();
+-deleted();
++added();`;
+    const byNew = anchoredDiffHunk(renameDiff, "new/name.ts", 2);
+    expect(byNew.ok).toBe(true);
+    const byOld = anchoredDiffHunk(renameDiff, "old/name.ts", 2);
+    expect(byOld.ok).toBe(true);
+    // A superstring path from another file must not match.
+    const other = `diff --git a/infra/new/name.ts b/infra/new/name.ts
+--- a/infra/new/name.ts
++++ b/infra/new/name.ts
+@@ -1,1 +1,1 @@
+-wrong();
++right();`;
+    expect(anchoredDiffHunk(other, "new/name.ts", 1)).toEqual({ ok: false, reason: "file_unchanged" });
+  });
+
+  it("shows whole-file deletions as deletion lines", () => {
+    const deleted = `diff --git a/gone.ts b/gone.ts
+deleted file mode 100644
+--- a/gone.ts
++++ /dev/null
+@@ -1,2 +0,0 @@
+-broken();
+-line two();`;
+    const result = anchoredDiffHunk(deleted, "gone.ts", 1);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.hunk.lines.every((l) => l.startsWith("-"))).toBe(true);
+  });
+
+  it("never lets a single oversized line exceed the char budget", () => {
+    const huge = "x".repeat(100_000);
+    const bigDiff = `diff --git a/min.ts b/min.ts
+--- a/min.ts
++++ b/min.ts
+@@ -1,1 +1,2 @@
++${huge}
++small();`;
+    const result = anchoredDiffHunk(bigDiff, "min.ts", 1, 4, 1_600);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const rendered = result.hunk.lines.join("\n");
+    expect(rendered.length).toBeLessThanOrEqual(1_700);
+    expect(result.hunk.truncated).toBe(true);
+  });
+});

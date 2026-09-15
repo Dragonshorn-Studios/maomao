@@ -214,17 +214,17 @@ export function findingLocation(finding: { file?: string; line?: number }): stri
   return finding.line ? `${finding.file}:${finding.line}` : finding.file;
 }
 
-/** Permalink to the exact reviewed revision on GitHub; null for non-GitHub or unknown paths. */
+/** Permalink to `path` at `sha` on GitHub; null for non-GitHub URLs, missing sha, or unsafe paths. */
 export function githubFileLink(
   prHtmlUrl: string | null | undefined,
   sha: string | null | undefined,
   path: string,
   line?: number | null,
 ): string | null {
-  if (!prHtmlUrl || !sha || !prHtmlUrl.startsWith("https://github.com/")) return null;
+  if (!prHtmlUrl || !sha) return null;
   const match = prHtmlUrl.match(/^(https:\/\/github\.com\/[^/]+\/[^/]+)\//);
   if (!match?.[1]) return null;
-  const clean = path.replace(/[^A-Za-z0-9._\-/]/g, "");
-  if (!clean || clean.includes("..")) return null;
-  return `${match[1]}/blob/${sha}/${clean}${line ? `#L${line}` : ""}`;
+  const segments = path.split("/").map((segment) => encodeURIComponent(segment));
+  if (segments.some((segment) => segment === ".." || segment === "")) return null;
+  return `${match[1]}/blob/${sha}/${segments.join("/")}${line ? `#L${line}` : ""}`;
 }
