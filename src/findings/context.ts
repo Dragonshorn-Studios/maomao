@@ -1,4 +1,4 @@
-import { readFile } from "node:fs/promises";
+import { readFile, realpath } from "node:fs/promises";
 import { isAbsolute, relative, resolve } from "node:path";
 import { normalizePath } from "./identity.js";
 
@@ -40,7 +40,7 @@ export async function readSnippet(
   line?: number,
   radius = 40,
 ): Promise<string | undefined> {
-  const safe = safeRepoPath(repoDir, filePath);
+  const safe = await resolveSafeRepoPath(repoDir, filePath);
   if (!safe) return undefined;
   try {
     const content = await readFile(safe, "utf8");
@@ -81,11 +81,19 @@ export function extractDiffHunks(diff: string, filePath: string, maxChars = 6_00
   return `${text.slice(0, maxChars)}\n[truncated]`;
 }
 
-function safeRepoPath(repoDir: string, filePath: string): string | undefined {
+export async function resolveSafeRepoPath(repoDir: string, filePath: string): Promise<string | undefined> {
   const full = resolve(repoDir, filePath);
   const rel = relative(repoDir, full);
   if (!rel || rel.startsWith("..") || isAbsolute(rel)) return undefined;
-  return full;
+  try {
+    const repoReal = await realpath(repoDir);
+    const fileReal = await realpath(full);
+    const inside = relative(repoReal, fileReal);
+    if (!inside || inside.startsWith("..") || isAbsolute(inside)) return undefined;
+    return fileReal;
+  } catch {
+    return undefined;
+  }
 }
 
 function numberLines(lines: string[], start: number): string {

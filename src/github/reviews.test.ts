@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildReviewBody, findExistingReview, toInlineComments } from "./client.js";
+import { buildReviewBody, findExistingReview, inlineCommentFingerprints, toInlineComments } from "./client.js";
 import { reviewMarker } from "../prompts.js";
 
 describe("GitHub review payload", () => {
@@ -30,6 +30,15 @@ describe("GitHub review payload", () => {
     expect(comments[0]?.side).toBe("RIGHT");
     expect(comments[0]?.body).toContain("maomao-finding");
     expect(comments[0]?.body).toContain("sha=abc123");
+  });
+
+  it("extracts fingerprints from posted inline comments", () => {
+    const comments = toInlineComments(
+      [{ file: "a.ts", line: 1, summary: "one", severity: "high", fingerprint: "abcdabcdabcdabcd" }],
+      12,
+      "abc123",
+    );
+    expect(inlineCommentFingerprints(comments)).toEqual(["abcdabcdabcdabcd"]);
   });
 
   it("detects an already posted Maomao review for the SHA", () => {

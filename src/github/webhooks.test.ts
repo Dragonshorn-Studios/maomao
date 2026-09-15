@@ -243,6 +243,44 @@ describe("review thread override commands", () => {
     expect(unauthorized.result.body.reason).toBe("unauthorized");
     expect(resolved).toEqual([]);
 
+    const ownerRead = await post(
+      reviewCommentBody({
+        comment: {
+          id: 199,
+          body: "@maomao bury",
+          path: "src/a.ts",
+          in_reply_to_id: 11,
+          user: { login: "octocat" },
+          author_association: "OWNER",
+        },
+      }),
+      {
+        deliveryId: "owner-read",
+        github: githubForCommands({ permission: "read", resolved }),
+      },
+    );
+    expect(ownerRead.result.body.reason).toBe("unauthorized");
+    expect(resolved).toEqual([]);
+
+    const memberNone = await post(
+      reviewCommentBody({
+        comment: {
+          id: 200,
+          body: "@maomao bury",
+          path: "src/a.ts",
+          in_reply_to_id: 11,
+          user: { login: "octocat" },
+          author_association: "MEMBER",
+        },
+      }),
+      {
+        deliveryId: "member-404",
+        github: githubForCommands({ permission: "none", resolved }),
+      },
+    );
+    expect(memberNone.result.body.reason).toBe("unauthorized");
+    expect(resolved).toEqual([]);
+
     const human = await post(reviewCommentBody(), {
       deliveryId: "human",
       github: githubForCommands({
@@ -258,6 +296,30 @@ describe("review thread override commands", () => {
     });
     expect(human.result.body.reason).toBe("not a Maomao review thread");
     expect(resolved).toEqual([]);
+  });
+
+  it("accepts a personal-repo OWNER when the collaborator API 404s as none", async () => {
+    const resolved: string[] = [];
+    const { result, store } = await post(
+      reviewCommentBody({
+        comment: {
+          id: 201,
+          body: "@maomao bury",
+          path: "src/a.ts",
+          in_reply_to_id: 11,
+          user: { login: "octocat" },
+          author_association: "OWNER",
+        },
+      }),
+      {
+        deliveryId: "owner-none",
+        github: githubForCommands({ permission: "none", resolved }),
+      },
+    );
+    expect(result.status).toBe(200);
+    expect(result.body.command).toBe("dismiss");
+    expect(resolved).toEqual(["PRRT_1"]);
+    expect(store.getFinding("acme/widgets", 7, "deadbeefdeadbeef")?.status).toBe("dismissed");
   });
 
   it("is idempotent for duplicate deliveries and repeated commands", async () => {

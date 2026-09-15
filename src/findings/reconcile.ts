@@ -25,6 +25,7 @@ export interface PriorFinding {
   severity?: string;
   reviewedSha?: string;
   dismissed: boolean;
+  settledResolved: boolean;
 }
 
 export function collectPriorFindings(input: {
@@ -46,6 +47,7 @@ export function collectPriorFindings(input: {
       severity: row.severity ?? undefined,
       reviewedSha: row.reviewed_sha,
       dismissed: row.status === "dismissed",
+      settledResolved: row.status === "resolved",
     });
   }
 
@@ -68,6 +70,7 @@ export function collectPriorFindings(input: {
       severity: existing?.severity,
       reviewedSha: marker.sha || existing?.reviewedSha,
       dismissed: existing?.dismissed === true,
+      settledResolved: false,
     });
   }
 
@@ -117,6 +120,21 @@ export async function classifyPriorFindings(input: {
         reason: "authorized human override",
         threadId: prior.threadId,
         commentId: prior.commentId,
+        originalPath: prior.path,
+        originalLine: prior.line,
+        category: prior.category,
+        summary: prior.summary,
+        body: prior.body,
+        severity: prior.severity,
+      });
+      continue;
+    }
+    if (prior.settledResolved) {
+      classified.push({
+        fingerprint: prior.fingerprint,
+        status: "resolved",
+        confidence: 1,
+        reason: "already resolved; no open thread to re-check",
         originalPath: prior.path,
         originalLine: prior.line,
         category: prior.category,

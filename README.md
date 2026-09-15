@@ -320,9 +320,9 @@ Reply **inside a Maomao review thread** (not on a human comment, and not as a re
 
 Dismissal is scoped to that **finding fingerprint on that pull request**, not the whole repository. The same fingerprint will not be re-reported on later SHAs of that PR unless someone `@maomao reopen`s it.
 
-Who may issue commands: repository `write`, `maintain`, or `admin` (the owner is included). Webhook signatures are verified. Duplicate deliveries and repeated commands are no-ops.
+Who may issue commands: repository `write`, `maintain`, or `admin`. A personal-repository `OWNER` association is accepted only when the collaborator API reports `none` (GitHub 404s some owners); it never upgrades an explicit `read`/`triage` permission. Org members who 404 the collaborator API are ignored (fail closed). Webhook signatures are verified. Duplicate deliveries and repeated commands are no-ops.
 
-The fingerprint is based on normalized path, category, a semantic anchor, and normalized meaning — not solely the line number.
+The fingerprint is based on normalized path, category, and code identifiers (camelCase / snake_case) in the finding text — not solely the line number. When no code identifiers are present it falls back to normalized summary wording.
 
 The verifier only receives the prior finding plus nearby current file/diff context, and it finishes before risk routing so a buried or already-fixed finding cannot inflate the next review into `poison-alert`.
 

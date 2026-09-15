@@ -65,10 +65,12 @@ export function normalizeMeaning(summary: string): string {
     .trim();
 }
 
-export function semanticAnchor(finding: FindingIdentity): string {
-  const text = `${finding.summary} ${finding.body ?? ""} ${finding.reason ?? ""}`;
-  const idents = text.match(/\b[A-Za-z_][A-Za-z0-9_]{2,}\b/g) ?? [];
-  const kept = [
+const CODE_IDENT_RE =
+  /\b[A-Za-z_][A-Za-z0-9]*[A-Z][A-Za-z0-9_]*\b|\b[A-Za-z_][A-Za-z0-9]*_[A-Za-z0-9_]+\b/g;
+
+export function codeIdentifiers(text: string): string[] {
+  const idents = text.match(CODE_IDENT_RE) ?? [];
+  return [
     ...new Set(
       idents
         .map((item) => item.toLowerCase())
@@ -77,17 +79,23 @@ export function semanticAnchor(finding: FindingIdentity): string {
   ]
     .sort()
     .slice(0, 8);
+}
+
+export function semanticAnchor(finding: FindingIdentity): string {
+  const text = `${finding.summary} ${finding.body ?? ""} ${finding.reason ?? ""}`;
   const fileBase = finding.file ? basename(normalizePath(finding.file)).replace(/\.[^.]+$/, "").toLowerCase() : "";
-  return [fileBase, ...kept].filter(Boolean).join(",");
+  return [fileBase, ...codeIdentifiers(text)].filter(Boolean).join(",");
 }
 
 export function fingerprintFinding(finding: FindingIdentity): string {
-  const payload = [
-    normalizePath(finding.file),
-    (finding.category ?? "general").trim().toLowerCase(),
-    semanticAnchor(finding),
-    normalizeMeaning(finding.summary),
-  ].join("\u001f");
+  const path = normalizePath(finding.file);
+  const category = (finding.category ?? "general").trim().toLowerCase();
+  const text = `${finding.summary} ${finding.body ?? ""} ${finding.reason ?? ""}`;
+  const idents = codeIdentifiers(text);
+  const fileBase = finding.file ? basename(path).replace(/\.[^.]+$/, "").toLowerCase() : "";
+  const payload = idents.length
+    ? [path, category, fileBase, ...idents].join("\u001f")
+    : [path, category, fileBase, normalizeMeaning(finding.summary)].join("\u001f");
   return createHash("sha256").update(payload).digest("hex").slice(0, 16);
 }
 

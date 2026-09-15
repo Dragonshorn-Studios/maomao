@@ -8,11 +8,17 @@ export async function applyReconciliationThreads(input: {
   github: GithubPort;
   job: JobRow;
   snapshot: ReconciliationSnapshot;
+  postedFingerprints?: Iterable<string>;
 }): Promise<{ resolved: string[]; skipped: string[] }> {
+  const posted = new Set(input.postedFingerprints ?? []);
   const resolved: string[] = [];
   const skipped: string[] = [];
   for (const item of input.snapshot.items) {
     if (!item.threadId) {
+      skipped.push(item.fingerprint);
+      continue;
+    }
+    if (item.status === "moved" && !posted.has(item.fingerprint)) {
       skipped.push(item.fingerprint);
       continue;
     }

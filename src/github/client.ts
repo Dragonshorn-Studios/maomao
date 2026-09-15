@@ -339,6 +339,8 @@ export class GithubClient implements GithubPort, ManualTriggerPort {
       return normalizePermission(permission, roleName);
     } catch (error) {
       const status = error && typeof error === "object" && "status" in error ? Number(error.status) : 0;
+      // 404 = not a collaborator (or the App cannot see them). Fail closed as none;
+      // OWNER association may fill this gap only for personal-repo owners.
       if (status === 404) return "none";
       throw error;
     }
@@ -396,6 +398,15 @@ export function toInlineComments(
     });
   }
   return comments;
+}
+
+export function inlineCommentFingerprints(comments: PullReviewComment[]): string[] {
+  const ids: string[] = [];
+  for (const comment of comments) {
+    const marker = parseFindingMarker(comment.body);
+    if (marker?.id) ids.push(marker.id);
+  }
+  return ids;
 }
 
 export function threadRoot(thread: ReviewThread): ReviewThreadComment | undefined {

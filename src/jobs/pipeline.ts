@@ -2,7 +2,7 @@ import { readFile } from "node:fs/promises";
 import type { Config } from "../config.js";
 import type { JobStore, JobRow, ReviewerRunRow } from "./store.js";
 import type { GithubPort } from "../github/client.js";
-import { buildReviewBody, findExistingReview, toInlineComments } from "../github/client.js";
+import { buildReviewBody, findExistingReview, toInlineComments, inlineCommentFingerprints } from "../github/client.js";
 import type { CheckoutPort } from "../checkout.js";
 import {
   aggregatorUsagePersistence,
@@ -145,13 +145,18 @@ async function runJob(deps: PipelineDeps, jobId: number, signal: AbortSignal): P
         store,
         job,
         threads,
-        publishedFingerprints: findingsForPublish(aggregated.findings, snapshot).map((item) => item.fingerprint),
+        publishedFingerprints: posted?.postedFingerprints ?? [],
       });
     } catch (error) {
       store.log(jobId, `Could not refresh finding thread ids: ${formatError(error)}`, "warn");
     }
     try {
-      const applied = await applyReconciliationThreads({ github: deps.github, job, snapshot });
+      const applied = await applyReconciliationThreads({
+        github: deps.github,
+        job,
+        snapshot,
+        postedFingerprints: posted?.postedFingerprints ?? [],
+      });
       if (applied.resolved.length > 0) {
         store.log(
           jobId,
@@ -420,14 +425,14 @@ async function publishReview(
   aggregated: AggregatorResult,
   reviewerCount: number,
   snapshot: ReconciliationSnapshot,
-): Promise<{ id: string; url: string } | undefined> {
+): Promise<{ id: string; url: string; postedFingerprints: string[] } | undefined> {
   if (deps.store.isStale(job.id)) return undefined;
 
   const existing = await deps.github.listReviews(job.installation_id, job.repo_owner, job.repo_name, job.pr_number);
   const already = findExistingReview(existing, job.head_sha);
   if (already) {
     deps.store.log(job.id, `Review already exists for ${job.head_sha}; skipping publish`);
-    return already;
+    return { ...already, postedFingerprints: [] };
   }
 
   const publishable = findingsForPublish(aggregated.findings, snapshot);
@@ -449,7 +454,8 @@ async function publishReview(
     reviewerCount,
   });
   const comments = toInlineComments(publishable, deps.config.maxInlineComments, job.head_sha);
-  return deps.github.createCommentReview({
+  const postedFingerprints = inlineCommentFingerprints(comments);
+  const posted = await deps.github.createCommentReview({
     installationId: job.installation_id,
     owner: job.repo_owner,
     repo: job.repo_name,
@@ -458,6 +464,7 @@ async function publishReview(
     body,
     comments,
   });
+  return { ...posted, postedFingerprints };
 }
 
 function formatError(error: unknown): string {

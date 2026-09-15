@@ -833,6 +833,124 @@ describe("finding reconciliation", () => {
     expect(resolved).toEqual([`thread-${fingerprint}`]);
   });
 
+  it("does not re-verify a stored resolved finding when no thread is open", async () => {
+    const fingerprint = fingerprintFinding(finding);
+    const config = loadConfig({
+      REVIEWER_ROLES: "correctness",
+      OPENCODE_REVIEWER_MODEL: "test/model",
+      POST_EMPTY_REVIEW: "true",
+    });
+    const store = new JobStore(openDb(":memory:"));
+    const created = enqueueJob(store, config, "nextsha");
+    store.upsertFinding({
+      repoFullName: created.job.repo_full_name,
+      prNumber: created.job.pr_number,
+      fingerprint,
+      status: "resolved",
+      reviewedSha: "oldsha",
+      summary: finding.summary,
+      githubThreadId: `thread-${fingerprint}`,
+    });
+    let verified = false;
+    await createPipeline({
+      config,
+      store,
+      github: githubPort({
+        listReviewThreads: async () => [],
+        resolveReviewThread: async () => {
+          throw new Error("should not resolve a settled finding");
+        },
+      }),
+      checkout: await fixtureCheckout(),
+      opencode: {
+        async run(input) {
+          if (input.prompt.includes("finding verifier")) {
+            verified = true;
+            throw new Error("verifier should not run for settled resolved findings");
+          }
+          if (input.prompt.includes("Role id:")) {
+            return { stdout: "", stderr: "", exitCode: 0, text: reviewerJson("correctness"), usage: {} };
+          }
+          return {
+            stdout: "",
+            stderr: "",
+            exitCode: 0,
+            text: JSON.stringify({ verdict: "clean", summary: "still gone", findings: [] }),
+            usage: {},
+          };
+        },
+      },
+    }).run(created.job.id);
+    expect(verified).toBe(false);
+    expect(store.getJob(created.job.id)?.state).toBe("completed");
+    expect(store.getFinding("acme/widgets", 4, fingerprint)?.status).toBe("resolved");
+  });
+
+  it("does not resolve a moved thread when the replacement comment is capped out", async () => {
+    const fingerprint = fingerprintFinding(finding);
+    const config = loadConfig({
+      REVIEWER_ROLES: "correctness",
+      OPENCODE_REVIEWER_MODEL: "test/model",
+      MAX_INLINE_COMMENTS: "0",
+    });
+    const store = new JobStore(openDb(":memory:"));
+    const created = enqueueJob(store, config, "capsha");
+    const resolved: string[] = [];
+    const posted: { path: string; line: number }[] = [];
+    await createPipeline({
+      config,
+      store,
+      github: githubPort({
+        listReviewThreads: async () => [threadFor(fingerprint)],
+        resolveReviewThread: async (_id, threadId) => {
+          resolved.push(threadId);
+        },
+        createCommentReview: async (input) => {
+          posted.push(...input.comments.map((comment) => ({ path: comment.path, line: comment.line })));
+          return { id: "2", url: "u" };
+        },
+      }),
+      checkout: await fixtureCheckout(),
+      opencode: {
+        async run(input) {
+          if (input.prompt.includes("finding verifier")) {
+            return {
+              stdout: "",
+              stderr: "",
+              exitCode: 0,
+              text: JSON.stringify({
+                classifications: [
+                  {
+                    fingerprint,
+                    status: "moved",
+                    confidence: 0.92,
+                    reason: "relocated",
+                    file: "example.ts",
+                    line: 8,
+                  },
+                ],
+              }),
+              usage: {},
+            };
+          }
+          if (input.prompt.includes("Role id:")) {
+            return { stdout: "", stderr: "", exitCode: 0, text: reviewerJson("correctness"), usage: {} };
+          }
+          return {
+            stdout: "",
+            stderr: "",
+            exitCode: 0,
+            text: JSON.stringify({ verdict: "comment", summary: "moved", findings: [] }),
+            usage: {},
+          };
+        },
+      },
+    }).run(created.job.id);
+    expect(posted).toEqual([]);
+    expect(resolved).toEqual([]);
+    expect(store.getJob(created.job.id)?.state).toBe("completed");
+  });
+
   it("does not close threads when the job fails or becomes stale", async () => {
     const fingerprint = fingerprintFinding(finding);
     const config = loadConfig({

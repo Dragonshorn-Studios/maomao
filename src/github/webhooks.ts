@@ -1,6 +1,6 @@
 import { verify } from "@octokit/webhooks-methods";
 import type { Config, PullRequestAction } from "../config.js";
-import { hasOverridePermission, parseOverrideCommand } from "../findings/commands.js";
+import { canIssueOverride, parseOverrideCommand } from "../findings/commands.js";
 import { parseFindingMarker } from "../findings/identity.js";
 import {
   isMaomaoLogin,
@@ -251,8 +251,7 @@ async function handleReviewCommentWebhook(input: {
   }
 
   const permission = await input.github.getCollaboratorPermission(installationId, repoOwner, repoName, actor);
-  const ownerAssociation = payload.comment?.author_association === "OWNER";
-  if (!hasOverridePermission(permission) && !ownerAssociation) {
+  if (!canIssueOverride(permission, payload.comment?.author_association)) {
     input.store.claimWebhookDelivery(input.request.deliveryId, input.request.event, "unauthorized");
     return {
       status: 202,
