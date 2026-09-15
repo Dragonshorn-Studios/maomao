@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { findingMarker, fingerprintFinding, parseFindingMarker } from "./identity.js";
 import { parseOverrideCommand, canIssueOverride } from "./commands.js";
 import { acceptClassification, classifyPriorFindings, collectPriorFindings, findingsForPublish } from "./reconcile.js";
-import { applyReconciliationThreads } from "./apply.js";
+import { applyReconciliationThreads, persistClassifications, persistThreadsAsFindings } from "./apply.js";
 import { openDb } from "../db.js";
 import { JobStore, type JobRow } from "../jobs/store.js";
 import type { ReviewThread } from "../github/client.js";
@@ -347,5 +347,148 @@ describe("settled resolved classification", () => {
     expect(items).toEqual([
       expect.objectContaining({ fingerprint: "abc", status: "resolved", reason: "already resolved; no open thread to re-check" }),
     ]);
+  });
+});
+
+describe("persisting anchored mini diffs", () => {
+  const diff = `diff --git a/src/auth.ts b/src/auth.ts
+--- a/src/auth.ts
++++ b/src/auth.ts
+@@ -50,6 +50,7 @@ export function login() {
+  const existing = 1;
+  const secret = readSecret();
++  console.log("leak", secret);
+  return issueJwt();
+}`;
+
+  function job(): JobRow {
+    return {
+      id: 7,
+      repo_full_name: "acme/widgets",
+      pr_number: 12,
+      head_sha: "headsha1",
+      pr_html_url: "https://github.com/acme/widgets/pull/12",
+    } as unknown as JobRow;
+  }
+
+  it("stores a bounded hunk from the authoritative diff for persisted findings", () => {
+    const store = new JobStore(openDb(":memory:"));
+    persistClassifications(
+      store,
+      job(),
+      [
+        {
+          fingerprint: "fp_with_hunk",
+          status: "still_valid",
+          confidence: 0.9,
+          reason: "still applies",
+          currentPath: "src/auth.ts",
+          currentLine: 52,
+          summary: "secret leaks to the log",
+        },
+      ],
+      diff,
+    );
+    const row = store.listFindings("acme/widgets", 12)[0];
+    expect(row?.diff_hunk).toContain('console.log("leak", secret);');
+    expect(row?.diff_hunk).toContain("secret = readSecret();");
+    expect(row?.diff_hunk?.startsWith("@@")).toBe(true);
+    expect(row?.diff_note).toBeNull();
+  });
+
+  it("records an explicit note instead of a hunk when the line is outside the diff", () => {
+    const store = new JobStore(openDb(":memory:"));
+    persistClassifications(
+      store,
+      job(),
+      [
+        {
+          fingerprint: "fp_outside",
+          status: "still_valid",
+          confidence: 0.9,
+          reason: "still applies",
+          currentPath: "src/auth.ts",
+          currentLine: 500,
+          summary: "way outside the hunk",
+        },
+      ],
+      diff,
+    );
+    const row = store.listFindings("acme/widgets", 12)[0];
+    expect(row?.diff_hunk).toBeNull();
+    expect(row?.diff_note).toBe("outside_hunk");
+  });
+
+  it("keeps an existing hunk when later updates carry no diff", () => {
+    const store = new JobStore(openDb(":memory:"));
+    persistClassifications(
+      store,
+      job(),
+      [
+        {
+          fingerprint: "fp_keep",
+          status: "still_valid",
+          confidence: 0.9,
+          reason: "still applies",
+          currentPath: "src/auth.ts",
+          currentLine: 52,
+          summary: "secret leaks",
+        },
+      ],
+      diff,
+    );
+    persistClassifications(store, job(), [
+      {
+        fingerprint: "fp_keep",
+        status: "resolved",
+        confidence: 0.9,
+        reason: "fixed later",
+        currentPath: "src/auth.ts",
+        currentLine: 52,
+        summary: "secret leaks",
+      },
+    ]);
+    const row = store.listFindings("acme/widgets", 12)[0];
+    expect(row?.status).toBe("resolved");
+    expect(row?.diff_hunk).toContain("console.log");
+  });
+});
+
+describe("thread findings carry anchored hunks", () => {
+  it("derives the hunk for posted threads from the job diff", () => {
+    const store = new JobStore(openDb(":memory:"));
+    const job = {
+      id: 9,
+      repo_full_name: "acme/widgets",
+      pr_number: 3,
+      installation_id: 1,
+      head_sha: "sha123",
+      pr_html_url: "https://github.com/acme/widgets/pull/3",
+    } as unknown as JobRow;
+    const marker = findingMarker("fpthread00001", "sha123");
+    const threads: ReviewThread[] = [
+      {
+        id: "PRRT_1",
+        isResolved: false,
+        path: "src/leak.ts",
+        line: 4,
+        comments: [{ id: "c1", databaseId: 5, body: `${marker}\n**high**: leak`, path: "src/leak.ts", line: 4 }],
+      },
+    ];
+    const diff = `diff --git a/src/leak.ts b/src/leak.ts
+--- a/src/leak.ts
++++ b/src/leak.ts
+@@ -1,5 +1,6 @@
+ const a = 1;
++console.log(secret);
+ const b = 2;
+ const c = 3;
+ const d = 4;
+ const e = 5;`;
+    persistThreadsAsFindings({ store, job, threads, postedFingerprints: ["fpthread00001"], diff });
+    const row = store.listFindings("acme/widgets", 3)[0];
+    expect(row?.diff_hunk).toContain("console.log(secret);");
+    expect(row?.diff_hunk?.startsWith("@@")).toBe(true);
+    expect(row?.diff_note).toBeNull();
   });
 });

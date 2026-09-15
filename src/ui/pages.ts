@@ -5,6 +5,7 @@ import { POLICIES_WITH_EXTERNAL, POLICIES_WITH_INTERNAL } from "../routing/types
 import type { JobState } from "../config.js";
 import { elapsedMs, escapeHtml, formatDuration, shortSha } from "../util.js";
 import {
+  diffUnavailableCopy,
   emptyQueueCopy,
   externalDispatchBadge,
   findingOverrideNote,
@@ -29,6 +30,7 @@ import {
   formatCost,
   formatTokens,
   formatUsageBreakdown,
+  githubFileLink,
   jobMetrics,
   jobMetricsFromRuns,
   parseReviewerResult,
@@ -203,7 +205,10 @@ export function renderJob(
     <h2>Aggregator</h2>
     ${renderAggregator(job, metrics)}
     <h2 id="findings">Findings</h2>
-    ${renderFindings(metrics, options.prFindings ?? [])}
+    ${renderFindings(metrics, options.prFindings ?? [], {
+      prHeadSha: options.prHeadSha,
+      prHtmlUrl: job.pr_html_url,
+    })}
     <h2>Logs</h2>
     <ol class="logs" aria-label="Job logs">
       ${
@@ -565,7 +570,11 @@ function renderAggregator(job: JobRow, metrics: JobMetrics): string {
   </article>`;
 }
 
-function renderFindings(metrics: JobMetrics, persisted: FindingRow[] = []): string {
+function renderFindings(
+  metrics: JobMetrics,
+  persisted: FindingRow[] = [],
+  context: { prHeadSha?: string; prHtmlUrl?: string } = {},
+): string {
   const unconfirmed = !metrics.findingsConfirmed;
   const items = metrics.findingsConfirmed
     ? (metrics.aggregator?.findings ?? []).map((finding) => ({
@@ -584,7 +593,7 @@ function renderFindings(metrics: JobMetrics, persisted: FindingRow[] = []): stri
     cardInput: Parameters<typeof renderFindingCard>[0],
   ) => {
     const settledRow = cardInput.record?.status === "dismissed" || cardInput.record?.status === "resolved";
-    (settledRow ? settled : active).push(renderFindingCard(cardInput, settledRow));
+    (settledRow ? settled : active).push(renderFindingCard(cardInput, context, settledRow));
   };
 
   for (const finding of items) {
@@ -649,6 +658,7 @@ function renderFindingCard(
     unconfirmed: boolean;
     record?: FindingRow;
   },
+  context: { prHeadSha?: string; prHtmlUrl?: string } = {},
   collapsed = false,
 ): string {
   const sev = severityLabel(input.severity);
@@ -658,6 +668,15 @@ function renderFindingCard(
   const override = record ? findingOverrideNote(record) : undefined;
   const buried = record?.status === "dismissed";
   const resolved = record?.status === "resolved";
+  const stale = Boolean(
+    record?.reviewed_sha && context.prHeadSha && record.reviewed_sha !== context.prHeadSha,
+  );
+  const permalink = githubFileLink(
+    context.prHtmlUrl,
+    record?.reviewed_sha,
+    input.file ?? "",
+    input.line ?? null,
+  );
   const attention =
     !buried && !resolved && (input.severity === "blocker" || input.severity === "high")
       ? "Finding requires attention"
@@ -668,6 +687,7 @@ function renderFindingCard(
     buried ? "is-buried" : "",
     resolved ? "is-resolved" : "",
     collapsed ? "is-collapsed" : "",
+    stale ? "is-stale-sha" : "",
     record && record.status !== "open" ? `finding-status-${escapeHtml(record.status)}` : "",
   ]
     .filter(Boolean)
@@ -675,16 +695,25 @@ function renderFindingCard(
   const statusBadge = status
     ? `<span class="finding-status finding-status-${escapeHtml(record!.status)}" title="${escapeHtml(status.hint)}">${escapeHtml(status.text)}</span>`
     : "";
+  const staleBadge = stale
+    ? `<span class="stale-sha" title="Reviewed at ${escapeHtml(record!.reviewed_sha)}; a newer head SHA exists for this pull request.">Older SHA</span>`
+    : "";
+  const locLink = permalink
+    ? ` <a class="loc-link" href="${escapeHtml(permalink)}" title="Open this file at the exact reviewed revision on GitHub">view at this SHA</a>`
+    : "";
+  const diffBlock = renderFindingDiff(record);
   const body = `
         ${override ? `<p class="finding-override" role="status"><strong>${escapeHtml(override)}</strong></p>` : ""}
         ${attention ? `<p><strong>${attention}</strong></p>` : ""}
         ${input.reason ? `<p>${escapeHtml(input.reason)}</p>` : ""}
         ${input.suggested ? `<p class="muted">Suggested check: ${escapeHtml(input.suggested)}</p>` : ""}
-        ${input.agreed?.length ? `<p class="muted">reviewers: ${escapeHtml(input.agreed.join(", "))}</p>` : ""}`;
+        ${input.agreed?.length ? `<p class="muted">reviewers: ${escapeHtml(input.agreed.join(", "))}</p>` : ""}
+        ${diffBlock}`;
   if (collapsed) {
     return `<details class="${classes}">
         <summary>
           ${statusBadge}
+          ${staleBadge}
           <span class="sev sev-${escapeHtml(input.severity)}"><span class="mark" aria-hidden="true">${sev.mark}</span> ${sev.text}</span>
           ${loc ? `<span class="loc">${escapeHtml(loc)}</span>` : ""}
           <span class="finding-title">${escapeHtml(input.summary)}</span>
@@ -697,12 +726,33 @@ function renderFindingCard(
         <div class="finding-head">
           <span class="sev sev-${escapeHtml(input.severity)}"><span class="mark" aria-hidden="true">${sev.mark}</span> ${sev.text}</span>
           ${statusBadge}
+          ${staleBadge}
           ${input.unconfirmed ? `<span class="unconfirmed">Unconfirmed</span>` : ""}
           ${input.category ? `<span>· ${escapeHtml(input.category)}</span>` : ""}
           ${input.agreed?.length ? `<span class="muted">reviewers: ${escapeHtml(input.agreed.join(", "))}</span>` : ""}
         </div>
-        ${loc ? `<p class="loc">${escapeHtml(loc)}</p>` : ""}
+        ${loc ? `<p class="loc">${escapeHtml(loc)}${locLink}</p>` : ""}
         <h3>${escapeHtml(input.summary)}</h3>
         ${body}
       </article>`;
+}
+
+function renderFindingDiff(record?: FindingRow): string {
+  if (!record) return "";
+  const note = diffUnavailableCopy(record.diff_note);
+  if (!record.diff_hunk) {
+    return note ? `<p class="muted diff-note">${escapeHtml(note)}</p>` : "";
+  }
+  const lines = record.diff_hunk
+    .split("\n")
+    .map((line) => {
+      const cls = line.startsWith("+") ? "add" : line.startsWith("-") ? "del" : "ctx";
+      return `<span class="diff-${cls}">${escapeHtml(line)}</span>`;
+    })
+    .join("\n");
+  return `<details class="finding-diff">
+      <summary>Show diff</summary>
+      <pre class="diff-panel" aria-label="Diff hunk from the reviewed revision">${lines}</pre>
+      ${note ? `<p class="muted diff-note">${escapeHtml(note)}</p>` : ""}
+    </details>`;
 }

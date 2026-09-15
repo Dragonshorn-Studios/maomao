@@ -203,3 +203,24 @@ export function settledFindingsCopy(buried: number, resolved: number): string {
   if (parts.length === 0) return "Settled findings";
   return `${parts.join(", ")} — expand a row for details`;
 }
+
+export function diffUnavailableCopy(note: string | null | undefined): string | undefined {
+  switch (note) {
+    case "file_unchanged":
+      return "No diff preview: the file is not part of the reviewed diff.";
+    case "binary":
+      return "No diff preview: binary file.";
+    case "outside_hunk":
+      return "No diff preview: the reported line is outside the reviewed diff hunks.";
+    case "no_hunks":
+      return "No diff preview: the change contains no diff hunks (rename or mode change only).";
+    case "missing_location":
+      return "No diff preview: no file location was recorded for this finding.";
+    case "no_line":
+      return "No line was recorded for this finding; showing the file's first hunk.";
+    case "truncated":
+      return "Diff preview clipped to the lines around the reported line.";
+    default:
+      return undefined;
+  }
+}

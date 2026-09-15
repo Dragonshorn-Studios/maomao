@@ -612,6 +612,44 @@ form.retry, form.retry-job {
 .finding-status-moved { color: var(--amber); background: var(--amber-soft); border-color: var(--amber); }
 .finding-status-uncertain { color: var(--ink-muted); background: var(--surface-2); }
 
+.stale-sha {
+  display: inline-flex;
+  align-items: center;
+  font-family: var(--font-mono);
+  font-size: 0.7rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--amber);
+  background: var(--amber-soft);
+  border: 1px solid var(--amber);
+  padding: 0.05rem 0.4rem;
+}
+.finding.is-stale-sha { border-style: dashed; }
+.loc-link { font-size: 0.8rem; }
+
+.finding-diff { margin: 0.4rem 0 0; }
+.finding-diff summary {
+  cursor: pointer;
+  font-size: 0.85rem;
+  color: var(--ink-muted);
+}
+.diff-panel {
+  font-family: var(--font-mono);
+  font-size: 0.78rem;
+  line-height: 1.45;
+  background: var(--surface-2);
+  border: 1px solid var(--line-strong);
+  padding: 0.5rem 0.75rem;
+  overflow-x: auto;
+  white-space: pre;
+  max-height: 24rem;
+  overflow-y: auto;
+}
+.diff-panel .add { color: var(--jade); display: block; }
+.diff-panel .del { color: var(--cinnabar); display: block; }
+.diff-panel .ctx { color: var(--ink-muted); display: block; }
+.diff-note { font-size: 0.8rem; }
+
 .finding.is-buried,
 .finding.is-resolved {
   border-style: dashed;

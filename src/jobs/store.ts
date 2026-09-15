@@ -672,6 +672,8 @@ export class JobStore {
     reopenCommand?: string | null;
     reconciliationConfidence?: number | null;
     reconciliationReason?: string | null;
+    diffHunk?: string | null;
+    diffNote?: string | null;
     lastJobId?: number | null;
   }): FindingRow {
     const existing = this.getFinding(input.repoFullName, input.prNumber, input.fingerprint);
@@ -690,8 +692,8 @@ export class JobStore {
           github_thread_id, github_comment_id, original_path, original_line, current_path, current_line,
           category, summary, body, severity, confidence,
           dismissed_by, dismissed_at, dismiss_command, reopened_by, reopened_at, reopen_command,
-          reconciliation_confidence, reconciliation_reason, last_job_id, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          reconciliation_confidence, reconciliation_reason, diff_hunk, diff_note, last_job_id, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(repo_full_name, pr_number, fingerprint) DO UPDATE SET
           status = excluded.status,
           reviewed_sha = excluded.reviewed_sha,
@@ -715,6 +717,14 @@ export class JobStore {
           reopen_command = excluded.reopen_command,
           reconciliation_confidence = COALESCE(excluded.reconciliation_confidence, findings.reconciliation_confidence),
           reconciliation_reason = COALESCE(excluded.reconciliation_reason, findings.reconciliation_reason),
+          diff_hunk = CASE
+            WHEN excluded.diff_hunk IS NULL AND excluded.diff_note IS NULL THEN findings.diff_hunk
+            ELSE excluded.diff_hunk
+          END,
+          diff_note = CASE
+            WHEN excluded.diff_hunk IS NULL AND excluded.diff_note IS NULL THEN findings.diff_note
+            ELSE excluded.diff_note
+          END,
           last_job_id = COALESCE(excluded.last_job_id, findings.last_job_id),
           updated_at = excluded.updated_at`,
       )
@@ -744,6 +754,8 @@ export class JobStore {
         input.reopenCommand ?? null,
         input.reconciliationConfidence ?? null,
         input.reconciliationReason ?? null,
+        input.diffHunk ?? null,
+        input.diffNote ?? null,
         input.lastJobId ?? null,
         now,
         now,

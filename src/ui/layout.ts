@@ -14,6 +14,8 @@ export interface PageOptions {
   prFindings?: FindingRow[];
   csrfToken?: string;
   identity?: { login: string; avatarUrl: string | null };
+  /** Latest reviewed head SHA for this pull request, for stale-finding detection. */
+  prHeadSha?: string;
 }
 
 export function csrfInput(token: string | undefined): string {

@@ -195,6 +195,8 @@ function migrate(db: SqliteDb): void {
       reopen_command TEXT,
       reconciliation_confidence REAL,
       reconciliation_reason TEXT,
+      diff_hunk TEXT,
+      diff_note TEXT,
       last_job_id INTEGER,
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL,
@@ -279,6 +281,12 @@ function migrate(db: SqliteDb): void {
     ["manual_escalate_requested", "INTEGER NOT NULL DEFAULT 0"],
   ];
   for (const [name, ddl] of jobColumns) ensureColumn(db, "jobs", name, ddl);
+
+  const findingColumns: [string, string][] = [
+    ["diff_hunk", "TEXT"],
+    ["diff_note", "TEXT"],
+  ];
+  for (const [name, ddl] of findingColumns) ensureColumn(db, "findings", name, ddl);
 }
 
 function columnNames(db: SqliteDb, table: string): Set<string> {

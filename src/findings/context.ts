@@ -81,6 +81,148 @@ export function extractDiffHunks(diff: string, filePath: string, maxChars = 6_00
   return `${text.slice(0, maxChars)}\n[truncated]`;
 }
 
+export interface AnchoredHunk {
+  lines: string[];
+  oldStart: number | null;
+  newStart: number | null;
+  truncated: boolean;
+}
+
+export type AnchoredHunkReason = "file_unchanged" | "binary" | "outside_hunk" | "no_hunks" | "missing_location";
+
+export type AnchoredHunkResult =
+  | { ok: true; hunk: AnchoredHunk }
+  | { ok: false; reason: AnchoredHunkReason };
+
+interface HunkLine {
+  marker: "+" | "-" | " ";
+  text: string;
+  oldNo: number | null;
+  newNo: number | null;
+}
+
+const HUNK_HEADER = /^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@/;
+
+const DIFF_GIT_HEADER = /^diff --git a\/(.+?) b\/(.+?)$/;
+
+function headerPaths(line: string): { oldPath: string; newPath: string } | undefined {
+  const match = DIFF_GIT_HEADER.exec(line);
+  if (!match) return undefined;
+  const unquote = (value: string) => (value.startsWith('"') && value.endsWith('"') ? value.slice(1, -1) : value);
+  return { oldPath: unquote(match[1]), newPath: unquote(match[2]) };
+}
+
+/**
+ * Extracts a small unified hunk around `line` for `filePath` from the authoritative PR diff,
+ * for display on finding cards. The model-reported line is only a hint: it must fall inside a
+ * real hunk of the reviewed SHA's diff, otherwise nothing is shown (no silent remapping).
+ */
+export function anchoredDiffHunk(
+  diff: string,
+  filePath: string | null | undefined,
+  line: number | null | undefined,
+  contextLines = 4,
+  maxChars = 1_600,
+): AnchoredHunkResult {
+  if (!diff || !filePath) return { ok: false, reason: "missing_location" };
+  const normalized = normalizePath(filePath);
+  const section: string[] = [];
+  let inFile = false;
+  for (const raw of diff.split("\n")) {
+    if (raw.startsWith("diff --git ")) {
+      if (inFile) break;
+      // Exact header-path comparison: substring matches would attribute another file's
+      // hunks to this finding (e.g. "infra/src/foo.ts" for a lookup of "src/foo.ts").
+      const paths = headerPaths(raw);
+      inFile = Boolean(
+        paths && (normalizePath(paths.newPath) === normalized || normalizePath(paths.oldPath) === normalized),
+      );
+      continue;
+    }
+    if (inFile) section.push(raw);
+  }
+  if (!inFile) return { ok: false, reason: "file_unchanged" };
+  if (section.some((l) => l.startsWith("GIT binary patch") || l.startsWith("Binary files"))) {
+    return { ok: false, reason: "binary" };
+  }
+
+  const hunks: HunkLine[][] = [];
+  let current: HunkLine[] | undefined;
+  let oldNo = 0;
+  let newNo = 0;
+  for (const raw of section) {
+    const header = HUNK_HEADER.exec(raw);
+    if (header) {
+      current = [];
+      hunks.push(current);
+      oldNo = Number(header[1]);
+      newNo = Number(header[3]);
+      continue;
+    }
+    if (!current) continue;
+    const marker = raw[0];
+    if (marker === "+") {
+      current.push({ marker: "+", text: raw.slice(1), oldNo: null, newNo: newNo++ });
+    } else if (marker === "-") {
+      current.push({ marker: "-", text: raw.slice(1), oldNo: oldNo++, newNo: null });
+    } else if (marker === " ") {
+      current.push({ marker: " ", text: raw.slice(1), oldNo: oldNo++, newNo: newNo++ });
+    }
+  }
+  if (hunks.length === 0) return { ok: false, reason: "no_hunks" };
+
+  let target: { hunk: HunkLine[]; index: number } | undefined;
+  if (line != null && line >= 1) {
+    for (const hunk of hunks) {
+      const index = hunk.findIndex((entry) => entry.newNo === line || entry.oldNo === line);
+      if (index >= 0) {
+        target = { hunk, index };
+        break;
+      }
+    }
+    if (!target) return { ok: false, reason: "outside_hunk" };
+  } else {
+    target = { hunk: hunks[0], index: 0 };
+  }
+
+  const start = Math.max(0, target.index - contextLines);
+  const end = Math.min(target.hunk.length, target.index + contextLines + 1);
+  const window = target.hunk.slice(start, end);
+  const anchoredAt = target.index - start;
+  // Clamp per line first: a single huge line (minified bundles) must not blow the budget.
+  const perLineCap = Math.min(maxChars, 200);
+  const lines = window.map((entry) => `${entry.marker} ${entry.text.slice(0, perLineCap)}`);
+  const first = window[0];
+  let truncated = start > 0 || end < target.hunk.length || window.some((entry) => entry.text.length > perLineCap);
+  if (lines.join("\n").length > maxChars) {
+    let total = 0;
+    let keep = 0;
+    for (const text of lines) {
+      if (total + text.length > maxChars) break;
+      total += text.length;
+      keep += 1;
+    }
+    truncated = true;
+    // The finding's own line must survive the budget cut, or the preview would be for
+    // a different line than the one reported.
+    if (keep <= anchoredAt) {
+      lines.length = anchoredAt + 1;
+      truncated = true;
+    } else {
+      lines.length = keep;
+    }
+  }
+  return {
+    ok: true,
+    hunk: {
+      lines,
+      oldStart: first.oldNo,
+      newStart: first.newNo,
+      truncated,
+    },
+  };
+}
+
 export async function resolveSafeRepoPath(repoDir: string, filePath: string): Promise<string | undefined> {
   const full = resolve(repoDir, filePath);
   const rel = relative(repoDir, full);
