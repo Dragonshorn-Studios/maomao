@@ -1,12 +1,17 @@
 import type { JobRow, JobStore, ReviewerRunRow } from "../jobs/store.js";
+import type { FindingRow } from "../findings/types.js";
+import { fingerprintFinding } from "../findings/identity.js";
 import { elapsedMs, escapeHtml, formatDuration, shortSha } from "../util.js";
 import {
   emptyQueueCopy,
+  findingOverrideNote,
+  findingStatusLabel,
   flavorForJob,
   jobStateLabel,
   observationsCopy,
   runStateLabel,
   severityLabel,
+  settledFindingsCopy,
   staleBanner,
   unconfirmedFindingsBanner,
   usageIncompleteCopy,
@@ -84,7 +89,6 @@ export function renderJob(
   const flavor = flavorForJob(job.state, job.pr_number);
   const elapsed = formatDuration(elapsedMs(job.started_at, job.finished_at) ?? elapsedMs(job.created_at));
   const stale = job.state === "stale";
-  const findingsHtml = renderFindings(metrics);
   const failedToRetry = retryableFailedCount(job, runs);
   const body = `
     <p class="crumb"><a href="/">Jobs</a> / job ${job.id}</p>
@@ -122,6 +126,15 @@ export function renderJob(
         </dd>
       </div>
       <div>
+        <dt>Reconciliation</dt>
+        <dd>${
+          job.risk_profile
+            ? `<span class="state state-reconciling"><span class="mark" aria-hidden="true">◍</span> ${escapeHtml(job.risk_profile)}</span>
+               ${job.risk_reason ? `<div class="muted">${escapeHtml(job.risk_reason)}</div>` : ""}`
+            : "—"
+        }</dd>
+      </div>
+      <div>
         <dt>Tokens / cost</dt>
         <dd class="metric">${escapeHtml(formatTokens(metrics.tokens))} · ${escapeHtml(formatCost(metrics.cost))}${
           metrics.usageComplete ? "" : " · incomplete"
@@ -154,7 +167,7 @@ export function renderJob(
     <h2>Aggregator</h2>
     ${renderAggregator(job, metrics)}
     <h2 id="findings">Findings</h2>
-    ${findingsHtml}
+    ${renderFindings(metrics, options.prFindings ?? [])}
     <h2>Logs</h2>
     <ol class="logs" aria-label="Job logs">
       ${
@@ -173,7 +186,7 @@ export function renderJob(
 function renderQueueCard(job: JobRow, metrics: JobMetrics): string {
   const state = jobStateLabel(job.state);
   const elapsed = formatDuration(elapsedMs(job.started_at, job.finished_at) ?? elapsedMs(job.created_at));
-  const live = ["preparing", "reviewing", "aggregating", "publishing"].includes(job.state);
+  const live = ["preparing", "reconciling", "reviewing", "aggregating", "publishing"].includes(job.state);
   const flavor = flavorForJob(job.state, job.pr_number);
   return `<li>
     <article class="specimen${live ? " is-live" : ""}">
@@ -349,7 +362,7 @@ function renderAggregator(job: JobRow, metrics: JobMetrics): string {
   </article>`;
 }
 
-function renderFindings(metrics: JobMetrics): string {
+function renderFindings(metrics: JobMetrics, persisted: FindingRow[] = []): string {
   const unconfirmed = !metrics.findingsConfirmed;
   const items = metrics.findingsConfirmed
     ? (metrics.aggregator?.findings ?? []).map((finding) => ({
@@ -359,39 +372,134 @@ function renderFindings(metrics: JobMetrics): string {
       }))
     : metrics.specialistFindings.map((finding) => ({ ...finding, reason: finding.reason }));
 
-  if (items.length === 0) {
+  const byFingerprint = new Map(persisted.map((row) => [row.fingerprint, row]));
+  const seen = new Set<string>();
+  const active: string[] = [];
+  const settled: string[] = [];
+
+  const pushCard = (
+    cardInput: Parameters<typeof renderFindingCard>[0],
+  ) => {
+    const settledRow = cardInput.record?.status === "dismissed" || cardInput.record?.status === "resolved";
+    (settledRow ? settled : active).push(renderFindingCard(cardInput, settledRow));
+  };
+
+  for (const finding of items) {
+    const fingerprint = fingerprintFinding(finding);
+    const record = byFingerprint.get(fingerprint);
+    if (record) seen.add(fingerprint);
+    pushCard({
+      severity: finding.severity,
+      category: finding.category || finding.role,
+      file: finding.file,
+      line: finding.line,
+      summary: finding.summary,
+      reason: "reason" in finding ? finding.reason : "",
+      suggested: "suggested_check" in finding ? finding.suggested_check : undefined,
+      agreed:
+        "reviewers_agreed" in finding && Array.isArray(finding.reviewers_agreed) ? finding.reviewers_agreed : [],
+      unconfirmed,
+      record,
+    });
+  }
+
+  for (const row of persisted) {
+    if (seen.has(row.fingerprint)) continue;
+    pushCard({
+      severity: row.severity || "info",
+      category: row.category || "",
+      file: row.current_path ?? row.original_path ?? undefined,
+      line: row.current_line ?? row.original_line ?? undefined,
+      summary: row.summary || row.fingerprint,
+      reason: row.body ?? "",
+      unconfirmed: false,
+      record: row,
+    });
+  }
+
+  if (active.length === 0 && settled.length === 0) {
     return `<p class="muted">${metrics.aggregator?.verdict === "clean" ? "No suspicious findings" : "No normalized findings yet."}</p>`;
   }
 
   const banner = unconfirmed
     ? `<p class="findings-provisional" role="status">${escapeHtml(unconfirmedFindingsBanner())}</p>`
     : "";
+  const buriedCount = persisted.filter((row) => row.status === "dismissed").length;
+  const resolvedCount = persisted.filter((row) => row.status === "resolved").length;
+  const settledBlock =
+    settled.length === 0
+      ? ""
+      : `<p class="muted settled-findings-label">${escapeHtml(settledFindingsCopy(buriedCount, resolvedCount))}</p>${settled.join("")}`;
+  return banner + active.join("") + settledBlock;
+}
 
-  return (
-    banner +
-    items
-      .map((finding) => {
-        const sev = severityLabel(finding.severity);
-        const loc = findingLocation(finding);
-        const attention = finding.severity === "blocker" || finding.severity === "high" ? "Finding requires attention" : "";
-        const reason = "reason" in finding ? finding.reason : "";
-        const suggested = "suggested_check" in finding ? finding.suggested_check : undefined;
-        const agreed =
-          "reviewers_agreed" in finding && Array.isArray(finding.reviewers_agreed) ? finding.reviewers_agreed : [];
-        return `<article class="finding${unconfirmed ? " is-unconfirmed" : ""}">
+function renderFindingCard(
+  input: {
+    severity: string;
+    category: string;
+    file?: string;
+    line?: number | null;
+    summary: string;
+    reason: string;
+    suggested?: string;
+    agreed?: string[];
+    unconfirmed: boolean;
+    record?: FindingRow;
+  },
+  collapsed = false,
+): string {
+  const sev = severityLabel(input.severity);
+  const loc = findingLocation({ file: input.file, line: input.line ?? undefined });
+  const record = input.record;
+  const status = record && record.status !== "open" ? findingStatusLabel(record.status) : undefined;
+  const override = record ? findingOverrideNote(record) : undefined;
+  const buried = record?.status === "dismissed";
+  const resolved = record?.status === "resolved";
+  const attention =
+    !buried && !resolved && (input.severity === "blocker" || input.severity === "high")
+      ? "Finding requires attention"
+      : "";
+  const classes = [
+    "finding",
+    input.unconfirmed ? "is-unconfirmed" : "",
+    buried ? "is-buried" : "",
+    resolved ? "is-resolved" : "",
+    collapsed ? "is-collapsed" : "",
+    record && record.status !== "open" ? `finding-status-${escapeHtml(record.status)}` : "",
+  ]
+    .filter(Boolean)
+    .join(" ");
+  const statusBadge = status
+    ? `<span class="finding-status finding-status-${escapeHtml(record!.status)}" title="${escapeHtml(status.hint)}">${escapeHtml(status.text)}</span>`
+    : "";
+  const body = `
+        ${override ? `<p class="finding-override" role="status"><strong>${escapeHtml(override)}</strong></p>` : ""}
+        ${attention ? `<p><strong>${attention}</strong></p>` : ""}
+        ${input.reason ? `<p>${escapeHtml(input.reason)}</p>` : ""}
+        ${input.suggested ? `<p class="muted">Suggested check: ${escapeHtml(input.suggested)}</p>` : ""}
+        ${input.agreed?.length ? `<p class="muted">reviewers: ${escapeHtml(input.agreed.join(", "))}</p>` : ""}`;
+  if (collapsed) {
+    return `<details class="${classes}">
+        <summary>
+          ${statusBadge}
+          <span class="sev sev-${escapeHtml(input.severity)}"><span class="mark" aria-hidden="true">${sev.mark}</span> ${sev.text}</span>
+          ${loc ? `<span class="loc">${escapeHtml(loc)}</span>` : ""}
+          <span class="finding-title">${escapeHtml(input.summary)}</span>
+        </summary>
+        ${input.category ? `<p class="muted">${escapeHtml(input.category)}</p>` : ""}
+        ${body}
+      </details>`;
+  }
+  return `<article class="${classes}">
         <div class="finding-head">
-          <span class="sev sev-${escapeHtml(finding.severity)}"><span class="mark" aria-hidden="true">${sev.mark}</span> ${sev.text}</span>
-          ${unconfirmed ? `<span class="unconfirmed">Unconfirmed</span>` : ""}
-          <span>· ${escapeHtml(finding.category || finding.role)}</span>
-          ${agreed.length ? `<span class="muted">reviewers: ${escapeHtml(agreed.join(", "))}</span>` : ""}
+          <span class="sev sev-${escapeHtml(input.severity)}"><span class="mark" aria-hidden="true">${sev.mark}</span> ${sev.text}</span>
+          ${statusBadge}
+          ${input.unconfirmed ? `<span class="unconfirmed">Unconfirmed</span>` : ""}
+          ${input.category ? `<span>· ${escapeHtml(input.category)}</span>` : ""}
+          ${input.agreed?.length ? `<span class="muted">reviewers: ${escapeHtml(input.agreed.join(", "))}</span>` : ""}
         </div>
         ${loc ? `<p class="loc">${escapeHtml(loc)}</p>` : ""}
-        <h3>${escapeHtml(finding.summary)}</h3>
-        ${attention ? `<p><strong>${attention}</strong></p>` : ""}
-        ${reason ? `<p>${escapeHtml(reason)}</p>` : ""}
-        ${suggested ? `<p class="muted">Suggested check: ${escapeHtml(suggested)}</p>` : ""}
+        <h3>${escapeHtml(input.summary)}</h3>
+        ${body}
       </article>`;
-      })
-      .join("")
-  );
 }

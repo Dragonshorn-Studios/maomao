@@ -107,7 +107,62 @@ function migrate(db: SqliteDb): void {
     CREATE INDEX IF NOT EXISTS idx_jobs_state ON jobs(state);
     CREATE INDEX IF NOT EXISTS idx_logs_job ON job_logs(job_id, id);
     CREATE INDEX IF NOT EXISTS idx_runs_job ON reviewer_runs(job_id);
+
+    CREATE TABLE IF NOT EXISTS findings (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      repo_full_name TEXT NOT NULL,
+      pr_number INTEGER NOT NULL,
+      fingerprint TEXT NOT NULL,
+      status TEXT NOT NULL,
+      reviewed_sha TEXT NOT NULL,
+      current_sha TEXT,
+      github_thread_id TEXT,
+      github_comment_id TEXT,
+      original_path TEXT,
+      original_line INTEGER,
+      current_path TEXT,
+      current_line INTEGER,
+      category TEXT,
+      summary TEXT NOT NULL DEFAULT '',
+      body TEXT,
+      severity TEXT,
+      confidence REAL,
+      dismissed_by TEXT,
+      dismissed_at TEXT,
+      dismiss_command TEXT,
+      reopened_by TEXT,
+      reopened_at TEXT,
+      reopen_command TEXT,
+      reconciliation_confidence REAL,
+      reconciliation_reason TEXT,
+      last_job_id INTEGER,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      UNIQUE (repo_full_name, pr_number, fingerprint)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_findings_pr ON findings(repo_full_name, pr_number, status);
+    CREATE INDEX IF NOT EXISTS idx_findings_thread ON findings(github_thread_id);
+    CREATE INDEX IF NOT EXISTS idx_findings_comment ON findings(github_comment_id);
+
+    CREATE TABLE IF NOT EXISTS webhook_deliveries (
+      delivery_id TEXT PRIMARY KEY,
+      event TEXT NOT NULL,
+      result TEXT NOT NULL,
+      created_at TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS processed_review_commands (
+      comment_id TEXT PRIMARY KEY,
+      delivery_id TEXT,
+      command TEXT NOT NULL,
+      result TEXT NOT NULL,
+      created_at TEXT NOT NULL
+    );
   `);
+  ensureColumn(db, "jobs", "reconciliation_json", "TEXT");
+  ensureColumn(db, "jobs", "risk_profile", "TEXT");
+  ensureColumn(db, "jobs", "risk_reason", "TEXT");
   ensureColumn(db, "jobs", "aggregator_reasoning_tokens", "INTEGER");
   ensureColumn(db, "jobs", "aggregator_cache_read_tokens", "INTEGER");
   ensureColumn(db, "jobs", "aggregator_cache_write_tokens", "INTEGER");

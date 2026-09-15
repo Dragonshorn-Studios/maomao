@@ -1,5 +1,6 @@
 import type { SqliteDb } from "../db.js";
 import type { JobState, ReviewerState } from "../config.js";
+import type { FindingRow, FindingStatus } from "../findings/types.js";
 import { nowIso } from "../util.js";
 import { publish } from "../events.js";
 
@@ -42,6 +43,9 @@ export interface JobRow {
   aggregator_total_tokens: number | null;
   aggregator_usage_complete: number | null;
   aggregator_usage_warning: string | null;
+  reconciliation_json: string | null;
+  risk_profile: string | null;
+  risk_reason: string | null;
   created_at: string;
   updated_at: string;
   started_at: string | null;
@@ -112,7 +116,15 @@ export interface EnqueueResult {
   staleJobIds: number[];
 }
 
-const TERMINAL_SKIP_REQUEUE: JobState[] = ["completed", "publishing", "queued", "preparing", "reviewing", "aggregating"];
+const TERMINAL_SKIP_REQUEUE: JobState[] = [
+  "completed",
+  "publishing",
+  "queued",
+  "preparing",
+  "reconciling",
+  "reviewing",
+  "aggregating",
+];
 
 export class JobStore {
   constructor(private readonly db: SqliteDb) {}
@@ -200,7 +212,7 @@ export class JobStore {
   listInterruptedJobs(): JobRow[] {
     return this.db
       .prepare(
-        `SELECT * FROM jobs WHERE state IN ('queued', 'preparing', 'reviewing', 'aggregating', 'publishing')`,
+        `SELECT * FROM jobs WHERE state IN ('queued', 'preparing', 'reconciling', 'reviewing', 'aggregating', 'publishing')`,
       )
       .all() as JobRow[];
   }
@@ -256,6 +268,9 @@ export class JobStore {
           aggregator_total_tokens = COALESCE(?, aggregator_total_tokens),
           aggregator_usage_complete = COALESCE(?, aggregator_usage_complete),
           aggregator_usage_warning = COALESCE(?, aggregator_usage_warning),
+          reconciliation_json = COALESCE(?, reconciliation_json),
+          risk_profile = COALESCE(?, risk_profile),
+          risk_reason = COALESCE(?, risk_reason),
           started_at = ?,
           finished_at = ?,
           updated_at = ?
@@ -284,6 +299,9 @@ export class JobStore {
         extra.aggregator_total_tokens ?? null,
         extra.aggregator_usage_complete ?? null,
         extra.aggregator_usage_warning ?? null,
+        extra.reconciliation_json ?? null,
+        extra.risk_profile ?? null,
+        extra.risk_reason ?? null,
         startedAt,
         finishedAt,
         updatedAt,
@@ -310,7 +328,7 @@ export class JobStore {
       .prepare(
         `UPDATE jobs SET state = 'queued', failure_reason = NULL, started_at = NULL, finished_at = NULL,
          aggregator_state = 'queued', aggregator_started_at = NULL, aggregator_finished_at = NULL, updated_at = ?
-         WHERE id = ? AND state IN ('preparing', 'reviewing', 'aggregating', 'publishing', 'queued')`,
+         WHERE id = ? AND state IN ('preparing', 'reconciling', 'reviewing', 'aggregating', 'publishing', 'queued')`,
       )
       .run(updatedAt, id);
     this.db
@@ -417,6 +435,254 @@ export class JobStore {
       reviewersDone: runs.filter((run) => run.state === "done").length,
       reviewersFailed: runs.filter((run) => run.state === "failed").length,
     };
+  }
+
+  listFindings(repoFullName: string, prNumber: number): FindingRow[] {
+    return this.db
+      .prepare(`SELECT * FROM findings WHERE repo_full_name = ? AND pr_number = ? ORDER BY id ASC`)
+      .all(repoFullName, prNumber) as FindingRow[];
+  }
+
+  getFinding(repoFullName: string, prNumber: number, fingerprint: string): FindingRow | undefined {
+    return this.db
+      .prepare(`SELECT * FROM findings WHERE repo_full_name = ? AND pr_number = ? AND fingerprint = ?`)
+      .get(repoFullName, prNumber, fingerprint) as FindingRow | undefined;
+  }
+
+  getFindingByThreadId(threadId: string): FindingRow | undefined {
+    return this.db.prepare(`SELECT * FROM findings WHERE github_thread_id = ?`).get(threadId) as FindingRow | undefined;
+  }
+
+  getFindingByCommentId(commentId: string): FindingRow | undefined {
+    return this.db.prepare(`SELECT * FROM findings WHERE github_comment_id = ?`).get(commentId) as
+      | FindingRow
+      | undefined;
+  }
+
+  upsertFinding(input: {
+    repoFullName: string;
+    prNumber: number;
+    fingerprint: string;
+    status: FindingStatus;
+    reviewedSha: string;
+    currentSha?: string | null;
+    githubThreadId?: string | null;
+    githubCommentId?: string | null;
+    originalPath?: string | null;
+    originalLine?: number | null;
+    currentPath?: string | null;
+    currentLine?: number | null;
+    category?: string | null;
+    summary: string;
+    body?: string | null;
+    severity?: string | null;
+    confidence?: number | null;
+    dismissedBy?: string | null;
+    dismissedAt?: string | null;
+    dismissCommand?: string | null;
+    reopenedBy?: string | null;
+    reopenedAt?: string | null;
+    reopenCommand?: string | null;
+    reconciliationConfidence?: number | null;
+    reconciliationReason?: string | null;
+    lastJobId?: number | null;
+  }): FindingRow {
+    const existing = this.getFinding(input.repoFullName, input.prNumber, input.fingerprint);
+    if (
+      existing?.status === "dismissed" &&
+      input.status !== "dismissed" &&
+      !(input.status === "open" && input.reopenedBy)
+    ) {
+      return existing;
+    }
+    const now = nowIso();
+    this.db
+      .prepare(
+        `INSERT INTO findings (
+          repo_full_name, pr_number, fingerprint, status, reviewed_sha, current_sha,
+          github_thread_id, github_comment_id, original_path, original_line, current_path, current_line,
+          category, summary, body, severity, confidence,
+          dismissed_by, dismissed_at, dismiss_command, reopened_by, reopened_at, reopen_command,
+          reconciliation_confidence, reconciliation_reason, last_job_id, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(repo_full_name, pr_number, fingerprint) DO UPDATE SET
+          status = excluded.status,
+          reviewed_sha = excluded.reviewed_sha,
+          current_sha = COALESCE(excluded.current_sha, findings.current_sha),
+          github_thread_id = COALESCE(excluded.github_thread_id, findings.github_thread_id),
+          github_comment_id = COALESCE(excluded.github_comment_id, findings.github_comment_id),
+          original_path = COALESCE(excluded.original_path, findings.original_path),
+          original_line = COALESCE(excluded.original_line, findings.original_line),
+          current_path = COALESCE(excluded.current_path, findings.current_path),
+          current_line = COALESCE(excluded.current_line, findings.current_line),
+          category = COALESCE(excluded.category, findings.category),
+          summary = excluded.summary,
+          body = COALESCE(excluded.body, findings.body),
+          severity = COALESCE(excluded.severity, findings.severity),
+          confidence = COALESCE(excluded.confidence, findings.confidence),
+          dismissed_by = excluded.dismissed_by,
+          dismissed_at = excluded.dismissed_at,
+          dismiss_command = excluded.dismiss_command,
+          reopened_by = excluded.reopened_by,
+          reopened_at = excluded.reopened_at,
+          reopen_command = excluded.reopen_command,
+          reconciliation_confidence = COALESCE(excluded.reconciliation_confidence, findings.reconciliation_confidence),
+          reconciliation_reason = COALESCE(excluded.reconciliation_reason, findings.reconciliation_reason),
+          last_job_id = COALESCE(excluded.last_job_id, findings.last_job_id),
+          updated_at = excluded.updated_at`,
+      )
+      .run(
+        input.repoFullName,
+        input.prNumber,
+        input.fingerprint,
+        input.status,
+        input.reviewedSha,
+        input.currentSha ?? null,
+        input.githubThreadId ?? null,
+        input.githubCommentId ?? null,
+        input.originalPath ?? null,
+        input.originalLine ?? null,
+        input.currentPath ?? null,
+        input.currentLine ?? null,
+        input.category ?? null,
+        input.summary,
+        input.body ?? null,
+        input.severity ?? null,
+        input.confidence ?? null,
+        input.dismissedBy ?? null,
+        input.dismissedAt ?? null,
+        input.dismissCommand ?? null,
+        input.reopenedBy ?? null,
+        input.reopenedAt ?? null,
+        input.reopenCommand ?? null,
+        input.reconciliationConfidence ?? null,
+        input.reconciliationReason ?? null,
+        input.lastJobId ?? null,
+        now,
+        now,
+      );
+    const row = this.getFinding(input.repoFullName, input.prNumber, input.fingerprint);
+    if (!row) throw new Error("failed to upsert finding");
+    return row;
+  }
+
+  dismissFinding(input: {
+    repoFullName: string;
+    prNumber: number;
+    fingerprint: string;
+    actor: string;
+    command: string;
+    reviewedSha: string;
+    githubThreadId?: string | null;
+    githubCommentId?: string | null;
+    summary: string;
+    path?: string | null;
+    line?: number | null;
+    category?: string | null;
+    severity?: string | null;
+    body?: string | null;
+  }): { finding: FindingRow; changed: boolean } {
+    const existing = this.getFinding(input.repoFullName, input.prNumber, input.fingerprint);
+    if (existing?.status === "dismissed") {
+      return { finding: existing, changed: false };
+    }
+    const finding = this.upsertFinding({
+      repoFullName: input.repoFullName,
+      prNumber: input.prNumber,
+      fingerprint: input.fingerprint,
+      status: "dismissed",
+      reviewedSha: existing?.reviewed_sha ?? input.reviewedSha,
+      currentSha: input.reviewedSha,
+      githubThreadId: input.githubThreadId ?? existing?.github_thread_id,
+      githubCommentId: input.githubCommentId ?? existing?.github_comment_id,
+      originalPath: existing?.original_path ?? input.path,
+      originalLine: existing?.original_line ?? input.line,
+      currentPath: input.path ?? existing?.current_path,
+      currentLine: input.line ?? existing?.current_line,
+      category: input.category ?? existing?.category,
+      summary: existing?.summary || input.summary,
+      body: input.body ?? existing?.body,
+      severity: input.severity ?? existing?.severity,
+      dismissedBy: input.actor,
+      dismissedAt: nowIso(),
+      dismissCommand: input.command,
+    });
+    return { finding, changed: true };
+  }
+
+  reopenFinding(input: {
+    repoFullName: string;
+    prNumber: number;
+    fingerprint: string;
+    actor: string;
+    command: string;
+    reviewedSha: string;
+    githubThreadId?: string | null;
+    githubCommentId?: string | null;
+    summary: string;
+  }): { finding: FindingRow; changed: boolean } {
+    const existing = this.getFinding(input.repoFullName, input.prNumber, input.fingerprint);
+    if (existing && existing.status !== "dismissed") {
+      return { finding: existing, changed: false };
+    }
+    const finding = this.upsertFinding({
+      repoFullName: input.repoFullName,
+      prNumber: input.prNumber,
+      fingerprint: input.fingerprint,
+      status: "open",
+      reviewedSha: existing?.reviewed_sha ?? input.reviewedSha,
+      currentSha: input.reviewedSha,
+      githubThreadId: input.githubThreadId ?? existing?.github_thread_id,
+      githubCommentId: input.githubCommentId ?? existing?.github_comment_id,
+      originalPath: existing?.original_path,
+      originalLine: existing?.original_line,
+      currentPath: existing?.current_path,
+      currentLine: existing?.current_line,
+      category: existing?.category,
+      summary: existing?.summary || input.summary,
+      body: existing?.body,
+      severity: existing?.severity,
+      dismissedBy: null,
+      dismissedAt: null,
+      dismissCommand: null,
+      reopenedBy: input.actor,
+      reopenedAt: nowIso(),
+      reopenCommand: input.command,
+    });
+    return { finding, changed: true };
+  }
+
+  claimWebhookDelivery(deliveryId: string, event: string, result: string): boolean {
+    if (!deliveryId) return true;
+    const insert = this.db
+      .prepare(`INSERT OR IGNORE INTO webhook_deliveries (delivery_id, event, result, created_at) VALUES (?, ?, ?, ?)`)
+      .run(deliveryId, event, result, nowIso());
+    return insert.changes > 0;
+  }
+
+  hasWebhookDelivery(deliveryId: string): boolean {
+    if (!deliveryId) return false;
+    const row = this.db.prepare(`SELECT delivery_id FROM webhook_deliveries WHERE delivery_id = ?`).get(deliveryId) as
+      | { delivery_id: string }
+      | undefined;
+    return Boolean(row);
+  }
+
+  claimReviewCommand(commentId: string, deliveryId: string, command: string, result: string): boolean {
+    const insert = this.db
+      .prepare(
+        `INSERT OR IGNORE INTO processed_review_commands (comment_id, delivery_id, command, result, created_at)
+         VALUES (?, ?, ?, ?, ?)`,
+      )
+      .run(commentId, deliveryId, command, result, nowIso());
+    return insert.changes > 0;
+  }
+
+  hasReviewCommand(commentId: string): boolean {
+    const row = this.db
+      .prepare(`SELECT comment_id FROM processed_review_commands WHERE comment_id = ?`)
+      .get(commentId) as { comment_id: string } | undefined;
+    return Boolean(row);
   }
 }
 
