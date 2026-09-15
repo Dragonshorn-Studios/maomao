@@ -129,12 +129,7 @@ export function renderJob(
       </div>
       <div>
         <dt>Reconciliation</dt>
-        <dd>${
-          job.risk_profile
-            ? `<span class="state state-reconciling"><span class="mark" aria-hidden="true">◍</span> ${escapeHtml(job.risk_profile)}</span>
-               ${job.risk_reason ? `<div class="muted">${escapeHtml(job.risk_reason)}</div>` : ""}`
-            : "—"
-        }</dd>
+        <dd>${escapeHtml(reconciliationSummary(job))}</dd>
       </div>
       <div>
         <dt>Tokens / cost</dt>
@@ -290,6 +285,26 @@ function safeParseSignals(raw: string | null): { families?: string[]; hardRiskFa
     return JSON.parse(raw) as { families?: string[]; hardRiskFamilies?: string[] };
   } catch {
     return undefined;
+  }
+}
+
+function reconciliationSummary(job: JobRow): string {
+  if (job.state === "reconciling") return "Checking prior findings against this SHA";
+  if (!job.reconciliation_json) return "—";
+  try {
+    const snapshot = JSON.parse(job.reconciliation_json) as { items?: Array<{ status?: string }> };
+    const items = Array.isArray(snapshot.items) ? snapshot.items : [];
+    if (items.length === 0) return "No prior findings";
+    const buried = items.filter((item) => item.status === "dismissed").length;
+    const resolved = items.filter((item) => item.status === "resolved").length;
+    const remaining = items.length - buried - resolved;
+    const parts = [`${items.length} prior`];
+    if (resolved) parts.push(`${resolved} resolved`);
+    if (buried) parts.push(`${buried} buried`);
+    if (remaining) parts.push(`${remaining} still current`);
+    return parts.join(" · ");
+  } catch {
+    return "—";
   }
 }
 

@@ -1,6 +1,10 @@
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
+
+const SRC_DIR = fileURLToPath(new URL("..", import.meta.url));
+const ROOT_DIR = fileURLToPath(new URL("../..", import.meta.url));
 
 function walk(dir: string): string[] {
   const out: string[] = [];
@@ -16,7 +20,7 @@ function walk(dir: string): string[] {
 
 describe("no hardcoded escalation integrations", () => {
   it("does not hardcode @marller or glm-5.3", () => {
-    const files = walk("/workspace/src").concat(["/workspace/.env.example", "/workspace/README.md"]);
+    const files = walk(SRC_DIR).concat([join(ROOT_DIR, ".env.example"), join(ROOT_DIR, "README.md")]);
     for (const file of files) {
       const text = readFileSync(file, "utf8");
       expect(text, file).not.toMatch(/@marller/i);

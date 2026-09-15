@@ -1091,6 +1091,7 @@ describe("finding reconciliation", () => {
             };
           }
           if (input.prompt.includes("Role id:")) {
+            expect(store.getJob(created.job.id)?.routing_profile).toBe("diagnosis");
             expect(store.getJob(created.job.id)?.risk_profile).toBe("diagnosis");
             return {
               stdout: "",

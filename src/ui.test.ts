@@ -125,6 +125,8 @@ describe("monitoring pages", () => {
     expect(html).toContain("reasoning");
     expect(html).toContain("cache r");
     expect(html).toContain("poison-alert");
+    expect(html).toContain("<h2>Routing</h2>");
+    expect(html).toMatch(/Reconciliation<\/dt>\s*<dd>—<\/dd>/);
     expect(html).toContain("internal_and_external");
     expect(html).toContain("anthropic/claude-opus-4-6");
     expect(html).toContain("dispatched (notification accepted)");
