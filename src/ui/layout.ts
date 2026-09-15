@@ -11,6 +11,7 @@ export interface PageOptions {
   error?: string;
   reviewUrl?: string;
   prFindings?: FindingRow[];
+  csrfToken?: string;
 }
 
 const APPEARANCE_BOOT = `
@@ -60,7 +61,9 @@ const APPEARANCE_BOOT = `
 export function layout(title: string, body: string, options: PageOptions = {}): string {
   const live = options.live !== false;
   const logout = options.showLogout
-    ? `<form method="post" action="/logout" class="logout"><button type="submit">Log out</button></form>`
+    ? `<form method="post" action="/logout" class="logout">${
+        options.csrfToken ? `<input type="hidden" name="csrf_token" value="${escapeHtml(options.csrfToken)}"/>` : ""
+      }<button type="submit">Log out</button></form>`
     : "";
   const script = live
     ? `<script>

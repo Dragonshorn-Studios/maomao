@@ -13,14 +13,20 @@ import { subscribe } from "./events.js";
 import { renderHome, renderJob, renderLogin, THEME_CSS } from "./ui/index.js";
 import type { JobQueue } from "./jobs/queue.js";
 import {
+  CSRF_COOKIE,
+  CSRF_FIELD,
+  CSRF_TTL_MS,
   SESSION_COOKIE,
   SESSION_TTL_MS,
   cookieSecure,
   isPublicPath,
+  issueCsrfToken,
   passwordsMatch,
   safeNextPath,
   signSession,
   uiGateEnabled,
+  verifyCsrfRequest,
+  verifyCsrfToken,
   verifySession,
 } from "./auth.js";
 
@@ -50,12 +56,45 @@ export function createApp(ctx: ServerContext): Hono {
     return c.redirect(`/login?next=${encodeURIComponent(`${url.pathname}${url.search}`)}`, 302);
   });
 
+  app.use("*", async (c, next) => {
+    if (!gateOn || c.req.method !== "POST" || c.req.path === "/webhooks/github") return next();
+    const cookieToken = getCookie(c, CSRF_COOKIE);
+    let fieldToken: string | undefined;
+    try {
+      const body = await c.req.parseBody();
+      fieldToken = typeof body[CSRF_FIELD] === "string" ? (body[CSRF_FIELD] as string) : undefined;
+    } catch {
+      fieldToken = undefined;
+    }
+    if (!verifyCsrfRequest(ctx.config.uiSessionSecret, cookieToken, fieldToken)) {
+      if (c.req.path === "/login") {
+        return c.html(renderLogin("csrf", safeNextPath(c.req.query("next")), ensureCsrfToken(c)), 403);
+      }
+      return c.html(CSRF_FAILURE_HTML, 403);
+    }
+    return next();
+  });
+
+  const ensureCsrfToken = (c: Context): string => {
+    const existing = getCookie(c, CSRF_COOKIE);
+    if (existing && verifyCsrfToken(ctx.config.uiSessionSecret, existing)) return existing;
+    const token = issueCsrfToken(ctx.config.uiSessionSecret);
+    setCookie(c, CSRF_COOKIE, token, {
+      httpOnly: true,
+      sameSite: "Lax",
+      secure: cookieSecure(c.req.url, c.req.header("x-forwarded-proto")),
+      path: "/",
+      maxAge: Math.floor(CSRF_TTL_MS / 1000),
+    });
+    return token;
+  };
+
   app.get("/login", (c) => {
     if (!gateOn) return c.redirect("/", 302);
     const token = getCookie(c, SESSION_COOKIE);
     const nextPath = safeNextPath(c.req.query("next"));
     if (verifySession(ctx.config.uiSessionSecret, token)) return c.redirect(nextPath, 302);
-    return c.html(renderLogin(false, nextPath));
+    return c.html(renderLogin(false, nextPath, ensureCsrfToken(c)));
   });
 
   app.post("/login", async (c) => {
@@ -64,7 +103,7 @@ export function createApp(ctx: ServerContext): Hono {
     const password = typeof body.password === "string" ? body.password : "";
     const nextPath = safeNextPath(typeof body.next === "string" ? body.next : c.req.query("next"));
     if (!passwordsMatch(password, ctx.config.uiPassword)) {
-      return c.html(renderLogin(true, nextPath), 401);
+      return c.html(renderLogin(true, nextPath, ensureCsrfToken(c)), 401);
     }
     setCookie(c, SESSION_COOKIE, signSession(ctx.config.uiSessionSecret), {
       httpOnly: true,
@@ -124,9 +163,15 @@ export function createApp(ctx: ServerContext): Hono {
   app.post("/reviews", async (c) => {
     const body = await c.req.parseBody();
     const rawUrl = typeof body.url === "string" ? body.url : "";
+    const csrfToken = getCookie(c, CSRF_COOKIE) ?? undefined;
     const home = (extra: { error?: string; notice?: string; reviewUrl?: string } = {}) =>
       c.html(
-        renderHome(ctx.store.listJobs(75), ctx.store, { ...pageOpts, ...extra, reviewUrl: extra.reviewUrl ?? rawUrl }),
+        renderHome(ctx.store.listJobs(75), ctx.store, {
+          ...pageOpts,
+          csrfToken,
+          ...extra,
+          reviewUrl: extra.reviewUrl ?? rawUrl,
+        }),
         extra.error ? 400 : 200,
       );
 
@@ -246,6 +291,7 @@ export function createApp(ctx: ServerContext): Hono {
     return c.html(
       renderHome(jobs, ctx.store, {
         ...pageOpts,
+        csrfToken: ensureCsrfToken(c),
         notice: noticeText(c.req.query("notice")),
         error: c.req.query("error") || undefined,
       }),
@@ -259,6 +305,7 @@ export function createApp(ctx: ServerContext): Hono {
     return c.html(
       renderJob(job, ctx.store.listReviewerRuns(id), ctx.store.listLogs(id), {
         ...pageOpts,
+        csrfToken: ensureCsrfToken(c),
         notice: noticeText(c.req.query("notice"), job.repo_full_name, job.pr_number, job.head_sha),
         prFindings: ctx.store.listFindings(job.repo_full_name, job.pr_number),
       }),
@@ -343,6 +390,7 @@ function retryJob(c: Context, ctx: ServerContext, jobId: number, runId?: number)
     return c.html(
       renderJob(job, ctx.store.listReviewerRuns(jobId), ctx.store.listLogs(jobId), {
         showLogout: uiGateEnabled(ctx.config.uiPassword, ctx.config.uiSessionSecret),
+        csrfToken: getCookie(c, CSRF_COOKIE) ?? undefined,
         error: result.error,
         prFindings: ctx.store.listFindings(job.repo_full_name, job.pr_number),
       }),
@@ -352,6 +400,22 @@ function retryJob(c: Context, ctx: ServerContext, jobId: number, runId?: number)
   ctx.queue.enqueue(jobId);
   return c.redirect(`/jobs/${jobId}?notice=retry`, 302);
 }
+
+const CSRF_FAILURE_HTML = `<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <title>Maomao — form expired</title>
+  <link rel="stylesheet" href="/assets/maomao.css"/>
+</head>
+<body>
+  <main id="main">
+    <p class="error" role="alert">This form was missing a valid CSRF token, or its token expired. Go back, reload the page, and try again.</p>
+    <p><a href="/">Back to jobs</a></p>
+  </main>
+</body>
+</html>`;
 
 function isReviewGithub(github: (ManualTriggerPort & Partial<GithubPort>) | undefined): github is ManualTriggerPort & GithubPort {
   return Boolean(
