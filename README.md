@@ -316,7 +316,7 @@ Reply **inside a Maomao review thread** (not on a human comment, and not as a re
 | `🌱` (nothing else in the comment) | Same as ignore |
 | `@maomao reopen` | Clear the dismissal and unresolve the thread when GitHub allows it |
 
-`dismissed` means “acknowledged and intentionally ignored”, not “fixed”. `resolved` and `dismissed` stay distinct in SQLite, logs, and the job **Finding ledger**.
+`dismissed` means “acknowledged and intentionally ignored”, not “fixed”. `resolved` and `dismissed` stay distinct in SQLite, logs, and the job Findings list (a buried finding keeps its card with a Dismissed badge and who buried it).
 
 Dismissal is scoped to that **finding fingerprint on that pull request**, not the whole repository. The same fingerprint will not be re-reported on later SHAs of that PR unless someone `@maomao reopen`s it.
 

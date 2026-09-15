@@ -596,6 +596,19 @@ form.retry, form.retry-job {
 .finding-status-moved { color: var(--amber); background: var(--amber-soft); border-color: var(--amber); }
 .finding-status-uncertain { color: var(--ink-muted); background: var(--surface-2); }
 
+.finding.is-buried,
+.finding.is-resolved {
+  opacity: 0.92;
+  border-style: dashed;
+}
+.finding-override {
+  color: var(--plum);
+  margin: 0.4rem 0 0.5rem;
+}
+.finding.is-resolved .finding-override {
+  color: var(--jade);
+}
+
 pre, .log-panel {
   white-space: pre-wrap;
   word-break: break-word;

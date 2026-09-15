@@ -107,3 +107,30 @@ export function findingStatusLabel(status: string): { text: string; hint: string
       return { text: "Open", hint: "Outstanding finding" };
   }
 }
+
+export function findingCommandLabel(command: string | null | undefined): string {
+  if (!command) return "";
+  if (command === "seedling") return "🌱";
+  if (command === "ignore" || command === "bury" || command === "reopen") return `@maomao ${command}`;
+  return command;
+}
+
+export function findingOverrideNote(finding: {
+  status: string;
+  dismissed_by?: string | null;
+  dismiss_command?: string | null;
+  reopened_by?: string | null;
+}): string | undefined {
+  if (finding.status === "dismissed") {
+    const who = finding.dismissed_by ? ` by ${finding.dismissed_by}` : "";
+    const via = findingCommandLabel(finding.dismiss_command);
+    return `Buried${who}${via ? ` via ${via}` : ""}. Intentionally ignored, not marked fixed.`;
+  }
+  if (finding.status === "resolved") {
+    return "Verifier confirmed the problem is gone.";
+  }
+  if (finding.reopened_by) {
+    return `Reopened by ${finding.reopened_by}.`;
+  }
+  return undefined;
+}
