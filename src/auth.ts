@@ -1,7 +1,10 @@
-import { createHmac, timingSafeEqual } from "node:crypto";
+import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 
 export const SESSION_COOKIE = "maomao_session";
 export const SESSION_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+export const CSRF_COOKIE = "maomao_csrf";
+export const CSRF_TTL_MS = SESSION_TTL_MS;
+export const CSRF_FIELD = "csrf_token";
 
 export function uiGateEnabled(password: string, sessionSecret: string): boolean {
   return Boolean(password && sessionSecret);
@@ -24,17 +27,7 @@ export function signSession(secret: string, now = Date.now(), ttlMs = SESSION_TT
 }
 
 export function verifySession(secret: string, token: string | undefined, now = Date.now()): boolean {
-  if (!token) return false;
-  const lastDot = token.lastIndexOf(".");
-  if (lastDot <= 0) return false;
-  const payload = token.slice(0, lastDot);
-  const sig = token.slice(lastDot + 1);
-  const expected = createHmac("sha256", secret).update(payload).digest("base64url");
-  if (!safeEqual(sig, expected)) return false;
-  const [version, expRaw] = payload.split(".");
-  if (version !== "v1") return false;
-  const exp = Number(expRaw);
-  return Number.isFinite(exp) && exp > now;
+  return verifySignedToken(secret, token, now, 1);
 }
 
 export function safeNextPath(raw: string | undefined | null): string {
@@ -60,6 +53,19 @@ export function isPublicPath(path: string): boolean {
   );
 }
 
+export function csrfExemptPath(path: string): boolean {
+  return path === "/webhooks/github";
+}
+
+export type CsrfRejectReason = "missing-cookie" | "missing-field" | "mismatch" | "bad-token";
+
+export function csrfRejectReason(cookieToken: string | undefined, fieldToken: string | undefined): CsrfRejectReason {
+  if (!cookieToken) return "missing-cookie";
+  if (!fieldToken) return "missing-field";
+  if (!safeEqual(cookieToken, fieldToken)) return "mismatch";
+  return "bad-token";
+}
+
 export function cookieSecure(url: string, forwardedProto?: string | null): boolean {
   if (forwardedProto?.split(",")[0]?.trim() === "https") return true;
   try {
@@ -67,4 +73,40 @@ export function cookieSecure(url: string, forwardedProto?: string | null): boole
   } catch {
     return false;
   }
+}
+
+export function issueCsrfToken(secret: string, now = Date.now(), ttlMs = CSRF_TTL_MS): string {
+  const nonce = randomBytes(16).toString("base64url");
+  const payload = `v1.${nonce}.${now + ttlMs}`;
+  const sig = createHmac("sha256", secret).update(payload).digest("base64url");
+  return `${payload}.${sig}`;
+}
+
+function verifySignedToken(secret: string, token: string | undefined, now: number, expiryPart: number): boolean {
+  if (!token) return false;
+  const lastDot = token.lastIndexOf(".");
+  if (lastDot <= 0) return false;
+  const payload = token.slice(0, lastDot);
+  const sig = token.slice(lastDot + 1);
+  const expected = createHmac("sha256", secret).update(payload).digest("base64url");
+  if (!safeEqual(sig, expected)) return false;
+  const parts = payload.split(".");
+  if (parts[0] !== "v1") return false;
+  const exp = Number(parts[expiryPart]);
+  return Number.isFinite(exp) && exp > now;
+}
+
+export function verifyCsrfToken(secret: string, token: string | undefined, now = Date.now()): boolean {
+  return verifySignedToken(secret, token, now, 2);
+}
+
+export function verifyCsrfRequest(
+  secret: string,
+  cookieToken: string | undefined,
+  fieldToken: string | undefined,
+  now = Date.now(),
+): boolean {
+  if (!cookieToken || !fieldToken) return false;
+  if (!safeEqual(cookieToken, fieldToken)) return false;
+  return verifyCsrfToken(secret, cookieToken, now);
 }

@@ -5,7 +5,7 @@ import { openDb } from "./db.js";
 import { JobStore } from "./jobs/store.js";
 import type { JobQueue } from "./jobs/queue.js";
 import { createApp } from "./server.js";
-import { SESSION_COOKIE } from "./auth.js";
+import { SESSION_COOKIE, CSRF_COOKIE, issueCsrfToken } from "./auth.js";
 import type { ManualTriggerPort, ResolvedPull } from "./github/client.js";
 
 function sign(secret: string, body: string): string {
@@ -33,11 +33,35 @@ function testApp(env: Record<string, string> = {}, github?: ManualTriggerPort) {
   return { app, store, enqueued, webhookSecret };
 }
 
-function cookieFrom(response: Response): string {
+function cookieFrom(response: Response, name = SESSION_COOKIE): string {
   const raw = response.headers.get("set-cookie") ?? "";
-  const match = raw.match(new RegExp(`${SESSION_COOKIE}=([^;]+)`));
-  if (!match?.[1]) throw new Error(`missing session cookie in ${raw}`);
-  return `${SESSION_COOKIE}=${match[1]}`;
+  const match = raw.match(new RegExp(`${name}=([^;]+)`));
+  if (!match?.[1]) throw new Error(`missing ${name} cookie in ${raw}`);
+  return `${name}=${match[1]}`;
+}
+
+function csrfArtifacts(response: Response): Promise<{ html: string; csrfCookie: string; csrfToken: string }> {
+  const csrfCookie = cookieFrom(response, CSRF_COOKIE);
+  return response.text().then((html) => {
+    const tokenMatch = html.match(/name="csrf_token" value="([^"]+)"/);
+    if (!tokenMatch?.[1]) throw new Error("missing csrf_token field in rendered form");
+    return { html, csrfCookie, csrfToken: tokenMatch[1] };
+  });
+}
+
+async function loginSession(
+  app: ReturnType<typeof createApp>,
+): Promise<{ session: string; csrfToken: string; cookies: string }> {
+  const page = await app.request("/login");
+  const { csrfCookie, csrfToken } = await csrfArtifacts(page);
+  const login = await app.request("/login", {
+    method: "POST",
+    headers: { cookie: csrfCookie, "content-type": "application/x-www-form-urlencoded" },
+    body: `password=hunter2&next=%2F&csrf_token=${encodeURIComponent(csrfToken)}`,
+  });
+  if (login.status !== 302) throw new Error(`login failed with status ${login.status}`);
+  const session = cookieFrom(login);
+  return { session, csrfToken, cookies: `${session}; ${csrfCookie}` };
 }
 
 const openedPayload = JSON.stringify({
@@ -66,6 +90,7 @@ describe("HTTP app", () => {
 
     const home = await app.request("/");
     expect(home.status).toBe(200);
+    expect(home.headers.get("set-cookie") ?? "").not.toContain(CSRF_COOKIE);
     expect(await home.text()).toContain("Queue a GitHub pull request");
 
     const webhook = await app.request("/webhooks/github", {
@@ -125,18 +150,30 @@ describe("HTTP app", () => {
     expect(webhook.status).toBe(202);
     expect(enqueued).toHaveLength(1);
 
-    const badLogin = await app.request("/login", {
+    const tokenless = await app.request("/login", {
       method: "POST",
       headers: { "content-type": "application/x-www-form-urlencoded" },
-      body: "password=wrong&next=%2F",
+      body: "password=hunter2&next=%2F",
+    });
+    expect(tokenless.status).toBe(403);
+    expect(tokenless.headers.get("set-cookie") ?? "").not.toContain(SESSION_COOKIE);
+
+    const loginPage = await app.request("/login");
+    expect(loginPage.status).toBe(200);
+    const { csrfCookie, csrfToken } = await csrfArtifacts(loginPage);
+
+    const badLogin = await app.request("/login", {
+      method: "POST",
+      headers: { cookie: csrfCookie, "content-type": "application/x-www-form-urlencoded" },
+      body: `password=wrong&next=%2F&csrf_token=${encodeURIComponent(csrfToken)}`,
     });
     expect(badLogin.status).toBe(401);
     expect(badLogin.headers.get("set-cookie") ?? "").not.toContain(SESSION_COOKIE);
 
     const login = await app.request("https://maomao.example/login", {
       method: "POST",
-      headers: { "content-type": "application/x-www-form-urlencoded" },
-      body: "password=hunter2&next=%2F",
+      headers: { cookie: csrfCookie, "content-type": "application/x-www-form-urlencoded" },
+      body: `password=hunter2&next=%2F&csrf_token=${encodeURIComponent(csrfToken)}`,
     });
     expect(login.status).toBe(302);
     expect(login.headers.get("location")).toBe("/");
@@ -264,23 +301,184 @@ describe("manual review trigger", () => {
     expect(denied.headers.get("location")).toContain("/login");
     expect(enqueued).toEqual([]);
 
-    const login = await app.request("/login", {
+    const session = await loginSession(app);
+    const tokenless = await app.request("/reviews", {
       method: "POST",
-      headers: { "content-type": "application/x-www-form-urlencoded" },
-      body: "password=hunter2&next=%2F",
+      headers: { cookie: session.session, "content-type": "application/x-www-form-urlencoded" },
+      body: "url=https%3A%2F%2Fgithub.com%2Facme%2Fwidgets%2Fpull%2F12",
     });
-    const cookie = cookieFrom(login);
+    expect(tokenless.status).toBe(403);
+    expect(enqueued).toEqual([]);
+
     const allowed = await app.request("/reviews", {
       method: "POST",
       headers: {
-        cookie,
+        cookie: session.cookies,
         "content-type": "application/x-www-form-urlencoded",
       },
-      body: "url=https%3A%2F%2Fgithub.com%2Facme%2Fwidgets%2Fpull%2F12",
+      body: `url=https%3A%2F%2Fgithub.com%2Facme%2Fwidgets%2Fpull%2F12&csrf_token=${encodeURIComponent(session.csrfToken)}`,
     });
     expect(allowed.status).toBe(302);
     expect(allowed.headers.get("location")).toMatch(/notice=queued/);
     expect(enqueued).toEqual([1]);
+  });
+
+  it("rejects tokenless, forged, mismatched, expired, and non-form form posts when the gate is on", async () => {
+    const { app, webhookSecret } = testApp(
+      { UI_PASSWORD: "hunter2", UI_SESSION_SECRET: "session-secret-for-tests" },
+      mockGithub(),
+    );
+
+    const tokenlessLogin = await app.request("/login", {
+      method: "POST",
+      headers: { "content-type": "application/x-www-form-urlencoded" },
+      body: "password=hunter2&next=%2F",
+    });
+    expect(tokenlessLogin.status).toBe(403);
+    const retry = await csrfArtifacts(tokenlessLogin);
+    expect(retry.html).toContain("form session expired");
+
+    const forged = await app.request("/login", {
+      method: "POST",
+      headers: { cookie: retry.csrfCookie, "content-type": "application/x-www-form-urlencoded" },
+      body: `password=hunter2&next=%2F&csrf_token=${encodeURIComponent("v1.tampered")}`,
+    });
+    expect(forged.status).toBe(403);
+
+    const session = await loginSession(app);
+
+    const tokenlessReviews = await app.request("/reviews", {
+      method: "POST",
+      headers: { cookie: session.cookies, "content-type": "application/x-www-form-urlencoded" },
+      body: "url=https%3A%2F%2Fgithub.com%2Facme%2Fwidgets%2Fpull%2F12",
+    });
+    expect(tokenlessReviews.status).toBe(403);
+    expect(await tokenlessReviews.text()).toContain("missing a valid CSRF token");
+
+    const mismatched = await app.request("/reviews", {
+      method: "POST",
+      headers: { cookie: session.cookies, "content-type": "application/x-www-form-urlencoded" },
+      body: `url=https%3A%2F%2Fgithub.com%2Facme%2Fwidgets%2Fpull%2F12&csrf_token=${encodeURIComponent(
+        issueCsrfToken("session-secret-for-tests"),
+      )}`,
+    });
+    expect(mismatched.status).toBe(403);
+
+    const expiredToken = issueCsrfToken("session-secret-for-tests", Date.now() - 1_000, 500);
+    const expired = await app.request("/reviews", {
+      method: "POST",
+      headers: {
+        cookie: `${CSRF_COOKIE}=${expiredToken}; ${session.session}`,
+        "content-type": "application/x-www-form-urlencoded",
+      },
+      body: `url=https%3A%2F%2Fgithub.com%2Facme%2Fwidgets%2Fpull%2F12&csrf_token=${encodeURIComponent(expiredToken)}`,
+    });
+    expect(expired.status).toBe(403);
+
+    const jsonBody = await app.request("/reviews", {
+      method: "POST",
+      headers: { cookie: session.cookies, "content-type": "application/json" },
+      body: JSON.stringify({ url: "https://github.com/acme/widgets/pull/12", csrf_token: session.csrfToken }),
+    });
+    expect(jsonBody.status).toBe(403);
+
+    const tokenlessLogout = await app.request("/logout", { method: "POST", headers: { cookie: session.cookies } });
+    expect(tokenlessLogout.status).toBe(403);
+
+    const home = await app.request("/", { headers: { cookie: session.cookies } });
+    const homeHtml = await home.text();
+    const homeToken = homeHtml.match(/name="csrf_token" value="([^"]+)"/)?.[1];
+    expect(homeToken).toBeTruthy();
+    expect(session.cookies).toContain(homeToken!);
+
+    const webhook = await app.request("/webhooks/github", {
+      method: "POST",
+      headers: {
+        "x-github-event": "pull_request",
+        "x-github-delivery": "abc",
+        "x-hub-signature-256": sign(webhookSecret, openedPayload),
+        "content-type": "application/json",
+      },
+      body: openedPayload,
+    });
+    expect(webhook.status).toBe(202);
+  });
+
+  it("issues the csrf cookie with the same protections as the session cookie", async () => {
+    const { app } = testApp({ UI_PASSWORD: "hunter2", UI_SESSION_SECRET: "session-secret-for-tests" });
+    const page = await app.request("https://maomao.example/login");
+    const raw = page.headers.get("set-cookie") ?? "";
+    const csrfSegment = raw.split(",").find((part) => part.includes(CSRF_COOKIE)) ?? raw;
+    expect(csrfSegment).toContain("HttpOnly");
+    expect(csrfSegment).toMatch(/samesite=lax/i);
+    expect(csrfSegment).toMatch(/secure/i);
+    expect(csrfSegment).toContain("Path=/");
+    expect(csrfSegment).toContain("Max-Age=");
+  });
+
+  it("logs out with a valid token and clears the session", async () => {
+    const { app } = testApp(
+      { UI_PASSWORD: "hunter2", UI_SESSION_SECRET: "session-secret-for-tests" },
+      mockGithub(),
+    );
+    const session = await loginSession(app);
+    const logout = await app.request("/logout", {
+      method: "POST",
+      headers: { cookie: session.cookies, "content-type": "application/x-www-form-urlencoded" },
+      body: `csrf_token=${encodeURIComponent(session.csrfToken)}`,
+    });
+    expect(logout.status).toBe(302);
+    expect(logout.headers.get("location")).toBe("/login");
+    expect(logout.headers.get("set-cookie") ?? "").toMatch(new RegExp(`${SESSION_COOKIE}=;`));
+  });
+
+  it("enforces the csrf token on reviewer retry posts when the gate is on", async () => {
+    const { app, store, enqueued } = testApp(
+      { UI_PASSWORD: "hunter2", UI_SESSION_SECRET: "session-secret-for-tests" },
+      mockGithub(),
+    );
+    const created = store.enqueue({
+      repoFullName: "acme/widgets",
+      repoOwner: "acme",
+      repoName: "widgets",
+      installationId: 1,
+      prNumber: 8,
+      prTitle: "Hello",
+      prBody: "",
+      prHtmlUrl: "https://example.test",
+      prAuthor: "dev",
+      baseSha: "b",
+      headSha: "h",
+      baseRef: "main",
+      headRef: "f",
+      reviewers: [{ role: "correctness", title: "Correctness" }],
+    });
+    const run = store.listReviewerRuns(created.job.id)[0];
+    store.patchReviewer(run.id, { state: "failed", validation_error: "empty" });
+    store.setJobState(created.job.id, "failed", { failure_reason: "all specialist reviewers failed" });
+    const session = await loginSession(app);
+
+    const tokenless = await app.request(`/jobs/${created.job.id}/reviewers/${run.id}/retry`, {
+      method: "POST",
+      headers: { cookie: session.cookies },
+    });
+    expect(tokenless.status).toBe(403);
+    expect(store.getReviewerRun(run.id)?.state).toBe("failed");
+    expect(enqueued).toEqual([]);
+
+    const jobPage = await app.request(`/jobs/${created.job.id}`, { headers: { cookie: session.cookies } });
+    const pageToken = (await jobPage.text()).match(/name="csrf_token" value="([^"]+)"/)?.[1];
+    expect(pageToken).toBeTruthy();
+
+    const allowed = await app.request(`/jobs/${created.job.id}/reviewers/${run.id}/retry`, {
+      method: "POST",
+      headers: { cookie: session.cookies, "content-type": "application/x-www-form-urlencoded" },
+      body: `csrf_token=${encodeURIComponent(pageToken!)}`,
+    });
+    expect(allowed.status).toBe(302);
+    expect(allowed.headers.get("location")).toBe(`/jobs/${created.job.id}?notice=retry`);
+    expect(enqueued).toEqual([created.job.id]);
+    expect(store.getReviewerRun(run.id)?.state).toBe("queued");
   });
 
   it("respects REVIEW_DRAFTS for manual triggers", async () => {

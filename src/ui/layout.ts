@@ -1,4 +1,5 @@
 import { escapeHtml } from "../util.js";
+import { CSRF_FIELD } from "../auth.js";
 import type { FindingRow } from "../findings/types.js";
 import { PRODUCT_TAGLINE } from "./copy.js";
 import { brandMark } from "./glyphs.js";
@@ -11,6 +12,11 @@ export interface PageOptions {
   error?: string;
   reviewUrl?: string;
   prFindings?: FindingRow[];
+  csrfToken?: string;
+}
+
+export function csrfInput(token: string | undefined): string {
+  return token ? `<input type="hidden" name="${CSRF_FIELD}" value="${escapeHtml(token)}"/>` : "";
 }
 
 const APPEARANCE_BOOT = `
@@ -60,7 +66,7 @@ const APPEARANCE_BOOT = `
 export function layout(title: string, body: string, options: PageOptions = {}): string {
   const live = options.live !== false;
   const logout = options.showLogout
-    ? `<form method="post" action="/logout" class="logout"><button type="submit">Log out</button></form>`
+    ? `<form method="post" action="/logout" class="logout">${csrfInput(options.csrfToken)}<button type="submit">Log out</button></form>`
     : "";
   const script = live
     ? `<script>

@@ -20,7 +20,7 @@ import {
   usageReportedCopy,
 } from "./copy.js";
 import { roleGlyph } from "./glyphs.js";
-import { layout, type PageOptions } from "./layout.js";
+import { csrfInput, layout, type PageOptions } from "./layout.js";
 import {
   findingLocation,
   formatCost,
@@ -35,12 +35,15 @@ import {
 
 export type { PageOptions };
 
-export function renderLogin(error: boolean, nextPath: string): string {
+export function renderLogin(error?: "invalid" | "csrf", nextPath: string = "/", csrfToken?: string): string {
+  const errorCopy =
+    error === "csrf" ? "Your form session expired. Submit the form again." : error === "invalid" ? "Invalid password." : "";
   const body = `
     <h1>Sign in</h1>
     <p class="lede">Enter the monitoring password to view jobs, logs, and APIs.</p>
-    ${error ? `<p class="error" role="alert">Invalid password.</p>` : ""}
+    ${errorCopy ? `<p class="error" role="alert">${escapeHtml(errorCopy)}</p>` : ""}
     <form class="login" method="post" action="/login">
+      ${csrfInput(csrfToken)}
       <input type="hidden" name="next" value="${escapeHtml(nextPath)}"/>
       <label>
         Password
@@ -63,6 +66,7 @@ export function renderHome(jobs: JobRow[], store: JobStore, options: PageOptions
     ${options.notice ? `<p class="notice" role="status">${escapeHtml(options.notice)}</p>` : ""}
     ${options.error ? `<p class="error" role="alert">${escapeHtml(options.error)}</p>` : ""}
     <form class="trigger" method="post" action="/reviews">
+      ${csrfInput(options.csrfToken)}
       <label>
         Queue a GitHub pull request
         <input type="url" name="url" placeholder="https://github.com/owner/repo/pull/123" value="${escapeHtml(options.reviewUrl ?? "")}" required/>
@@ -157,11 +161,11 @@ export function renderJob(
     ${job.failure_reason ? `<p class="error" role="alert"><strong>Failure:</strong> ${escapeHtml(job.failure_reason)}</p>` : ""}
     <div class="section-head">
       <h2>Reviewers</h2>
-      ${failedToRetry > 0 ? renderJobRetry(job.id, failedToRetry) : ""}
+      ${failedToRetry > 0 ? renderJobRetry(job.id, failedToRetry, options.csrfToken) : ""}
     </div>
     <p class="muted">${escapeHtml(progressCopy(metrics))}</p>
     <div class="cards">
-      ${runs.map((run) => renderRun(run, canRetryRun(job, run))).join("")}
+      ${runs.map((run) => renderRun(run, canRetryRun(job, run), options.csrfToken)).join("")}
     </div>
     <h2>Aggregator</h2>
     ${renderAggregator(job, metrics)}
@@ -400,14 +404,15 @@ function canRetryRun(job: JobRow, run: ReviewerRunRow): boolean {
   return ["failed", "completed"].includes(job.state) && run.state === "failed";
 }
 
-function renderJobRetry(jobId: number, count: number): string {
+function renderJobRetry(jobId: number, count: number, csrfToken?: string): string {
   const label = count === 1 ? "Retry failed reviewer" : `Retry ${count} failed reviewers`;
   return `<form class="retry-job" method="post" action="/jobs/${jobId}/retry">
+    ${csrfInput(csrfToken)}
     <button type="submit">${escapeHtml(label)}</button>
   </form>`;
 }
 
-function renderRun(run: ReviewerRunRow, showRetry = false): string {
+function renderRun(run: ReviewerRunRow, showRetry = false, csrfToken?: string): string {
   const parsed = parseReviewerResult(run.normalized_json);
   const findingCount = parsed?.findings.length ?? 0;
   const state = runStateLabel(run.state);
@@ -446,6 +451,7 @@ function renderRun(run: ReviewerRunRow, showRetry = false): string {
     ${
       showRetry
         ? `<form class="retry" method="post" action="/jobs/${run.job_id}/reviewers/${run.id}/retry">
+             ${csrfInput(csrfToken)}
              <button type="submit">Retry</button>
            </form>`
         : ""

@@ -1,11 +1,16 @@
 import { describe, expect, it } from "vitest";
 import {
   cookieSecure,
+  csrfExemptPath,
+  csrfRejectReason,
   isPublicPath,
+  issueCsrfToken,
   passwordsMatch,
   safeNextPath,
   signSession,
   uiGateEnabled,
+  verifyCsrfRequest,
+  verifyCsrfToken,
   verifySession,
 } from "./auth.js";
 
@@ -55,5 +60,51 @@ describe("session helpers", () => {
     expect(uiGateEnabled("pw", "")).toBe(false);
     expect(uiGateEnabled("", "secret")).toBe(false);
     expect(uiGateEnabled("pw", "secret")).toBe(true);
+  });
+});
+
+describe("csrf tokens", () => {
+  it("issues unique signed tokens that verify before expiry", () => {
+    const first = issueCsrfToken("secret", 1_000, 60_000);
+    const second = issueCsrfToken("secret", 1_000, 60_000);
+    expect(first).not.toBe(second);
+    expect(verifyCsrfToken("secret", first, 1_500)).toBe(true);
+    expect(verifyCsrfToken("secret", first, 60_500)).toBe(true);
+    expect(verifyCsrfToken("secret", first, 61_001)).toBe(false);
+  });
+
+  it("rejects tampered, foreign, and malformed csrf tokens", () => {
+    const token = issueCsrfToken("secret", 1_000, 60_000);
+    expect(verifyCsrfToken("other", token, 1_500)).toBe(false);
+    expect(verifyCsrfToken("secret", token.slice(0, -2) + "ab", 1_500)).toBe(false);
+    expect(verifyCsrfToken("secret", undefined, 1_500)).toBe(false);
+    expect(verifyCsrfToken("secret", "", 1_500)).toBe(false);
+    expect(verifyCsrfToken("secret", "garbage", 1_500)).toBe(false);
+    expect(verifyCsrfToken("secret", "v2.abc.9999999999999.sig", 1_500)).toBe(false);
+  });
+
+  it("requires matching, valid cookie and field values", () => {
+    const token = issueCsrfToken("secret", 1_000, 60_000);
+    expect(verifyCsrfRequest("secret", token, token, 1_500)).toBe(true);
+    expect(verifyCsrfRequest("secret", token, undefined, 1_500)).toBe(false);
+    expect(verifyCsrfRequest("secret", undefined, token, 1_500)).toBe(false);
+    expect(verifyCsrfRequest("secret", token, issueCsrfToken("secret", 1_000, 60_000), 1_500)).toBe(false);
+    expect(verifyCsrfRequest("secret", token, token, 61_001)).toBe(false);
+  });
+
+  it("classifies rejection reasons for logging", () => {
+    const token = issueCsrfToken("secret", 1_000, 60_000);
+    expect(csrfRejectReason(undefined, undefined)).toBe("missing-cookie");
+    expect(csrfRejectReason(token, undefined)).toBe("missing-field");
+    expect(csrfRejectReason(token, issueCsrfToken("secret", 1_000, 60_000))).toBe("mismatch");
+    expect(csrfRejectReason("v1.tampered", "v1.tampered")).toBe("bad-token");
+  });
+
+  it("keeps the webhook as the only csrf-exempt path", () => {
+    expect(csrfExemptPath("/webhooks/github")).toBe(true);
+    expect(csrfExemptPath("/webhooks/github/extra")).toBe(false);
+    expect(csrfExemptPath("/login")).toBe(false);
+    expect(csrfExemptPath("/reviews")).toBe(false);
+    expect(csrfExemptPath("/health")).toBe(false);
   });
 });
