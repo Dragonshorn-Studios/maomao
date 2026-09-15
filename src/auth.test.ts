@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import {
   cookieSecure,
+  csrfExemptPath,
+  csrfRejectReason,
   isPublicPath,
   issueCsrfToken,
   passwordsMatch,
@@ -87,7 +89,22 @@ describe("csrf tokens", () => {
     expect(verifyCsrfRequest("secret", token, undefined, 1_500)).toBe(false);
     expect(verifyCsrfRequest("secret", undefined, token, 1_500)).toBe(false);
     expect(verifyCsrfRequest("secret", token, issueCsrfToken("secret", 1_000, 60_000), 1_500)).toBe(false);
-    const expired = issueCsrfToken("secret", 1_000, 60_000);
-    expect(verifyCsrfRequest("secret", expired, expired, 61_001)).toBe(false);
+    expect(verifyCsrfRequest("secret", token, token, 61_001)).toBe(false);
+  });
+
+  it("classifies rejection reasons for logging", () => {
+    const token = issueCsrfToken("secret", 1_000, 60_000);
+    expect(csrfRejectReason(undefined, undefined)).toBe("missing-cookie");
+    expect(csrfRejectReason(token, undefined)).toBe("missing-field");
+    expect(csrfRejectReason(token, issueCsrfToken("secret", 1_000, 60_000))).toBe("mismatch");
+    expect(csrfRejectReason("v1.tampered", "v1.tampered")).toBe("bad-token");
+  });
+
+  it("keeps the webhook as the only csrf-exempt path", () => {
+    expect(csrfExemptPath("/webhooks/github")).toBe(true);
+    expect(csrfExemptPath("/webhooks/github/extra")).toBe(false);
+    expect(csrfExemptPath("/login")).toBe(false);
+    expect(csrfExemptPath("/reviews")).toBe(false);
+    expect(csrfExemptPath("/health")).toBe(false);
   });
 });

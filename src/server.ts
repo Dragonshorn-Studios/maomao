@@ -19,6 +19,8 @@ import {
   SESSION_COOKIE,
   SESSION_TTL_MS,
   cookieSecure,
+  csrfExemptPath,
+  csrfRejectReason,
   isPublicPath,
   issueCsrfToken,
   passwordsMatch,
@@ -57,44 +59,41 @@ export function createApp(ctx: ServerContext): Hono {
   });
 
   app.use("*", async (c, next) => {
-    if (!gateOn || c.req.method !== "POST" || c.req.path === "/webhooks/github") return next();
+    if (!gateOn || c.req.method !== "POST" || csrfExemptPath(c.req.path)) return next();
     const cookieToken = getCookie(c, CSRF_COOKIE);
     let fieldToken: string | undefined;
+    let bodyNext: string | undefined;
     try {
+      // parseBody caches the parsed form on the request, so route handlers can parse it again.
       const body = await c.req.parseBody();
-      fieldToken = typeof body[CSRF_FIELD] === "string" ? (body[CSRF_FIELD] as string) : undefined;
-    } catch {
+      if (typeof body[CSRF_FIELD] === "string") fieldToken = body[CSRF_FIELD];
+      if (typeof body.next === "string") bodyNext = body.next;
+    } catch (error) {
+      console.warn(
+        `csrf: could not parse body for ${c.req.path}:`,
+        error instanceof Error ? error.message : error,
+      );
       fieldToken = undefined;
     }
     if (!verifyCsrfRequest(ctx.config.uiSessionSecret, cookieToken, fieldToken)) {
+      console.warn(`csrf rejected: ${csrfRejectReason(cookieToken, fieldToken)} path=${c.req.path}`);
       if (c.req.path === "/login") {
-        return c.html(renderLogin("csrf", safeNextPath(c.req.query("next")), ensureCsrfToken(c)), 403);
+        return c.html(
+          renderLogin("csrf", safeNextPath(bodyNext ?? c.req.query("next")), ensureCsrfToken(c, ctx.config.uiSessionSecret)),
+          403,
+        );
       }
       return c.html(CSRF_FAILURE_HTML, 403);
     }
     return next();
   });
 
-  const ensureCsrfToken = (c: Context): string => {
-    const existing = getCookie(c, CSRF_COOKIE);
-    if (existing && verifyCsrfToken(ctx.config.uiSessionSecret, existing)) return existing;
-    const token = issueCsrfToken(ctx.config.uiSessionSecret);
-    setCookie(c, CSRF_COOKIE, token, {
-      httpOnly: true,
-      sameSite: "Lax",
-      secure: cookieSecure(c.req.url, c.req.header("x-forwarded-proto")),
-      path: "/",
-      maxAge: Math.floor(CSRF_TTL_MS / 1000),
-    });
-    return token;
-  };
-
   app.get("/login", (c) => {
     if (!gateOn) return c.redirect("/", 302);
     const token = getCookie(c, SESSION_COOKIE);
     const nextPath = safeNextPath(c.req.query("next"));
     if (verifySession(ctx.config.uiSessionSecret, token)) return c.redirect(nextPath, 302);
-    return c.html(renderLogin(false, nextPath, ensureCsrfToken(c)));
+    return c.html(renderLogin(undefined, nextPath, ensureCsrfToken(c, ctx.config.uiSessionSecret)));
   });
 
   app.post("/login", async (c) => {
@@ -103,7 +102,7 @@ export function createApp(ctx: ServerContext): Hono {
     const password = typeof body.password === "string" ? body.password : "";
     const nextPath = safeNextPath(typeof body.next === "string" ? body.next : c.req.query("next"));
     if (!passwordsMatch(password, ctx.config.uiPassword)) {
-      return c.html(renderLogin(true, nextPath, ensureCsrfToken(c)), 401);
+      return c.html(renderLogin("invalid", nextPath, ensureCsrfToken(c, ctx.config.uiSessionSecret)), 401);
     }
     setCookie(c, SESSION_COOKIE, signSession(ctx.config.uiSessionSecret), {
       httpOnly: true,
@@ -163,7 +162,7 @@ export function createApp(ctx: ServerContext): Hono {
   app.post("/reviews", async (c) => {
     const body = await c.req.parseBody();
     const rawUrl = typeof body.url === "string" ? body.url : "";
-    const csrfToken = getCookie(c, CSRF_COOKIE) ?? undefined;
+    const csrfToken = gateOn ? ensureCsrfToken(c, ctx.config.uiSessionSecret) : undefined;
     const home = (extra: { error?: string; notice?: string; reviewUrl?: string } = {}) =>
       c.html(
         renderHome(ctx.store.listJobs(75), ctx.store, {
@@ -291,7 +290,7 @@ export function createApp(ctx: ServerContext): Hono {
     return c.html(
       renderHome(jobs, ctx.store, {
         ...pageOpts,
-        csrfToken: ensureCsrfToken(c),
+        csrfToken: gateOn ? ensureCsrfToken(c, ctx.config.uiSessionSecret) : undefined,
         notice: noticeText(c.req.query("notice")),
         error: c.req.query("error") || undefined,
       }),
@@ -305,7 +304,7 @@ export function createApp(ctx: ServerContext): Hono {
     return c.html(
       renderJob(job, ctx.store.listReviewerRuns(id), ctx.store.listLogs(id), {
         ...pageOpts,
-        csrfToken: ensureCsrfToken(c),
+        csrfToken: gateOn ? ensureCsrfToken(c, ctx.config.uiSessionSecret) : undefined,
         notice: noticeText(c.req.query("notice"), job.repo_full_name, job.pr_number, job.head_sha),
         prFindings: ctx.store.listFindings(job.repo_full_name, job.pr_number),
       }),
@@ -382,15 +381,31 @@ function noticeText(
   return undefined;
 }
 
+// Reuses a still-valid token instead of rotating: per-request rotation would 403 forms open in other tabs.
+function ensureCsrfToken(c: Context, secret: string): string {
+  const existing = getCookie(c, CSRF_COOKIE);
+  if (existing && verifyCsrfToken(secret, existing)) return existing;
+  const token = issueCsrfToken(secret);
+  setCookie(c, CSRF_COOKIE, token, {
+    httpOnly: true,
+    sameSite: "Lax",
+    secure: cookieSecure(c.req.url, c.req.header("x-forwarded-proto")),
+    path: "/",
+    maxAge: Math.floor(CSRF_TTL_MS / 1000),
+  });
+  return token;
+}
+
 function retryJob(c: Context, ctx: ServerContext, jobId: number, runId?: number) {
   const job = ctx.store.getJob(jobId);
   if (!job) return c.text("Not found", 404);
   const result = ctx.store.retryFailedReviewers(jobId, runId);
   if (!result.ok) {
+    const gate = uiGateEnabled(ctx.config.uiPassword, ctx.config.uiSessionSecret);
     return c.html(
       renderJob(job, ctx.store.listReviewerRuns(jobId), ctx.store.listLogs(jobId), {
-        showLogout: uiGateEnabled(ctx.config.uiPassword, ctx.config.uiSessionSecret),
-        csrfToken: getCookie(c, CSRF_COOKIE) ?? undefined,
+        showLogout: gate,
+        csrfToken: gate ? ensureCsrfToken(c, ctx.config.uiSessionSecret) : undefined,
         error: result.error,
         prFindings: ctx.store.listFindings(job.repo_full_name, job.pr_number),
       }),

@@ -20,7 +20,7 @@ import {
   usageReportedCopy,
 } from "./copy.js";
 import { roleGlyph } from "./glyphs.js";
-import { layout, type PageOptions } from "./layout.js";
+import { csrfInput, layout, type PageOptions } from "./layout.js";
 import {
   findingLocation,
   formatCost,
@@ -35,16 +35,15 @@ import {
 
 export type { PageOptions };
 
-export function renderLogin(error: boolean | "csrf", nextPath: string, csrfToken?: string): string {
-  const csrf = csrfToken ? `<input type="hidden" name="csrf_token" value="${escapeHtml(csrfToken)}"/>` : "";
+export function renderLogin(error?: "invalid" | "csrf", nextPath: string = "/", csrfToken?: string): string {
   const errorCopy =
-    error === "csrf" ? "Your form session expired. Submit the form again." : error ? "Invalid password." : "";
+    error === "csrf" ? "Your form session expired. Submit the form again." : error === "invalid" ? "Invalid password." : "";
   const body = `
     <h1>Sign in</h1>
     <p class="lede">Enter the monitoring password to view jobs, logs, and APIs.</p>
     ${errorCopy ? `<p class="error" role="alert">${escapeHtml(errorCopy)}</p>` : ""}
     <form class="login" method="post" action="/login">
-      ${csrf}
+      ${csrfInput(csrfToken)}
       <input type="hidden" name="next" value="${escapeHtml(nextPath)}"/>
       <label>
         Password
@@ -67,7 +66,7 @@ export function renderHome(jobs: JobRow[], store: JobStore, options: PageOptions
     ${options.notice ? `<p class="notice" role="status">${escapeHtml(options.notice)}</p>` : ""}
     ${options.error ? `<p class="error" role="alert">${escapeHtml(options.error)}</p>` : ""}
     <form class="trigger" method="post" action="/reviews">
-      ${options.csrfToken ? `<input type="hidden" name="csrf_token" value="${escapeHtml(options.csrfToken)}"/>` : ""}
+      ${csrfInput(options.csrfToken)}
       <label>
         Queue a GitHub pull request
         <input type="url" name="url" placeholder="https://github.com/owner/repo/pull/123" value="${escapeHtml(options.reviewUrl ?? "")}" required/>
@@ -408,7 +407,7 @@ function canRetryRun(job: JobRow, run: ReviewerRunRow): boolean {
 function renderJobRetry(jobId: number, count: number, csrfToken?: string): string {
   const label = count === 1 ? "Retry failed reviewer" : `Retry ${count} failed reviewers`;
   return `<form class="retry-job" method="post" action="/jobs/${jobId}/retry">
-    ${csrfToken ? `<input type="hidden" name="csrf_token" value="${escapeHtml(csrfToken)}"/>` : ""}
+    ${csrfInput(csrfToken)}
     <button type="submit">${escapeHtml(label)}</button>
   </form>`;
 }
@@ -452,7 +451,7 @@ function renderRun(run: ReviewerRunRow, showRetry = false, csrfToken?: string): 
     ${
       showRetry
         ? `<form class="retry" method="post" action="/jobs/${run.job_id}/reviewers/${run.id}/retry">
-             ${csrfToken ? `<input type="hidden" name="csrf_token" value="${escapeHtml(csrfToken)}"/>` : ""}
+             ${csrfInput(csrfToken)}
              <button type="submit">Retry</button>
            </form>`
         : ""

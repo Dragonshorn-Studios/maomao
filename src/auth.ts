@@ -27,17 +27,7 @@ export function signSession(secret: string, now = Date.now(), ttlMs = SESSION_TT
 }
 
 export function verifySession(secret: string, token: string | undefined, now = Date.now()): boolean {
-  if (!token) return false;
-  const lastDot = token.lastIndexOf(".");
-  if (lastDot <= 0) return false;
-  const payload = token.slice(0, lastDot);
-  const sig = token.slice(lastDot + 1);
-  const expected = createHmac("sha256", secret).update(payload).digest("base64url");
-  if (!safeEqual(sig, expected)) return false;
-  const [version, expRaw] = payload.split(".");
-  if (version !== "v1") return false;
-  const exp = Number(expRaw);
-  return Number.isFinite(exp) && exp > now;
+  return verifySignedToken(secret, token, now, 1);
 }
 
 export function safeNextPath(raw: string | undefined | null): string {
@@ -63,6 +53,19 @@ export function isPublicPath(path: string): boolean {
   );
 }
 
+export function csrfExemptPath(path: string): boolean {
+  return path === "/webhooks/github";
+}
+
+export type CsrfRejectReason = "missing-cookie" | "missing-field" | "mismatch" | "bad-token";
+
+export function csrfRejectReason(cookieToken: string | undefined, fieldToken: string | undefined): CsrfRejectReason {
+  if (!cookieToken) return "missing-cookie";
+  if (!fieldToken) return "missing-field";
+  if (!safeEqual(cookieToken, fieldToken)) return "mismatch";
+  return "bad-token";
+}
+
 export function cookieSecure(url: string, forwardedProto?: string | null): boolean {
   if (forwardedProto?.split(",")[0]?.trim() === "https") return true;
   try {
@@ -79,7 +82,7 @@ export function issueCsrfToken(secret: string, now = Date.now(), ttlMs = CSRF_TT
   return `${payload}.${sig}`;
 }
 
-export function verifyCsrfToken(secret: string, token: string | undefined | null, now = Date.now()): boolean {
+function verifySignedToken(secret: string, token: string | undefined, now: number, expiryPart: number): boolean {
   if (!token) return false;
   const lastDot = token.lastIndexOf(".");
   if (lastDot <= 0) return false;
@@ -87,16 +90,20 @@ export function verifyCsrfToken(secret: string, token: string | undefined | null
   const sig = token.slice(lastDot + 1);
   const expected = createHmac("sha256", secret).update(payload).digest("base64url");
   if (!safeEqual(sig, expected)) return false;
-  const [version, , expRaw] = payload.split(".");
-  if (version !== "v1") return false;
-  const exp = Number(expRaw);
+  const parts = payload.split(".");
+  if (parts[0] !== "v1") return false;
+  const exp = Number(parts[expiryPart]);
   return Number.isFinite(exp) && exp > now;
+}
+
+export function verifyCsrfToken(secret: string, token: string | undefined, now = Date.now()): boolean {
+  return verifySignedToken(secret, token, now, 2);
 }
 
 export function verifyCsrfRequest(
   secret: string,
   cookieToken: string | undefined,
-  fieldToken: string | undefined | null,
+  fieldToken: string | undefined,
   now = Date.now(),
 ): boolean {
   if (!cookieToken || !fieldToken) return false;

@@ -44,7 +44,7 @@ describe("theme tokens", () => {
 
 describe("monitoring pages", () => {
   it("renders login with appearance controls and no live SSE", () => {
-    const html = renderLogin(false, "/jobs/1");
+    const html = renderLogin(undefined, "/jobs/1");
     expect(html).toContain("Sign in");
     expect(html).toContain('data-appearance="light"');
     expect(html).toContain('data-appearance="dark"');
@@ -201,6 +201,24 @@ describe("monitoring pages", () => {
     expect(staleHtml).toContain("pull request");
     expect(staleHtml).toContain("6 / 6 reviewers done");
     expect(staleHtml).not.toContain(">Retry</button>");
+  });
+
+  it("embeds the CSRF token in every state-changing form when provided", () => {
+    const store = seededStore();
+    const failed = store.listJobs(20).find((row) => row.state === "failed")!;
+    const token = "csrf-test-token";
+    const html = renderJob(failed, store.listReviewerRuns(failed.id), store.listLogs(failed.id), {
+      showLogout: true,
+      csrfToken: token,
+    });
+    const inputs = html.match(/<input type="hidden" name="csrf_token" value="[^"]*"/g) ?? [];
+    expect(inputs.length).toBeGreaterThanOrEqual(3);
+    expect(html).toContain(`name="csrf_token" value="${token}"/>`);
+    const home = renderHome(store.listJobs(20), store, { showLogout: true, csrfToken: token });
+    expect(home).toContain(`name="csrf_token" value="${token}"/>`);
+    const bare = renderJob(failed, store.listReviewerRuns(failed.id), store.listLogs(failed.id));
+    expect(bare).not.toContain('name="csrf_token"');
+    expect(renderHome([], store)).not.toContain('name="csrf_token"');
   });
 });
 
