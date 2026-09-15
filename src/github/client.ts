@@ -64,6 +64,8 @@ export interface ReviewThread {
   comments: ReviewThreadComment[];
 }
 
+export type ReviewEvent = "COMMENT" | "APPROVE" | "REQUEST_CHANGES";
+
 export interface GithubPort {
   getInstallationToken(installationId: number): Promise<string>;
   getPullDiff(
@@ -87,6 +89,7 @@ export interface GithubPort {
     commitId: string;
     body: string;
     comments: PullReviewComment[];
+    event?: ReviewEvent;
   }): Promise<PostedReview>;
   listIssueComments?(
     installationId: number,
@@ -289,15 +292,17 @@ export class GithubClient implements GithubPort, ManualTriggerPort {
     commitId: string;
     body: string;
     comments: PullReviewComment[];
+    event?: ReviewEvent;
   }): Promise<PostedReview> {
     const octokit = this.installationOctokit(input.installationId);
+    const event = input.event ?? "COMMENT";
     try {
       const response = await octokit.rest.pulls.createReview({
         owner: input.owner,
         repo: input.repo,
         pull_number: input.pullNumber,
         commit_id: input.commitId,
-        event: "COMMENT",
+        event,
         body: input.body,
         comments: input.comments.map((comment) => ({
           path: comment.path,
@@ -309,13 +314,13 @@ export class GithubClient implements GithubPort, ManualTriggerPort {
       return { id: String(response.data.id), url: response.data.html_url ?? "" };
     } catch (error) {
       if (input.comments.length === 0) throw error;
-      // Inline comments must land on diff lines; fall back to a body-only COMMENT.
+      // Inline comments must land on diff lines; fall back to a body-only review.
       const response = await octokit.rest.pulls.createReview({
         owner: input.owner,
         repo: input.repo,
         pull_number: input.pullNumber,
         commit_id: input.commitId,
-        event: "COMMENT",
+        event,
         body: `${input.body}\n\n_Inline comments were omitted because GitHub rejected one or more diff locations._`,
       });
       return { id: String(response.data.id), url: response.data.html_url ?? "" };

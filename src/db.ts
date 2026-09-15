@@ -222,6 +222,9 @@ function migrate(db: SqliteDb): void {
       created_at TEXT NOT NULL
     );
   `);
+  ensureColumn(db, "jobs", "review_event", "TEXT");
+  ensureColumn(db, "jobs", "review_event_reason", "TEXT");
+  ensureColumn(db, "jobs", "aggregator_fallback", "INTEGER");
   ensureColumn(db, "jobs", "github_account_id", "INTEGER");
   ensureColumn(db, "jobs", "github_repository_id", "INTEGER");
   ensureColumn(db, "jobs", "reconciliation_json", "TEXT");
@@ -288,7 +291,6 @@ function migrate(db: SqliteDb): void {
   ];
   for (const [name, ddl] of findingColumns) ensureColumn(db, "findings", name, ddl);
 }
-
 function columnNames(db: SqliteDb, table: string): Set<string> {
   const rows = db.prepare(`PRAGMA table_info(${table})`).all() as { name: string }[];
   return new Set(rows.map((row) => row.name));

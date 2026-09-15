@@ -21,6 +21,7 @@ import {
   type ReviewerResult,
 } from "../schema.js";
 import { classifyPriorFindings, collectPriorFindings, findingsForPublish } from "../findings/reconcile.js";
+import { resolveReviewEvent } from "./verdict.js";
 import { applyReconciliationThreads, persistClassifications, persistThreadsAsFindings } from "../findings/apply.js";
 import type { ReconciliationSnapshot } from "../findings/types.js";
 import { currentFindingsForRisk } from "../findings/types.js";
@@ -660,6 +661,7 @@ async function runAggregator(
       aggregator_model: model || null,
       aggregator_provider: model.includes("/") ? model.split("/")[0] : null,
       aggregator_state: "done",
+      aggregator_fallback: 0,
       aggregator_finished_at: nowIso(),
       aggregator_duration_ms: Date.now() - started,
       ...aggregatorUsagePersistence(result.usage),
@@ -674,6 +676,7 @@ async function runAggregator(
       aggregator_normalized: JSON.stringify(fallback, null, 2),
       aggregator_model: model || null,
       aggregator_state: "done",
+      aggregator_fallback: 1,
       aggregator_finished_at: nowIso(),
       aggregator_duration_ms: Date.now() - started,
     });
@@ -817,6 +820,26 @@ async function publishReview(
     return undefined;
   }
 
+  // Only the orchestrator selects the GitHub event; specialists never do.
+  const runs = deps.store.listReviewerRuns(job.id);
+  const allReviewersDone = runs.length > 0 && runs.every((run) => run.state === "done" && !run.validation_error);
+  const aggregatorFallback = (deps.store.getJob(job.id)?.aggregator_fallback ?? 0) === 1;
+  const decision = resolveReviewEvent({
+    allowApprove: deps.config.reviewAllowApprove,
+    allowRequestChanges: deps.config.reviewAllowRequestChanges,
+    minSeverity: deps.config.reviewRequestChangesMinSeverity,
+    clean: verdict === "clean",
+    findings: publishable,
+    allReviewersDone,
+    aggregatorFallback,
+    stale: deps.store.isStale(job.id),
+  });
+  deps.store.log(job.id, `Review event: ${decision.event} (${decision.reason})`);
+  deps.store.patchJob(job.id, {
+    review_event: decision.event,
+    review_event_reason: decision.reason,
+  });
+
   const body = buildReviewBody({
     headSha: job.head_sha,
     summary: aggregated.summary,
@@ -833,6 +856,7 @@ async function publishReview(
     commitId: job.head_sha,
     body,
     comments,
+    event: decision.event,
   });
   return { ...posted, postedFingerprints };
 }

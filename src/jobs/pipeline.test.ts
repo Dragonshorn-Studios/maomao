@@ -2084,3 +2084,165 @@ describe("finding reconciliation", () => {
 });
 
 
+
+describe("review verdict events", () => {
+  function cleanReviewPipeline(
+    store: JobStore,
+    posted: { event?: string }[],
+    githubOverrides: Partial<GithubPort> = {},
+  ) {
+    const config = loadConfig({
+      REVIEWER_ROLES: "correctness,security",
+      OPENCODE_REVIEWER_MODEL: "test/model",
+      POST_EMPTY_REVIEW: "true",
+      GITHUB_REVIEW_ALLOW_APPROVE: "true",
+      GITHUB_REVIEW_ALLOW_REQUEST_CHANGES: "true",
+      GITHUB_APP_ID: "1",
+      GITHUB_WEBHOOK_SECRET: "s",
+      GITHUB_APP_PRIVATE_KEY: "k",
+    });
+    const github: GithubPort = githubPort({
+      getPullDiff: async () => "diff --git a/example.ts b/example.ts\n",
+      listReviews: async () => [],
+      createCommentReview: async (input) => {
+        posted.push({ event: input.event });
+        return { id: "99", url: "https://example.test/reviews/99" };
+      },
+      ...githubOverrides,
+    });
+    const opencode: OpenCodePort = {
+      async run(input) {
+        const roleMatch = input.prompt.match(/Role id: (\w+)/);
+        const text = roleMatch
+          ? reviewerJson(roleMatch[1], "all good")
+          : JSON.stringify({ schema_version: 1, verdict: "clean", summary: "clean", findings: [] });
+        return { stdout: text, stderr: "", exitCode: 0, text, usage: {} };
+      },
+    };
+    return { config, opencode, github };
+  }
+
+  it("publishes APPROVE for a clean review when enabled and records the event", async () => {
+    const store = new JobStore(openDb(":memory:"));
+    const posted: { event?: string }[] = [];
+    const { config, opencode, github } = cleanReviewPipeline(store, posted);
+    const created = store.enqueue({ ...jobInput("approvesha"), reviewers: [] });
+    await createPipeline({ config, store, github, checkout: await fixtureCheckout(), opencode }).run(created.job.id);
+    expect(posted[0]?.event).toBe("APPROVE");
+    const job = store.getJob(created.job.id);
+    expect(job?.review_event).toBe("APPROVE");
+    expect(job?.review_event_reason).toContain("clean review");
+    expect(job?.state).toBe("completed");
+  });
+
+  it("stays COMMENT by default for a clean review", async () => {
+    const store = new JobStore(openDb(":memory:"));
+    const posted: { event?: string }[] = [];
+    const { config, opencode, github } = cleanReviewPipeline(store, posted, {
+      createCommentReview: async (input) => {
+        posted.push({ event: input.event });
+        return { id: "98", url: "u" };
+      },
+    });
+    const plain = loadConfig({
+      REVIEWER_ROLES: "correctness,security",
+      OPENCODE_REVIEWER_MODEL: "test/model",
+      POST_EMPTY_REVIEW: "true",
+      GITHUB_APP_ID: "1",
+      GITHUB_WEBHOOK_SECRET: "s",
+      GITHUB_APP_PRIVATE_KEY: "k",
+    });
+    const created = store.enqueue({ ...jobInput("defaultsha"), reviewers: [] });
+    await createPipeline({ config: plain, store, github, checkout: await fixtureCheckout(), opencode }).run(
+      created.job.id,
+    );
+    expect(posted[0]?.event).toBe("COMMENT");
+    expect(store.getJob(created.job.id)?.review_event).toBe("COMMENT");
+  });
+
+  it("publishes REQUEST_CHANGES for findings at the configured threshold", async () => {
+    const store = new JobStore(openDb(":memory:"));
+    const posted: { event?: string }[] = [];
+    const config = loadConfig({
+      REVIEWER_ROLES: "correctness,security",
+      OPENCODE_REVIEWER_MODEL: "test/model",
+      POST_EMPTY_REVIEW: "true",
+      GITHUB_REVIEW_ALLOW_REQUEST_CHANGES: "true",
+      GITHUB_REVIEW_REQUEST_CHANGES_MIN_SEVERITY: "high",
+      GITHUB_APP_ID: "1",
+      GITHUB_WEBHOOK_SECRET: "s",
+      GITHUB_APP_PRIVATE_KEY: "k",
+    });
+    const github: GithubPort = githubPort({
+      getPullDiff: async () => "diff --git a/example.ts b/example.ts\n",
+      listReviews: async () => [],
+      createCommentReview: async (input) => {
+        posted.push({ event: input.event });
+        return { id: "97", url: "u" };
+      },
+    });
+    const opencode: OpenCodePort = {
+      async run(input) {
+        const roleMatch = input.prompt.match(/Role id: (\w+)/);
+        const text = roleMatch
+          ? reviewerJson(roleMatch[1])
+          : JSON.stringify({
+              schema_version: 1,
+              verdict: "comment",
+              summary: "high finding",
+              findings: [
+                {
+                  severity: "high",
+                  confidence: 0.9,
+                  category: "correctness",
+                  file: "example.ts",
+                  line: 1,
+                  summary: "high bug",
+                  body: "details",
+                },
+              ],
+            });
+        return { stdout: text, stderr: "", exitCode: 0, text, usage: {} };
+      },
+    };
+    const created = store.enqueue({ ...jobInput("rcsha"), reviewers: [] });
+    await createPipeline({ config, store, github, checkout: await fixtureCheckout(), opencode }).run(created.job.id);
+    expect(posted[0]?.event).toBe("REQUEST_CHANGES");
+    expect(store.getJob(created.job.id)?.review_event).toBe("REQUEST_CHANGES");
+    expect(store.getJob(created.job.id)?.review_event_reason).toContain("high");
+  });
+
+  it("never approves when a reviewer run failed", async () => {
+    const store = new JobStore(openDb(":memory:"));
+    const posted: { event?: string }[] = [];
+    const base = cleanReviewPipeline(store, posted);
+    const config = loadConfig({
+      REVIEWER_ROUTING: "fixed",
+      REVIEWER_ROLES: "correctness,security",
+      OPENCODE_REVIEWER_MODEL: "test/model",
+      POST_EMPTY_REVIEW: "true",
+      GITHUB_REVIEW_ALLOW_APPROVE: "true",
+      GITHUB_APP_ID: "1",
+      GITHUB_WEBHOOK_SECRET: "s",
+      GITHUB_APP_PRIVATE_KEY: "k",
+    });
+    // correctness fails outright; security and the aggregator still produce a clean review.
+    const opencode: OpenCodePort = {
+      async run(input) {
+        const roleMatch = input.prompt.match(/Role id: (\w+)/);
+        if (roleMatch?.[1] === "correctness") {
+          return { stdout: "", stderr: "boom", exitCode: 1, text: "", usage: {} };
+        }
+        return base.opencode.run(input);
+      },
+    };
+    const created = store.enqueue({ ...jobInput("failedsha"), reviewers: [] });
+    await createPipeline({ config, store, github: base.github, checkout: await fixtureCheckout(), opencode }).run(
+      created.job.id,
+    );
+    const job = store.getJob(created.job.id);
+    expect(posted[0]?.event).toBe("COMMENT");
+    expect(job?.review_event).toBe("COMMENT");
+    expect(job?.review_event_reason).toContain("did not finish");
+  });
+});

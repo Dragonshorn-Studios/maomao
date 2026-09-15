@@ -70,6 +70,10 @@ export interface Config {
   reconcileMinConfidence: number;
   uiPassword: string;
   uiSessionSecret: string;
+  /** Opt-in GitHub review verdicts. Defaults keep every review COMMENT-only. */
+  reviewAllowApprove: boolean;
+  reviewAllowRequestChanges: boolean;
+  reviewRequestChangesMinSeverity: Severity;
   /** GitHub OAuth (operator login). Empty strings = OAuth disabled. */
   oauthClientId: string;
   oauthClientSecret: string;
@@ -148,10 +152,10 @@ function parsePolicy(raw: string | undefined): PoisonAlertPolicy {
   throw new Error(`POISON_ALERT_POLICY must be one of ${POISON_ALERT_POLICIES.join(", ")}`);
 }
 
-function parseSeverity(raw: string | undefined, fallback: Severity): Severity {
+function parseSeverity(raw: string | undefined, fallback: Severity, source = "severity list"): Severity {
   const value = (raw?.trim().toLowerCase() || fallback) as Severity;
   if (["blocker", "high", "medium", "low", "info"].includes(value)) return value;
-  throw new Error("POISON_ALERT_EXTERNAL_MIN_SEVERITY must be blocker, high, medium, low, or info");
+  throw new Error(`${source} must be blocker, high, medium, low, or info`);
 }
 
 function loadRouting(env: NodeJS.ProcessEnv): RouterConfig {
@@ -188,7 +192,7 @@ function loadPoisonAlert(env: NodeJS.ProcessEnv): PoisonAlertConfig {
     external: {
       enabled: parseBoolean(env.POISON_ALERT_EXTERNAL_ENABLED, false),
       targets: parseExternalTargetsJson(env.POISON_ALERT_EXTERNAL_TARGETS_JSON),
-      minSeverity: parseSeverity(env.POISON_ALERT_EXTERNAL_MIN_SEVERITY, "high"),
+      minSeverity: parseSeverity(env.POISON_ALERT_EXTERNAL_MIN_SEVERITY, "high", "POISON_ALERT_EXTERNAL_MIN_SEVERITY"),
     },
   };
 }
@@ -240,6 +244,9 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     adminGithubIds: parseIdList(env.MAOMAO_ADMIN_GITHUB_IDS, "MAOMAO_ADMIN_GITHUB_IDS"),
     uiLocalLogin: parseBoolean(env.UI_LOCAL_LOGIN, false),
     publicUrl: env.MAOMAO_PUBLIC_URL?.trim().replace(/\/+$/, "") || "",
+    reviewAllowApprove: parseBoolean(env.GITHUB_REVIEW_ALLOW_APPROVE, false),
+    reviewAllowRequestChanges: parseBoolean(env.GITHUB_REVIEW_ALLOW_REQUEST_CHANGES, false),
+    reviewRequestChangesMinSeverity: parseSeverity(env.GITHUB_REVIEW_REQUEST_CHANGES_MIN_SEVERITY, "blocker"),
     allowedGithubAccountIds: parseIdList(env.ALLOWED_GITHUB_ACCOUNT_IDS, "ALLOWED_GITHUB_ACCOUNT_IDS"),
     allowedGithubRepositoryIds: parseIdList(env.ALLOWED_GITHUB_REPOSITORY_IDS, "ALLOWED_GITHUB_REPOSITORY_IDS"),
     maxDiffBytes: clamp(parseInteger(env.MAX_DIFF_BYTES, 1_048_576), 0, 50 * 1024 * 1024),

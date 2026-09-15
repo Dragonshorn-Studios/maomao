@@ -188,7 +188,13 @@ export function renderJob(
             : job.state === "completed"
               ? "not published"
               : "—"
-        }</dd>
+        }
+          ${
+            job.review_event
+              ? `<div class="muted" title="${escapeHtml(job.review_event_reason || "")}">Event: <code class="metric">${escapeHtml(job.review_event)}</code>${job.review_event_reason ? ` — ${escapeHtml(job.review_event_reason)}` : ""}</div>`
+              : ""
+          }
+        </dd>
       </div>
     </dl>
     ${renderRouting(job)}
