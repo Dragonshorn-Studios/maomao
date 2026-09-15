@@ -149,10 +149,11 @@ Create a GitHub App for your user or org. Maomao needs **least privilege**:
 | Metadata | Read | Identify the installation / repository |
 | Contents | **Read** | Fetch the PR head into a workspace |
 | Pull requests | Read & write | Read the diff; post a `COMMENT` review |
+| Issues | Write (optional) | Poison-alert mention/command comments on the PR conversation |
 
 Do **not** grant Contents write, Actions write, Administration, Secrets, merge, or branch push. The strongest action Maomao can take is posting a pull request review.
 
-Subscribe the app to the **Pull request** webhook event. Set the webhook URL to:
+Subscribe the app to the **Pull request** webhook event. If you use `@maomao escalate` in `manual` poison-alert policy, also subscribe to **Issue comment**. Set the webhook URL to:
 
 ```text
 https://<your-host>/webhooks/github
@@ -192,6 +193,34 @@ Default specialist roles (override with `REVIEWER_ROLES`):
 - `maintainer` — merge blockers
 
 Each run has a timeout (`OPENCODE_TIMEOUT_MS`), retries (`OPENCODE_MAX_RETRIES`), and a concurrency cap (`OPENCODE_REVIEWER_CONCURRENCY`).
+
+### Risk-aware specialist routing
+
+By default Maomao runs a **pre-review router** before specialists. A deterministic scanner extracts cheap signals (file/line counts, languages, auth/secrets/billing/migrations/deploy, lockfiles, tests, PR title/body). An optional low-cost router model may refine the set. Output is a profile plus allowlisted role ids:
+
+- `observation` — 1–2 specialists for trivial or narrow changes
+- `diagnosis` — 3–4 relevant specialists for ordinary changes
+- `poison-alert` — relevant specialists plus optional escalation for high-risk or large changes
+
+Set `REVIEWER_ROUTING=fixed` to keep the previous always-on reviewer list. `deterministic` uses only the scanner; `model` uses the router model with hard-risk override; `hybrid` (default) uses both.
+
+Hard-risk paths (auth, secrets, billing, migrations, deploy) can escalate the profile. The model cannot downgrade those triggers. Invalid or failed routing falls back to `diagnosis` and still runs a review.
+
+Optional: `OPENCODE_ROUTER_MODEL`, `ROUTER_TIMEOUT_MS`, `ROUTER_MAX_DIFF_CHARS`, `ROUTER_MAX_REVIEWERS`.
+
+### Poison-alert escalation
+
+`poison-alert` can use two independent channels. Neither has a hardcoded model, provider, username, or bot.
+
+Internal: a second, bounded pass with `POISON_ALERT_INTERNAL_MODEL` (any configured `provider/model`), separate cost/token/timeout/retry caps, and a distinct usage record. It verifies or refines first-pass findings. If the model is missing or over budget, Maomao keeps the first pass unless `POISON_ALERT_INTERNAL_FALLBACK=fail`.
+
+External: fire-and-forget **after** Maomao publishes its own review. Targets are JSON in `POISON_ALERT_EXTERNAL_TARGETS_JSON` (`mention`, `command`, or signed `webhook`). Webhook URLs/secrets are env refs; HTTPS is required and private/loopback destinations are rejected. Mention/command fields are validated so configuration cannot inject comment content.
+
+Policies: `internal_only`, `external_only`, `internal_then_external` (external only if the internal pass still meets `POISON_ALERT_EXTERNAL_MIN_SEVERITY`), `internal_and_external`, `manual` (`@maomao escalate` from an OWNER/MEMBER/COLLABORATOR, loop-safe against bot/marker comments).
+
+Maomao does not queue, claim, poll, or ingest external review results. The UI shows immediate dispatch status only.
+
+Mention/command dispatch uses a GitHub issue comment and needs **Issues: Write** on the GitHub App. Webhook-only escalation does not.
 
 Maomao records OpenCode `step_finish` usage across every unique agent step (including tool-call steps). Token totals include input, output, reasoning, and cache read/write when the CLI reports them. **These figures are provider/OpenCode-reported usage, not an independently calculated invoice.** If the JSON stream ends without a matching `step_finish` (see [opencode#26855](https://github.com/anomalyco/opencode/issues/26855)), the UI marks usage incomplete and treats the stored numbers as a minimum.
 
@@ -286,7 +315,7 @@ OpenCode is still a powerful process. Keep Maomao on a locked-down host and do n
 
 ## Configuration reference
 
-See `.env.example`. Notable knobs: `REVIEW_DRAFTS`, `POST_EMPTY_REVIEW`, `JOB_CONCURRENCY`, `WORKSPACE_ROOT`, `DATABASE_PATH`, `MAX_INLINE_COMMENTS`, `PULL_REQUEST_ACTIONS`, `UI_PASSWORD`, `UI_SESSION_SECRET`.
+See `.env.example`. Notable knobs: `REVIEW_DRAFTS`, `POST_EMPTY_REVIEW`, `JOB_CONCURRENCY`, `WORKSPACE_ROOT`, `DATABASE_PATH`, `MAX_INLINE_COMMENTS`, `PULL_REQUEST_ACTIONS`, `UI_PASSWORD`, `UI_SESSION_SECRET`, `REVIEWER_ROUTING`, `POISON_ALERT_POLICY`.
 
 ## Follow-ups (not in this MVP)
 
@@ -296,6 +325,7 @@ See `.env.example`. Notable knobs: `REVIEW_DRAFTS`, `POST_EMPTY_REVIEW`, `JOB_CO
 - Resume a reviewer run mid-job instead of re-running after process restart
 - Forges other than GitHub
 - Marller registration as a trusted review source
+- Finding lifecycle / bury commands across revisions
 
 ## License
 

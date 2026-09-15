@@ -107,6 +107,9 @@ export function createApp(ctx: ServerContext): Hono {
     if (result.enqueue) {
       dispatchEnqueue(ctx.queue, result.enqueue);
     }
+    if (result.dispatchJobId) {
+      ctx.queue.enqueue(result.dispatchJobId);
+    }
     return c.json(result.body, result.status as 200);
   });
 

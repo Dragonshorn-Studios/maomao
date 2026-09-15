@@ -1,3 +1,4 @@
+import { readFile } from "node:fs/promises";
 import type { Config } from "../config.js";
 import type { JobStore, JobRow, ReviewerRunRow } from "./store.js";
 import type { GithubPort } from "../github/client.js";
@@ -10,16 +11,44 @@ import {
   type OpenCodeRunResult,
 } from "../opencode/parse.js";
 import { buildAggregatorPrompt, buildReviewerPrompt } from "../prompts.js";
+import { reviewerSpecs } from "./enqueue.js";
 import {
   fallbackAggregator,
   parseAggregatorResult,
   parseReviewerResult,
   SchemaValidationError,
+  extractJsonFromText,
   type AggregatorResult,
   type ReviewerResult,
 } from "../schema.js";
 import { mapLimit, nowIso, sleep, truncate } from "../util.js";
 import { ZodError } from "zod";
+import { scanRoutingSignals, relevantDiffHunks } from "../routing/signals.js";
+import {
+  diagnosisFallback,
+  deterministicDecision,
+  mergeModelDecision,
+} from "../routing/select.js";
+import { parseRouterResult } from "../routing/parse.js";
+import { buildInternalEscalationPrompt, buildRouterPrompt } from "../routing/prompts.js";
+import { internalEscalationResultSchema } from "../routing/schema.js";
+import type { RoutingDecision } from "../routing/types.js";
+import {
+  deliverSignedWebhook,
+  escalationId,
+  escalationMarker,
+  parseEscalationMarker,
+  resolveMention,
+  targetKey,
+} from "../routing/escalation.js";
+import {
+  assignFindingIds,
+  findingsMeetThreshold,
+  mergeInternalEscalation,
+  shouldRunExternal,
+  shouldRunInternal,
+  usageOverBudget,
+} from "../routing/policy.js";
 
 export interface PipelineDeps {
   config: Config;
@@ -28,6 +57,8 @@ export interface PipelineDeps {
   checkout: CheckoutPort;
   opencode: OpenCodePort;
   getInstallationToken?: (installationId: number) => Promise<string>;
+  fetchImpl?: typeof fetch;
+  env?: NodeJS.ProcessEnv;
 }
 
 const aborts = new Map<number, AbortController>();
@@ -50,6 +81,11 @@ export function createPipeline(deps: PipelineDeps) {
         if (aborts.get(jobId) === controller) aborts.delete(jobId);
       }
     },
+    async dispatchExternal(jobId: number): Promise<void> {
+      const job = deps.store.getJob(jobId);
+      if (!job) return;
+      await dispatchExternalEscalation(deps, job, undefined);
+    },
   };
 }
 
@@ -57,7 +93,13 @@ async function runJob(deps: PipelineDeps, jobId: number, signal: AbortSignal): P
   const { store, config } = deps;
   const job = store.getJob(jobId);
   if (!job) return;
-  if (["completed", "stale", "cancelled"].includes(job.state)) return;
+  if (["stale", "cancelled"].includes(job.state)) return;
+  if (job.state === "completed") {
+    if (job.manual_escalate_requested && job.external_dispatch_status !== "dispatched") {
+      await dispatchExternalEscalation(deps, job, undefined);
+    }
+    return;
+  }
 
   try {
     store.setJobState(jobId, "preparing", { started_at: nowIso() });
@@ -91,6 +133,10 @@ async function runJob(deps: PipelineDeps, jobId: number, signal: AbortSignal): P
     store.log(jobId, `Checked out ${job.head_sha} into ${workspace.dir}`);
     throwIfStale(store, jobId, signal);
 
+    const diff = await readFile(workspace.diffPath, "utf8");
+    await routeSpecialists(deps, job, diff, workspace.repoDir, [workspace.diffPath, workspace.metaPath], signal);
+    throwIfStale(store, jobId, signal);
+
     store.setJobState(jobId, "reviewing");
     const runs = store.listReviewerRuns(jobId).filter((run) => run.state !== "done");
     await mapLimit(runs, config.opencode.reviewerConcurrency, async (run) => {
@@ -116,17 +162,36 @@ async function runJob(deps: PipelineDeps, jobId: number, signal: AbortSignal): P
       aggregator_model: config.opencode.aggregatorModel || config.opencode.reviewerModel || null,
     });
     store.log(jobId, `Aggregating ${parsedReviewers.length} reviewer result(s)`);
-    const aggregated = await runAggregator(deps, job, parsedReviewers, workspace.repoDir, [workspace.diffPath], signal);
+    let aggregated = await runAggregator(deps, job, parsedReviewers, workspace.repoDir, [workspace.diffPath], signal);
     throwIfStale(store, jobId, signal);
+
+    const routed = store.getJob(jobId);
+    if (routed && shouldRunInternal(config.poisonAlert.policy, config.poisonAlert.internal.enabled, routed.routing_profile ?? "")) {
+      aggregated = await runInternalEscalation(deps, routed, aggregated, diff, workspace.repoDir, signal);
+      throwIfStale(store, jobId, signal);
+    }
+
+    aggregated = {
+      ...aggregated,
+      findings: assignFindingIds(aggregated.findings),
+    };
+    store.patchJob(jobId, { aggregator_normalized: JSON.stringify(aggregated, null, 2) });
 
     store.setJobState(jobId, "publishing", { aggregator_state: "done" });
     const posted = await publishReview(deps, job, aggregated, parsedReviewers.length);
+    const afterPublish = store.getJob(jobId) ?? job;
+    if (posted) {
+      store.patchJob(jobId, { github_review_id: posted.id, github_review_url: posted.url });
+    }
+    store.log(jobId, posted ? `Published COMMENT review ${posted.id}` : "No GitHub review posted");
+
+    await dispatchExternalEscalation(deps, store.getJob(jobId) ?? afterPublish, aggregated);
+
     store.setJobState(jobId, "completed", {
-      github_review_id: posted?.id ?? null,
-      github_review_url: posted?.url ?? null,
+      github_review_id: posted?.id ?? store.getJob(jobId)?.github_review_id ?? null,
+      github_review_url: posted?.url ?? store.getJob(jobId)?.github_review_url ?? null,
       finished_at: nowIso(),
     });
-    store.log(jobId, posted ? `Published COMMENT review ${posted.id}` : "No GitHub review posted");
   } catch (error) {
     if (store.isStale(jobId) || signal.aborted) {
       store.log(jobId, "Job aborted or marked stale; skipping publish", "warn");
@@ -160,6 +225,143 @@ function throwIfStale(store: JobStore, jobId: number, signal: AbortSignal): void
   if (signal.aborted || store.isStale(jobId)) {
     throw new Error("stale");
   }
+}
+
+function persistDecision(store: JobStore, jobId: number, decision: RoutingDecision, extra: Partial<JobRow> = {}): void {
+  store.patchJob(jobId, {
+    routing_state: "done",
+    routing_profile: decision.profile,
+    routing_reason: decision.reason,
+    routing_confidence: decision.confidence,
+    routing_signals: JSON.stringify(decision.signals),
+    routing_reviewers: JSON.stringify(decision.reviewers),
+    routing_source: decision.source,
+    routing_raw: decision.modelRaw ? truncate(decision.modelRaw, 20_000) : extra.routing_raw,
+    ...extra,
+  });
+}
+
+async function routeSpecialists(
+  deps: PipelineDeps,
+  job: JobRow,
+  diff: string,
+  cwd: string,
+  files: string[],
+  signal: AbortSignal,
+): Promise<void> {
+  const { store, config } = deps;
+  const existing = store.listReviewerRuns(job.id);
+  const allowlist = config.reviewers.map((role) => role.id);
+
+  if (config.routing.mode === "fixed") {
+    if (existing.length === 0) store.ensureReviewerRuns(job.id, reviewerSpecs(config));
+    const roles = store.listReviewerRuns(job.id).map((run) => run.role);
+    persistDecision(store, job.id, {
+      profile: "diagnosis",
+      reviewers: roles,
+      reason: "Fixed reviewer set from configuration",
+      confidence: 1,
+      source: "fixed",
+      signals: scanRoutingSignals({ diff, title: job.pr_title, body: job.pr_body }),
+      hardRuleEscalated: false,
+    }, { routing_mode: "fixed" });
+    store.log(job.id, `Routing skipped (fixed): ${roles.join(", ") || "(none)"}`);
+    return;
+  }
+
+  if (existing.length > 0 && job.routing_profile) {
+    store.log(job.id, `Routing reused: profile=${job.routing_profile} reviewers=${existing.map((run) => run.role).join(", ")}`);
+    return;
+  }
+
+  if (existing.length > 0) {
+    const roles = existing.map((run) => run.role);
+    persistDecision(store, job.id, {
+      profile: "diagnosis",
+      reviewers: roles,
+      reason: "Preselected reviewer set for this job",
+      confidence: 1,
+      source: "fixed",
+      signals: scanRoutingSignals({ diff, title: job.pr_title, body: job.pr_body }),
+      hardRuleEscalated: false,
+    }, { routing_mode: config.routing.mode });
+    store.log(job.id, `Routing recorded preselected reviewers: ${roles.join(", ")}`);
+    return;
+  }
+
+  store.setJobState(job.id, "routing", { routing_state: "running", routing_mode: config.routing.mode });
+  const signals = scanRoutingSignals({ diff, title: job.pr_title, body: job.pr_body });
+  let decision: RoutingDecision;
+  const routerModel = config.routing.model || config.opencode.reviewerModel;
+  const useModel = (config.routing.mode === "model" || config.routing.mode === "hybrid") && Boolean(routerModel);
+
+  if (!useModel) {
+    decision = deterministicDecision(signals, allowlist, config.routing);
+  } else {
+    const started = Date.now();
+    try {
+      const result = await deps.opencode.run({
+        cwd,
+        model: routerModel,
+        prompt: buildRouterPrompt({
+          allowedRoles: allowlist,
+          signals,
+          diff,
+          maxDiffChars: config.routing.maxDiffChars,
+          title: job.pr_title,
+          body: job.pr_body,
+        }),
+        files,
+        timeoutMs: config.routing.timeoutMs,
+        extraArgs: config.opencode.extraArgs,
+        bin: config.opencode.bin,
+        title: `maomao-router-${job.id}`,
+        signal,
+      });
+      const parsed = parseRouterResult(result.text || result.stdout);
+      decision = mergeModelDecision(
+        {
+          profile: parsed.profile,
+          reviewers: parsed.reviewers,
+          reason: parsed.reason,
+          confidence: parsed.confidence,
+        },
+        signals,
+        allowlist,
+        config.routing,
+        result.text || result.stdout,
+      );
+      const usage = usagePersistence(result.usage);
+      store.patchJob(job.id, {
+        routing_model: routerModel,
+        routing_provider: routerModel.includes("/") ? routerModel.split("/")[0] : null,
+        routing_prompt_tokens: usage.prompt_tokens,
+        routing_completion_tokens: usage.completion_tokens,
+        routing_cost: usage.cost,
+        routing_total_tokens: usage.total_tokens,
+        routing_usage_complete: usage.usage_complete,
+        routing_usage_warning: usage.usage_warning,
+        routing_duration_ms: Date.now() - started,
+        routing_raw: truncate(result.text || result.stdout, 20_000),
+      });
+    } catch (error) {
+      const message = formatError(error);
+      store.log(job.id, `Router model failed (${message}); falling back to diagnosis`, "warn");
+      decision = diagnosisFallback(signals, allowlist, config.routing, `Router failed: ${message}`);
+      store.patchJob(job.id, {
+        routing_model: routerModel,
+        routing_duration_ms: Date.now() - started,
+        routing_usage_warning: message,
+      });
+    }
+  }
+
+  persistDecision(store, job.id, decision, { routing_mode: config.routing.mode });
+  store.ensureReviewerRuns(job.id, reviewerSpecs(config, decision.reviewers));
+  store.log(
+    job.id,
+    `Routed profile=${decision.profile} source=${decision.source} reviewers=${decision.reviewers.join(", ")} reason=${decision.reason}`,
+  );
 }
 
 async function runReviewer(
@@ -318,6 +520,116 @@ async function runAggregator(
   }
 }
 
+async function runInternalEscalation(
+  deps: PipelineDeps,
+  job: JobRow,
+  firstPass: AggregatorResult,
+  diff: string,
+  cwd: string,
+  signal: AbortSignal,
+): Promise<AggregatorResult> {
+  const internal = deps.config.poisonAlert.internal;
+  if (!internal.model) {
+    deps.store.patchJob(job.id, {
+      internal_escalation_state: "skipped",
+      internal_escalation_reason: "POISON_ALERT_INTERNAL_MODEL is not configured",
+    });
+    deps.store.log(job.id, "Internal poison-alert pass skipped: no model configured", "warn");
+    return firstPass;
+  }
+
+  const started = Date.now();
+  deps.store.patchJob(job.id, {
+    internal_escalation_state: "running",
+    internal_escalation_model: internal.model,
+    internal_escalation_provider: internal.model.includes("/") ? internal.model.split("/")[0] : null,
+  });
+  deps.store.log(job.id, `Internal poison-alert pass model=${internal.model}`);
+
+  const files = assignFindingIds(firstPass.findings)
+    .map((finding) => finding.file)
+    .filter((file): file is string => Boolean(file));
+  const hunks = relevantDiffHunks(diff, files, deps.config.routing.maxContextChars);
+  const retries = Math.max(0, internal.retries);
+  let lastError = "unknown error";
+
+  for (let attempt = 1; attempt <= retries + 1; attempt++) {
+    throwIfStale(deps.store, job.id, signal);
+    try {
+      const result = await deps.opencode.run({
+        cwd,
+        model: internal.model,
+        prompt: buildInternalEscalationPrompt({
+          signals: JSON.parse(job.routing_signals || "null") ?? scanRoutingSignals({ diff }),
+          firstPass,
+          hunks,
+          reason: job.routing_reason || "poison-alert",
+        }),
+        timeoutMs: internal.timeoutSeconds * 1000,
+        extraArgs: deps.config.opencode.extraArgs,
+        bin: deps.config.opencode.bin,
+        title: `maomao-poison-alert-${job.id}`,
+        signal,
+      });
+      const usage = usagePersistence(result.usage);
+      const over = usageOverBudget({
+        cost: usage.cost,
+        tokens: usage.total_tokens,
+        maxCostUsd: internal.maxCostUsd,
+        maxTokens: internal.maxTokens,
+      });
+      deps.store.patchJob(job.id, {
+        internal_escalation_raw: truncate(result.text || result.stdout, 200_000),
+        internal_escalation_prompt_tokens: usage.prompt_tokens,
+        internal_escalation_completion_tokens: usage.completion_tokens,
+        internal_escalation_cost: usage.cost,
+        internal_escalation_total_tokens: usage.total_tokens,
+        internal_escalation_usage_complete: usage.usage_complete,
+        internal_escalation_usage_warning: over ?? usage.usage_warning,
+        internal_escalation_duration_ms: Date.now() - started,
+        internal_escalation_model: internal.model,
+        internal_escalation_provider: internal.model.includes("/") ? internal.model.split("/")[0] : null,
+      });
+      if (over) {
+        deps.store.log(job.id, over, "warn");
+        if (internal.fallback === "fail") throw new Error(over);
+        deps.store.patchJob(job.id, {
+          internal_escalation_state: "failed",
+          internal_escalation_reason: over,
+        });
+        return firstPass;
+      }
+      const parsed = internalEscalationResultSchema.parse(extractJsonFromText(result.text || result.stdout));
+      const merged = mergeInternalEscalation(firstPass, parsed);
+      deps.store.patchJob(job.id, {
+        internal_escalation_state: "done",
+        internal_escalation_normalized: JSON.stringify(parsed, null, 2),
+        internal_escalation_alert_cleared: parsed.alert_cleared ? 1 : 0,
+        internal_escalation_reason: parsed.alert_cleared ? "internal pass cleared the alert" : "internal pass confirmed risk",
+        aggregator_normalized: JSON.stringify(merged, null, 2),
+      });
+      deps.store.log(
+        job.id,
+        `Internal poison-alert pass done: alert_cleared=${parsed.alert_cleared} findings=${merged.findings.length}`,
+      );
+      return merged;
+    } catch (error) {
+      lastError = formatError(error);
+      deps.store.log(job.id, `Internal poison-alert attempt ${attempt} failed: ${lastError}`, "warn");
+      if (attempt <= retries) await sleep(500 * attempt, signal);
+    }
+  }
+
+  deps.store.patchJob(job.id, {
+    internal_escalation_state: "failed",
+    internal_escalation_reason: lastError,
+    internal_escalation_duration_ms: Date.now() - started,
+  });
+  if (internal.fallback === "fail") throw new Error(`internal poison-alert pass failed: ${lastError}`);
+  deps.store.log(job.id, `Keeping first-pass findings after internal escalation failure: ${lastError}`, "warn");
+  return firstPass;
+}
+
 async function publishReview(
   deps: PipelineDeps,
   job: JobRow,
@@ -355,6 +667,213 @@ async function publishReview(
     body,
     comments,
   });
+}
+
+async function dispatchExternalEscalation(
+  deps: PipelineDeps,
+  job: JobRow,
+  aggregated: AggregatorResult | undefined,
+): Promise<void> {
+  const config = deps.config.poisonAlert;
+  const latest = deps.store.getJob(job.id) ?? job;
+  const findings = aggregated?.findings ?? parseStoredFindings(latest.aggregator_normalized);
+  const withIds = assignFindingIds(findings);
+  const alertCleared = latest.internal_escalation_alert_cleared === 1;
+  const internalFailed = latest.internal_escalation_state === "failed";
+  const internalRan = latest.internal_escalation_state === "done" || internalFailed;
+  const meets = findingsMeetThreshold(withIds, config.external.minSeverity);
+  const want = shouldRunExternal({
+    policy: config.policy,
+    enabled: config.external.enabled,
+    profile: latest.routing_profile ?? "",
+    manualRequested: Boolean(latest.manual_escalate_requested),
+    internalRan,
+    internalFailed,
+    alertCleared: alertCleared || !meets,
+  });
+
+  if (!want) {
+    if (!latest.external_dispatch_status || latest.external_dispatch_status === "not_requested") {
+      const reason = alertCleared
+        ? "internal pass cleared the alert"
+        : latest.routing_profile !== "poison-alert"
+          ? "profile is not poison-alert"
+          : "external dispatch not requested by policy";
+      deps.store.patchJob(job.id, {
+        external_dispatch_status: "not_requested",
+        external_dispatch_reason: reason,
+        poison_alert_policy: config.policy,
+      });
+    }
+    return;
+  }
+
+  if (!latest.github_review_id && !latest.github_review_url) {
+    deps.store.patchJob(job.id, {
+      external_dispatch_status: "dispatch_failed",
+      external_dispatch_reason: "Maomao review was not published; external dispatch skipped",
+      poison_alert_policy: config.policy,
+    });
+    deps.store.log(job.id, "External poison-alert dispatch skipped because the Maomao review was not published", "warn");
+    return;
+  }
+
+  const provider = "github";
+  const instance = "github.com";
+  const id = latest.escalation_id || escalationId({
+    provider,
+    instance,
+    repoFullName: latest.repo_full_name,
+    prNumber: latest.pr_number,
+    headSha: latest.head_sha,
+    policy: config.policy,
+  });
+  deps.store.patchJob(job.id, {
+    external_dispatch_status: "dispatching",
+    external_dispatch_targets: JSON.stringify(config.external.targets),
+    escalation_id: id,
+    poison_alert_policy: config.policy,
+  });
+
+  const findingsList = withIds.map((finding) => finding.id).join(", ") || "(none)";
+  const riskSummary = latest.routing_reason || aggregated?.summary || "poison-alert";
+  const errors: string[] = [];
+  let anySuccess = false;
+
+  for (const target of config.external.targets) {
+    const claimed = deps.store.claimDispatch({
+      escalationId: id,
+      jobId: latest.id,
+      provider,
+      instance,
+      repoFullName: latest.repo_full_name,
+      prNumber: latest.pr_number,
+      headSha: latest.head_sha,
+      policy: config.policy,
+      targetKey: targetKey(target),
+      targetType: target.type,
+    });
+    if (!claimed.created && claimed.row.status === "dispatched") {
+      anySuccess = true;
+      continue;
+    }
+    try {
+      if (target.type === "webhook") {
+        const env = deps.env ?? process.env;
+        const url = env[target.urlSecretRef]?.trim();
+        const secret = env[target.signingSecretRef]?.trim();
+        if (!url || !secret) throw new Error(`missing ${target.urlSecretRef} or ${target.signingSecretRef}`);
+        const payload = JSON.stringify({
+          event: "maomao.poison_alert",
+          escalation_id: id,
+          provider,
+          instance,
+          repository: latest.repo_full_name,
+          pull_request: latest.pr_number,
+          head_sha: latest.head_sha,
+          job_id: latest.id,
+          review_id: latest.github_review_id,
+          review_url: latest.github_review_url,
+          profile: latest.routing_profile,
+          reason: latest.routing_reason,
+          policy: config.policy,
+          finding_ids: withIds.map((finding) => finding.id),
+          risk_summary: riskSummary,
+          status: "dispatched",
+        });
+        const delivered = await deliverSignedWebhook({
+          url,
+          secret,
+          body: payload,
+          fetchImpl: deps.fetchImpl,
+        });
+        if (!delivered.ok) throw new Error(delivered.error || `webhook status ${delivered.status}`);
+        deps.store.updateDispatch(claimed.row.id, "dispatched", `webhook ${delivered.status}`);
+        anySuccess = true;
+      } else {
+        const recipient = resolveMention(target.recipient, latest.repo_owner);
+        const command = target.type === "command" ? target.command : undefined;
+        const marker = escalationMarker({
+          id,
+          provider,
+          instance,
+          repo: latest.repo_full_name,
+          pr: latest.pr_number,
+          sha: latest.head_sha,
+          job: latest.id,
+          reason: riskSummary,
+          status: "dispatched",
+        });
+        if (deps.github.listIssueComments) {
+          const comments = await deps.github.listIssueComments(
+            latest.installation_id,
+            latest.repo_owner,
+            latest.repo_name,
+            latest.pr_number,
+          );
+          const already = comments.find((comment) => {
+            const parsed = parseEscalationMarker(comment.body);
+            return parsed?.id === id && parsed.sha === latest.head_sha;
+          });
+          if (already) {
+            deps.store.updateDispatch(claimed.row.id, "dispatched", `comment ${already.id}`);
+            anySuccess = true;
+            continue;
+          }
+        }
+        if (!deps.github.createIssueComment) {
+          throw new Error("GitHub issue comments are not available on this client");
+        }
+        const lines = [
+          marker,
+          command ? `${recipient} ${command}` : recipient,
+          "",
+          `Maomao published a poison-alert review for \`${latest.repo_full_name}#${latest.pr_number}\` at \`${latest.head_sha}\`.`,
+          latest.github_review_url ? `Review: ${latest.github_review_url}` : "",
+          `Finding IDs: ${findingsList}`,
+          `Risk: ${riskSummary.replace(/\s+/g, " ").slice(0, 300)}`,
+          "",
+          "This is a fire-and-forget notification. Maomao does not track downstream review completion.",
+        ].filter((line) => line !== "");
+        const posted = await deps.github.createIssueComment({
+          installationId: latest.installation_id,
+          owner: latest.repo_owner,
+          repo: latest.repo_name,
+          pullNumber: latest.pr_number,
+          body: lines.join("\n"),
+        });
+        deps.store.updateDispatch(claimed.row.id, "dispatched", posted.url || posted.id);
+        anySuccess = true;
+      }
+    } catch (error) {
+      const message = formatError(error);
+      errors.push(`${target.type}: ${message}`);
+      deps.store.updateDispatch(claimed.row.id, "dispatch_failed", message);
+    }
+  }
+
+  deps.store.patchJob(job.id, {
+    external_dispatch_status: anySuccess && errors.length === 0 ? "dispatched" : anySuccess ? "dispatched" : "dispatch_failed",
+    external_dispatch_reason: anySuccess ? "immediate dispatch completed" : errors.join("; ") || "dispatch failed",
+    external_dispatch_error: errors.length ? errors.join("; ") : null,
+  });
+  deps.store.log(
+    job.id,
+    anySuccess
+      ? `External poison-alert dispatch ${errors.length ? "partially " : ""}completed`
+      : `External poison-alert dispatch failed: ${errors.join("; ")}`,
+    anySuccess ? "info" : "warn",
+  );
+}
+
+function parseStoredFindings(raw: string | null): AggregatorResult["findings"] {
+  if (!raw) return [];
+  try {
+    const parsed = JSON.parse(raw) as AggregatorResult;
+    return Array.isArray(parsed.findings) ? parsed.findings : [];
+  } catch {
+    return [];
+  }
 }
 
 function formatError(error: unknown): string {

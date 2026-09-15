@@ -100,6 +100,11 @@ describe("monitoring pages", () => {
     expect(html).toContain("independently calculated invoice");
     expect(html).toContain("reasoning");
     expect(html).toContain("cache r");
+    expect(html).toContain("poison-alert");
+    expect(html).toContain("internal_and_external");
+    expect(html).toContain("provider/strong-model");
+    expect(html).toContain("dispatched (notification accepted)");
+    expect(html).toContain("does not track whether an external reviewer finished");
   });
 
   it("marks specialist findings unconfirmed until the aggregator finishes", () => {

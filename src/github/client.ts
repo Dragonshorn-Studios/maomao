@@ -55,6 +55,19 @@ export interface GithubPort {
     body: string;
     comments: PullReviewComment[];
   }): Promise<PostedReview>;
+  listIssueComments?(
+    installationId: number,
+    owner: string,
+    repo: string,
+    pullNumber: number,
+  ): Promise<{ id: number; body: string; userLogin?: string; userType?: string }[]>;
+  createIssueComment?(input: {
+    installationId: number;
+    owner: string;
+    repo: string;
+    pullNumber: number;
+    body: string;
+  }): Promise<{ id: string; url: string }>;
 }
 
 export class GithubClient implements GithubPort, ManualTriggerPort {
@@ -216,6 +229,44 @@ export class GithubClient implements GithubPort, ManualTriggerPort {
       });
       return { id: String(response.data.id), url: response.data.html_url ?? "" };
     }
+  }
+
+  async listIssueComments(
+    installationId: number,
+    owner: string,
+    repo: string,
+    pullNumber: number,
+  ): Promise<{ id: number; body: string; userLogin?: string; userType?: string }[]> {
+    const octokit = this.installationOctokit(installationId);
+    const comments = await octokit.paginate(octokit.rest.issues.listComments, {
+      owner,
+      repo,
+      issue_number: pullNumber,
+      per_page: 100,
+    });
+    return comments.map((comment) => ({
+      id: comment.id,
+      body: comment.body ?? "",
+      userLogin: comment.user?.login ?? undefined,
+      userType: comment.user?.type ?? undefined,
+    }));
+  }
+
+  async createIssueComment(input: {
+    installationId: number;
+    owner: string;
+    repo: string;
+    pullNumber: number;
+    body: string;
+  }): Promise<{ id: string; url: string }> {
+    const octokit = this.installationOctokit(input.installationId);
+    const response = await octokit.rest.issues.createComment({
+      owner: input.owner,
+      repo: input.repo,
+      issue_number: input.pullNumber,
+      body: input.body,
+    });
+    return { id: String(response.data.id), url: response.data.html_url ?? "" };
   }
 }
 

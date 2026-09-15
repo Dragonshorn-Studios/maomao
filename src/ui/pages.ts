@@ -5,6 +5,8 @@ import {
   flavorForJob,
   jobStateLabel,
   observationsCopy,
+  routingProfileLabel,
+  dispatchStatusLabel,
   runStateLabel,
   severityLabel,
   staleBanner,
@@ -142,6 +144,8 @@ export function renderJob(
         }</dd>
       </div>
     </dl>
+    ${renderRouting(job)}
+    ${renderEscalation(job)}
     ${job.failure_reason ? `<p class="error" role="alert"><strong>Failure:</strong> ${escapeHtml(job.failure_reason)}</p>` : ""}
     <div class="section-head">
       <h2>Reviewers</h2>
@@ -173,7 +177,7 @@ export function renderJob(
 function renderQueueCard(job: JobRow, metrics: JobMetrics): string {
   const state = jobStateLabel(job.state);
   const elapsed = formatDuration(elapsedMs(job.started_at, job.finished_at) ?? elapsedMs(job.created_at));
-  const live = ["preparing", "reviewing", "aggregating", "publishing"].includes(job.state);
+  const live = ["preparing", "routing", "reviewing", "aggregating", "publishing"].includes(job.state);
   const flavor = flavorForJob(job.state, job.pr_number);
   return `<li>
     <article class="specimen${live ? " is-live" : ""}">
@@ -195,6 +199,110 @@ function renderQueueCard(job: JobRow, metrics: JobMetrics): string {
       ${renderSeverityChips(metrics.findings, !metrics.findingsConfirmed)}
     </article>
   </li>`;
+}
+
+function renderRouting(job: JobRow): string {
+  if (!job.routing_profile && job.routing_state !== "running") return "";
+  const signals = safeParseSignals(job.routing_signals);
+  const reviewers = safeParseStringArray(job.routing_reviewers);
+  const families = signals?.hardRiskFamilies?.length
+    ? signals.hardRiskFamilies.join(", ")
+    : signals?.families?.length
+      ? signals.families.join(", ")
+      : "none";
+  return `<h2>Routing</h2>
+    <article class="card">
+      <header>
+        <span class="role"><strong>Profile</strong> ${escapeHtml(routingProfileLabel(job.routing_profile))}</span>
+        ${job.routing_source ? `<span class="muted">source ${escapeHtml(job.routing_source)}</span>` : ""}
+      </header>
+      <p>${escapeHtml(job.routing_reason || "Selecting specialists for this SHA.")}</p>
+      <p class="muted">
+        confidence ${job.routing_confidence != null ? escapeHtml(String(job.routing_confidence)) : "—"}
+        · reviewers ${escapeHtml(reviewers.join(", ") || "pending")}
+        · signals ${escapeHtml(families)}
+        ${job.routing_model ? ` · router <code class="metric">${escapeHtml(job.routing_model)}</code>` : ""}
+        ${job.routing_cost != null ? ` · router cost ${escapeHtml(formatCost(job.routing_cost))}` : ""}
+        ${job.routing_total_tokens != null ? ` · router tokens ${escapeHtml(formatTokens(job.routing_total_tokens))}` : ""}
+      </p>
+    </article>`;
+}
+
+function renderEscalation(job: JobRow): string {
+  const show =
+    job.routing_profile === "poison-alert" ||
+    (job.internal_escalation_state && job.internal_escalation_state !== "not_requested") ||
+    (job.external_dispatch_status && job.external_dispatch_status !== "not_requested") ||
+    job.poison_alert_policy;
+  if (!show) return "";
+  const targets = safeParseTargets(job.external_dispatch_targets);
+  const targetText =
+    targets.length > 0
+      ? targets
+          .map((target) => {
+            if (target.type === "mention") return `mention ${target.recipient}`;
+            if (target.type === "command") return `command ${target.recipient} ${target.command}`;
+            return `webhook ${target.urlSecretRef}`;
+          })
+          .join("; ")
+      : "none configured";
+  return `<h2>Poison alert</h2>
+    <article class="card">
+      <p><strong>Policy</strong> ${escapeHtml(job.poison_alert_policy || "—")}</p>
+      <p class="muted">${escapeHtml(job.routing_reason || "High-risk routing selected poison-alert.")}</p>
+      <h3>Internal model</h3>
+      <p class="muted">
+        state ${escapeHtml(job.internal_escalation_state || "not_requested")}
+        ${job.internal_escalation_model ? ` · model <code class="metric">${escapeHtml(job.internal_escalation_model)}</code>` : ""}
+        ${job.internal_escalation_provider ? ` · provider <code class="metric">${escapeHtml(job.internal_escalation_provider)}</code>` : ""}
+        · ${escapeHtml(formatTokens(job.internal_escalation_total_tokens))} tokens
+        · ${escapeHtml(formatCost(job.internal_escalation_cost))}
+      </p>
+      ${job.internal_escalation_reason ? `<p>${escapeHtml(job.internal_escalation_reason)}</p>` : ""}
+      <p class="muted">Internal usage is recorded separately from specialist and aggregator totals.</p>
+      <h3>External dispatch</h3>
+      <p class="muted">
+        ${escapeHtml(dispatchStatusLabel(job.external_dispatch_status))}
+        · targets ${escapeHtml(targetText)}
+      </p>
+      ${job.external_dispatch_reason ? `<p>${escapeHtml(job.external_dispatch_reason)}</p>` : ""}
+      ${job.external_dispatch_error ? `<p class="error">${escapeHtml(job.external_dispatch_error)}</p>` : ""}
+      <p class="muted">Maomao records only the immediate notification outcome. It does not track whether an external reviewer finished.</p>
+    </article>`;
+}
+
+function safeParseSignals(raw: string | null): { families?: string[]; hardRiskFamilies?: string[] } | undefined {
+  if (!raw) return undefined;
+  try {
+    return JSON.parse(raw) as { families?: string[]; hardRiskFamilies?: string[] };
+  } catch {
+    return undefined;
+  }
+}
+
+function safeParseStringArray(raw: string | null): string[] {
+  if (!raw) return [];
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    return Array.isArray(parsed) ? parsed.map((item) => String(item)) : [];
+  } catch {
+    return [];
+  }
+}
+
+function safeParseTargets(raw: string | null): Array<{
+  type: string;
+  recipient?: string;
+  command?: string;
+  urlSecretRef?: string;
+}> {
+  if (!raw) return [];
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    return Array.isArray(parsed) ? (parsed as Array<{ type: string; recipient?: string; command?: string; urlSecretRef?: string }>) : [];
+  } catch {
+    return [];
+  }
 }
 
 function renderDiagnosis(metrics: JobMetrics, aggregatorState: string): string {
