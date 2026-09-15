@@ -9,6 +9,7 @@ import { createApp } from "./server.js";
 import { GithubClient } from "./github/client.js";
 import { createCheckout, sweepWorkspaces } from "./checkout.js";
 import { createOpenCodeRunner } from "./opencode/spawn.js";
+import { oauthCallbackUrl, oauthEnabled } from "./oauth.js";
 
 const config = loadConfig();
 assertRuntimeConfig(config);
@@ -35,9 +36,13 @@ const app = createApp({ config, store, queue, github, startedAt: Date.now() });
 serve({ fetch: app.fetch, hostname: config.host, port: config.port }, (info) => {
   console.log(`Maomao listening on http://${info.address}:${info.port}`);
   console.log(`Webhook: POST /webhooks/github`);
-  if (!config.uiPassword || !config.uiSessionSecret) {
+  if (oauthEnabled(config)) {
+    console.log(`OAuth operator login enabled; callback URL: ${oauthCallbackUrl(config)}`);
+  }
+  const passwordOn = Boolean(config.uiPassword && config.uiSessionSecret);
+  if (!oauthEnabled(config) && !passwordOn) {
     console.warn(
-      "UI_PASSWORD and UI_SESSION_SECRET are unset; / , /jobs, /api, and /events are open. Set both before exposing Maomao.",
+      "No operator login is configured (OAuth or UI_PASSWORD + UI_SESSION_SECRET); / , /jobs, /api, and /events are open. Configure one before exposing Maomao.",
     );
   }
   if (config.allowedGithubAccountIds.length === 0 && config.allowedGithubRepositoryIds.length === 0) {

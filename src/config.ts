@@ -72,7 +72,7 @@ export interface Config {
   /** GitHub OAuth (operator login). Empty strings = OAuth disabled. */
   oauthClientId: string;
   oauthClientSecret: string;
-  /** GitHub user REST numeric ids allowed to operate the UI. Empty denies all OAuth logins. */
+  /** GitHub user REST numeric ids allowed to operate the UI. Empty list refuses to boot when OAuth is enabled. */
   adminGithubIds: number[];
   /** Emergency shared-password form on the login page. Only honored while OAuth is enabled. */
   uiLocalLogin: boolean;

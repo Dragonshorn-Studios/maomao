@@ -358,7 +358,7 @@ describe("manual review trigger", () => {
     });
     expect(tokenlessLogin.status).toBe(403);
     const retry = await csrfArtifacts(tokenlessLogin);
-    expect(retry.html).toContain("form session expired");
+    expect(retry.html).toContain("was missing or expired");
 
     const forged = await app.request("/login", {
       method: "POST",
@@ -708,7 +708,8 @@ describe("oauth operator login", () => {
     const callback = await app.request(`/login/github/callback?code=good-code&state=${state}`);
     expect(callback.status).toBe(403);
     expect(await callback.text()).toContain("not authorized to operate this Maomao instance");
-    expect(callback.headers.get("set-cookie") ?? "").not.toContain(SESSION_COOKIE);
+    // The deny path clears the stale session cookie instead of leaving it in place.
+    expect(callback.headers.get("set-cookie") ?? "").toContain(`${SESSION_COOKIE}=;`);
     expect(String(warn.mock.calls.find(([msg]) => String(msg).includes("oauth login denied"))?.[0])).toContain("id=4242");
     warn.mockRestore();
   });
@@ -742,6 +743,7 @@ describe("oauth operator login", () => {
     expect(html).toContain("GitHub sign-in failed");
     expect(html).not.toContain("csecret");
     expect(html).not.toContain("human-access-token");
+    expect(warn).toHaveBeenCalled();
     warn.mockRestore();
   });
 
@@ -795,5 +797,106 @@ describe("oauth operator login", () => {
     const html = await page.text();
     expect(html).toContain("Sign in with GitHub");
     expect(html).toContain('name="password"');
+  });
+});
+
+describe("oauth operator login hardening", () => {
+  const oauthEnv = {
+    UI_SESSION_SECRET: "session-secret-for-tests",
+    GITHUB_OAUTH_CLIENT_ID: "cid",
+    GITHUB_OAUTH_CLIENT_SECRET: "csecret",
+    MAOMAO_ADMIN_GITHUB_IDS: "1001",
+    MAOMAO_PUBLIC_URL: "https://maomao.example",
+  };
+
+  function stateFrom(location: string | null): string {
+    const match = location?.match(/state=([^&]+)/);
+    if (!match?.[1]) throw new Error(`missing state in ${location}`);
+    return match[1];
+  }
+
+  it("treats a provider-side cancel as user action, not a failure", async () => {
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    const { app } = testApp(oauthEnv, undefined, mockOauthFetch({ id: 1001, login: "octocat" }));
+    for (let i = 0; i < 12; i += 1) {
+      const start = await app.request("/login/github");
+      const state = stateFrom(start.headers.get("location"));
+      const cancelled = await app.request(`/login/github/callback?error=access_denied&state=${state}`);
+      expect(cancelled.status).toBe(400);
+      expect(await cancelled.text()).toContain("was cancelled");
+    }
+    expect(log.mock.calls.some(([msg]) => String(msg).includes("not completed at provider"))).toBe(true);
+    log.mockRestore();
+  });
+
+  it("refuses the disabled password route even with a valid csrf token and empty password", async () => {
+    const { app } = testApp(oauthEnv, undefined, mockOauthFetch({ id: 1001, login: "octocat" }));
+    const start = await app.request("/login/github");
+    const state = stateFrom(start.headers.get("location"));
+    const callback = await app.request(`/login/github/callback?code=good-code&state=${state}`);
+    const session = cookieFrom(callback);
+
+    const page = await app.request("/", { headers: { cookie: session } });
+    const { csrfCookie, csrfToken } = await csrfArtifacts(page);
+    const post = await app.request("/login", {
+      method: "POST",
+      headers: { cookie: `${session}; ${csrfCookie}`, "content-type": "application/x-www-form-urlencoded" },
+      body: `password=&next=%2F&csrf_token=${encodeURIComponent(csrfToken)}`,
+    });
+    expect(post.status).toBe(302);
+    expect(post.headers.get("location")).toBe("/login");
+    expect(post.headers.get("set-cookie") ?? "").not.toMatch(new RegExp(`${SESSION_COOKIE}=v1`));
+  });
+
+  it("replaces a pre-existing (attacker-chosen) session cookie at login", async () => {
+    const { app } = testApp(oauthEnv, undefined, mockOauthFetch({ id: 1001, login: "octocat" }));
+    const attackerCookie = `${SESSION_COOKIE}=v2.attacker.9999999999999.1001.YXR0YWNrZXI..sig`;
+    const start = await app.request("/login/github", { headers: { cookie: attackerCookie } });
+    const state = stateFrom(start.headers.get("location"));
+    const callback = await app.request(
+      `/login/github/callback?code=good-code&state=${state}`,
+      { headers: { cookie: attackerCookie } },
+    );
+    expect(callback.status).toBe(302);
+    const fresh = cookieFrom(callback);
+    expect(fresh).not.toBe(attackerCookie);
+    expect((callback.headers.get("set-cookie") ?? "").match(/maomao_session=([^;]+)/)?.[1]).toBeTruthy();
+  });
+
+  it("logs out an oauth session and clears its cookie", async () => {
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    const { app } = testApp(oauthEnv, undefined, mockOauthFetch({ id: 1001, login: "octocat" }));
+    const start = await app.request("/login/github");
+    const state = stateFrom(start.headers.get("location"));
+    const callback = await app.request(`/login/github/callback?code=good-code&state=${state}`);
+    const session = cookieFrom(callback);
+
+    const page = await app.request("/", { headers: { cookie: session } });
+    const { csrfCookie, csrfToken } = await csrfArtifacts(page);
+    const logout = await app.request("/logout", {
+      method: "POST",
+      headers: { cookie: `${session}; ${csrfCookie}`, "content-type": "application/x-www-form-urlencoded" },
+      body: `csrf_token=${encodeURIComponent(csrfToken)}`,
+    });
+    expect(logout.status).toBe(302);
+    expect(logout.headers.get("location")).toBe("/login");
+    expect(logout.headers.get("set-cookie") ?? "").toContain(`${SESSION_COOKIE}=;`);
+    expect(log.mock.calls.some(([msg]) => String(msg).includes("auth: logout"))).toBe(true);
+    log.mockRestore();
+  });
+
+  it("keeps csrf enforcement active for oauth sessions", async () => {
+    const { app } = testApp(oauthEnv, mockGithub(), mockOauthFetch({ id: 1001, login: "octocat" }));
+    const start = await app.request("/login/github");
+    const state = stateFrom(start.headers.get("location"));
+    const callback = await app.request(`/login/github/callback?code=good-code&state=${state}`);
+    const session = cookieFrom(callback);
+
+    const tokenless = await app.request("/reviews", {
+      method: "POST",
+      headers: { cookie: session, "content-type": "application/x-www-form-urlencoded" },
+      body: "url=https%3A%2F%2Fgithub.com%2Facme%2Fwidgets%2Fpull%2F12",
+    });
+    expect(tokenless.status).toBe(403);
   });
 });

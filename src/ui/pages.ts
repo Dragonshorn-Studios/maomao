@@ -35,15 +35,16 @@ import {
 
 export type { PageOptions };
 
-export type LoginError = "invalid" | "csrf" | "oauth-state" | "oauth-denied" | "oauth-failed";
+export type LoginError = "invalid" | "csrf" | "oauth-state" | "oauth-denied" | "oauth-failed" | "oauth-cancelled";
 
 const LOGIN_ERRORS: Record<LoginError, string> = {
   invalid: "Invalid password.",
-  csrf: "Your form session expired. Submit the form again.",
+  csrf: "This form's security token was missing or expired. Go back and try again.",
   "oauth-state": "Sign-in could not be verified (the state was missing, expired, or replayed). Start again.",
   "oauth-denied":
-    "Your GitHub account is not authorized to operate this Maomao instance. Ask an operator to add your GitHub user id, or sign in as a different user.",
+    "Your GitHub account is not authorized to operate this Maomao instance. Ask an operator to add your GitHub user id, or sign out of GitHub and retry with a different account.",
   "oauth-failed": "GitHub sign-in failed. Try again shortly.",
+  "oauth-cancelled": "GitHub sign-in was cancelled. You can try again.",
 };
 
 export interface LoginOptions {

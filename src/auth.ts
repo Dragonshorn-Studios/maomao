@@ -123,7 +123,8 @@ export interface OAuthSession {
  * OAuth sessions carry the operator identity (stable numeric GitHub id, mutable login and
  * avatar for display only) so the allowlist can be re-checked on every request. The random
  * nonce makes every issued value unique, so each login rotates the session id. Format:
- * `v2.<nonce>.<exp>.<id>.<base64url(login)>.<base64url(avatarUrl)>.<sig>`.
+ * `v2.<nonce>.<exp>.<id>.<base64url(login)>.<base64url(avatarUrl)>.<sig>` where the avatar
+ * segment is empty when `avatarUrl` is null.
  */
 export function signOAuthSession(
   secret: string,
@@ -131,6 +132,9 @@ export function signOAuthSession(
   now = Date.now(),
   ttlMs = SESSION_TTL_MS,
 ): string {
+  if (!Number.isInteger(session.id) || session.id <= 0 || !session.login) {
+    throw new Error("OAuth sessions require a positive numeric id and a login");
+  }
   const nonce = randomBytes(16).toString("base64url");
   const avatar = session.avatarUrl ? Buffer.from(session.avatarUrl, "utf8").toString("base64url") : "";
   const payload = `v2.${nonce}.${now + ttlMs}.${session.id}.${Buffer.from(session.login, "utf8").toString("base64url")}.${avatar}`;
@@ -156,33 +160,25 @@ export function verifyOAuthSession(
   if (!Number.isFinite(exp) || exp <= now) return undefined;
   const id = Number(idRaw);
   if (!Number.isInteger(id) || id <= 0) return undefined;
-  let login: string;
-  try {
-    login = Buffer.from(loginRaw, "base64url").toString("utf8");
-  } catch {
-    return undefined;
-  }
+  // Buffer.from never throws here: the HMAC above already proved the payload is self-produced.
+  const login = Buffer.from(loginRaw, "base64url").toString("utf8");
   if (!login) return undefined;
-  let avatarUrl: string | null = null;
-  if (avatarRaw) {
-    try {
-      const decoded = Buffer.from(avatarRaw, "base64url").toString("utf8");
-      avatarUrl = decoded.startsWith("https://") ? decoded : null;
-    } catch {
-      avatarUrl = null;
-    }
-  }
-  return { id, login, avatarUrl };
+  const avatar = avatarRaw ? Buffer.from(avatarRaw, "base64url").toString("utf8") : "";
+  return { id, login, avatarUrl: avatar.startsWith("https://") ? avatar : null };
 }
 
 /**
  * Single-use OAuth `state` values, held in process memory (matching the in-process queue and
- * rate limiter). `consume` deletes on first read, so replays fail.
+ * rate limiter). `consume` deletes on first read, so replays fail; `issue` sweeps expired
+ * leftovers, so abandoned flows do not accumulate.
  */
 export class OAuthStateStore {
   private readonly entries = new Map<string, { expiresAt: number; next: string }>();
 
-  issue(now = Date.now(), ttlMs = 10 * 60 * 1000, next = "/"): string {
+  issue(now: number, ttlMs: number, next = "/"): string {
+    for (const [nonce, entry] of this.entries) {
+      if (entry.expiresAt <= now) this.entries.delete(nonce);
+    }
     const nonce = randomBytes(16).toString("base64url");
     this.entries.set(nonce, { expiresAt: now + ttlMs, next });
     return nonce;

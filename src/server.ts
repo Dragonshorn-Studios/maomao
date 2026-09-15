@@ -35,8 +35,7 @@ import {
   verifySession,
   type OAuthSession,
 } from "./auth.js";
-import { exchangeOauthCode, fetchGithubUser, oauthAuthorizeUrl, oauthEnabled } from "./oauth.js";
-import type { LoginError } from "./ui/index.js";
+import { exchangeOAuthCode, fetchGithubUser, oauthAuthorizeUrl, oauthEnabled } from "./oauth.js";
 
 export interface ServerContext {
   config: Config;
@@ -53,16 +52,38 @@ const OAUTH_STATE_TTL_MS = 10 * 60 * 1000;
 const OAUTH_START_LIMIT = 30;
 const OAUTH_FAIL_LIMIT = 10;
 const OAUTH_WINDOW_MS = 10 * 60 * 1000;
+/** Global ceilings (10x per-IP) contain distributed abuse without letting one visitor lock everyone out. */
+const OAUTH_GLOBAL_MULTIPLIER = 10;
 
-export function createApp(ctx: ServerContext): Hono<{ Variables: { identity?: OAuthSession } }> {
-  const app = new Hono<{ Variables: { identity?: OAuthSession } }>();
+type AppEnv = { Variables: { identity?: OAuthSession } };
+
+function clientKey(c: Context<AppEnv>): string {
+  const first = c.req.header("x-forwarded-for")?.split(",")[0]?.trim();
+  return first || "local";
+}
+
+function setSessionCookie(c: Context<AppEnv>, value: string): void {
+  setCookie(c, SESSION_COOKIE, value, {
+    httpOnly: true,
+    sameSite: "Lax",
+    secure: cookieSecure(c.req.url, c.req.header("x-forwarded-proto")),
+    path: "/",
+    maxAge: Math.floor(SESSION_TTL_MS / 1000),
+  });
+}
+
+export function createApp(ctx: ServerContext): Hono<AppEnv> {
+  const app = new Hono<AppEnv>();
   const oauthOn = oauthEnabled(ctx.config);
   const passwordGateOn = uiGateEnabled(ctx.config.uiPassword, ctx.config.uiSessionSecret);
   const gateOn = oauthOn || passwordGateOn;
   const passwordLoginOn = passwordGateOn && (!oauthOn || ctx.config.uiLocalLogin);
   const pageOpts = { showLogout: gateOn };
   const loginPageOpts = { showGithub: oauthOn, showPassword: passwordLoginOn };
-  const renderLoginDenied = (c: Context) => c.html(renderLogin({ ...loginPageOpts, error: "oauth-denied" }), 403);
+  const renderLoginDenied = (c: Context<AppEnv>) => {
+    deleteCookie(c, SESSION_COOKIE, { path: "/" });
+    return c.html(renderLogin({ ...loginPageOpts, error: "oauth-denied" }), 403);
+  };
   const rateLimiter = ctx.rateLimiter ?? new RepoRateLimiter();
   const authLimiter = new WindowRateLimiter();
   const oauthStates = new OAuthStateStore();
@@ -75,6 +96,8 @@ export function createApp(ctx: ServerContext): Hono<{ Variables: { identity?: OA
       // Re-check the allowlist on every request so removing an id revokes live sessions immediately.
       if (!ctx.config.adminGithubIds.includes(oauthSession.id)) {
         console.warn(`auth: session denied (not allowlisted) id=${oauthSession.id} login=${oauthSession.login}`);
+        // Clear the stale cookie so the noise (and the denial) ends after this response.
+        deleteCookie(c, SESSION_COOKIE, { path: "/" });
         if (c.req.path.startsWith("/api/") || c.req.path === "/events") {
           return c.json({ error: "forbidden" }, 403);
         }
@@ -143,11 +166,17 @@ export function createApp(ctx: ServerContext): Hono<{ Variables: { identity?: OA
   });
 
   app.post("/login", async (c) => {
-    if (!passwordLoginOn) return c.redirect("/login", 302);
+    if (!passwordLoginOn) {
+      console.warn("auth: password login attempted while disabled");
+      return c.redirect("/login", 302);
+    }
     const body = await c.req.parseBody();
     const password = typeof body.password === "string" ? body.password : "";
     const nextPath = safeNextPath(typeof body.next === "string" ? body.next : c.req.query("next"));
-    if (!passwordsMatch(password, ctx.config.uiPassword)) {
+    // The explicit uiPassword check matters: passwordsMatch("", "") is true, and uiPassword is
+    // "" whenever the password gate is off.
+    if (!ctx.config.uiPassword || !passwordsMatch(password, ctx.config.uiPassword)) {
+      console.warn("auth: password login failed");
       return c.html(
         renderLogin({
           ...loginPageOpts,
@@ -158,72 +187,80 @@ export function createApp(ctx: ServerContext): Hono<{ Variables: { identity?: OA
         401,
       );
     }
-    setCookie(c, SESSION_COOKIE, signSession(ctx.config.uiSessionSecret), {
-      httpOnly: true,
-      sameSite: "Lax",
-      secure: cookieSecure(c.req.url, c.req.header("x-forwarded-proto")),
-      path: "/",
-      maxAge: Math.floor(SESSION_TTL_MS / 1000),
-    });
+    console.log("auth: password login");
+    setSessionCookie(c, signSession(ctx.config.uiSessionSecret));
     return c.redirect(nextPath, 302);
   });
 
   app.get("/login/github", (c) => {
     if (!oauthOn) return c.redirect("/login", 302);
-    if (!authLimiter.wouldAllow("oauth-start", OAUTH_START_LIMIT, OAUTH_WINDOW_MS)) {
+    const ip = clientKey(c);
+    if (
+      !authLimiter.wouldAllow(`start:${ip}`, OAUTH_START_LIMIT, OAUTH_WINDOW_MS) ||
+      !authLimiter.wouldAllow("start:global", OAUTH_START_LIMIT * OAUTH_GLOBAL_MULTIPLIER, OAUTH_WINDOW_MS)
+    ) {
+      console.warn(`auth: oauth start rate limit tripped ip=${ip}`);
       return c.text("Too many sign-in attempts; try again later.", 429);
     }
-    authLimiter.record("oauth-start", OAUTH_START_LIMIT, OAUTH_WINDOW_MS);
+    authLimiter.record(`start:${ip}`, OAUTH_START_LIMIT, OAUTH_WINDOW_MS);
+    authLimiter.record("start:global", OAUTH_START_LIMIT * OAUTH_GLOBAL_MULTIPLIER, OAUTH_WINDOW_MS);
     const state = oauthStates.issue(Date.now(), OAUTH_STATE_TTL_MS, safeNextPath(c.req.query("next")));
     return c.redirect(oauthAuthorizeUrl(ctx.config, state), 302);
   });
 
   app.get("/login/github/callback", async (c) => {
     if (!oauthOn) return c.redirect("/login", 302);
-    if (!authLimiter.wouldAllow("oauth-fail", OAUTH_FAIL_LIMIT, OAUTH_WINDOW_MS)) {
+    const ip = clientKey(c);
+    if (
+      !authLimiter.wouldAllow(`fail:${ip}`, OAUTH_FAIL_LIMIT, OAUTH_WINDOW_MS) ||
+      !authLimiter.wouldAllow("fail:global", OAUTH_FAIL_LIMIT * OAUTH_GLOBAL_MULTIPLIER, OAUTH_WINDOW_MS)
+    ) {
+      console.warn(`auth: oauth failure rate limit tripped ip=${ip}`);
       return c.text("Too many failed sign-ins; try again later.", 429);
     }
     const url = new URL(c.req.url);
-    const code = url.searchParams.get("code") ?? "";
     const next = oauthStates.consume(url.searchParams.get("state") ?? undefined);
     if (next === undefined) {
-      authLimiter.record("oauth-fail", OAUTH_FAIL_LIMIT, OAUTH_WINDOW_MS);
-      console.warn("auth: oauth state rejected (missing, expired, or replayed)");
+      authLimiter.record(`fail:${ip}`, OAUTH_FAIL_LIMIT, OAUTH_WINDOW_MS);
+      authLimiter.record("fail:global", OAUTH_FAIL_LIMIT * OAUTH_GLOBAL_MULTIPLIER, OAUTH_WINDOW_MS);
+      console.warn(`auth: oauth state rejected (missing, expired, or replayed) ip=${ip}`);
       return c.html(renderLogin({ ...loginPageOpts, error: "oauth-state" }), 403);
     }
+    const providerError = url.searchParams.get("error");
+    if (providerError) {
+      // User-initiated cancel or provider-side refusal: no code exists, so this is not a
+      // protocol failure and does not count toward the failure budget.
+      console.log(`auth: oauth sign-in not completed at provider (${providerError}) ip=${ip}`);
+      return c.html(renderLogin({ ...loginPageOpts, error: "oauth-cancelled" }), 400);
+    }
     const fetchImpl = ctx.oauthFetch ?? fetch;
-    const accessToken = await exchangeOauthCode(ctx.config, code, fetchImpl).catch(() => undefined);
-    const user = accessToken ? await fetchGithubUser(accessToken, fetchImpl).catch(() => undefined) : undefined;
+    const accessToken = await exchangeOAuthCode(ctx.config, url.searchParams.get("code") ?? "", fetchImpl);
+    const user = accessToken ? await fetchGithubUser(accessToken, fetchImpl) : undefined;
     if (!user) {
-      authLimiter.record("oauth-fail", OAUTH_FAIL_LIMIT, OAUTH_WINDOW_MS);
+      authLimiter.record(`fail:${ip}`, OAUTH_FAIL_LIMIT, OAUTH_WINDOW_MS);
+      authLimiter.record("fail:global", OAUTH_FAIL_LIMIT * OAUTH_GLOBAL_MULTIPLIER, OAUTH_WINDOW_MS);
       console.warn("auth: oauth token exchange or user lookup failed");
       return c.html(renderLogin({ ...loginPageOpts, error: "oauth-failed" }), 502);
     }
     if (!ctx.config.adminGithubIds.includes(user.id)) {
-      authLimiter.record("oauth-fail", OAUTH_FAIL_LIMIT, OAUTH_WINDOW_MS);
-      console.warn(`auth: oauth login denied id=${user.id} login=${user.login}`);
+      authLimiter.record(`fail:${ip}`, OAUTH_FAIL_LIMIT, OAUTH_WINDOW_MS);
+      authLimiter.record("fail:global", OAUTH_FAIL_LIMIT * OAUTH_GLOBAL_MULTIPLIER, OAUTH_WINDOW_MS);
+      console.warn(`auth: oauth login denied id=${user.id} login=${user.login} ip=${ip}`);
       return renderLoginDenied(c);
     }
     // Rotation: always issue a fresh session value at login; the human access token above is
     // used once for identity and never stored.
-    setCookie(
+    setSessionCookie(
       c,
-      SESSION_COOKIE,
       signOAuthSession(ctx.config.uiSessionSecret, { id: user.id, login: user.login, avatarUrl: user.avatarUrl }),
-      {
-        httpOnly: true,
-        sameSite: "Lax",
-        secure: cookieSecure(c.req.url, c.req.header("x-forwarded-proto")),
-        path: "/",
-        maxAge: Math.floor(SESSION_TTL_MS / 1000),
-      },
     );
     console.log(`auth: oauth login id=${user.id} login=${user.login}`);
     return c.redirect(safeNextPath(next), 302);
   });
 
   app.post("/logout", (c) => {
-    const identity = c.get("identity");
+    // /logout is a public path, so the session middleware never set `identity`; derive it here.
+    const identity = verifyOAuthSession(ctx.config.uiSessionSecret, getCookie(c, SESSION_COOKIE));
     if (identity) console.log(`auth: logout id=${identity.id} login=${identity.login}`);
     deleteCookie(c, SESSION_COOKIE, { path: "/" });
     return c.redirect(gateOn ? "/login" : "/", 302);
@@ -425,11 +462,11 @@ export function createApp(ctx: ServerContext): Hono<{ Variables: { identity?: OA
     );
   });
 
-  app.post("/jobs/:id/retry", (c) => retryJob(c, ctx, Number(c.req.param("id"))));
+  app.post("/jobs/:id/retry", (c) => retryJob(c, ctx, pageOpts, Number(c.req.param("id"))));
   app.post("/jobs/:id/reviewers/:runId/retry", (c) => {
     const runId = Number(c.req.param("runId"));
     if (!Number.isFinite(runId)) return c.text("Not found", 404);
-    return retryJob(c, ctx, Number(c.req.param("id")), runId);
+    return retryJob(c, ctx, pageOpts, Number(c.req.param("id")), runId);
   });
 
   app.get("/api/jobs", (c) => {
@@ -510,17 +547,22 @@ function ensureCsrfToken(c: Context, secret: string): string {
   return token;
 }
 
-function retryJob(c: Context, ctx: ServerContext, jobId: number, runId?: number) {
+function retryJob(
+  c: Context<AppEnv>,
+  ctx: ServerContext,
+  pageOpts: { showLogout: boolean },
+  jobId: number,
+  runId?: number,
+) {
   const job = ctx.store.getJob(jobId);
   if (!job) return c.text("Not found", 404);
   const result = ctx.store.retryFailedReviewers(jobId, runId);
   if (!result.ok) {
-    const gate = oauthEnabled(ctx.config) || uiGateEnabled(ctx.config.uiPassword, ctx.config.uiSessionSecret);
     return c.html(
       renderJob(job, ctx.store.listReviewerRuns(jobId), ctx.store.listLogs(jobId), {
-        showLogout: gate,
+        ...pageOpts,
         identity: c.get("identity"),
-        csrfToken: gate ? ensureCsrfToken(c, ctx.config.uiSessionSecret) : undefined,
+        csrfToken: pageOpts.showLogout ? ensureCsrfToken(c, ctx.config.uiSessionSecret) : undefined,
         error: result.error,
         prFindings: ctx.store.listFindings(job.repo_full_name, job.pr_number),
       }),

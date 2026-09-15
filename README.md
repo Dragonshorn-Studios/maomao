@@ -291,7 +291,7 @@ UI_PASSWORD=a-long-password
 UI_SESSION_SECRET=a-long-random-string   # e.g. openssl rand -hex 32
 ```
 
-Aliases: `MAOMAO_UI_PASSWORD`, `MAOMAO_UI_SESSION_SECRET`. Setting `UI_PASSWORD` without `UI_SESSION_SECRET` is a startup error (`UI_SESSION_SECRET` alone is valid when OAuth provides the login).
+Aliases: `MAOMAO_UI_PASSWORD`, `MAOMAO_UI_SESSION_SECRET`. Setting `UI_PASSWORD` without `UI_SESSION_SECRET` is a startup error (`UI_SESSION_SECRET` alone is accepted, but without OAuth **or** `UI_PASSWORD` the gate stays off and the UI is open).
 
 With the password gate on, GET/POST `/login` issues an **HttpOnly**, **SameSite=Lax** cookie (`maomao_session`), signed with `UI_SESSION_SECRET`. The cookie is **Secure** when the request is HTTPS (including `X-Forwarded-Proto: https`). Unauthenticated HTML pages redirect to `/login`; `/api/*` and `/events` return 401. `/webhooks/github`, `/health`, and `/assets/maomao.css` stay public (no cookie).
 
@@ -311,15 +311,16 @@ MAOMAO_PUBLIC_URL=https://maomao.example
 UI_SESSION_SECRET=a-long-random-string
 ```
 
-Register the OAuth App with the exact callback `https://maomao.example/login/github/callback` (no wildcards). Configuration is validated at startup: half-configured OAuth, an empty allowlist, a missing `MAOMAO_PUBLIC_URL`, or a missing `UI_SESSION_SECRET` refuses to boot.
+Register the OAuth App with the exact callback `https://maomao.example/login/github/callback` (no wildcards). Configuration is validated at startup: half-configured OAuth, an empty allowlist, a missing `MAOMAO_PUBLIC_URL`, a missing `UI_SESSION_SECRET`, or `UI_LOCAL_LOGIN` without a working password gate refuses to boot.
 
 Behavior and boundaries:
 
-- The flow is GitHub's authorization-code flow with a short-lived, single-use `state` (10 minutes, in-process); GitHub OAuth apps do not support PKCE, so the state plus the exact registered callback carry that role.
+- The flow is GitHub's authorization-code flow with a short-lived, single-use `state` (10 minutes, in-process) as a confidential client: the state plus the exact registered callback carry the CSRF/code-injection role, and the client secret authenticates the exchange. GitHub has supported PKCE (S256) since 2025-07; adding it would be defense-in-depth.
 - Authorization uses **stable numeric GitHub user ids only** (`MAOMAO_ADMIN_GITHUB_IDS`). The `login` and avatar shown in the header are display-only and never used as an authorization key.
-- The allowlist is re-checked on **every request**, so removing an id revokes live sessions immediately, and the login flow re-checks it before issuing a session. Denials are logged without credentials.
+- The allowlist is re-checked on **every request**, so removing an id revokes live sessions immediately, and the login flow re-checks it before issuing a session. Denials are logged with the numeric id and login but never tokens or secrets.
 - Login always issues a fresh session value (no session fixation), logout invalidates the cookie, and login/callback endpoints are rate-limited (30 starts / 10 callback failures per 10 minutes).
 - The human OAuth access token is used once to resolve identity and is then discarded — it is never stored, logged, or used for review jobs or repository checkout. Reviews keep running under the **GitHub App installation identity**.
+- Logins, logouts, denials, and state rejections all emit credential-free audit lines; password logins (when the emergency path is enabled) do the same.
 - Org/team membership policies are not inferred, and repository visibility grants no UI access.
 
 **Emergency local login.** The shared-password form is hidden while OAuth is enabled. Set `UI_LOCAL_LOGIN=true` (plus `UI_PASSWORD`/`UI_SESSION_SECRET`) to show it as a recovery path; it stays off by default.
