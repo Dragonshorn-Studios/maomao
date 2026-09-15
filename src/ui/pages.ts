@@ -11,6 +11,7 @@ import {
   observationsCopy,
   runStateLabel,
   severityLabel,
+  settledFindingsCopy,
   staleBanner,
   unconfirmedFindingsBanner,
   usageIncompleteCopy,
@@ -373,32 +374,38 @@ function renderFindings(metrics: JobMetrics, persisted: FindingRow[] = []): stri
 
   const byFingerprint = new Map(persisted.map((row) => [row.fingerprint, row]));
   const seen = new Set<string>();
-  const cards: string[] = [];
+  const active: string[] = [];
+  const settled: string[] = [];
+
+  const pushCard = (
+    cardInput: Parameters<typeof renderFindingCard>[0],
+  ) => {
+    const settledRow = cardInput.record?.status === "dismissed" || cardInput.record?.status === "resolved";
+    (settledRow ? settled : active).push(renderFindingCard(cardInput, settledRow));
+  };
 
   for (const finding of items) {
     const fingerprint = fingerprintFinding(finding);
     const record = byFingerprint.get(fingerprint);
     if (record) seen.add(fingerprint);
-    cards.push(
-      renderFindingCard({
-        severity: finding.severity,
-        category: finding.category || finding.role,
-        file: finding.file,
-        line: finding.line,
-        summary: finding.summary,
-        reason: "reason" in finding ? finding.reason : "",
-        suggested: "suggested_check" in finding ? finding.suggested_check : undefined,
-        agreed:
-          "reviewers_agreed" in finding && Array.isArray(finding.reviewers_agreed) ? finding.reviewers_agreed : [],
-        unconfirmed,
-        record,
-      }),
-    );
+    pushCard({
+      severity: finding.severity,
+      category: finding.category || finding.role,
+      file: finding.file,
+      line: finding.line,
+      summary: finding.summary,
+      reason: "reason" in finding ? finding.reason : "",
+      suggested: "suggested_check" in finding ? finding.suggested_check : undefined,
+      agreed:
+        "reviewers_agreed" in finding && Array.isArray(finding.reviewers_agreed) ? finding.reviewers_agreed : [],
+      unconfirmed,
+      record,
+    });
   }
 
   for (const row of persisted) {
     if (seen.has(row.fingerprint)) continue;
-    cards.push(renderFindingCard({
+    pushCard({
       severity: row.severity || "info",
       category: row.category || "",
       file: row.current_path ?? row.original_path ?? undefined,
@@ -407,31 +414,40 @@ function renderFindings(metrics: JobMetrics, persisted: FindingRow[] = []): stri
       reason: row.body ?? "",
       unconfirmed: false,
       record: row,
-    }));
+    });
   }
 
-  if (cards.length === 0) {
+  if (active.length === 0 && settled.length === 0) {
     return `<p class="muted">${metrics.aggregator?.verdict === "clean" ? "No suspicious findings" : "No normalized findings yet."}</p>`;
   }
 
   const banner = unconfirmed
     ? `<p class="findings-provisional" role="status">${escapeHtml(unconfirmedFindingsBanner())}</p>`
     : "";
-  return banner + cards.join("");
+  const buriedCount = persisted.filter((row) => row.status === "dismissed").length;
+  const resolvedCount = persisted.filter((row) => row.status === "resolved").length;
+  const settledBlock =
+    settled.length === 0
+      ? ""
+      : `<p class="muted settled-findings-label">${escapeHtml(settledFindingsCopy(buriedCount, resolvedCount))}</p>${settled.join("")}`;
+  return banner + active.join("") + settledBlock;
 }
 
-function renderFindingCard(input: {
-  severity: string;
-  category: string;
-  file?: string;
-  line?: number | null;
-  summary: string;
-  reason: string;
-  suggested?: string;
-  agreed?: string[];
-  unconfirmed: boolean;
-  record?: FindingRow;
-}): string {
+function renderFindingCard(
+  input: {
+    severity: string;
+    category: string;
+    file?: string;
+    line?: number | null;
+    summary: string;
+    reason: string;
+    suggested?: string;
+    agreed?: string[];
+    unconfirmed: boolean;
+    record?: FindingRow;
+  },
+  collapsed = false,
+): string {
   const sev = severityLabel(input.severity);
   const loc = findingLocation({ file: input.file, line: input.line ?? undefined });
   const record = input.record;
@@ -448,23 +464,42 @@ function renderFindingCard(input: {
     input.unconfirmed ? "is-unconfirmed" : "",
     buried ? "is-buried" : "",
     resolved ? "is-resolved" : "",
+    collapsed ? "is-collapsed" : "",
     record && record.status !== "open" ? `finding-status-${escapeHtml(record.status)}` : "",
   ]
     .filter(Boolean)
     .join(" ");
+  const statusBadge = status
+    ? `<span class="finding-status finding-status-${escapeHtml(record!.status)}" title="${escapeHtml(status.hint)}">${escapeHtml(status.text)}</span>`
+    : "";
+  const body = `
+        ${override ? `<p class="finding-override" role="status"><strong>${escapeHtml(override)}</strong></p>` : ""}
+        ${attention ? `<p><strong>${attention}</strong></p>` : ""}
+        ${input.reason ? `<p>${escapeHtml(input.reason)}</p>` : ""}
+        ${input.suggested ? `<p class="muted">Suggested check: ${escapeHtml(input.suggested)}</p>` : ""}
+        ${input.agreed?.length ? `<p class="muted">reviewers: ${escapeHtml(input.agreed.join(", "))}</p>` : ""}`;
+  if (collapsed) {
+    return `<details class="${classes}">
+        <summary>
+          ${statusBadge}
+          <span class="sev sev-${escapeHtml(input.severity)}"><span class="mark" aria-hidden="true">${sev.mark}</span> ${sev.text}</span>
+          ${loc ? `<span class="loc">${escapeHtml(loc)}</span>` : ""}
+          <span class="finding-title">${escapeHtml(input.summary)}</span>
+        </summary>
+        ${input.category ? `<p class="muted">${escapeHtml(input.category)}</p>` : ""}
+        ${body}
+      </details>`;
+  }
   return `<article class="${classes}">
         <div class="finding-head">
           <span class="sev sev-${escapeHtml(input.severity)}"><span class="mark" aria-hidden="true">${sev.mark}</span> ${sev.text}</span>
-          ${status ? `<span class="finding-status finding-status-${escapeHtml(record!.status)}" title="${escapeHtml(status.hint)}">${escapeHtml(status.text)}</span>` : ""}
+          ${statusBadge}
           ${input.unconfirmed ? `<span class="unconfirmed">Unconfirmed</span>` : ""}
           ${input.category ? `<span>· ${escapeHtml(input.category)}</span>` : ""}
           ${input.agreed?.length ? `<span class="muted">reviewers: ${escapeHtml(input.agreed.join(", "))}</span>` : ""}
         </div>
         ${loc ? `<p class="loc">${escapeHtml(loc)}</p>` : ""}
         <h3>${escapeHtml(input.summary)}</h3>
-        ${override ? `<p class="finding-override" role="status"><strong>${escapeHtml(override)}</strong></p>` : ""}
-        ${attention ? `<p><strong>${attention}</strong></p>` : ""}
-        ${input.reason ? `<p>${escapeHtml(input.reason)}</p>` : ""}
-        ${input.suggested ? `<p class="muted">Suggested check: ${escapeHtml(input.suggested)}</p>` : ""}
+        ${body}
       </article>`;
 }

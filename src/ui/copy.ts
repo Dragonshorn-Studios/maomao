@@ -134,3 +134,11 @@ export function findingOverrideNote(finding: {
   }
   return undefined;
 }
+
+export function settledFindingsCopy(buried: number, resolved: number): string {
+  const parts: string[] = [];
+  if (buried) parts.push(buried === 1 ? "1 buried" : `${buried} buried`);
+  if (resolved) parts.push(resolved === 1 ? "1 resolved" : `${resolved} resolved`);
+  if (parts.length === 0) return "Settled findings";
+  return `${parts.join(", ")} — expand a row for details`;
+}

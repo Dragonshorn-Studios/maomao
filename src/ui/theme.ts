@@ -598,8 +598,56 @@ form.retry, form.retry-job {
 
 .finding.is-buried,
 .finding.is-resolved {
-  opacity: 0.92;
   border-style: dashed;
+}
+details.finding:not([open]) {
+  opacity: 0.82;
+}
+details.finding {
+  padding: 0.45rem 0.75rem;
+  margin: 0 0 0.4rem;
+}
+details.finding > summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.3rem 0.55rem;
+  align-items: baseline;
+  cursor: pointer;
+  color: var(--ink);
+  list-style: none;
+}
+details.finding > summary::-webkit-details-marker,
+details.finding > summary::marker {
+  display: none;
+}
+details.finding > summary::before {
+  content: "▸";
+  color: var(--ash);
+  font-size: 0.72rem;
+  width: 0.7rem;
+  flex: none;
+}
+details.finding[open] > summary::before {
+  content: "▾";
+}
+details.finding[open] > summary {
+  margin-bottom: 0.35rem;
+  padding-bottom: 0.35rem;
+  border-bottom: 1px dashed var(--line);
+}
+details.finding .finding-title {
+  flex: 1 1 10rem;
+  font-family: var(--font-ui);
+  font-weight: 600;
+  font-size: 0.92rem;
+}
+details.finding .loc {
+  margin: 0;
+  font-size: 0.78rem;
+}
+.settled-findings-label {
+  margin: 1rem 0 0.45rem;
+  font-size: 0.82rem;
 }
 .finding-override {
   color: var(--plum);
