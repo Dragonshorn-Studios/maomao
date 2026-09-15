@@ -44,7 +44,7 @@ describe("theme tokens", () => {
 
 describe("monitoring pages", () => {
   it("renders login with appearance controls and no live SSE", () => {
-    const html = renderLogin(undefined, "/jobs/1");
+    const html = renderLogin({ nextPath: "/jobs/1", showPassword: true });
     expect(html).toContain("Sign in");
     expect(html).toContain('data-appearance="light"');
     expect(html).toContain('data-appearance="dark"');

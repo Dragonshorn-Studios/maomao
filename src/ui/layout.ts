@@ -13,6 +13,7 @@ export interface PageOptions {
   reviewUrl?: string;
   prFindings?: FindingRow[];
   csrfToken?: string;
+  identity?: { login: string; avatarUrl: string | null };
 }
 
 export function csrfInput(token: string | undefined): string {
@@ -68,6 +69,9 @@ export function layout(title: string, body: string, options: PageOptions = {}): 
   const logout = options.showLogout
     ? `<form method="post" action="/logout" class="logout">${csrfInput(options.csrfToken)}<button type="submit">Log out</button></form>`
     : "";
+  const identity = options.identity
+    ? `<span class="who">${options.identity.avatarUrl ? `<img class="who-avatar" src="${escapeHtml(options.identity.avatarUrl)}" alt="" width="20" height="20"/> ` : ""}signed in as <strong>${escapeHtml(options.identity.login)}</strong></span>`
+    : "";
   const script = live
     ? `<script>
     if (!new URLSearchParams(location.search).has("static")) {
@@ -112,6 +116,7 @@ export function layout(title: string, body: string, options: PageOptions = {}): 
       <button type="button" data-appearance="system" aria-pressed="true">System</button>
     </div>
     <a class="top-link" href="/health">health</a>
+    ${identity}
     ${logout}
   </header>
   <main id="main">${body}</main>

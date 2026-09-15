@@ -210,6 +210,20 @@ a:hover { color: var(--herb); }
   text-decoration: none;
   padding: 0.2rem 0;
 }
+.who {
+  font-size: 0.85rem;
+  color: var(--ink-muted);
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+}
+.who strong { color: var(--ink); }
+.who-avatar { border-radius: 50%; vertical-align: middle; }
+.github-login {
+  display: inline-block;
+  margin: 0.35rem 0;
+  font-weight: 600;
+}
 
 main {
   padding: 1.25rem 1.35rem 3rem;
