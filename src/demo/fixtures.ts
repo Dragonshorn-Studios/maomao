@@ -720,5 +720,5 @@ function seedPoisonSniffing(store: JobStore): void {
     internal_escalation_model: AGG_MODEL,
     internal_escalation_provider: PROVIDER,
   });
-  store.log(job.id, "Internal poison-alert pass model=opencode/gpt-oss:20b");
+  store.log(job.id, `Internal poison-alert pass model=${AGG_MODEL}`);
 }

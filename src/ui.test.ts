@@ -288,13 +288,13 @@ describe("poison alert card", () => {
     const store = seededStore();
     const job = jobByTitle(store, "Rotate billing webhook signing keys");
     const html = renderJob(job, store.listReviewerRuns(job.id), store.listLogs(job.id));
-    expect(html).toContain("Poison alert");
-    expect(html).toContain("laboratory re-check only");
-    expect(html).toContain("Internal model");
-    expect(html).toContain("Laboratory re-check finished");
-    expect(html).not.toContain("External dispatch");
-    expect(html).not.toContain("0 tokens");
-    expect(html).not.toContain("not requested");
+    const card = html.slice(html.indexOf("<h2>Poison alert</h2>"));
+    expect(card).toContain("Poison alert");
+    expect(card).toContain("laboratory re-check only");
+    expect(card).toContain("Internal model");
+    expect(card).toContain("Laboratory re-check finished");
+    expect(card).not.toContain("External dispatch");
+    expect(card).not.toContain("0 tokens");
   });
 
   it("renders both channels with badges when the policy requests them", () => {
@@ -367,6 +367,41 @@ describe("poison alert card", () => {
     const aggregating = jobByTitle(store, "Deprecate v1 list endpoint");
     const html = renderJob(aggregating, store.listReviewerRuns(aggregating.id), store.listLogs(aggregating.id));
     expect(html).toContain("Aggregation in progress");
+    expect(html).not.toContain("Laboratory re-check of the aggregated findings");
     expect(html).not.toContain("Laboratory re-check for PR #88");
+  });
+
+  it("renders manual-policy jobs as waiting, or both channels once escalate is requested", () => {
+    const store = seededStore();
+    const job = jobByTitle(store, "Rotate billing webhook signing keys");
+    store.patchJob(job.id, {
+      poison_alert_policy: "manual",
+      internal_escalation_state: "not_requested",
+      manual_escalate_requested: 0,
+    });
+    const waiting = renderJob(store.getJob(job.id)!, store.listReviewerRuns(job.id), store.listLogs(job.id));
+    const waitingCard = waiting.slice(waiting.indexOf("<h2>Poison alert</h2>"));
+    expect(waitingCard).toContain("waiting for a manual @maomao escalate");
+    expect(waitingCard).not.toContain("Internal model");
+    expect(waitingCard).not.toContain("External dispatch");
+
+    store.patchJob(job.id, { manual_escalate_requested: 1 });
+    const requested = renderJob(store.getJob(job.id)!, store.listReviewerRuns(job.id), store.listLogs(job.id));
+    const requestedCard = requested.slice(requested.indexOf("<h2>Poison alert</h2>"));
+    // Manual escalate triggers the external dispatch; the internal pass is policy-gated elsewhere.
+    expect(requestedCard).toContain("manual escalate requested");
+    expect(requestedCard).toContain("external dispatch only");
+    expect(requestedCard).toContain("External dispatch");
+    expect(requestedCard).not.toContain("Internal model");
+  });
+
+  it("renders a pending policy for a poison-alert profile before the pipeline records one", () => {
+    const store = seededStore();
+    const job = jobByTitle(store, "Deprecate v1 list endpoint");
+    store.patchJob(job.id, { routing_profile: "poison-alert", poison_alert_policy: null });
+    const html = renderJob(store.getJob(job.id)!, store.listReviewerRuns(job.id), store.listLogs(job.id));
+    expect(html).toContain("Poison alert");
+    expect(html).not.toContain("Policy</strong> manual");
+    expect(html).toContain("Policy</strong> pending");
   });
 });

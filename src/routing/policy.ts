@@ -1,6 +1,6 @@
 import { severityRank, type AggregatorFinding, type AggregatorResult, type Severity } from "../schema.js";
 import type { InternalEscalationResult } from "./schema.js";
-import type { PoisonAlertPolicy } from "./types.js";
+import { POLICIES_WITH_INTERNAL, type PoisonAlertPolicy } from "./types.js";
 
 export function assignFindingIds(findings: AggregatorFinding[]): Array<AggregatorFinding & { id: string }> {
   return findings.map((finding, index) => ({
@@ -54,7 +54,7 @@ export function mergeInternalEscalation(
 
 export function shouldRunInternal(policy: PoisonAlertPolicy, enabled: boolean, profile: string): boolean {
   if (!enabled || profile !== "poison-alert") return false;
-  return policy === "internal_only" || policy === "internal_then_external" || policy === "internal_and_external";
+  return (POLICIES_WITH_INTERNAL as readonly string[]).includes(policy);
 }
 
 export function shouldRunExternal(input: {

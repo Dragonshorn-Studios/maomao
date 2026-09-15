@@ -1,6 +1,8 @@
 import type { JobRow, JobStore, ReviewerRunRow } from "../jobs/store.js";
 import type { FindingRow } from "../findings/types.js";
 import { fingerprintFinding } from "../findings/identity.js";
+import { POLICIES_WITH_EXTERNAL, POLICIES_WITH_INTERNAL } from "../routing/types.js";
+import type { JobState } from "../config.js";
 import { elapsedMs, escapeHtml, formatDuration, shortSha } from "../util.js";
 import {
   emptyQueueCopy,
@@ -220,10 +222,19 @@ export function renderJob(
 function renderQueueCard(job: JobRow, metrics: JobMetrics): string {
   const state = jobStateLabel(job.state);
   const elapsed = formatDuration(elapsedMs(job.started_at, job.finished_at) ?? elapsedMs(job.created_at));
-  const live = ["preparing", "reconciling", "routing", "reviewing", "aggregating", "sniffing", "publishing"].includes(job.state);
+  const live: readonly JobState[] = [
+    "preparing",
+    "reconciling",
+    "routing",
+    "reviewing",
+    "aggregating",
+    "sniffing",
+    "publishing",
+  ];
+  const isLive = live.includes(job.state);
   const flavor = flavorForJob(job.state, job.pr_number);
   return `<li>
-    <article class="specimen${live ? " is-live" : ""}">
+    <article class="specimen${isLive ? " is-live" : ""}">
       <div class="specimen-head">
         <span class="specimen-id">Specimen · job ${job.id}</span>
         ${renderState(job.state, state.text, state.hint, state.mark)}
@@ -272,22 +283,24 @@ function renderRouting(job: JobRow): string {
 }
 
 function renderEscalation(job: JobRow): string {
+  // The pipeline persists poison_alert_policy only once work starts, so an absent policy is
+  // rendered as "pending" (a live poison-alert job has not reached its escalation plan yet).
   const policy = job.poison_alert_policy || "";
   const manual = Boolean(job.manual_escalate_requested);
   const internalState = job.internal_escalation_state;
   const externalStatus = job.external_dispatch_status;
   const internalObserved = Boolean(internalState && internalState !== "not_requested");
   const externalObserved = Boolean(externalStatus && externalStatus !== "not_requested");
-  const show = Boolean(policy) || manual || internalObserved || externalObserved;
+  const show =
+    Boolean(policy) || job.routing_profile === "poison-alert" || manual || internalObserved || externalObserved;
   if (!show) return "";
 
   const internalRequested =
-    ["internal_only", "internal_then_external", "internal_and_external"].includes(policy) ||
-    (policy === "manual" && manual) ||
-    internalObserved;
+    (POLICIES_WITH_INTERNAL as readonly string[]).includes(policy) || internalObserved;
   const externalRequested =
-    ["external_only", "internal_then_external", "internal_and_external"].includes(policy) ||
+    (POLICIES_WITH_EXTERNAL as readonly string[]).includes(policy) ||
     (policy === "manual" && manual) ||
+    (!policy && manual) ||
     externalObserved;
 
   const plan = internalRequested && externalRequested
@@ -296,7 +309,9 @@ function renderEscalation(job: JobRow): string {
       ? "laboratory re-check only"
       : externalRequested
         ? "external dispatch only"
-        : "waiting for a manual @maomao escalate";
+        : policy === "manual" || (!policy && !internalObserved && !externalObserved)
+          ? "waiting for a manual @maomao escalate"
+          : "escalation pending";
 
   const channels: string[] = [];
   if (internalRequested) {
@@ -315,7 +330,8 @@ function renderEscalation(job: JobRow): string {
       ${job.internal_escalation_reason ? `<p>${escapeHtml(job.internal_escalation_reason)}</p>` : ""}`);
   }
   if (externalRequested) {
-    const badge = externalDispatchBadge(externalStatus);
+    const decided = Boolean(job.external_dispatch_reason);
+    const badge = externalDispatchBadge(externalStatus, decided);
     const targets = safeParseTargets(job.external_dispatch_targets);
     const targetText = targets
       .map((target) => {
@@ -326,16 +342,17 @@ function renderEscalation(job: JobRow): string {
       .join("; ");
     channels.push(`<h3>External dispatch</h3>
       <p>${renderState(badge.stateClass, badge.text, badge.hint, badge.mark)}
-        ${externalStatus === "dispatching" || externalStatus === "dispatched" || externalStatus === "dispatch_failed" ? `<span class="muted">${targetText ? ` · ${escapeHtml(targetText)}` : ""}</span>` : ""}
+        ${externalObserved ? `<span class="muted">${targetText ? ` · ${escapeHtml(targetText)}` : ""}</span>` : ""}
       </p>
       ${job.external_dispatch_reason ? `<p>${escapeHtml(job.external_dispatch_reason)}</p>` : ""}
       ${job.external_dispatch_error ? `<p class="error">${escapeHtml(job.external_dispatch_error)}</p>` : ""}
       <p class="muted">Fire-and-forget: Maomao records only the immediate notification outcome, not whether an external reviewer finished.</p>`);
   }
 
+  const policyLabel = policy || "pending";
   return `<h2>Poison alert</h2>
     <article class="card">
-      <p><strong>Policy</strong> ${escapeHtml(policy || "manual")} — ${escapeHtml(plan)}${manual ? " · <strong>manual escalate requested</strong>" : ""}</p>
+      <p><strong>Policy</strong> ${escapeHtml(policyLabel)} — ${escapeHtml(plan)}${manual ? " · <strong>manual escalate requested</strong>" : ""}</p>
       ${channels.join("\n")}
     </article>`;
 }

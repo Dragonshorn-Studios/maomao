@@ -286,6 +286,13 @@ async function runJob(deps: PipelineDeps, jobId: number, signal: AbortSignal): P
   } catch (error) {
     if (store.isStale(jobId) || signal.aborted) {
       store.log(jobId, "Job aborted or marked stale; skipping publish", "warn");
+      const runningInternal = store.getJob(jobId)?.internal_escalation_state === "running";
+      if (runningInternal) {
+        store.patchJob(jobId, {
+          internal_escalation_state: "failed",
+          internal_escalation_reason: "job ended before the internal pass finished",
+        });
+      }
       if (!store.isStale(jobId)) store.setJobState(jobId, "stale", { finished_at: nowIso() });
       return;
     }
@@ -318,10 +325,19 @@ function throwIfStale(store: JobStore, jobId: number, signal: AbortSignal): void
   }
 }
 
-function persistDecision(store: JobStore, jobId: number, decision: RoutingDecision, extra: Partial<JobRow> = {}): void {
+function persistDecision(
+  store: JobStore,
+  jobId: number,
+  decision: RoutingDecision,
+  poisonAlertPolicy: string | null,
+  extra: Partial<JobRow> = {},
+): void {
   const reason = sanitizePublicReason(decision.reason, 300) || "router decision";
+  // Record the escalation policy as soon as the profile is known, so the UI can show the
+  // planned channels while the job is still running (not only after dispatch).
   store.patchJob(jobId, {
     ...extra,
+    poison_alert_policy: decision.profile === "poison-alert" ? poisonAlertPolicy : null,
     routing_state: "done",
     routing_profile: decision.profile,
     routing_reason: reason,
@@ -358,7 +374,7 @@ async function routeSpecialists(
       source: "fixed",
       signals: scanRoutingSignals({ diff, title: job.pr_title, body: job.pr_body }),
       hardRuleEscalated: false,
-    }, { routing_mode: "fixed" });
+    }, null, { routing_mode: "fixed" });
     store.log(job.id, `Routing skipped (fixed): ${roles.join(", ") || "(none)"}`);
     return;
   }
@@ -378,7 +394,7 @@ async function routeSpecialists(
       source: "fixed",
       signals: scanRoutingSignals({ diff, title: job.pr_title, body: job.pr_body }),
       hardRuleEscalated: false,
-    }, { routing_mode: config.routing.mode });
+    }, null, { routing_mode: config.routing.mode });
     store.log(job.id, `Routing recorded preselected reviewers: ${roles.join(", ")}`);
     return;
   }
@@ -450,7 +466,13 @@ async function routeSpecialists(
     }
   }
 
-  persistDecision(store, job.id, decision, { routing_mode: config.routing.mode });
+  persistDecision(
+    store,
+    job.id,
+    decision,
+    decision.profile === "poison-alert" ? config.poisonAlert.policy : null,
+    { routing_mode: config.routing.mode },
+  );
   store.ensureReviewerRuns(job.id, reviewerSpecs(config, decision.reviewers));
   store.log(
     job.id,

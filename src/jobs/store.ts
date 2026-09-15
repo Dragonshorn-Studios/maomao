@@ -184,6 +184,7 @@ const ACTIVE_JOB_STATES: JobState[] = [
   "routing",
   "reviewing",
   "aggregating",
+  "sniffing",
   "publishing",
 ];
 
@@ -196,6 +197,7 @@ const TERMINAL_SKIP_REQUEUE: JobState[] = [
   "routing",
   "reviewing",
   "aggregating",
+  "sniffing",
 ];
 
 const JOB_PATCH_KEYS = new Set<string>([
@@ -350,10 +352,10 @@ export class JobStore {
   }
 
   listInterruptedJobs(): JobRow[] {
+    // Derive the IN-list from ACTIVE_JOB_STATES so a new job state cannot drift out of crash recovery.
+    const states = ACTIVE_JOB_STATES.map((state) => `'${state}'`).join(", ");
     return this.db
-      .prepare(
-        `SELECT * FROM jobs WHERE state IN ('queued', 'preparing', 'reconciling', 'routing', 'reviewing', 'aggregating', 'publishing')`,
-      )
+      .prepare(`SELECT * FROM jobs WHERE state IN (${states})`)
       .all() as JobRow[];
   }
 
@@ -414,11 +416,12 @@ export class JobStore {
 
   resetInterrupted(id: number): void {
     const updatedAt = nowIso();
+    const states = [...ACTIVE_JOB_STATES.map((state) => `'${state}'`)].join(", ");
     this.db
       .prepare(
         `UPDATE jobs SET state = 'queued', failure_reason = NULL, started_at = NULL, finished_at = NULL,
          aggregator_state = 'queued', aggregator_started_at = NULL, aggregator_finished_at = NULL, updated_at = ?
-         WHERE id = ? AND state IN ('preparing', 'reconciling', 'routing', 'reviewing', 'aggregating', 'publishing', 'queued')`,
+         WHERE id = ? AND state IN (${states})`,
       )
       .run(updatedAt, id);
     this.db

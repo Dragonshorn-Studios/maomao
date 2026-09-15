@@ -124,8 +124,13 @@ export function internalEscalationBadge(state: string | null | undefined): Label
   }
 }
 
-/** Badge for the external (fire-and-forget) dispatch channel; same visual language as run states. */
-export function externalDispatchBadge(status: string | null | undefined): LabeledState & { stateClass: string } {
+/** Badge for the external (fire-and-forget) dispatch channel; same visual language as run states.
+ * `decided` marks that the pipeline already decided not to dispatch (status not_requested + reason),
+ * as opposed to the enqueue-time default where dispatch simply has not been reached yet. */
+export function externalDispatchBadge(
+  status: string | null | undefined,
+  decided = false,
+): LabeledState & { stateClass: string } {
   switch (status) {
     case "dispatching":
       return { stateClass: "running", text: "Dispatching", hint: "Sending the external notification", mark: "◉" };
@@ -137,7 +142,11 @@ export function externalDispatchBadge(status: string | null | undefined): Labele
         mark: "●",
       };
     case "dispatch_failed":
-      return { stateClass: "failed", text: "Failed", hint: "External notification could not be sent", mark: "!" };
+      return { stateClass: "failed", text: "Failed", hint: "External notification was not delivered", mark: "!" };
+    case "not_requested":
+      return decided
+        ? { stateClass: "cancelled", text: "Held", hint: "External dispatch was not requested for this SHA", mark: "–" }
+        : { stateClass: "queued", text: "Queued", hint: "Dispatches after the GitHub review is posted", mark: "○" };
     default:
       return { stateClass: "queued", text: "Queued", hint: "Dispatches after the GitHub review is posted", mark: "○" };
   }
