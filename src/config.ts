@@ -1,11 +1,22 @@
 import { readFileSync, existsSync } from "node:fs";
 import { resolve } from "node:path";
-import { parseBoolean, parseCsv, parseInteger, replaceEscapedNewlines } from "./util.js";
-import { DEFAULT_REVIEWER_ROLES, type ReviewerRole } from "./prompts.js";
+import { parseBoolean, parseCsv, parseInteger, parseNumber, replaceEscapedNewlines } from "./util.js";
+import { DEFAULT_REVIEWER_ROLES, KNOWN_REVIEWER_ROLES, type ReviewerRole } from "./prompts.js";
+import { parseExternalTargetsJson, validateCommandText } from "./routing/escalation.js";
+import {
+  POISON_ALERT_POLICIES,
+  ROUTING_MODES,
+  type PoisonAlertConfig,
+  type PoisonAlertPolicy,
+  type RouterConfig,
+  type RoutingMode,
+} from "./routing/types.js";
+import type { Severity } from "./schema.js";
 
 export type JobState =
   | "queued"
   | "preparing"
+  | "routing"
   | "reconciling"
   | "reviewing"
   | "aggregating"
@@ -48,6 +59,8 @@ export interface Config {
   github: GithubConfig;
   opencode: OpenCodeConfig;
   reviewers: ReviewerRole[];
+  routing: RouterConfig;
+  poisonAlert: PoisonAlertConfig;
   jobConcurrency: number;
   reviewDrafts: boolean;
   postEmptyReview: boolean;
@@ -81,7 +94,7 @@ export function loadPrivateKey(env: NodeJS.ProcessEnv = process.env): string {
 function loadReviewers(env: NodeJS.ProcessEnv): ReviewerRole[] {
   const ids = parseCsv(env.REVIEWER_ROLES);
   const selected = ids.length > 0 ? ids : DEFAULT_REVIEWER_ROLES.map((role) => role.id);
-  const byId = new Map(DEFAULT_REVIEWER_ROLES.map((role) => [role.id, role]));
+  const byId = new Map(KNOWN_REVIEWER_ROLES.map((role) => [role.id, role]));
   return selected.map((id) => {
     const known = byId.get(id);
     const envPrompt = env[`REVIEWER_PROMPT_${id.toUpperCase().replaceAll("-", "_")}`];
@@ -102,6 +115,63 @@ function loadReviewers(env: NodeJS.ProcessEnv): ReviewerRole[] {
       model: envModel?.trim(),
     };
   });
+}
+
+function parseRoutingMode(raw: string | undefined): RoutingMode {
+  const value = (raw?.trim().toLowerCase() || "hybrid") as RoutingMode;
+  if ((ROUTING_MODES as readonly string[]).includes(value)) return value;
+  throw new Error(`REVIEWER_ROUTING must be one of ${ROUTING_MODES.join(", ")}`);
+}
+
+function parsePolicy(raw: string | undefined): PoisonAlertPolicy {
+  const value = (raw?.trim().toLowerCase() || "internal_and_external") as PoisonAlertPolicy;
+  if ((POISON_ALERT_POLICIES as readonly string[]).includes(value)) return value;
+  throw new Error(`POISON_ALERT_POLICY must be one of ${POISON_ALERT_POLICIES.join(", ")}`);
+}
+
+function parseSeverity(raw: string | undefined, fallback: Severity): Severity {
+  const value = (raw?.trim().toLowerCase() || fallback) as Severity;
+  if (["blocker", "high", "medium", "low", "info"].includes(value)) return value;
+  throw new Error("POISON_ALERT_EXTERNAL_MIN_SEVERITY must be blocker, high, medium, low, or info");
+}
+
+function loadRouting(env: NodeJS.ProcessEnv): RouterConfig {
+  return {
+    mode: parseRoutingMode(env.REVIEWER_ROUTING),
+    model: env.OPENCODE_ROUTER_MODEL?.trim() || "",
+    timeoutMs: parseInteger(env.ROUTER_TIMEOUT_MS, 60_000),
+    maxDiffChars: Math.max(500, parseInteger(env.ROUTER_MAX_DIFF_CHARS, 12_000)),
+    maxReviewers: Math.max(1, parseInteger(env.ROUTER_MAX_REVIEWERS, 6)),
+    maxContextChars: Math.max(1_000, parseInteger(env.ROUTER_MAX_CONTEXT_CHARS, 24_000)),
+    observationMaxFiles: Math.max(1, parseInteger(env.ROUTER_OBSERVATION_MAX_FILES, 2)),
+    observationMaxLines: Math.max(1, parseInteger(env.ROUTER_OBSERVATION_MAX_LINES, 40)),
+    poisonAlertMinFiles: Math.max(1, parseInteger(env.ROUTER_POISON_ALERT_MIN_FILES, 20)),
+    poisonAlertMinLines: Math.max(1, parseInteger(env.ROUTER_POISON_ALERT_MIN_LINES, 500)),
+  };
+}
+
+function loadPoisonAlert(env: NodeJS.ProcessEnv): PoisonAlertConfig {
+  const fallback = env.POISON_ALERT_INTERNAL_FALLBACK?.trim().toLowerCase() === "fail" ? "fail" : "keep_first_pass";
+  return {
+    policy: parsePolicy(env.POISON_ALERT_POLICY),
+    mentionName: env.MAOMAO_MENTION?.trim().replace(/^@/, "") || "maomao",
+    escalateCommand: validateCommandText(env.POISON_ALERT_ESCALATE_COMMAND?.trim() || "escalate"),
+    internal: {
+      enabled: parseBoolean(env.POISON_ALERT_INTERNAL_ENABLED, false),
+      model: env.POISON_ALERT_INTERNAL_MODEL?.trim() || "",
+      maxCostUsd: Math.max(0, parseNumber(env.POISON_ALERT_INTERNAL_MAX_COST_USD, 0.3)),
+      maxTokens: Math.max(0, parseInteger(env.POISON_ALERT_INTERNAL_MAX_TOKENS, 150_000)),
+      timeoutSeconds: Math.max(1, parseInteger(env.POISON_ALERT_INTERNAL_TIMEOUT_SECONDS, 300)),
+      retries: Math.max(0, parseInteger(env.POISON_ALERT_INTERNAL_RETRIES, 1)),
+      context: "findings_and_relevant_hunks",
+      fallback,
+    },
+    external: {
+      enabled: parseBoolean(env.POISON_ALERT_EXTERNAL_ENABLED, false),
+      targets: parseExternalTargetsJson(env.POISON_ALERT_EXTERNAL_TARGETS_JSON),
+      minSeverity: parseSeverity(env.POISON_ALERT_EXTERNAL_MIN_SEVERITY, "high"),
+    },
+  };
 }
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
@@ -136,6 +206,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
       reviewerConcurrency: Math.max(1, parseInteger(env.OPENCODE_REVIEWER_CONCURRENCY, 2)),
     },
     reviewers: loadReviewers(env),
+    routing: loadRouting(env),
+    poisonAlert: loadPoisonAlert(env),
     jobConcurrency: Math.max(1, parseInteger(env.JOB_CONCURRENCY, 1)),
     reviewDrafts: parseBoolean(env.REVIEW_DRAFTS, false),
     postEmptyReview: parseBoolean(env.POST_EMPTY_REVIEW, false),
@@ -157,6 +229,12 @@ export function assertRuntimeConfig(config: Config): void {
   }
   if (config.reviewers.length === 0) {
     throw new Error("At least one reviewer role is required");
+  }
+  if (config.routing.mode === "model" && !config.routing.model && !config.opencode.reviewerModel) {
+    throw new Error("REVIEWER_ROUTING=model requires OPENCODE_ROUTER_MODEL or OPENCODE_REVIEWER_MODEL");
+  }
+  if (config.poisonAlert.internal.enabled && !config.poisonAlert.internal.model) {
+    throw new Error("POISON_ALERT_INTERNAL_ENABLED requires POISON_ALERT_INTERNAL_MODEL");
   }
   const passwordSet = Boolean(config.uiPassword);
   const secretSet = Boolean(config.uiSessionSecret);

@@ -39,6 +39,12 @@ export function parseInteger(value: string | undefined, fallback: number): numbe
   return Number.isFinite(n) ? n : fallback;
 }
 
+export function parseNumber(value: string | undefined, fallback: number): number {
+  if (value == null || value === "") return fallback;
+  const n = Number(value);
+  return Number.isFinite(n) ? n : fallback;
+}
+
 export function parseCsv(value: string | undefined): string[] {
   if (!value) return [];
   return value

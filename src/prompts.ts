@@ -38,6 +38,27 @@ Schema:
 
 Use file/line only when they refer to the new/head side of the change. Empty findings with verdict "clean" is a valid outcome.`;
 
+export const OPTIONAL_REVIEWER_ROLES: ReviewerRole[] = [
+  {
+    id: "data-integrity",
+    title: "Data integrity / migrations",
+    prompt: `${COMMON_RULES}
+
+Role id: data-integrity
+Focus: schema and data migrations, destructive SQL, missing backfills, irreversible data loss, inconsistent writes, and storage invariants.
+Ignore style. If the diff has no data/schema impact, verdict may be clean.`,
+  },
+  {
+    id: "concurrency",
+    title: "Concurrency / races",
+    prompt: `${COMMON_RULES}
+
+Role id: concurrency
+Focus: races, lock ordering, shared mutable state, async interleaving, deadlocks, and lost updates.
+Ignore style. If the diff is single-threaded and has no shared state, verdict may be clean.`,
+  },
+];
+
 export const DEFAULT_REVIEWER_ROLES: ReviewerRole[] = [
   {
     id: "correctness",
@@ -94,6 +115,8 @@ Focus: merge blockers a careful maintainer would raise: incomplete changes, dang
 Be conservative. Do not invent blockers.`,
   },
 ];
+
+export const KNOWN_REVIEWER_ROLES: ReviewerRole[] = [...DEFAULT_REVIEWER_ROLES, ...OPTIONAL_REVIEWER_ROLES];
 
 export function buildReviewerPrompt(input: {
   role: ReviewerRole;

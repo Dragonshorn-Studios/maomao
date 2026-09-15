@@ -428,7 +428,7 @@ button, input, textarea {
 .state-completed, .state-done { background: var(--jade-soft); border-color: var(--jade); }
 .state-failed { background: var(--cinnabar-soft); border-color: var(--cinnabar); }
 .state-stale, .state-cancelled { background: var(--amber-soft); border-color: var(--amber); }
-.state-reviewing, .state-aggregating, .state-publishing, .state-running, .state-preparing, .state-reconciling {
+.state-reviewing, .state-aggregating, .state-publishing, .state-running, .state-preparing, .state-routing, .state-reconciling {
   background: var(--working-soft);
   border-color: var(--working);
 }
@@ -437,7 +437,8 @@ button, input, textarea {
 .state-reviewing .mark,
 .state-aggregating .mark,
 .state-publishing .mark,
-.state-running .mark {
+.state-running .mark,
+.state-routing .mark {
   width: 0.65rem;
   height: 0.65rem;
   padding: 0;
@@ -717,7 +718,8 @@ details summary { cursor: pointer; color: var(--ink-muted); }
   .state-reviewing .mark,
   .state-aggregating .mark,
   .state-publishing .mark,
-  .state-running .mark {
+  .state-running .mark,
+  .state-routing .mark {
     animation: none !important;
     background: var(--working);
     border-color: var(--working);

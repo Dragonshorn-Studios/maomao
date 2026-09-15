@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { assertRuntimeConfig, loadConfig } from "./config.js";
-import { parseBoolean, parseCsv } from "./util.js";
+import { parseBoolean, parseCsv, parseNumber } from "./util.js";
 
 describe("loadConfig", () => {
   it("loads defaults and reviewer roles from env", () => {
@@ -53,12 +53,33 @@ describe("loadConfig", () => {
       expect.objectContaining({ id: "perf", prompt: "Look for hot loops." }),
     ]);
   });
+
+  it("loads routing and poison-alert defaults without hardcoded models", () => {
+    const config = loadConfig({
+      GITHUB_APP_ID: "1",
+      GITHUB_APP_PRIVATE_KEY: "k",
+      GITHUB_WEBHOOK_SECRET: "s",
+    });
+    expect(config.routing.mode).toBe("hybrid");
+    expect(config.poisonAlert.policy).toBe("internal_and_external");
+    expect(config.poisonAlert.internal.enabled).toBe(false);
+    expect(config.poisonAlert.internal.model).toBe("");
+    expect(config.poisonAlert.external.targets).toEqual([]);
+    expect(JSON.stringify(config)).not.toMatch(/glm-5\.3/i);
+    expect(JSON.stringify(config)).not.toMatch(/marller/i);
+  });
+
+  it("loads optional data-integrity roles from the known catalog", () => {
+    const config = loadConfig({ REVIEWER_ROLES: "correctness,data-integrity" });
+    expect(config.reviewers.map((role) => role.id)).toEqual(["correctness", "data-integrity"]);
+  });
 });
 
 describe("env parsers", () => {
-  it("parses booleans and csv", () => {
+  it("parses booleans, csv, and numbers", () => {
     expect(parseBoolean("yes", false)).toBe(true);
     expect(parseBoolean("off", true)).toBe(false);
     expect(parseCsv("a, b,,c")).toEqual(["a", "b", "c"]);
+    expect(parseNumber("0.30", 0)).toBe(0.3);
   });
 });

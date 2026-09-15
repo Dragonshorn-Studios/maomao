@@ -13,6 +13,7 @@ export interface LabeledState {
 const JOB_STATES: Record<JobState, LabeledState> = {
   queued: { text: "Queued", hint: "Waiting to examine this pull request", mark: "○" },
   preparing: { text: "Preparing", hint: "Checking out the reviewed head SHA", mark: "◌" },
+  routing: { text: "Routing", hint: "Selecting a review profile and specialists", mark: "◎" },
   reconciling: { text: "Reconciling", hint: "Checking prior findings against this SHA", mark: "◍" },
   reviewing: { text: "Reviewing", hint: "Examining this pull request", mark: "◉" },
   aggregating: { text: "Aggregating", hint: "Aggregation in progress", mark: "◎" },
@@ -85,10 +86,32 @@ export function staleBanner(): string {
 
 export function flavorForJob(state: string, prNumber: number): string | undefined {
   if (state === "reviewing" || state === "preparing") return `Examining PR #${prNumber}…`;
+  if (state === "routing") return `Choosing specialists for PR #${prNumber}…`;
   if (state === "reconciling") return `Reconciling prior findings for PR #${prNumber}`;
   if (state === "aggregating") return "Aggregation in progress";
   if (state === "queued") return `PR #${prNumber} is queued for examination`;
   return undefined;
+}
+
+export function routingProfileLabel(profile: string | null | undefined): string {
+  if (profile === "observation") return "observation";
+  if (profile === "diagnosis") return "diagnosis";
+  if (profile === "poison-alert") return "poison-alert";
+  if (profile === "fixed") return "fixed";
+  return profile || "pending";
+}
+
+export function dispatchStatusLabel(status: string | null | undefined): string {
+  switch (status) {
+    case "dispatching":
+      return "dispatching";
+    case "dispatched":
+      return "dispatched (notification accepted)";
+    case "dispatch_failed":
+      return "dispatch failed";
+    default:
+      return "not requested";
+  }
 }
 
 export function findingStatusLabel(status: string): { text: string; hint: string } {

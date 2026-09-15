@@ -123,6 +123,135 @@ describe("webhook handling", () => {
     expect(sync.body.headSha).toBe("head333");
     expect(store.getJob(Number(first.body.jobId))?.state).toBe("stale");
   });
+
+  it("enqueues hybrid jobs without a preselected reviewer set", async () => {
+    const secret = "s3cret";
+    const config = loadConfig({
+      GITHUB_WEBHOOK_SECRET: secret,
+      GITHUB_APP_ID: "1",
+      GITHUB_APP_PRIVATE_KEY: "k",
+      REVIEWER_ROUTING: "hybrid",
+      REVIEWER_ROLES: "correctness,security",
+    });
+    const store = new JobStore(openDb(":memory:"));
+    const rawBody = JSON.stringify(prPayload());
+    const result = await handleGithubWebhook({
+      config,
+      store,
+      request: { event: "pull_request", deliveryId: "d3", signature: sign(secret, rawBody), rawBody },
+    });
+    expect(result.body.created).toBe(true);
+    expect(store.listReviewerRuns(Number(result.body.jobId))).toHaveLength(0);
+  });
+
+  it("ignores bot and marker comments and accepts authorized escalate commands", async () => {
+    const secret = "s3cret";
+    const config = loadConfig({
+      GITHUB_WEBHOOK_SECRET: secret,
+      GITHUB_APP_ID: "1",
+      GITHUB_APP_PRIVATE_KEY: "k",
+      REVIEWER_ROUTING: "fixed",
+      REVIEWER_ROLES: "correctness",
+      POISON_ALERT_POLICY: "manual",
+      POISON_ALERT_EXTERNAL_ENABLED: "true",
+    });
+    const store = new JobStore(openDb(":memory:"));
+    const prBody = JSON.stringify(prPayload());
+    await handleGithubWebhook({
+      config,
+      store,
+      request: { event: "pull_request", deliveryId: "p1", signature: sign(secret, prBody), rawBody: prBody },
+    });
+    const jobId = store.listJobs(1)[0]?.id;
+    expect(jobId).toBeTruthy();
+    store.patchJob(jobId!, { routing_profile: "poison-alert", github_review_id: "1" });
+
+    const botBody = JSON.stringify({
+      action: "created",
+      installation: { id: 42 },
+      repository: { full_name: "acme/widgets", name: "widgets", owner: { login: "acme" } },
+      issue: { number: 7, pull_request: { url: "https://github.com/acme/widgets/pull/7" } },
+      comment: {
+        body: "@maomao escalate",
+        user: { login: "other[bot]", type: "Bot" },
+        author_association: "OWNER",
+      },
+    });
+    const bot = await handleGithubWebhook({
+      config,
+      store,
+      request: { event: "issue_comment", deliveryId: "c1", signature: sign(secret, botBody), rawBody: botBody },
+    });
+    expect(bot.body.reason).toMatch(/bot/i);
+
+    const markerBody = JSON.stringify({
+      action: "created",
+      installation: { id: 42 },
+      repository: { full_name: "acme/widgets", name: "widgets", owner: { login: "acme" } },
+      issue: { number: 7, pull_request: { url: "https://github.com/acme/widgets/pull/7" } },
+      comment: {
+        body: "<!-- maomao-escalation id=x provider=github instance=github.com repo=acme/widgets pr=7 sha=head222 job=1 target=mention:@acme status=dispatched -->\n@maomao escalate",
+        user: { login: "alice", type: "User" },
+        author_association: "OWNER",
+      },
+    });
+    const marker = await handleGithubWebhook({
+      config,
+      store,
+      request: { event: "issue_comment", deliveryId: "c2", signature: sign(secret, markerBody), rawBody: markerBody },
+    });
+    expect(marker.body.reason).toMatch(/marker/i);
+
+    const okBody = JSON.stringify({
+      action: "created",
+      installation: { id: 42 },
+      repository: { full_name: "acme/widgets", name: "widgets", owner: { login: "acme" } },
+      issue: { number: 7, pull_request: { url: "https://github.com/acme/widgets/pull/7" } },
+      comment: {
+        body: "@maomao escalate",
+        user: { login: "alice", type: "User" },
+        author_association: "OWNER",
+      },
+    });
+    const ok = await handleGithubWebhook({
+      config,
+      store,
+      github: githubForCommands({ permission: "none" }),
+      request: { event: "issue_comment", deliveryId: "c3", signature: sign(secret, okBody), rawBody: okBody },
+    });
+    expect(ok.dispatchJobId).toBe(jobId);
+    expect(store.getJob(jobId!)?.manual_escalate_requested).toBe(1);
+
+    store.patchJob(jobId!, { manual_escalate_requested: 0 });
+    const memberBody = JSON.stringify({
+      action: "created",
+      installation: { id: 42 },
+      repository: { full_name: "acme/widgets", name: "widgets", owner: { login: "acme" } },
+      issue: { number: 7, pull_request: { url: "https://github.com/acme/widgets/pull/7" } },
+      comment: {
+        body: "@maomao escalate",
+        user: { login: "member", type: "User" },
+        author_association: "MEMBER",
+      },
+    });
+    const memberNone = await handleGithubWebhook({
+      config,
+      store,
+      github: githubForCommands({ permission: "none" }),
+      request: { event: "issue_comment", deliveryId: "c4", signature: sign(secret, memberBody), rawBody: memberBody },
+    });
+    expect(memberNone.body.reason).toMatch(/not authorized/i);
+    expect(store.getJob(jobId!)?.manual_escalate_requested).toBe(0);
+
+    const memberWrite = await handleGithubWebhook({
+      config,
+      store,
+      github: githubForCommands({ permission: "write" }),
+      request: { event: "issue_comment", deliveryId: "c5", signature: sign(secret, memberBody), rawBody: memberBody },
+    });
+    expect(memberWrite.dispatchJobId).toBe(jobId);
+    expect(store.getJob(jobId!)?.manual_escalate_requested).toBe(1);
+  });
 });
 
 function githubForCommands(overrides: {

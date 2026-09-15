@@ -12,6 +12,11 @@ import {
 } from "./client.js";
 import type { EnqueueResult, JobStore } from "../jobs/store.js";
 import { enqueuePullJob } from "../jobs/enqueue.js";
+import {
+  commentLooksLikeMaomaoEscalation,
+  isBotActor,
+  mentionsEscalateCommand,
+} from "../routing/escalation.js";
 
 export interface WebhookRequest {
   event: string;
@@ -24,7 +29,29 @@ export type WebhookHandleResult = {
   status: number;
   body: Record<string, unknown>;
   enqueue?: EnqueueResult;
+  dispatchJobId?: number;
 };
+
+export interface IssueCommentWebhookPayload {
+  action?: string;
+  installation?: { id?: number };
+  repository?: {
+    full_name?: string;
+    name?: string;
+    owner?: { login?: string };
+  };
+  issue?: {
+    number?: number;
+    pull_request?: { url?: string };
+  };
+  comment?: {
+    id?: number;
+    body?: string | null;
+    user?: { login?: string; type?: string };
+    author_association?: string;
+  };
+  sender?: { login?: string; type?: string };
+}
 
 export interface ReviewCommentWebhookPayload {
   action?: string;
@@ -151,6 +178,10 @@ export async function handleGithubWebhook(input: {
     return { status: 200, body: { ok: true, event: "ping" } };
   }
 
+  if (input.request.event === "issue_comment") {
+    return await handleIssueComment(input);
+  }
+
   if (input.request.event === "pull_request_review_comment") {
     return handleReviewCommentWebhook(input);
   }
@@ -196,6 +227,61 @@ export async function handleGithubWebhook(input: {
       body: { error: error instanceof Error ? error.message : String(error) },
     };
   }
+}
+
+async function handleIssueComment(input: {
+  config: Config;
+  store: JobStore;
+  request: WebhookRequest;
+  github?: GithubPort;
+}): Promise<WebhookHandleResult> {
+  let payload: IssueCommentWebhookPayload;
+  try {
+    payload = JSON.parse(input.request.rawBody) as IssueCommentWebhookPayload;
+  } catch {
+    return { status: 400, body: { error: "invalid JSON" } };
+  }
+  if (payload.action !== "created") {
+    return { status: 202, body: { ok: true, ignored: true, reason: `ignored action ${payload.action ?? "unknown"}` } };
+  }
+  if (!payload.issue?.pull_request) {
+    return { status: 202, body: { ok: true, ignored: true, reason: "not a pull request comment" } };
+  }
+  const body = payload.comment?.body ?? "";
+  const actor = payload.comment?.user ?? payload.sender;
+  if (isBotActor({ login: actor?.login, type: actor?.type })) {
+    return { status: 202, body: { ok: true, ignored: true, reason: "ignored bot comment" } };
+  }
+  if (commentLooksLikeMaomaoEscalation(body)) {
+    return { status: 202, body: { ok: true, ignored: true, reason: "ignored maomao marker comment" } };
+  }
+  if (!mentionsEscalateCommand(body, input.config.poisonAlert.mentionName, input.config.poisonAlert.escalateCommand)) {
+    return { status: 202, body: { ok: true, ignored: true, reason: "not an escalate command" } };
+  }
+  const installationId = payload.installation?.id;
+  const repoOwner = payload.repository?.owner?.login;
+  const repoName = payload.repository?.name;
+  const repoFullName = payload.repository?.full_name;
+  const prNumber = payload.issue.number;
+  const actorLogin = actor?.login;
+  if (!installationId || !repoOwner || !repoName || !repoFullName || !prNumber || !actorLogin || !input.github) {
+    return { status: 202, body: { ok: true, ignored: true, reason: "missing github context" } };
+  }
+  const permission = await input.github.getCollaboratorPermission(installationId, repoOwner, repoName, actorLogin);
+  if (!canIssueOverride(permission, payload.comment?.author_association)) {
+    return { status: 202, body: { ok: true, ignored: true, reason: "actor is not authorized to escalate", actor: actorLogin, permission } };
+  }
+  const job = input.store.findLatestJobForPull(repoFullName, prNumber);
+  if (!job) {
+    return { status: 202, body: { ok: true, ignored: true, reason: "no maomao job for this pull request" } };
+  }
+  input.store.patchJob(job.id, { manual_escalate_requested: 1 });
+  input.store.log(job.id, `Authorized escalate command from ${actorLogin}`);
+  return {
+    status: 202,
+    body: { ok: true, dispatchJobId: job.id, jobId: job.id, headSha: job.head_sha },
+    dispatchJobId: job.id,
+  };
 }
 
 async function handleReviewCommentWebhook(input: {

@@ -26,6 +26,7 @@ export const reviewerResultSchema = z.object({
 export type ReviewerResult = z.infer<typeof reviewerResultSchema>;
 
 export const aggregatorFindingSchema = z.object({
+  id: z.string().min(1).optional(),
   severity: severitySchema,
   confidence: z.number().min(0).max(1).optional().default(0.5),
   category: z.string().min(1).optional().default("general"),
