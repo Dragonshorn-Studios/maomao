@@ -60,8 +60,25 @@ describe("routing signals", () => {
     }
   });
 
-  it("does not treat author names as auth paths", () => {
-    expect(familiesForPath("src/authors/list.ts")).not.toContain("auth");
+  it("does not treat PR title or body keywords as hard-risk families", () => {
+    const signals = scanRoutingSignals({
+      diff: diff([{ path: "README.md", added: ["+typo"] }]),
+      title: "Fix typo in JWT docs",
+      body: "Also mention kubernetes, stripe, terraform, and a credential leak.",
+    });
+    expect(signals.titleHints.length).toBeGreaterThan(0);
+    expect(signals.bodyHints.length).toBeGreaterThan(0);
+    expect(signals.hardRiskFamilies).toEqual([]);
+    expect(signals.families).toEqual(["docs"]);
+    expect(deterministicDecision(signals, ALLOWLIST, routerConfig()).profile).toBe("observation");
+    const merged = mergeModelDecision(
+      { profile: "observation", reviewers: ["tests"], reason: "docs", confidence: 0.9 },
+      signals,
+      ALLOWLIST,
+      routerConfig(),
+    );
+    expect(merged.profile).toBe("observation");
+    expect(merged.hardRuleEscalated).toBe(false);
   });
 
   it("parses unified diffs and lockfiles", () => {

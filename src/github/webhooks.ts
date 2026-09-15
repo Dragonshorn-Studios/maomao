@@ -14,7 +14,6 @@ import type { EnqueueResult, JobStore } from "../jobs/store.js";
 import { enqueuePullJob } from "../jobs/enqueue.js";
 import {
   commentLooksLikeMaomaoEscalation,
-  isAuthorizedEscalateActor,
   isBotActor,
   mentionsEscalateCommand,
 } from "../routing/escalation.js";
@@ -180,7 +179,7 @@ export async function handleGithubWebhook(input: {
   }
 
   if (input.request.event === "issue_comment") {
-    return handleIssueComment(input);
+    return await handleIssueComment(input);
   }
 
   if (input.request.event === "pull_request_review_comment") {
@@ -230,11 +229,12 @@ export async function handleGithubWebhook(input: {
   }
 }
 
-function handleIssueComment(input: {
+async function handleIssueComment(input: {
   config: Config;
   store: JobStore;
   request: WebhookRequest;
-}): WebhookHandleResult {
+  github?: GithubPort;
+}): Promise<WebhookHandleResult> {
   let payload: IssueCommentWebhookPayload;
   try {
     payload = JSON.parse(input.request.rawBody) as IssueCommentWebhookPayload;
@@ -258,20 +258,25 @@ function handleIssueComment(input: {
   if (!mentionsEscalateCommand(body, input.config.poisonAlert.mentionName, input.config.poisonAlert.escalateCommand)) {
     return { status: 202, body: { ok: true, ignored: true, reason: "not an escalate command" } };
   }
-  if (!isAuthorizedEscalateActor(payload.comment?.author_association)) {
-    return { status: 202, body: { ok: true, ignored: true, reason: "actor is not authorized to escalate" } };
-  }
+  const installationId = payload.installation?.id;
+  const repoOwner = payload.repository?.owner?.login;
+  const repoName = payload.repository?.name;
   const repoFullName = payload.repository?.full_name;
   const prNumber = payload.issue.number;
-  if (!repoFullName || !prNumber) {
-    return { status: 400, body: { error: "comment payload missing repository or issue number" } };
+  const actorLogin = actor?.login;
+  if (!installationId || !repoOwner || !repoName || !repoFullName || !prNumber || !actorLogin || !input.github) {
+    return { status: 202, body: { ok: true, ignored: true, reason: "missing github context" } };
+  }
+  const permission = await input.github.getCollaboratorPermission(installationId, repoOwner, repoName, actorLogin);
+  if (!canIssueOverride(permission, payload.comment?.author_association)) {
+    return { status: 202, body: { ok: true, ignored: true, reason: "actor is not authorized to escalate", actor: actorLogin, permission } };
   }
   const job = input.store.findLatestJobForPull(repoFullName, prNumber);
   if (!job) {
     return { status: 202, body: { ok: true, ignored: true, reason: "no maomao job for this pull request" } };
   }
   input.store.patchJob(job.id, { manual_escalate_requested: 1 });
-  input.store.log(job.id, `Authorized escalate command from ${actor?.login ?? "unknown"}`);
+  input.store.log(job.id, `Authorized escalate command from ${actorLogin}`);
   return {
     status: 202,
     body: { ok: true, dispatchJobId: job.id, jobId: job.id, headSha: job.head_sha },

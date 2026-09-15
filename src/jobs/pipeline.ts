@@ -43,6 +43,7 @@ import {
   escalationMarker,
   parseEscalationMarker,
   resolveMention,
+  sanitizePublicReason,
   targetKey,
 } from "../routing/escalation.js";
 import {
@@ -99,7 +100,7 @@ async function runJob(deps: PipelineDeps, jobId: number, signal: AbortSignal): P
   if (!job) return;
   if (["stale", "cancelled"].includes(job.state)) return;
   if (job.state === "completed") {
-    if (job.manual_escalate_requested && job.external_dispatch_status !== "dispatched") {
+    if (job.manual_escalate_requested && jobHasPendingDispatch(store, job)) {
       await dispatchExternalEscalation(deps, job, undefined);
     }
     return;
@@ -279,18 +280,19 @@ function throwIfStale(store: JobStore, jobId: number, signal: AbortSignal): void
 }
 
 function persistDecision(store: JobStore, jobId: number, decision: RoutingDecision, extra: Partial<JobRow> = {}): void {
+  const reason = sanitizePublicReason(decision.reason, 300) || "router decision";
   store.patchJob(jobId, {
+    ...extra,
     routing_state: "done",
     routing_profile: decision.profile,
-    routing_reason: decision.reason,
+    routing_reason: reason,
     routing_confidence: decision.confidence,
     routing_signals: JSON.stringify(decision.signals),
     routing_reviewers: JSON.stringify(decision.reviewers),
     routing_source: decision.source,
     routing_raw: decision.modelRaw ? truncate(decision.modelRaw, 20_000) : extra.routing_raw,
     risk_profile: decision.profile,
-    risk_reason: decision.reason,
-    ...extra,
+    risk_reason: reason,
   });
 }
 
@@ -689,12 +691,8 @@ async function runInternalEscalation(
       });
       if (over) {
         deps.store.log(job.id, over, "warn");
-        if (internal.fallback === "fail") throw new Error(over);
-        deps.store.patchJob(job.id, {
-          internal_escalation_state: "failed",
-          internal_escalation_reason: over,
-        });
-        return firstPass;
+        lastError = over;
+        break;
       }
       const parsed = internalEscalationResultSchema.parse(extractJsonFromText(result.text || result.stdout));
       const merged = mergeInternalEscalation(firstPass, parsed);
@@ -805,11 +803,14 @@ async function dispatchExternalEscalation(
         : latest.routing_profile !== "poison-alert"
           ? "profile is not poison-alert"
           : "external dispatch not requested by policy";
-      deps.store.patchJob(job.id, {
+      const patch: Partial<JobRow> = {
         external_dispatch_status: "not_requested",
         external_dispatch_reason: reason,
-        poison_alert_policy: config.policy,
-      });
+      };
+      if (latest.routing_profile === "poison-alert" || latest.manual_escalate_requested) {
+        patch.poison_alert_policy = config.policy;
+      }
+      deps.store.patchJob(job.id, patch);
     }
     return;
   }
@@ -842,11 +843,13 @@ async function dispatchExternalEscalation(
   });
 
   const findingsList = withIds.map((finding) => finding.id).join(", ") || "(none)";
-  const riskSummary = latest.routing_reason || aggregated?.summary || "poison-alert";
+  const riskSummary =
+    sanitizePublicReason(latest.routing_reason || aggregated?.summary || "", 300) || "poison-alert";
   const errors: string[] = [];
   let anySuccess = false;
 
   for (const target of config.external.targets) {
+    const key = targetKey(target);
     const claimed = deps.store.claimDispatch({
       escalationId: id,
       jobId: latest.id,
@@ -856,7 +859,7 @@ async function dispatchExternalEscalation(
       prNumber: latest.pr_number,
       headSha: latest.head_sha,
       policy: config.policy,
-      targetKey: targetKey(target),
+      targetKey: key,
       targetType: target.type,
     });
     if (!claimed.created && claimed.row.status === "dispatched") {
@@ -881,7 +884,7 @@ async function dispatchExternalEscalation(
           review_id: latest.github_review_id,
           review_url: latest.github_review_url,
           profile: latest.routing_profile,
-          reason: latest.routing_reason,
+          reason: riskSummary,
           policy: config.policy,
           finding_ids: withIds.map((finding) => finding.id),
           risk_summary: riskSummary,
@@ -907,7 +910,7 @@ async function dispatchExternalEscalation(
           pr: latest.pr_number,
           sha: latest.head_sha,
           job: latest.id,
-          reason: riskSummary,
+          targetKey: key,
           status: "dispatched",
         });
         if (deps.github.listIssueComments) {
@@ -919,7 +922,7 @@ async function dispatchExternalEscalation(
           );
           const already = comments.find((comment) => {
             const parsed = parseEscalationMarker(comment.body);
-            return parsed?.id === id && parsed.sha === latest.head_sha;
+            return parsed?.id === id && parsed.sha === latest.head_sha && parsed.target === key;
           });
           if (already) {
             deps.store.updateDispatch(claimed.row.id, "dispatched", `comment ${already.id}`);
@@ -937,7 +940,7 @@ async function dispatchExternalEscalation(
           `Maomao published a poison-alert review for \`${latest.repo_full_name}#${latest.pr_number}\` at \`${latest.head_sha}\`.`,
           latest.github_review_url ? `Review: ${latest.github_review_url}` : "",
           `Finding IDs: ${findingsList}`,
-          `Risk: ${riskSummary.replace(/\s+/g, " ").slice(0, 300)}`,
+          `Risk: ${riskSummary}`,
           "",
           "This is a fire-and-forget notification. Maomao does not track downstream review completion.",
         ].filter((line) => line !== "");
@@ -958,9 +961,15 @@ async function dispatchExternalEscalation(
     }
   }
 
+  const jobStatus = errors.length === 0 ? "dispatched" : "dispatch_failed";
   deps.store.patchJob(job.id, {
-    external_dispatch_status: anySuccess && errors.length === 0 ? "dispatched" : anySuccess ? "dispatched" : "dispatch_failed",
-    external_dispatch_reason: anySuccess ? "immediate dispatch completed" : errors.join("; ") || "dispatch failed",
+    external_dispatch_status: jobStatus,
+    external_dispatch_reason:
+      errors.length === 0
+        ? "immediate dispatch completed"
+        : anySuccess
+          ? `partial dispatch: ${errors.join("; ")}`
+          : errors.join("; ") || "dispatch failed",
     external_dispatch_error: errors.length ? errors.join("; ") : null,
   });
   deps.store.log(
@@ -968,8 +977,13 @@ async function dispatchExternalEscalation(
     anySuccess
       ? `External poison-alert dispatch ${errors.length ? "partially " : ""}completed`
       : `External poison-alert dispatch failed: ${errors.join("; ")}`,
-    anySuccess ? "info" : "warn",
+    errors.length ? "warn" : "info",
   );
+}
+
+function jobHasPendingDispatch(store: JobStore, job: JobRow): boolean {
+  if (job.external_dispatch_status !== "dispatched") return true;
+  return store.listDispatches(job.id).some((row) => row.status !== "dispatched");
 }
 
 function parseStoredFindings(raw: string | null): AggregatorResult["findings"] {

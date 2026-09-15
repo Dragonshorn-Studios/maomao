@@ -241,7 +241,7 @@ function renderEscalation(job: JobRow): string {
     job.routing_profile === "poison-alert" ||
     (job.internal_escalation_state && job.internal_escalation_state !== "not_requested") ||
     (job.external_dispatch_status && job.external_dispatch_status !== "not_requested") ||
-    job.poison_alert_policy;
+    Boolean(job.manual_escalate_requested);
   if (!show) return "";
   const targets = safeParseTargets(job.external_dispatch_targets);
   const targetText =

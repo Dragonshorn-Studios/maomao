@@ -5,12 +5,12 @@ import {
   deliverSignedWebhook,
   escalationId,
   escalationMarker,
-  isAuthorizedEscalateActor,
   isBotActor,
   mentionsEscalateCommand,
   parseEscalationMarker,
   parseExternalTargetsJson,
   resolveMention,
+  sanitizePublicReason,
   signWebhookBody,
   validateCommandText,
   validateMentionRecipient,
@@ -52,7 +52,7 @@ describe("mention and command validation", () => {
 });
 
 describe("escalation marker and loop guards", () => {
-  it("round-trips a stable hidden marker", () => {
+  it("round-trips a stable hidden marker without embedding the reason", () => {
     const marker = escalationMarker({
       id: "esc_abc",
       provider: "github",
@@ -61,19 +61,41 @@ describe("escalation marker and loop guards", () => {
       pr: 7,
       sha: "deadbeef",
       job: 3,
-      reason: "auth + migration",
+      targetKey: "mention:@repository-owner",
       status: "dispatched",
     });
-    expect(parseEscalationMarker(marker)).toEqual({ id: "esc_abc", sha: "deadbeef", status: "dispatched" });
+    expect(parseEscalationMarker(marker)).toEqual({
+      id: "esc_abc",
+      sha: "deadbeef",
+      target: "mention:@repository-owner",
+      status: "dispatched",
+    });
+    expect(marker).not.toContain("reason=");
     expect(commentLooksLikeMaomaoEscalation(`${marker}\n@alice`)).toBe(true);
+    const other = escalationMarker({
+      id: "esc_abc",
+      provider: "github",
+      instance: "github.com",
+      repo: "acme/widgets",
+      pr: 7,
+      sha: "deadbeef",
+      job: 3,
+      targetKey: "command:@review-dispatcher:escalate",
+      status: "dispatched",
+    });
+    expect(parseEscalationMarker(other)?.target).toBe("command:@review-dispatcher:escalate");
+    expect(parseEscalationMarker(other)?.target).not.toBe(parseEscalationMarker(marker)?.target);
+  });
+
+  it("strips mentions, URLs, and HTML comment closers from public reasons", () => {
+    expect(sanitizePublicReason("ping @oncall see https://evil.test/x --> leftover")).toBe("ping see leftover");
+    expect(sanitizePublicReason("@org/security jwt change")).toBe("jwt change");
   });
 
   it("recognizes escalate commands and ignores bots", () => {
     expect(mentionsEscalateCommand("hey @maomao escalate please", "maomao", "escalate")).toBe(true);
     expect(mentionsEscalateCommand("@maomao review", "maomao", "escalate")).toBe(false);
     expect(isBotActor({ login: "maomao[bot]", type: "Bot" })).toBe(true);
-    expect(isAuthorizedEscalateActor("OWNER")).toBe(true);
-    expect(isAuthorizedEscalateActor("CONTRIBUTOR")).toBe(false);
   });
 
   it("is idempotent per provider, repo, PR, SHA, and policy", () => {

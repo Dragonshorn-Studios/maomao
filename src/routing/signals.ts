@@ -215,8 +215,6 @@ export function scanRoutingSignals(input: {
 
   const titleHints = familiesForText(input.title ?? "");
   const bodyHints = familiesForText(input.body ?? "");
-  for (const family of [...titleHints, ...bodyHints]) familySet.add(family);
-
   const families = [...familySet];
   const hardRiskFamilies = families.filter((family): family is HardRiskFamily =>
     (HARD_RISK_FAMILIES as readonly string[]).includes(family),

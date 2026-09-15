@@ -707,6 +707,7 @@ describe("pre-review routing and poison-alert", () => {
     expect(kinds).toContain("reviewer");
     expect(store.getJob(created.job.id)?.routing_profile).toBe("observation");
     expect(store.listReviewerRuns(created.job.id).map((run) => run.role)).toEqual(["correctness"]);
+    expect(store.getJob(created.job.id)?.poison_alert_policy).toBeFalsy();
 
     const fixed = loadConfig({
       REVIEWER_ROUTING: "fixed",
@@ -868,7 +869,7 @@ describe("pre-review routing and poison-alert", () => {
           events.push("review");
           return { id: "88", url: "https://github.com/acme/widgets/pull/4#pullrequestreview-88" };
         },
-        listIssueComments: async () => [],
+        listIssueComments: async () => comments.map((body, index) => ({ id: index + 1, body })),
         createIssueComment: async (input) => {
           events.push("comment");
           comments.push(input.body);
@@ -876,7 +877,9 @@ describe("pre-review routing and poison-alert", () => {
           expect(input.body).toContain("pullrequestreview-88");
           expect(input.body).toMatch(/F\d/);
           expect(input.body).not.toMatch(/marller/i);
-          return { id: "c1", url: "https://github.com/acme/widgets/issues/4#issuecomment-1" };
+          expect(input.body).not.toMatch(/@oncall/i);
+          expect(input.body).not.toContain("--> leftover");
+          return { id: `c${comments.length}`, url: `https://github.com/acme/widgets/issues/4#issuecomment-${comments.length}` };
         },
       }),
       checkout: await fixtureCheckout(),
@@ -912,7 +915,7 @@ describe("pre-review routing and poison-alert", () => {
       },
     }).run(created.job.id);
     expect(events[0]).toBe("review");
-    expect(events).toContain("comment");
+    expect(events.filter((event) => event === "comment")).toHaveLength(2);
     expect(events).toContain("webhook");
     const job = store.getJob(created.job.id);
     expect(job?.state).toBe("completed");
@@ -920,6 +923,11 @@ describe("pre-review routing and poison-alert", () => {
     expect(job?.external_dispatch_status).toBe("dispatched");
     expect(job?.external_dispatch_status).not.toBe("completed");
     expect(comments.join("\n")).toContain("@acme");
+    expect(comments.join("\n")).toContain("@review-dispatcher escalate");
+    expect(comments.map((body) => body.match(/target=(\S+)/)?.[1]).sort()).toEqual([
+      "command:@review-dispatcher:escalate",
+      "mention:@repository-owner",
+    ]);
     expect(store.listDispatches(created.job.id).every((row) => row.status === "dispatched")).toBe(true);
 
     events.length = 0;
@@ -939,6 +947,141 @@ describe("pre-review routing and poison-alert", () => {
       opencode: { async run() { throw new Error("should not rerun"); } },
     }).dispatchExternal(created.job.id);
     expect(events).toEqual([]);
+  });
+
+  it("keeps failed mention/command targets retryable after a partial dispatch", async () => {
+    const config = loadConfig({
+      REVIEWER_ROUTING: "deterministic",
+      REVIEWER_ROLES: "correctness,security",
+      OPENCODE_REVIEWER_MODEL: "test/model",
+      POST_EMPTY_REVIEW: "true",
+      POISON_ALERT_POLICY: "external_only",
+      POISON_ALERT_EXTERNAL_ENABLED: "true",
+      POISON_ALERT_EXTERNAL_TARGETS_JSON: JSON.stringify([
+        { type: "mention", recipient: "@repository-owner" },
+        { type: "command", recipient: "@review-dispatcher", command: "escalate" },
+      ]),
+    });
+    const store = new JobStore(openDb(":memory:"));
+    const created = store.enqueue({ ...jobInput("partial"), reviewers: [] });
+    const comments: string[] = [];
+    let failCommand = true;
+    await createPipeline({
+      config,
+      store,
+      github: githubPort({
+        getPullDiff: async () => AUTH_DIFF,
+        listReviews: async () => [],
+        createCommentReview: async () => ({ id: "88", url: "https://r/88" }),
+        listIssueComments: async () => comments.map((body, index) => ({ id: index + 1, body })),
+        createIssueComment: async (input) => {
+          if (failCommand && input.body.includes("@review-dispatcher")) {
+            throw new Error("Issues: Write missing");
+          }
+          comments.push(input.body);
+          return { id: `c${comments.length}`, url: `u${comments.length}` };
+        },
+      }),
+      checkout: await fixtureCheckout(),
+      opencode: {
+        async run(input) {
+          const text = input.prompt.includes("Role id:")
+            ? reviewerJson("security")
+            : JSON.stringify({
+                verdict: "comment",
+                summary: "auth finding",
+                findings: [{ severity: "high", confidence: 0.9, category: "security", summary: "jwt", body: "x" }],
+              });
+          return { stdout: text, stderr: "", exitCode: 0, text, usage: {} };
+        },
+      },
+    }).run(created.job.id);
+    let job = store.getJob(created.job.id);
+    expect(job?.state).toBe("completed");
+    expect(job?.external_dispatch_status).toBe("dispatch_failed");
+    expect(job?.external_dispatch_reason).toMatch(/partial dispatch/i);
+    expect(comments).toHaveLength(1);
+    expect(store.listDispatches(created.job.id).map((row) => row.status).sort()).toEqual(["dispatch_failed", "dispatched"]);
+
+    failCommand = false;
+    store.patchJob(created.job.id, { manual_escalate_requested: 1 });
+    await createPipeline({
+      config,
+      store,
+      github: githubPort({
+        getPullDiff: async () => AUTH_DIFF,
+        listReviews: async () => [],
+        createCommentReview: async () => ({ id: "x", url: "x" }),
+        listIssueComments: async () => comments.map((body, index) => ({ id: index + 1, body })),
+        createIssueComment: async (input) => {
+          comments.push(input.body);
+          return { id: `c${comments.length}`, url: `u${comments.length}` };
+        },
+      }),
+      checkout: await fixtureCheckout(),
+      opencode: { async run() { throw new Error("should not rerun specialists"); } },
+    }).run(created.job.id);
+    job = store.getJob(created.job.id);
+    expect(job?.external_dispatch_status).toBe("dispatched");
+    expect(comments).toHaveLength(2);
+    expect(comments.some((body) => body.includes("@review-dispatcher escalate"))).toBe(true);
+    expect(store.listDispatches(created.job.id).every((row) => row.status === "dispatched")).toBe(true);
+  });
+
+  it("does not retry an over-budget internal pass before failing the job", async () => {
+    const config = loadConfig({
+      REVIEWER_ROUTING: "deterministic",
+      REVIEWER_ROLES: "correctness,security",
+      OPENCODE_REVIEWER_MODEL: "test/model",
+      POST_EMPTY_REVIEW: "true",
+      POISON_ALERT_POLICY: "internal_only",
+      POISON_ALERT_INTERNAL_ENABLED: "true",
+      POISON_ALERT_INTERNAL_MODEL: "test/strong",
+      POISON_ALERT_INTERNAL_MAX_COST_USD: "0.01",
+      POISON_ALERT_INTERNAL_RETRIES: "1",
+      POISON_ALERT_INTERNAL_FALLBACK: "fail",
+    });
+    const store = new JobStore(openDb(":memory:"));
+    const created = store.enqueue({ ...jobInput("budget"), reviewers: [] });
+    let labCalls = 0;
+    await createPipeline({
+      config,
+      store,
+      github: githubPort({
+        getPullDiff: async () => AUTH_DIFF,
+        listReviews: async () => [],
+        createCommentReview: async () => ({ id: "9", url: "https://r/9" }),
+      }),
+      checkout: await fixtureCheckout(),
+      opencode: {
+        async run(input) {
+          if (input.prompt.includes("laboratory re-check")) {
+            labCalls += 1;
+            const text = JSON.stringify({
+              confirmed: true,
+              alert_cleared: false,
+              summary: "still bad",
+              findings: [],
+            });
+            return { stdout: text, stderr: "", exitCode: 0, text, usage: { cost: 1.25, totalTokens: 10, complete: true } };
+          }
+          const text = input.prompt.includes("Role id:")
+            ? reviewerJson("security")
+            : JSON.stringify({
+                verdict: "comment",
+                summary: "auth",
+                findings: [{ severity: "high", confidence: 0.9, category: "security", summary: "maybe", body: "x" }],
+              });
+          return { stdout: text, stderr: "", exitCode: 0, text, usage: {} };
+        },
+      },
+    }).run(created.job.id);
+    expect(labCalls).toBe(1);
+    const job = store.getJob(created.job.id);
+    expect(job?.state).toBe("failed");
+    expect(job?.internal_escalation_state).toBe("failed");
+    expect(job?.internal_escalation_reason).toMatch(/exceeded cap/);
+    expect(job?.github_review_id).toBeNull();
   });
 
   it("skips external dispatch when internal_then_external clears the alert", async () => {

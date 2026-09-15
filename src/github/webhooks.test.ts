@@ -190,7 +190,7 @@ describe("webhook handling", () => {
       repository: { full_name: "acme/widgets", name: "widgets", owner: { login: "acme" } },
       issue: { number: 7, pull_request: { url: "https://github.com/acme/widgets/pull/7" } },
       comment: {
-        body: "<!-- maomao-escalation id=x provider=github instance=github.com repo=acme/widgets pr=7 sha=head222 job=1 status=dispatched reason=\"x\" -->\n@maomao escalate",
+        body: "<!-- maomao-escalation id=x provider=github instance=github.com repo=acme/widgets pr=7 sha=head222 job=1 target=mention:@acme status=dispatched -->\n@maomao escalate",
         user: { login: "alice", type: "User" },
         author_association: "OWNER",
       },
@@ -216,9 +216,40 @@ describe("webhook handling", () => {
     const ok = await handleGithubWebhook({
       config,
       store,
+      github: githubForCommands({ permission: "none" }),
       request: { event: "issue_comment", deliveryId: "c3", signature: sign(secret, okBody), rawBody: okBody },
     });
     expect(ok.dispatchJobId).toBe(jobId);
+    expect(store.getJob(jobId!)?.manual_escalate_requested).toBe(1);
+
+    store.patchJob(jobId!, { manual_escalate_requested: 0 });
+    const memberBody = JSON.stringify({
+      action: "created",
+      installation: { id: 42 },
+      repository: { full_name: "acme/widgets", name: "widgets", owner: { login: "acme" } },
+      issue: { number: 7, pull_request: { url: "https://github.com/acme/widgets/pull/7" } },
+      comment: {
+        body: "@maomao escalate",
+        user: { login: "member", type: "User" },
+        author_association: "MEMBER",
+      },
+    });
+    const memberNone = await handleGithubWebhook({
+      config,
+      store,
+      github: githubForCommands({ permission: "none" }),
+      request: { event: "issue_comment", deliveryId: "c4", signature: sign(secret, memberBody), rawBody: memberBody },
+    });
+    expect(memberNone.body.reason).toMatch(/not authorized/i);
+    expect(store.getJob(jobId!)?.manual_escalate_requested).toBe(0);
+
+    const memberWrite = await handleGithubWebhook({
+      config,
+      store,
+      github: githubForCommands({ permission: "write" }),
+      request: { event: "issue_comment", deliveryId: "c5", signature: sign(secret, memberBody), rawBody: memberBody },
+    });
+    expect(memberWrite.dispatchJobId).toBe(jobId);
     expect(store.getJob(jobId!)?.manual_escalate_requested).toBe(1);
   });
 });

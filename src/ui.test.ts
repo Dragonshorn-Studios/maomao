@@ -101,6 +101,13 @@ describe("monitoring pages", () => {
     expect(observationHtml).toContain("Profile</strong> observation");
     expect(observationHtml).toContain("reviewers correctness");
     expect(observationHtml).not.toContain("Poison alert");
+    store.patchJob(observation!.id, { poison_alert_policy: "internal_and_external" });
+    const observationWithPolicy = renderJob(
+      store.getJob(observation!.id)!,
+      store.listReviewerRuns(observation!.id),
+      store.listLogs(observation!.id),
+    );
+    expect(observationWithPolicy).not.toContain("Poison alert");
   });
 
   it("renders job detail with reviewer cards, findings, and a log panel", () => {

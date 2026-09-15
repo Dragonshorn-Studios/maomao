@@ -208,7 +208,7 @@ By default Maomao runs a **pre-review router** before specialists. A determinist
 
 Set `REVIEWER_ROUTING=fixed` to keep the previous always-on reviewer list. `deterministic` uses only the scanner; `model` uses the router model with hard-risk override; `hybrid` (default) uses both.
 
-Hard-risk paths (auth, secrets, billing, migrations, deploy) can escalate the profile. The model cannot downgrade those triggers. Invalid or failed routing falls back to `diagnosis` and still runs a review.
+Hard-risk **file paths** (auth, secrets, billing, migrations, deploy) can escalate the profile. PR title and body are untrusted hints only and cannot force that escalate. The model cannot downgrade file/diff hard-risk triggers. Invalid or failed routing falls back to `diagnosis` and still runs a review.
 
 Optional: `OPENCODE_ROUTER_MODEL`, `ROUTER_TIMEOUT_MS`, `ROUTER_MAX_DIFF_CHARS`, `ROUTER_MAX_REVIEWERS`.
 
@@ -216,11 +216,11 @@ Optional: `OPENCODE_ROUTER_MODEL`, `ROUTER_TIMEOUT_MS`, `ROUTER_MAX_DIFF_CHARS`,
 
 `poison-alert` can use two independent channels. Neither has a hardcoded model, provider, username, or bot.
 
-Internal: a second, bounded pass with `POISON_ALERT_INTERNAL_MODEL` (any configured `provider/model`), separate cost/token/timeout/retry caps, and a distinct usage record. It verifies or refines first-pass findings. If the model is missing or over budget, Maomao keeps the first pass unless `POISON_ALERT_INTERNAL_FALLBACK=fail`.
+Internal: a second, bounded pass with `POISON_ALERT_INTERNAL_MODEL` (any configured `provider/model`), separate cost/token/timeout/retry caps, and a distinct usage record. It verifies or refines first-pass findings. If the model is missing or over budget, Maomao keeps the first pass unless `POISON_ALERT_INTERNAL_FALLBACK=fail`. Over-budget is not retried.
 
 External: fire-and-forget **after** Maomao publishes its own review. Targets are JSON in `POISON_ALERT_EXTERNAL_TARGETS_JSON` (`mention`, `command`, or signed `webhook`). Webhook URLs/secrets are env refs; HTTPS is required and private/loopback destinations are rejected. Mention/command fields are validated so configuration cannot inject comment content.
 
-Policies: `internal_only`, `external_only`, `internal_then_external` (external only if the internal pass still meets `POISON_ALERT_EXTERNAL_MIN_SEVERITY`), `internal_and_external`, `manual` (`@maomao escalate` from an OWNER/MEMBER/COLLABORATOR, loop-safe against bot/marker comments).
+Policies: `internal_only`, `external_only`, `internal_then_external` (external only if the internal pass still meets `POISON_ALERT_EXTERNAL_MIN_SEVERITY`), `internal_and_external`, `manual` (`@maomao escalate` from write/maintain/admin collaborators, or a personal-repo OWNER when the collaborator API 404s, loop-safe against bot/marker comments). Partial target failure is stored as `dispatch_failed` and can be retried.
 
 Maomao does not queue, claim, poll, or ingest external review results. The UI shows immediate dispatch status only.
 

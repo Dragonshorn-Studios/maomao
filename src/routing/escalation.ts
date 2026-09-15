@@ -103,6 +103,17 @@ export function escalationId(input: {
 
 export const ESCALATION_MARKER_PREFIX = "<!-- maomao-escalation";
 
+export function sanitizePublicReason(raw: string, max = 180): string {
+  return raw
+    .replace(/https?:\/\/\S+/gi, " ")
+    .replace(/@[A-Za-z0-9][A-Za-z0-9\-\/]*/g, " ")
+    .replace(/<!--|-->/g, " ")
+    .replace(/[\r\n\u2028\u2029]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, max);
+}
+
 export function escalationMarker(fields: {
   id: string;
   provider: string;
@@ -111,27 +122,23 @@ export function escalationMarker(fields: {
   pr: number;
   sha: string;
   job: number;
-  reason: string;
+  targetKey: string;
   status: string;
 }): string {
-  const compactReason = fields.reason.replace(/\s+/g, " ").slice(0, 180);
-  return `${ESCALATION_MARKER_PREFIX} id=${fields.id} provider=${fields.provider} instance=${fields.instance} repo=${fields.repo} pr=${fields.pr} sha=${fields.sha} job=${fields.job} status=${fields.status} reason=${JSON.stringify(compactReason)} -->`;
+  const target = fields.targetKey.replace(/\s+/g, "").slice(0, 120);
+  return `${ESCALATION_MARKER_PREFIX} id=${fields.id} provider=${fields.provider} instance=${fields.instance} repo=${fields.repo} pr=${fields.pr} sha=${fields.sha} job=${fields.job} target=${target} status=${fields.status} -->`;
 }
 
-export function parseEscalationMarker(body: string): { id: string; sha: string; status: string } | undefined {
+export function parseEscalationMarker(body: string): { id: string; sha: string; target: string; status: string } | undefined {
   const match = body.match(
-    /<!-- maomao-escalation id=(\S+) provider=\S+ instance=\S+ repo=\S+ pr=\d+ sha=(\S+) job=\d+ status=(\S+)/,
+    /<!-- maomao-escalation id=(\S+) provider=\S+ instance=\S+ repo=\S+ pr=\d+ sha=(\S+) job=\d+ target=(\S+) status=(\S+)/,
   );
   if (!match) return undefined;
-  return { id: match[1] ?? "", sha: match[2] ?? "", status: match[3] ?? "" };
+  return { id: match[1] ?? "", sha: match[2] ?? "", target: match[3] ?? "", status: match[4] ?? "" };
 }
 
 export function commentLooksLikeMaomaoEscalation(body: string): boolean {
   return body.includes(ESCALATION_MARKER_PREFIX) || body.includes("<!-- maomao-review");
-}
-
-export function isAuthorizedEscalateActor(association: string | undefined): boolean {
-  return ["OWNER", "MEMBER", "COLLABORATOR"].includes((association ?? "").toUpperCase());
 }
 
 export function isBotActor(input: { login?: string; type?: string }): boolean {
