@@ -370,8 +370,9 @@ export class GithubClient implements GithubPort, ManualTriggerPort {
   }
 
   async listAppInstallations() {
-    const response = await this.appOctokit().rest.apps.listInstallations({ per_page: 100 });
-    return response.data
+    const octokit = this.appOctokit();
+    const installations = await octokit.paginate(octokit.rest.apps.listInstallations, { per_page: 100 });
+    return installations
       .filter((installation) => installation.account && "id" in installation.account)
       .map((installation) => ({
         id: Number(installation.id),

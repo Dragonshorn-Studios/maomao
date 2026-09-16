@@ -177,6 +177,10 @@ describe("HTTP app", () => {
     expect(diffsJs.status).toBe(200);
     expect(diffsJs.headers.get("content-type")).toContain("text/javascript");
     expect(await diffsJs.text()).toContain("__maomaoDiffs");
+    const typeaheadJs = await app.request("/assets/typeahead.js");
+    expect(typeaheadJs.status).toBe(200);
+    expect(typeaheadJs.headers.get("content-type")).toContain("text/javascript");
+    expect(await typeaheadJs.text()).toContain("__maomaoTypeahead");
     expect((await app.request("/assets/other.css")).status).toBe(302);
     expect((await app.request("/assets/other.css")).headers.get("location")).toContain("/login");
 
@@ -2459,6 +2463,7 @@ describe("scan repository typeahead", () => {
     const again = await app.request("/api/scan/repositories", { headers: { cookie: session } });
     expect(again.status).toBe(200);
     expect(calls.installations).toBe(1);
+    expect(calls.repositories).toBe(2);
     warn.mockRestore();
   });
 
@@ -2477,10 +2482,80 @@ describe("scan repository typeahead", () => {
     warn.mockRestore();
   });
 
-  it("reports 503 when the GitHub client lacks repository search support", async () => {
-    const { app } = testApp(oauthEnv, undefined, mockOauthFetch({ id: 1001, login: "octocat" }));
+  it("reports 503 when a present client lacks the optional enumeration methods", async () => {
+    const github = {
+      getRepoInstallation: async () => ({ installationId: 42, accountId: 1001 }),
+      getRepository: async () => ({ id: 2002 }),
+    } as unknown as ManualTriggerPort & Partial<GithubPort>;
+    const { app } = testApp(oauthEnv, github, mockOauthFetch({ id: 1001, login: "octocat" }));
     const session = await operatorSession(app);
     const res = await app.request("/api/scan/repositories", { headers: { cookie: session } });
     expect(res.status).toBe(503);
+  });
+
+  it("skips installations outside the account allowlist entirely", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const calls = { installations: 0, repositories: 0 };
+    const github = typeaheadGithub(calls);
+    github.listAppInstallations = async () => {
+      calls.installations += 1;
+      return [
+        { id: 42, accountId: 1001 },
+        { id: 43, accountId: 9001 },
+      ];
+    };
+    const { app } = testApp({ ...oauthEnv, ALLOWED_GITHUB_ACCOUNT_IDS: "1001" }, github, mockOauthFetch({ id: 1001, login: "octocat" }));
+    const session = await operatorSession(app);
+    const res = await app.request("/api/scan/repositories", { headers: { cookie: session } });
+    const body = await res.json() as { repositories: Array<{ fullName: string }> };
+    expect(body.repositories.map((repo) => repo.fullName)).toEqual(["acme/other", "acme/widgets", "acme/zebra"]);
+    expect(calls.repositories).toBe(1); // installation 43's repos were never listed
+    warn.mockRestore();
+  });
+
+  it("caps the suggestion list at 500 repositories", async () => {
+    const github = {
+      listAppInstallations: async () => [{ id: 42, accountId: 1001 }],
+      listInstallationRepositories: async () =>
+        Array.from({ length: 600 }, (_, i) => ({ id: i + 1, fullName: `acme/repo${String(i).padStart(3, "0")}` })),
+    } as unknown as ManualTriggerPort & Partial<GithubPort>;
+    const { app } = testApp(oauthEnv, github, mockOauthFetch({ id: 1001, login: "octocat" }));
+    const session = await operatorSession(app);
+    const res = await app.request("/api/scan/repositories", { headers: { cookie: session } });
+    const body = await res.json() as { repositories: unknown[] };
+    expect(body.repositories).toHaveLength(500);
+  });
+
+  it("re-enumerates after the cache TTL lapses", async () => {
+    const calls = { installations: 0, repositories: 0 };
+    const { app } = testApp(oauthEnv, typeaheadGithub(calls), mockOauthFetch({ id: 1001, login: "octocat" }));
+    const session = await operatorSession(app);
+    await app.request("/api/scan/repositories", { headers: { cookie: session } });
+    expect(calls.installations).toBe(1);
+    const nowSpy = vi.spyOn(Date, "now").mockReturnValue(Date.now() + 6 * 60 * 1000);
+    try {
+      await app.request("/api/scan/repositories", { headers: { cookie: session } });
+      expect(calls.installations).toBe(2);
+    } finally {
+      nowSpy.mockRestore();
+    }
+  });
+
+  it("does not cache empty enumeration results", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const calls = { installations: 0, repositories: 0 };
+    const github = typeaheadGithub(calls);
+    github.listAppInstallations = async () => {
+      calls.installations += 1;
+      return [];
+    };
+    const { app } = testApp(oauthEnv, github, mockOauthFetch({ id: 1001, login: "octocat" }));
+    const session = await operatorSession(app);
+    const first = await app.request("/api/scan/repositories", { headers: { cookie: session } });
+    expect(first.status).toBe(200);
+    expect(await first.json()).toEqual({ repositories: [] });
+    await app.request("/api/scan/repositories", { headers: { cookie: session } });
+    expect(calls.installations).toBe(2); // empty result must not pin the list for the TTL
+    warn.mockRestore();
   });
 });

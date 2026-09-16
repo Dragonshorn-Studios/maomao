@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { openDb } from "./db.js";
 import { seedDemoJobs } from "./demo/fixtures.js";
 import { JobStore } from "./jobs/store.js";
@@ -955,5 +955,161 @@ describe("scan repository typeahead", () => {
     expect(html).toContain('role="listbox"');
     expect(html).toContain('<script src="/assets/typeahead.js" defer></script>');
     expect(html).toContain('aria-label="Run repository health scan"');
+  });
+});
+
+describe("scan typeahead combobox (fake DOM)", () => {
+  // Minimal DOM covering everything TYPEAHEAD_JS touches — no jsdom dependency.
+  function fakeElement(tag: string): any {
+    const classes = new Set<string>();
+    const attrs = new Map<string, string>();
+    const listeners = new Map<string, Array<(event?: unknown) => void>>();
+    const element: any = {
+      tag,
+      id: "",
+      value: "",
+      hidden: false,
+      children: [],
+      className: "",
+      parentNode: undefined as any,
+      scrollIntoView: undefined as unknown as () => void,
+      classList: {
+        toggle(name: string, force?: boolean) {
+          const next = force ?? !classes.has(name);
+          if (next) classes.add(name);
+          else classes.delete(name);
+          return next;
+        },
+        contains: (name: string) => classes.has(name),
+      },
+      appendChild(child: any) {
+        element.children.push(child);
+        child.parentNode = element;
+        return child;
+      },
+      contains(node: any) {
+        if (node === element) return true;
+        return element.children.some((child: any) => child === node || child.contains?.(node));
+      },
+      addEventListener(type: string, fn: (event?: unknown) => void) {
+        const list = listeners.get(type) ?? [];
+        list.push(fn);
+        listeners.set(type, list);
+      },
+      fire(type: string, event: any = {}) {
+        event.target ??= element;
+        event.preventDefault ??= vi.fn();
+        for (const fn of listeners.get(type) ?? []) fn(event);
+      },
+      listenerNames: () => [...listeners.keys()],
+      getAttribute: (name: string) => attrs.get(name),
+      setAttribute: (name: string, value: string) => void attrs.set(name, String(value)),
+      removeAttribute: (name: string) => void attrs.delete(name),
+      focus: vi.fn(),
+    };
+    Object.defineProperty(element, "textContent", {
+      get: () => element._text ?? "",
+      set: (value: string) => {
+        element._text = value;
+        element.children = [];
+      },
+    });
+    return element;
+  }
+
+  const REPOS = [{ fullName: "acme/widgets" }, { fullName: "acme/zebra" }, { fullName: "beta/tools" }];
+
+  async function boot(repos: Array<{ fullName: string }> | null, fetchOk = true) {
+    const input = fakeElement("input");
+    input.id = "scan-repo-input";
+    input.setAttribute("aria-controls", "repo-listbox");
+    const listbox = fakeElement("ul");
+    listbox.id = "repo-listbox";
+    listbox.hidden = true; // the server-rendered listbox ships with the hidden attribute
+    const docListeners = new Map<string, Array<(event?: unknown) => void>>();
+    const doc: any = {
+      readyState: "complete",
+      querySelector: (selector: string) => (selector === "[data-repo-typeahead]" ? input : null),
+      getElementById: (id: string) => (id === "repo-listbox" ? listbox : null),
+      createElement: (tag: string) => fakeElement(tag),
+      addEventListener: (type: string, fn: (event?: unknown) => void) => {
+        const list = docListeners.get(type) ?? [];
+        list.push(fn);
+        docListeners.set(type, list);
+      },
+    };
+    const payload: any = fetchOk && repos ? { ok: true, json: async () => ({ repositories: repos }) } : { ok: false, json: async () => ({}) };
+    const fetchFn = vi.fn(async () => payload as Response);
+    new Function("globalThis", "document", "fetch", `${TYPEAHEAD_JS}\n;return globalThis.__maomaoTypeahead;`)(
+      globalThis,
+      doc,
+      fetchFn,
+    );
+    await new Promise((resolve) => setTimeout(resolve, 0)); // let the fetch chain settle
+    const docFire = (type: string, event?: any) => {
+      for (const fn of docListeners.get(type) ?? []) fn(event);
+    };
+    return { input, listbox, docFire };
+  }
+
+  it("opens on focus, renders options, and auto-activates nothing", async () => {
+    const { input, listbox } = await boot(REPOS);
+    input.fire("focus");
+    expect(listbox.hidden).toBe(false);
+    expect(input.getAttribute("aria-expanded")).toBe("true");
+    expect(listbox.children).toHaveLength(3);
+    // No auto-activation: typing + Enter must submit the typed value (review finding).
+    expect(input.getAttribute("aria-activedescendant")).toBeUndefined();
+    expect(listbox.children.some((child: any) => child.classList.contains("is-active"))).toBe(false);
+  });
+
+  it("does not intercept Enter before the operator navigated with arrows", async () => {
+    const { input, listbox } = await boot(REPOS);
+    input.fire("focus");
+    input.value = "acme/zebra";
+    input.fire("input");
+    const preventDefault = vi.fn();
+    input.fire("keydown", { key: "Enter", preventDefault });
+    // The typed value stands; the form submits naturally.
+    expect(preventDefault).not.toHaveBeenCalled();
+    expect(input.value).toBe("acme/zebra");
+    expect(listbox.hidden).toBe(false);
+  });
+
+  it("navigates with arrows and selects with Enter without submitting", async () => {
+    const { input, listbox } = await boot(REPOS);
+    input.fire("focus");
+    input.fire("keydown", { key: "ArrowDown", preventDefault: vi.fn() });
+    expect(input.getAttribute("aria-activedescendant")).toContain("scan-repo-input-opt-");
+    expect(listbox.children[0]?.classList.contains("is-active")).toBe(true);
+    input.fire("keydown", { key: "ArrowDown", preventDefault: vi.fn() });
+    input.fire("keydown", { key: "Enter", preventDefault: vi.fn() });
+    expect(input.value).toBe("acme/zebra");
+    expect(listbox.hidden).toBe(true);
+    expect(input.getAttribute("aria-expanded")).toBe("false");
+    expect(input.focus).toHaveBeenCalled();
+  });
+
+  it("closes on Escape and on click-away", async () => {
+    const { input, listbox, docFire } = await boot(REPOS);
+    input.fire("focus");
+    input.fire("keydown", { key: "Escape" });
+    expect(listbox.hidden).toBe(true);
+    input.fire("focus");
+    expect(listbox.hidden).toBe(false);
+    docFire("click", { target: { tag: "other" } });
+    expect(listbox.hidden).toBe(true);
+  });
+
+  it("leaves the input free-form when the endpoint fails or returns nothing", async () => {
+    const failed = await boot(null, false);
+    failed.input.fire("focus");
+    expect(failed.listbox.hidden).toBe(true); // no listeners wired, nothing opens
+    expect(failed.input.listenerNames()).toEqual([]);
+
+    const empty = await boot([]);
+    empty.input.fire("focus");
+    expect(empty.listbox.hidden).toBe(true);
+    expect(empty.input.listenerNames()).toEqual([]);
   });
 });

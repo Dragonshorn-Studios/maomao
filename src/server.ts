@@ -24,6 +24,8 @@ import {
   THEME_CSS,
   DIFFS_HREF,
   DIFFS_JS,
+  TYPEAHEAD_HREF,
+  TYPEAHEAD_JS,
   FAVICON_SVG,
   FAVICON_PNG_BASE64,
   LARGE_ICON_SVG,
@@ -415,6 +417,13 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
 
   app.get(DIFFS_HREF, (c) =>
     c.newResponse(DIFFS_JS, 200, {
+      "content-type": "text/javascript; charset=utf-8",
+      "cache-control": "public, max-age=3600",
+    }),
+  );
+
+  app.get(TYPEAHEAD_HREF, (c) =>
+    c.newResponse(TYPEAHEAD_JS, 200, {
       "content-type": "text/javascript; charset=utf-8",
       "cache-control": "public, max-age=3600",
     }),
@@ -1459,53 +1468,71 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
   type ScanRepoOption = { fullName: string; installationId: number; repositoryId: number; accountId: number | null };
   const SCAN_REPO_CACHE_TTL_MS = 5 * 60 * 1000;
   let scanRepoCache: { at: number; options: ScanRepoOption[] } | null = null;
+  let scanRepoInflight: Promise<ScanRepoOption[]> | null = null;
+
+  const enumerateScanRepos = async (): Promise<ScanRepoOption[]> => {
+    const github = ctx.github;
+    if (!github || !github.listAppInstallations || !github.listInstallationRepositories) {
+      throw new Error("this GitHub client does not support repository search");
+    }
+    const options: ScanRepoOption[] = [];
+    const installations = await github.listAppInstallations();
+    for (const installation of installations) {
+      const subject = {
+        installationId: installation.id,
+        accountId: installation.accountId,
+      };
+      if (!authorizeGithubAccount(ctx.config, subject).ok) continue;
+      try {
+        const repos = await github.listInstallationRepositories(installation.id);
+        for (const repo of repos) {
+          if (!authorizeGithubRepository(ctx.config, { ...subject, repositoryId: repo.id }).ok) continue;
+          options.push({
+            fullName: repo.fullName,
+            installationId: installation.id,
+            repositoryId: repo.id,
+            accountId: installation.accountId,
+          });
+        }
+      } catch (error) {
+        console.warn(
+          `scan: could not list repositories for installation ${installation.id}: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+    }
+    return options.sort((a, b) => a.fullName.localeCompare(b.fullName)).slice(0, 500);
+  };
+
   // Allowlist-filtered installation repositories for the scan-page typeahead.
   // Enumeration is cached: installations×repos is expensive and the allowlists
   // change rarely; the confirm step re-validates against live allowlists anyway.
+  // Empty results are NOT cached — a transient outage would otherwise pin an
+  // empty suggestion list for the full TTL. Concurrent cold-cache requests share
+  // one in-flight enumeration instead of stampeding GitHub.
   app.get("/api/scan/repositories", async (c) => {
     if (!c.get("identity")) {
       return c.json({ error: "repository search requires an operator GitHub OAuth identity" }, 403);
     }
-    const github = ctx.github;
-    if (!github || !github.listAppInstallations || !github.listInstallationRepositories) {
+    if (!ctx.github || !ctx.github.listAppInstallations || !ctx.github.listInstallationRepositories) {
       return c.json({ error: "this GitHub client does not support repository search" }, 503);
     }
     const now = Date.now();
     if (!scanRepoCache || now - scanRepoCache.at > SCAN_REPO_CACHE_TTL_MS) {
-      const options: ScanRepoOption[] = [];
+      scanRepoCache = null;
+      if (!scanRepoInflight) {
+        scanRepoInflight = enumerateScanRepos().finally(() => {
+          scanRepoInflight = null;
+        });
+      }
       try {
-        const installations = await github.listAppInstallations();
-        for (const installation of installations) {
-          const subject = {
-            installationId: installation.id,
-            accountId: installation.accountId,
-          };
-          if (!authorizeGithubAccount(ctx.config, subject).ok) continue;
-          try {
-            const repos = await github.listInstallationRepositories(installation.id);
-            for (const repo of repos) {
-              if (!authorizeGithubRepository(ctx.config, { ...subject, repositoryId: repo.id }).ok) continue;
-              options.push({
-                fullName: repo.fullName,
-                installationId: installation.id,
-                repositoryId: repo.id,
-                accountId: installation.accountId,
-              });
-            }
-          } catch (error) {
-            console.warn(
-              `scan: could not list repositories for installation ${installation.id}: ${error instanceof Error ? error.message : String(error)}`,
-            );
-          }
-        }
+        const options = await scanRepoInflight;
+        if (options.length > 0) scanRepoCache = { at: now, options };
       } catch (error) {
         console.warn(`scan: repository enumeration failed: ${error instanceof Error ? error.message : String(error)}`);
         return c.json({ error: "could not enumerate installation repositories" }, 502);
       }
-      options.sort((a, b) => a.fullName.localeCompare(b.fullName));
-      scanRepoCache = { at: now, options: options.slice(0, 500) };
     }
-    return c.json({ repositories: scanRepoCache.options });
+    return c.json({ repositories: scanRepoCache?.options ?? [] });
   });
 
   app.get("/api/jobs", (c) => {

@@ -63,13 +63,16 @@ export const TYPEAHEAD_JS = String.raw`(function () {
     function render() {
       listbox.textContent = "";
       options = filterRepos(repos, input.value);
+      // Deliberately no auto-activation: typing a full repository name and
+      // pressing Enter must submit the typed value, not the first match.
+      // Only arrow-key navigation (setActive) arms the Enter interception.
+      active = -1;
+      input.removeAttribute("aria-activedescendant");
       if (options.length === 0) {
         listbox.appendChild(createOption({ fullName: "No matching allowlisted repository" }, true));
-        active = -1;
         return;
       }
       for (var i = 0; i < options.length; i++) listbox.appendChild(createOption(options[i], false));
-      setActive(0);
     }
 
     function createOption(repo, isEmpty) {
@@ -98,14 +101,15 @@ export const TYPEAHEAD_JS = String.raw`(function () {
     input.addEventListener("input", function () { render(); open(); });
     input.addEventListener("keydown", function (event) {
       if (listbox.hidden) return;
-      if (event.key === "ArrowDown" && active < options.length - 1) {
+      if (event.key === "ArrowDown") {
         event.preventDefault();
-        setActive(active + 1);
-      } else if (event.key === "ArrowUp" && active > 0) {
+        setActive(active < 0 ? 0 : Math.min(active + 1, options.length - 1));
+      } else if (event.key === "ArrowUp") {
         event.preventDefault();
-        setActive(active - 1);
+        setActive(active < 0 ? options.length - 1 : active - 1);
+        if (active < 0) input.removeAttribute("aria-activedescendant");
       } else if (event.key === "Enter" && active >= 0 && options[active]) {
-        event.preventDefault(); // select, don't submit the form
+        event.preventDefault(); // select the navigated option, don't submit
         select(options[active]);
       } else if (event.key === "Escape") {
         close();

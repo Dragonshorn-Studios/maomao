@@ -54,6 +54,7 @@ export function isPublicPath(path: string): boolean {
     // Stylesheet and brand icons: fixed constants served by src/server.ts.
     path === "/assets/maomao.css" ||
     path === "/assets/diffs.js" ||
+    path === "/assets/typeahead.js" ||
     path === "/assets/favicon.svg" ||
     path === "/assets/favicon.png" ||
     path === "/assets/icon.svg" ||
