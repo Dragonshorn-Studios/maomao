@@ -29,6 +29,7 @@ import {
   usageReportedCopy,
 } from "./copy.js";
 import { roleGlyph } from "./glyphs.js";
+import { TYPEAHEAD_HREF } from "./typeahead.js";
 import { csrfInput, layout, type PageOptions, type UiIdentity } from "./layout.js";
 import {
   findingLocation,
@@ -810,6 +811,10 @@ function renderFindingDiff(record?: FindingRow): string {
   if (!record.diff_hunk) {
     return note ? `<p class="muted diff-note">${escapeHtml(note)}</p>` : "";
   }
+  // Two layers: the server-rendered spans are the no-JS fallback;
+  // /assets/vendor/pierre-diffs.js upgrades the container to a @pierre/diffs
+  // viewer (syntax highlighting, unified/split toggle, line annotation) using
+  // the raw hunk embedded in the non-executing script tag below.
   const lines = record.diff_hunk
     .split("\n")
     .map((line) => {
@@ -817,9 +822,15 @@ function renderFindingDiff(record?: FindingRow): string {
       return `<span class="diff-${cls}">${escapeHtml(line)}</span>`;
     })
     .join("\n");
+  // Only new-file numbering can anchor a line annotation; original_line is
+  // old-file numbering and would mark an unrelated row.
+  const line = record.current_line;
   return `<details class="finding-diff">
       <summary>Show diff</summary>
-      <pre class="diff-panel" aria-label="Diff hunk from the reviewed revision">${lines}</pre>
+      <div class="pierre-diff" data-pierre-diff data-path="${escapeHtml(record.current_path ?? record.original_path ?? "")}" data-line="${line ?? ""}" data-severity="${escapeHtml(record.severity ?? "info")}" data-summary="${escapeHtml((record.summary ?? "").slice(0, 160))}">
+        <pre class="diff-panel" aria-label="Diff hunk from the reviewed revision">${lines}</pre>
+        <script type="text/plain" class="diff-raw">${escapeHtml(record.diff_hunk)}</script>
+      </div>
       ${note ? `<p class="muted diff-note">${escapeHtml(note)}</p>` : ""}
     </details>`;
 }
@@ -1232,10 +1243,13 @@ export function renderScanPage(data: ScanPageData): string {
     ${data.canScan ? `
     <form class="trigger" method="post" action="/scan">
       ${csrf}
-      <label>
-        Repository (owner/repo — must be an allowlisted installation)
-        <input name="repo" placeholder="owner/repo" required/>
-      </label>
+      <label for="scan-repo-input">Repository (owner/repo — must be an allowlisted installation)</label>
+      <span class="typeahead-wrap">
+        <input id="scan-repo-input" name="repo" placeholder="owner/repo — start typing to search" required autocomplete="off"
+          role="combobox" aria-expanded="false" aria-controls="repo-listbox" aria-autocomplete="list"
+          data-repo-typeahead/>
+        <ul id="repo-listbox" role="listbox" aria-label="Allowlisted repositories" class="typeahead-listbox" hidden></ul>
+      </span>
       <button type="submit" aria-label="Run repository health scan">Sniff sniff</button>
     </form>
     <p class="muted">${data.profileRevision ? `Active profile revision: #${data.profileRevision.id} (${escapeHtml(data.profileRevision.name)}) — snapshotted onto the scan job.` : "No active profile revision — env configuration applies."}</p>
@@ -1245,7 +1259,8 @@ export function renderScanPage(data: ScanPageData): string {
       data.issueCreationEnabled
         ? `<p class="muted">Open a completed scan to select findings, preview the proposed issues, and publish them. Findings are deduplicated per repository + fingerprint; already-linked GitHub issues are skipped, and partial failures can be retried safely.</p>`
         : `<p class="muted">Issue creation is disabled (GITHUB_ISSUE_CREATION_ENABLED=false).</p>`
-    }`
+    }
+    <script src="${TYPEAHEAD_HREF}" defer></script>`
     : `<p class="muted">Scanning requires an operator GitHub OAuth identity.</p>`}`;
   return layout("Repository health scan", body, {
     showLogout: data.canScan || Boolean(data.csrfToken),

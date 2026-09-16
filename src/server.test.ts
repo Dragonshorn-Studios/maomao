@@ -16,7 +16,12 @@ function sign(secret: string, body: string): string {
   return `sha256=${createHmac("sha256", secret).update(body).digest("hex")}`;
 }
 
-function testApp(env: Record<string, string> = {}, github?: ManualTriggerPort, oauthFetch?: typeof fetch) {
+function testApp(
+  env: Record<string, string> = {},
+  github?: ManualTriggerPort,
+  oauthFetch?: typeof fetch,
+  contextExtras: Partial<Parameters<typeof createApp>[0]> = {},
+) {
   const webhookSecret = "s3cret";
   const config = loadConfig({
     GITHUB_WEBHOOK_SECRET: webhookSecret,
@@ -33,7 +38,7 @@ function testApp(env: Record<string, string> = {}, github?: ManualTriggerPort, o
     },
     abortMany() {},
   } as unknown as JobQueue;
-  const app = createApp({ config, store, queue, github, startedAt: Date.now(), oauthFetch });
+  const app = createApp({ config, store, queue, github, startedAt: Date.now(), oauthFetch, ...contextExtras });
   return { app, store, enqueued, webhookSecret };
 }
 
@@ -173,10 +178,14 @@ describe("HTTP app", () => {
     expect((await app.request("/login")).status).toBe(200);
     expect((await app.request("/assets/maomao.css")).status).toBe(200);
     expect(await (await app.request("/assets/maomao.css")).text()).toContain("--jade:");
-    const diffsJs = await app.request("/assets/diffs.js");
-    expect(diffsJs.status).toBe(200);
-    expect(diffsJs.headers.get("content-type")).toContain("text/javascript");
-    expect(await diffsJs.text()).toContain("__maomaoDiffs");
+    const typeaheadJs = await app.request("/assets/typeahead.js");
+    expect(typeaheadJs.status).toBe(200);
+    expect(typeaheadJs.headers.get("content-type")).toContain("text/javascript");
+    expect(await typeaheadJs.text()).toContain("__maomaoTypeahead");
+    const pierreJs = await app.request("/assets/vendor/pierre-diffs.js");
+    expect(pierreJs.status).toBe(200);
+    expect(pierreJs.headers.get("content-type")).toContain("text/javascript");
+    expect(await pierreJs.text()).toContain("__maomaoPierre");
     expect((await app.request("/assets/other.css")).status).toBe(302);
     expect((await app.request("/assets/other.css")).headers.get("location")).toContain("/login");
 
@@ -2380,5 +2389,213 @@ describe("scan issue creation", () => {
     expect(page.status).toBe(200);
     expect(await page.text()).toContain("Issues: write permission");
     log.mockRestore();
+  });
+});
+
+describe("pierre diffs vendor asset", () => {
+  it("404s when the bundle has not been built, leaving the no-JS fallback", async () => {
+    const { mkdtempSync } = await import("node:fs");
+    const { tmpdir } = await import("node:os");
+    const { join } = await import("node:path");
+    const emptyDir = mkdtempSync(join(tmpdir(), "maomao-vendor-"));
+    const { app } = testApp(
+      { UI_PASSWORD: "hunter2", UI_SESSION_SECRET: "session-secret-for-tests" },
+      undefined,
+      undefined,
+      { vendorAssetsDir: emptyDir },
+    );
+    const missing = await app.request("/assets/vendor/pierre-diffs.js");
+    expect(missing.status).toBe(404);
+  });
+
+  it("serves a bundle placed into the vendor directory (fixture, not cwd dist)", async () => {
+    const { mkdtempSync, writeFileSync } = await import("node:fs");
+    const { tmpdir } = await import("node:os");
+    const { join } = await import("node:path");
+    const vendorDir = mkdtempSync(join(tmpdir(), "maomao-vendor-"));
+    writeFileSync(join(vendorDir, "pierre-diffs.js"), "globalThis.__maomaoPierre = { enhance() {} };");
+    const { app } = testApp(
+      { UI_PASSWORD: "hunter2", UI_SESSION_SECRET: "session-secret-for-tests" },
+      undefined,
+      undefined,
+      { vendorAssetsDir: vendorDir },
+    );
+    const res = await app.request("/assets/vendor/pierre-diffs.js");
+    expect(res.status).toBe(200);
+    expect(res.headers.get("content-type")).toContain("text/javascript");
+    expect(await res.text()).toContain("__maomaoPierre");
+  });
+});
+
+describe("scan repository typeahead", () => {
+  const oauthEnv = {
+    UI_SESSION_SECRET: "session-secret-for-tests",
+    GITHUB_OAUTH_CLIENT_ID: "cid",
+    GITHUB_OAUTH_CLIENT_SECRET: "csecret",
+    MAOMAO_ADMIN_GITHUB_IDS: "1001",
+    MAOMAO_PUBLIC_URL: "https://maomao.example",
+  };
+
+  function typeaheadGithub(calls: { installations: number; repositories: number }): ManualTriggerPort & Partial<GithubPort> {
+    return {
+      getRepoInstallation: async () => ({ installationId: 42, accountId: 1001 }),
+      getRepository: async () => ({ id: 2002 }),
+      listAppInstallations: async () => {
+        calls.installations += 1;
+        return [
+          { id: 42, accountId: 1001 },
+          { id: 43, accountId: 1001 },
+        ];
+      },
+      listInstallationRepositories: async (installationId: number) => {
+        calls.repositories += 1;
+        if (installationId === 43) throw new Error("installation suspended");
+        return [
+          { id: 2002, fullName: "acme/widgets" },
+          { id: 3003, fullName: "acme/other" },
+          { id: 4004, fullName: "acme/zebra" },
+        ];
+      },
+    } as unknown as ManualTriggerPort & Partial<GithubPort>;
+  }
+
+  async function operatorSession(app: ReturnType<typeof createApp>): Promise<string> {
+    const start = await app.request("/login/github");
+    const state = start.headers.get("location")?.match(/state=([^&]+)/)?.[1] ?? "";
+    const callback = await app.request(`/login/github/callback?code=good-code&state=${state}`);
+    return cookieFrom(callback);
+  }
+
+  it("is operator-only and gated like the rest of /api", async () => {
+    const { app } = testApp(oauthEnv, undefined, mockOauthFetch({ id: 1001, login: "octocat" }));
+    const anonymous = await app.request("/api/scan/repositories");
+    expect(anonymous.status).toBe(401);
+  });
+
+  it("refuses non-OAuth (password) sessions", async () => {
+    const { app } = testApp({ UI_PASSWORD: "hunter2", UI_SESSION_SECRET: "session-secret-for-tests" });
+    const { cookies } = await loginSession(app);
+    const res = await app.request("/api/scan/repositories", { headers: { cookie: cookies } });
+    expect(res.status).toBe(403);
+    expect(await res.json()).toEqual({ error: expect.stringContaining("operator GitHub OAuth identity") });
+  });
+
+  it("returns allowlisted repositories sorted by name, skipping failing installations", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const calls = { installations: 0, repositories: 0 };
+    const { app, store } = testApp(
+      { ...oauthEnv, ALLOWED_GITHUB_REPOSITORY_IDS: "2002,4004" },
+      typeaheadGithub(calls),
+      mockOauthFetch({ id: 1001, login: "octocat" }),
+    );
+    void store;
+    const session = await operatorSession(app);
+    const res = await app.request("/api/scan/repositories", { headers: { cookie: session } });
+    expect(res.status).toBe(200);
+    const body = await res.json() as { repositories: Array<{ fullName: string }> };
+    // acme/other (id 3003) is filtered by the repository allowlist; installation 43
+    // failed and was skipped without killing the rest.
+    expect(body.repositories.map((repo) => repo.fullName)).toEqual(["acme/widgets", "acme/zebra"]);
+    expect(calls.installations).toBe(1);
+    expect(calls.repositories).toBe(2);
+
+    // Cached for the TTL: no additional GitHub enumeration on the second call.
+    const again = await app.request("/api/scan/repositories", { headers: { cookie: session } });
+    expect(again.status).toBe(200);
+    expect(calls.installations).toBe(1);
+    expect(calls.repositories).toBe(2);
+    warn.mockRestore();
+  });
+
+  it("reports 502 when enumeration fails entirely so the UI can fall back", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const github = {
+      listAppInstallations: async () => {
+        throw new Error("bad credentials");
+      },
+      listInstallationRepositories: async () => [],
+    } as unknown as ManualTriggerPort & Partial<GithubPort>;
+    const { app } = testApp(oauthEnv, github, mockOauthFetch({ id: 1001, login: "octocat" }));
+    const session = await operatorSession(app);
+    const res = await app.request("/api/scan/repositories", { headers: { cookie: session } });
+    expect(res.status).toBe(502);
+    warn.mockRestore();
+  });
+
+  it("reports 503 when a present client lacks the optional enumeration methods", async () => {
+    const github = {
+      getRepoInstallation: async () => ({ installationId: 42, accountId: 1001 }),
+      getRepository: async () => ({ id: 2002 }),
+    } as unknown as ManualTriggerPort & Partial<GithubPort>;
+    const { app } = testApp(oauthEnv, github, mockOauthFetch({ id: 1001, login: "octocat" }));
+    const session = await operatorSession(app);
+    const res = await app.request("/api/scan/repositories", { headers: { cookie: session } });
+    expect(res.status).toBe(503);
+  });
+
+  it("skips installations outside the account allowlist entirely", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const calls = { installations: 0, repositories: 0 };
+    const github = typeaheadGithub(calls);
+    github.listAppInstallations = async () => {
+      calls.installations += 1;
+      return [
+        { id: 42, accountId: 1001 },
+        { id: 43, accountId: 9001 },
+      ];
+    };
+    const { app } = testApp({ ...oauthEnv, ALLOWED_GITHUB_ACCOUNT_IDS: "1001" }, github, mockOauthFetch({ id: 1001, login: "octocat" }));
+    const session = await operatorSession(app);
+    const res = await app.request("/api/scan/repositories", { headers: { cookie: session } });
+    const body = await res.json() as { repositories: Array<{ fullName: string }> };
+    expect(body.repositories.map((repo) => repo.fullName)).toEqual(["acme/other", "acme/widgets", "acme/zebra"]);
+    expect(calls.repositories).toBe(1); // installation 43's repos were never listed
+    warn.mockRestore();
+  });
+
+  it("caps the suggestion list at 500 repositories", async () => {
+    const github = {
+      listAppInstallations: async () => [{ id: 42, accountId: 1001 }],
+      listInstallationRepositories: async () =>
+        Array.from({ length: 600 }, (_, i) => ({ id: i + 1, fullName: `acme/repo${String(i).padStart(3, "0")}` })),
+    } as unknown as ManualTriggerPort & Partial<GithubPort>;
+    const { app } = testApp(oauthEnv, github, mockOauthFetch({ id: 1001, login: "octocat" }));
+    const session = await operatorSession(app);
+    const res = await app.request("/api/scan/repositories", { headers: { cookie: session } });
+    const body = await res.json() as { repositories: unknown[] };
+    expect(body.repositories).toHaveLength(500);
+  });
+
+  it("re-enumerates after the cache TTL lapses", async () => {
+    const calls = { installations: 0, repositories: 0 };
+    const { app } = testApp(oauthEnv, typeaheadGithub(calls), mockOauthFetch({ id: 1001, login: "octocat" }));
+    const session = await operatorSession(app);
+    await app.request("/api/scan/repositories", { headers: { cookie: session } });
+    expect(calls.installations).toBe(1);
+    const nowSpy = vi.spyOn(Date, "now").mockReturnValue(Date.now() + 6 * 60 * 1000);
+    try {
+      await app.request("/api/scan/repositories", { headers: { cookie: session } });
+      expect(calls.installations).toBe(2);
+    } finally {
+      nowSpy.mockRestore();
+    }
+  });
+
+  it("does not cache empty enumeration results", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const calls = { installations: 0, repositories: 0 };
+    const github = typeaheadGithub(calls);
+    github.listAppInstallations = async () => {
+      calls.installations += 1;
+      return [];
+    };
+    const { app } = testApp(oauthEnv, github, mockOauthFetch({ id: 1001, login: "octocat" }));
+    const session = await operatorSession(app);
+    const first = await app.request("/api/scan/repositories", { headers: { cookie: session } });
+    expect(first.status).toBe(200);
+    expect(await first.json()).toEqual({ repositories: [] });
+    await app.request("/api/scan/repositories", { headers: { cookie: session } });
+    expect(calls.installations).toBe(2); // empty result must not pin the list for the TTL
+    warn.mockRestore();
   });
 });

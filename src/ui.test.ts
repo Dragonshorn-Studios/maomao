@@ -1,9 +1,9 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { openDb } from "./db.js";
 import { seedDemoJobs } from "./demo/fixtures.js";
 import { JobStore } from "./jobs/store.js";
 import { THEME_CSS } from "./ui/theme.js";
-import { DIFFS_JS } from "./ui/diffs.js";
+import { TYPEAHEAD_JS } from "./ui/typeahead.js";
 import { renderConfigPage, renderHome, renderJob, renderLogin, renderScanConfirmPage, renderScanIssuePreviewPage, renderScanPage } from "./ui/pages.js";
 import { jobStateLabel, settledFindingsCopy } from "./ui/copy.js";
 import { formatCost, formatTokens, jobMetrics } from "./ui/metrics.js";
@@ -30,10 +30,13 @@ describe("theme tokens", () => {
     expect(THEME_CSS).toContain("details.finding");
     expect(THEME_CSS).toContain(".settled-findings-label");
     expect(THEME_CSS).toContain(".diff-panel .diff-add");
-    expect(THEME_CSS).toContain(".diff-gutter");
-    expect(THEME_CSS).toContain(".word-add");
-    expect(THEME_CSS).toContain(".word-del");
-    expect(THEME_CSS).toContain(".diff-more");
+    expect(THEME_CSS).toContain("--diffs-font-family");
+    expect(THEME_CSS).toContain(".pierre-annotation");
+    expect(THEME_CSS).toContain(".diff-layout-toggle");
+    expect(THEME_CSS).not.toContain(".diff-gutter");
+    expect(THEME_CSS).not.toContain(".word-add");
+    expect(THEME_CSS).toContain(".typeahead-listbox");
+    expect(THEME_CSS).toContain(".typeahead-option");
     expect(THEME_CSS).toContain("@keyframes spin");
     expect(THEME_CSS).toContain(".section-head");
     expect(THEME_CSS).toMatch(/\.tick\.running[\s\S]*var\(--working\)/);
@@ -452,6 +455,11 @@ describe("finding mini diffs", () => {
     });
     expect(html).toContain("Show diff");
     expect(html).toContain("diff-panel");
+    // Vendor container: the @pierre/diffs bundle upgrades this in the browser.
+    expect(html).toContain('data-pierre-diff');
+    expect(html).toContain('data-path="src/auth.ts"');
+    expect(html).toContain('data-severity="high"');
+    expect(html).toContain('<script type="text/plain" class="diff-raw">');
     expect(html).toContain("+  console.log(&quot;leak&quot;, secret);");
     expect(html).toContain('class="diff-add"');
     expect(html).toContain('class="diff-ctx"');
@@ -844,60 +852,212 @@ describe("repository health scan UI", () => {
   });
 });
 
-describe("diffs.js", () => {
+
+describe("scan repository typeahead", () => {
   const api = new Function(
-    `${DIFFS_JS}\n;return globalThis.__maomaoDiffs;`,
+    `${TYPEAHEAD_JS}\n;return globalThis.__maomaoTypeahead;`,
   )() as {
-    wordDiff: (a: string, b: string) => { oldTokens: { text: string; changed: boolean }[]; newTokens: { text: string; changed: boolean }[] };
-    computeGutters: (lines: { type: string; text: string }[]) => { old: number | null; new: number | null }[];
+    filterRepos: (repos: Array<{ fullName: string }>, query: string) => Array<{ fullName: string }>;
   };
+  const REPOS = [
+    { fullName: "acme/widgets" },
+    { fullName: "acme/wrenches" },
+    { fullName: "beta/tools" },
+    ...Array.from({ length: 14 }, (_, i) => ({ fullName: `gamma/repo${i}` })),
+  ];
 
-  it("marks only the changed words between paired lines", () => {
-    const result = api.wordDiff("const total = compute(1);", "const total = compute(2);");
-    const changed = (tokens: { text: string; changed: boolean }[]) =>
-      tokens.filter((token) => token.changed).map((token) => token.text).join("");
-    expect(changed(result.oldTokens)).toBe("1");
-    expect(changed(result.newTokens)).toBe("2");
-    // Shared context stays unmarked.
-    expect(result.oldTokens.some((token) => !token.changed && token.text === "compute")).toBe(true);
+  it("ranks prefix matches before substring matches and caps the list", () => {
+    const matches = api.filterRepos(REPOS, "a");
+    // Full names starting with the query beat substring-only matches.
+    expect(matches[0]?.fullName).toBe("acme/widgets");
+    expect(matches[1]?.fullName).toBe("acme/wrenches");
+    expect(matches[2]?.fullName).toBe("beta/tools");
+    expect(matches).toHaveLength(12); // capped for the dropdown
   });
 
-  it("tracks old/new line numbers across hunk headers and line types", () => {
-    const gutters = api.computeGutters([
-      { type: "ctx", text: "@@ -4,3 +4,4 @@" },
-      { type: "ctx", text: " unchanged" },
-      { type: "del", text: "-removed" },
-      { type: "add", text: "+added" },
-      { type: "add", text: "+added2" },
-      { type: "ctx", text: " tail" },
-    ]);
-    expect(gutters.slice(1)).toEqual([
-      { old: 4, new: 4 },
-      { old: 5, new: null },
-      { old: null, new: 5 },
-      { old: null, new: 6 },
-      { old: 6, new: 7 },
-    ]);
+  it("matches substrings and returns everything for an empty query", () => {
+    expect(api.filterRepos(REPOS, "beta")).toEqual([{ fullName: "beta/tools" }]);
+    expect(api.filterRepos(REPOS, "").length).toBe(12);
+    expect(api.filterRepos(REPOS, "nomatch-xyz")).toEqual([]);
   });
 
-  it("leaves gutters empty when the hunk header has no numbers", () => {
-    const gutters = api.computeGutters([
-      { type: "ctx", text: "@@ first hunk (no line recorded)" },
-      { type: "add", text: "+x" },
-    ]);
-    expect(gutters[0]).toEqual({ old: null, new: null });
-    expect(gutters[1]).toEqual({ old: null, new: null });
+  it("serves a script with a debug hook and DOM-safe rendering", () => {
+    expect(TYPEAHEAD_JS).toContain("__maomaoTypeahead");
+    expect(TYPEAHEAD_JS).not.toContain("innerHTML");
+    expect(TYPEAHEAD_JS).not.toMatch(/https?:\/\//);
   });
 
-  it("serves a self-contained script with a debug hook and no network calls", () => {
-    expect(DIFFS_JS).toContain("__maomaoDiffs");
-    expect(DIFFS_JS).not.toMatch(/fetch\(|XMLHttpRequest|https?:\/\//);
-    expect(DIFFS_JS).not.toContain("innerHTML");
-    expect(DIFFS_JS).toContain("data-diffs-enhanced");
+  it("renders the scan form as a themed combobox loading the typeahead", () => {
+    const html = renderScanPage({
+      canScan: true,
+      identity: { login: "octocat", avatarUrl: null },
+      csrfToken: "tok",
+      issueCreationEnabled: false,
+      profileRevision: null,
+      recentScans: [],
+    });
+    expect(html).toContain('data-repo-typeahead');
+    expect(html).toContain('role="combobox"');
+    expect(html).toContain('aria-controls="repo-listbox"');
+    expect(html).toContain('aria-autocomplete="list"');
+    expect(html).toContain('role="listbox"');
+    expect(html).toContain('<script src="/assets/typeahead.js" defer></script>');
+    expect(html).toContain('aria-label="Run repository health scan"');
+  });
+});
+
+describe("scan typeahead combobox (fake DOM)", () => {
+  // Minimal DOM covering everything TYPEAHEAD_JS touches — no jsdom dependency.
+  function fakeElement(tag: string): any {
+    const classes = new Set<string>();
+    const attrs = new Map<string, string>();
+    const listeners = new Map<string, Array<(event?: unknown) => void>>();
+    const element: any = {
+      tag,
+      id: "",
+      value: "",
+      hidden: false,
+      children: [],
+      className: "",
+      parentNode: undefined as any,
+      scrollIntoView: undefined as unknown as () => void,
+      classList: {
+        toggle(name: string, force?: boolean) {
+          const next = force ?? !classes.has(name);
+          if (next) classes.add(name);
+          else classes.delete(name);
+          return next;
+        },
+        contains: (name: string) => classes.has(name),
+      },
+      appendChild(child: any) {
+        element.children.push(child);
+        child.parentNode = element;
+        return child;
+      },
+      contains(node: any) {
+        if (node === element) return true;
+        return element.children.some((child: any) => child === node || child.contains?.(node));
+      },
+      addEventListener(type: string, fn: (event?: unknown) => void) {
+        const list = listeners.get(type) ?? [];
+        list.push(fn);
+        listeners.set(type, list);
+      },
+      fire(type: string, event: any = {}) {
+        event.target ??= element;
+        event.preventDefault ??= vi.fn();
+        for (const fn of listeners.get(type) ?? []) fn(event);
+      },
+      listenerNames: () => [...listeners.keys()],
+      getAttribute: (name: string) => attrs.get(name),
+      setAttribute: (name: string, value: string) => void attrs.set(name, String(value)),
+      removeAttribute: (name: string) => void attrs.delete(name),
+      focus: vi.fn(),
+    };
+    Object.defineProperty(element, "textContent", {
+      get: () => element._text ?? "",
+      set: (value: string) => {
+        element._text = value;
+        element.children = [];
+      },
+    });
+    return element;
+  }
+
+  const REPOS = [{ fullName: "acme/widgets" }, { fullName: "acme/zebra" }, { fullName: "beta/tools" }];
+
+  async function boot(repos: Array<{ fullName: string }> | null, fetchOk = true) {
+    const input = fakeElement("input");
+    input.id = "scan-repo-input";
+    input.setAttribute("aria-controls", "repo-listbox");
+    const listbox = fakeElement("ul");
+    listbox.id = "repo-listbox";
+    listbox.hidden = true; // the server-rendered listbox ships with the hidden attribute
+    const docListeners = new Map<string, Array<(event?: unknown) => void>>();
+    const doc: any = {
+      readyState: "complete",
+      querySelector: (selector: string) => (selector === "[data-repo-typeahead]" ? input : null),
+      getElementById: (id: string) => (id === "repo-listbox" ? listbox : null),
+      createElement: (tag: string) => fakeElement(tag),
+      addEventListener: (type: string, fn: (event?: unknown) => void) => {
+        const list = docListeners.get(type) ?? [];
+        list.push(fn);
+        docListeners.set(type, list);
+      },
+    };
+    const payload: any = fetchOk && repos ? { ok: true, json: async () => ({ repositories: repos }) } : { ok: false, json: async () => ({}) };
+    const fetchFn = vi.fn(async () => payload as Response);
+    new Function("globalThis", "document", "fetch", `${TYPEAHEAD_JS}\n;return globalThis.__maomaoTypeahead;`)(
+      globalThis,
+      doc,
+      fetchFn,
+    );
+    await new Promise((resolve) => setTimeout(resolve, 0)); // let the fetch chain settle
+    const docFire = (type: string, event?: any) => {
+      for (const fn of docListeners.get(type) ?? []) fn(event);
+    };
+    return { input, listbox, docFire };
+  }
+
+  it("opens on focus, renders options, and auto-activates nothing", async () => {
+    const { input, listbox } = await boot(REPOS);
+    input.fire("focus");
+    expect(listbox.hidden).toBe(false);
+    expect(input.getAttribute("aria-expanded")).toBe("true");
+    expect(listbox.children).toHaveLength(3);
+    // No auto-activation: typing + Enter must submit the typed value (review finding).
+    expect(input.getAttribute("aria-activedescendant")).toBeUndefined();
+    expect(listbox.children.some((child: any) => child.classList.contains("is-active"))).toBe(false);
   });
 
-  it("is loaded with defer from every page head", () => {
-    const html = renderLogin({ nextPath: "/jobs/1", showPassword: true });
-    expect(html).toContain('<script src="/assets/diffs.js" defer></script>');
+  it("does not intercept Enter before the operator navigated with arrows", async () => {
+    const { input, listbox } = await boot(REPOS);
+    input.fire("focus");
+    input.value = "acme/zebra";
+    input.fire("input");
+    const preventDefault = vi.fn();
+    input.fire("keydown", { key: "Enter", preventDefault });
+    // The typed value stands; the form submits naturally.
+    expect(preventDefault).not.toHaveBeenCalled();
+    expect(input.value).toBe("acme/zebra");
+    expect(listbox.hidden).toBe(false);
+  });
+
+  it("navigates with arrows and selects with Enter without submitting", async () => {
+    const { input, listbox } = await boot(REPOS);
+    input.fire("focus");
+    input.fire("keydown", { key: "ArrowDown", preventDefault: vi.fn() });
+    expect(input.getAttribute("aria-activedescendant")).toContain("scan-repo-input-opt-");
+    expect(listbox.children[0]?.classList.contains("is-active")).toBe(true);
+    input.fire("keydown", { key: "ArrowDown", preventDefault: vi.fn() });
+    input.fire("keydown", { key: "Enter", preventDefault: vi.fn() });
+    expect(input.value).toBe("acme/zebra");
+    expect(listbox.hidden).toBe(true);
+    expect(input.getAttribute("aria-expanded")).toBe("false");
+    expect(input.focus).toHaveBeenCalled();
+  });
+
+  it("closes on Escape and on click-away", async () => {
+    const { input, listbox, docFire } = await boot(REPOS);
+    input.fire("focus");
+    input.fire("keydown", { key: "Escape" });
+    expect(listbox.hidden).toBe(true);
+    input.fire("focus");
+    expect(listbox.hidden).toBe(false);
+    docFire("click", { target: { tag: "other" } });
+    expect(listbox.hidden).toBe(true);
+  });
+
+  it("leaves the input free-form when the endpoint fails or returns nothing", async () => {
+    const failed = await boot(null, false);
+    failed.input.fire("focus");
+    expect(failed.listbox.hidden).toBe(true); // no listeners wired, nothing opens
+    expect(failed.input.listenerNames()).toEqual([]);
+
+    const empty = await boot([]);
+    empty.input.fire("focus");
+    expect(empty.listbox.hidden).toBe(true);
+    expect(empty.input.listenerNames()).toEqual([]);
   });
 });

@@ -646,57 +646,80 @@ form.retry, form.retry-job {
   overflow-y: auto;
   position: relative;
 }
-/* Server-rendered line spans (no-JS fallback) and the enhanced rows share tokens. */
-.diff-panel .diff-add { color: var(--jade); display: block; }
-.diff-panel .diff-del { color: var(--cinnabar); display: block; }
-.diff-panel .diff-ctx { color: var(--ink-muted); display: block; }
-.diff-table { display: block; }
-.diff-row {
-  display: grid;
-  grid-template-columns: 2.8em 2.8em 1fr;
-  min-height: 1.35em;
-  align-items: baseline;
-}
-.diff-row.is-add { background: color-mix(in srgb, var(--jade) 10%, transparent); }
-.diff-row.is-del { background: color-mix(in srgb, var(--cinnabar) 10%, transparent); }
-.diff-row.is-hunk { margin-top: 0.2rem; }
-.diff-row.diff-collapsed { display: none; }
-.diff-gutter {
-  color: var(--ink-muted);
-  text-align: right;
-  padding-right: 0.6em;
-  user-select: none;
-  opacity: 0.7;
-}
-.diff-code { white-space: pre; padding-right: 0.5em; }
-.diff-row.is-add .diff-code { color: var(--jade); }
-.diff-row.is-del .diff-code { color: var(--cinnabar); }
-.word-add { background: color-mix(in srgb, var(--jade) 34%, transparent); border-radius: 2px; }
-.word-del { background: color-mix(in srgb, var(--cinnabar) 34%, transparent); border-radius: 2px; }
-.diff-copy {
-  position: sticky;
-  top: 0.25rem;
-  float: right;
-  font-size: 0.72rem;
-  padding: 0.1rem 0.5rem;
-  cursor: pointer;
-  color: var(--ink);
-  background: var(--paper);
-  border: 1px solid var(--line-strong);
-  border-radius: 6px;
-}
-.diff-more {
-  display: block;
-  margin-top: 0.25rem;
-  font-size: 0.75rem;
-  padding: 0.1rem 0.5rem;
-  cursor: pointer;
-  color: var(--ink);
-  background: var(--paper);
-  border: 1px solid var(--line-strong);
-  border-radius: 6px;
-}
+/* Server-rendered line spans (no-JS fallback) share the panel pre's newlines —
+   they must stay inline or every line renders double-spaced. */
+.diff-panel .diff-add { color: var(--jade); }
+.diff-panel .diff-del { color: var(--cinnabar); }
+.diff-panel .diff-ctx { color: var(--ink-muted); }
 .diff-note { font-size: 0.8rem; }
+
+/* @pierre/diffs bridge: point the library's CSS variables at Maomao tokens
+   (variable names come from formatCSSVariablePrefix("diffs") → --diffs-*). */
+.pierre-diff,
+details.finding-diff {
+  --diffs-font-family: var(--font-mono);
+  --diffs-font-size: 0.78rem;
+}
+html[data-theme="dark"] .pierre-diff {
+  --diffs-foreground: var(--ink);
+  --diffs-background: var(--surface-2);
+}
+.pierre-annotation {
+  border-left: 3px solid var(--amber);
+  background: color-mix(in srgb, var(--amber) 14%, transparent);
+  padding: 0.25rem 0.5rem;
+  margin: 0.15rem 0;
+  font-size: 0.78rem;
+  border-radius: 4px;
+}
+.pierre-annotation.severity-blocker,
+.pierre-annotation.severity-high { border-left-color: var(--cinnabar); }
+.pierre-annotation.severity-medium { border-left-color: var(--amber); }
+.pierre-annotation.severity-low,
+.pierre-annotation.severity-info { border-left-color: var(--herb); }
+.diff-layout-toggle {
+  margin-left: auto;
+  font-size: 0.72rem;
+  padding: 0.05rem 0.45rem;
+  cursor: pointer;
+  color: var(--ink-muted);
+  background: transparent;
+  border: 1px solid var(--line-strong);
+  border-radius: 6px;
+}
+/* Scan-page repository typeahead (progressively enhanced by /assets/typeahead.js) */
+.typeahead-wrap { position: relative; display: block; }
+.typeahead-wrap input { width: 100%; }
+.typeahead-listbox {
+  position: absolute;
+  z-index: 10;
+  left: 0;
+  right: 0;
+  margin: 0.2rem 0 0;
+  padding: 0.2rem;
+  list-style: none;
+  background: var(--surface-2);
+  border: 1px solid var(--line-strong);
+  border-radius: 8px;
+  box-shadow: var(--shadow);
+  max-height: 16rem;
+  overflow-y: auto;
+}
+.typeahead-option {
+  padding: 0.3rem 0.55rem;
+  cursor: pointer;
+  font-family: var(--font-mono);
+  font-size: 0.85rem;
+  border-radius: 6px;
+}
+.typeahead-option.is-active,
+.typeahead-option[aria-selected="true"] { background: color-mix(in srgb, var(--herb) 26%, transparent); }
+.typeahead-empty,
+.typeahead-empty.is-active {
+  cursor: default;
+  color: var(--ink-muted);
+  background: transparent;
+}
 
 .finding.is-buried,
 .finding.is-resolved {
