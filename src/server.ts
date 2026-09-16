@@ -1023,14 +1023,14 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
           skipped += 1;
           continue;
         }
-        // Claim the fingerprint before the GitHub write: a concurrent submit loses the race.
-        ctx.store.claimScanIssue({
+        // Atomic claim: a concurrent submit loses the race and counts as skipped.
+        const claimed = ctx.store.claimScanIssue({
           jobId: job.id,
           repoFullName: job.repo_full_name,
           fingerprint: finding.fingerprint,
           title: finding.summary ?? finding.fingerprint,
         });
-        if (ctx.store.getScanIssue(job.repo_full_name, finding.fingerprint)?.issue_number !== 0) {
+        if (!claimed) {
           skipped += 1;
           continue;
         }
@@ -1073,7 +1073,7 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
       `Issue creation by ${actor.login}: ${createdCount} created, ${skipped} skipped (already present), ${failed} failed`,
     );
     if (failed > 0) {
-      return c.redirect(`/jobs/${job.id}?error=issues-partial:${failed}`, 302);
+      return c.redirect(`/jobs/${job.id}?notice=issues-partial:${failed}`, 302);
     }
     return c.redirect(`/jobs/${job.id}?notice=issues-created`, 302);
   });
