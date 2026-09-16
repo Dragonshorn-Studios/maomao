@@ -25,6 +25,7 @@ import {
 import { classifyPriorFindings, collectPriorFindings, findingsForPublish } from "../findings/reconcile.js";
 import { resolveReviewEvent } from "./verdict.js";
 import { applyReconciliationThreads, attachStoredThreadIds, closeResolvedScanIssues, findingDiffContext, persistClassifications, persistThreadsAsFindings } from "../findings/apply.js";
+import { githubRetryReason } from "../github/errors.js";
 import { fingerprintFinding } from "../findings/identity.js";
 import type { ReconciliationSnapshot } from "../findings/types.js";
 import { currentFindingsForRisk } from "../findings/types.js";
@@ -298,7 +299,13 @@ async function runJob(deps: PipelineDeps, jobId: number, signal: AbortSignal): P
         // does not have: keep the finding visible so the next run retries.
         // (dismissed is a human override; moved was already republished.)
         if (item?.status === "resolved") {
-          store.setFindingStatus(job.repo_full_name, job.pr_number, failure.fingerprint, "uncertain", "GitHub resolve failed; will retry next review");
+          store.setFindingStatus(
+            job.repo_full_name,
+            job.pr_number,
+            failure.fingerprint,
+            "uncertain",
+            githubRetryReason("thread", failure.reason),
+          );
         }
       }
     } catch (error) {
@@ -508,6 +515,13 @@ async function runScanJob(deps: PipelineDeps, jobId: number, signal: AbortSignal
       }
       for (const failure of closed.failed) {
         store.log(jobId, `Could not close issue for ${failure.fingerprint}: ${failure.reason}`, "warn");
+        store.setFindingStatus(
+          job.repo_full_name,
+          job.pr_number,
+          failure.fingerprint,
+          "uncertain",
+          githubRetryReason("issue", failure.reason),
+        );
       }
     } catch (error) {
       store.log(jobId, `Scan issue close deferred: ${formatError(error)}`, "warn");

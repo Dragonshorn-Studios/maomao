@@ -2032,6 +2032,113 @@ describe("finding reconciliation", () => {
     );
   });
 
+  it("records the GitHub error on the finding when resolve fails", async () => {
+    const fingerprint = fingerprintFinding(finding);
+    const config = loadConfig({
+      REVIEWER_ROLES: "correctness",
+      OPENCODE_REVIEWER_MODEL: "test/model",
+      POST_EMPTY_REVIEW: "true",
+    });
+    const store = new JobStore(openDb(":memory:"));
+    const created = enqueueJob(store, config, "permsha");
+    await createPipeline({
+      config,
+      store,
+      github: githubPort({
+        listReviewThreads: async () => [threadFor(fingerprint)],
+        resolveReviewThread: async () => {
+          throw Object.assign(new Error("Resource not accessible by integration"), { status: 403 });
+        },
+      }),
+      checkout: await fixtureCheckout(),
+      opencode: {
+        async run(input) {
+          if (input.prompt.includes("finding verifier")) {
+            return {
+              stdout: "",
+              stderr: "",
+              exitCode: 0,
+              text: JSON.stringify({
+                classifications: [{ fingerprint, status: "resolved", confidence: 0.95, reason: "the bug is gone" }],
+              }),
+              usage: {},
+            };
+          }
+          if (input.prompt.includes("Role id:")) {
+            return { stdout: "", stderr: "", exitCode: 0, text: reviewerJson("correctness"), usage: {} };
+          }
+          return {
+            stdout: "",
+            stderr: "",
+            exitCode: 0,
+            text: JSON.stringify({ verdict: "clean", summary: "fixed", findings: [] }),
+            usage: {},
+          };
+        },
+      },
+    }).run(created.job.id);
+    const row = store.getFinding("acme/widgets", 4, fingerprint);
+    expect(row?.status).toBe("uncertain");
+    expect(row?.reconciliation_reason).toContain("GitHub App lacks permission");
+    expect(row?.reconciliation_reason).toContain("Resource not accessible by integration");
+    expect(row?.reconciliation_reason).toContain("will retry next review");
+    expect(store.listLogs(created.job.id).map((line) => line.message).join("\n")).toContain(
+      "Could not resolve thread",
+    );
+  });
+
+  it("keeps a vanished GitHub thread resolved instead of looping on retry", async () => {
+    const fingerprint = fingerprintFinding(finding);
+    const config = loadConfig({
+      REVIEWER_ROLES: "correctness",
+      OPENCODE_REVIEWER_MODEL: "test/model",
+      POST_EMPTY_REVIEW: "true",
+    });
+    const store = new JobStore(openDb(":memory:"));
+    const created = enqueueJob(store, config, "gonesha");
+    await createPipeline({
+      config,
+      store,
+      github: githubPort({
+        listReviewThreads: async () => [threadFor(fingerprint)],
+        resolveReviewThread: async () => {
+          throw new Error("Could not resolve to a node with the global id of 'PRRT_gone'");
+        },
+      }),
+      checkout: await fixtureCheckout(),
+      opencode: {
+        async run(input) {
+          if (input.prompt.includes("finding verifier")) {
+            return {
+              stdout: "",
+              stderr: "",
+              exitCode: 0,
+              text: JSON.stringify({
+                classifications: [{ fingerprint, status: "resolved", confidence: 0.95, reason: "the bug is gone" }],
+              }),
+              usage: {},
+            };
+          }
+          if (input.prompt.includes("Role id:")) {
+            return { stdout: "", stderr: "", exitCode: 0, text: reviewerJson("correctness"), usage: {} };
+          }
+          return {
+            stdout: "",
+            stderr: "",
+            exitCode: 0,
+            text: JSON.stringify({ verdict: "clean", summary: "fixed", findings: [] }),
+            usage: {},
+          };
+        },
+      },
+    }).run(created.job.id);
+    const row = store.getFinding("acme/widgets", 4, fingerprint);
+    expect(row?.status).toBe("resolved");
+    expect(store.listLogs(created.job.id).map((line) => line.message).join("\n")).toContain(
+      "no longer exists",
+    );
+  });
+
   it("does not resolve a moved thread when the replacement comment is capped out", async () => {
     const fingerprint = fingerprintFinding(finding);
     const config = loadConfig({
@@ -2975,6 +3082,107 @@ describe("repository health scan", () => {
     expect(row?.reconciliation_reason).toContain("the log line is gone");
     expect(closed).toEqual([44]);
     expect(store.listLogs(second).map((line) => line.message).join("\n")).toContain("Closed 1 Maomao scan issue");
+  });
+
+  it("records the GitHub error on the finding when scan issue close fails", async () => {
+    const config = loadConfig({
+      REVIEWER_ROUTING: "fixed",
+      REVIEWER_ROLES: "correctness",
+      OPENCODE_REVIEWER_MODEL: "test/model",
+      POST_EMPTY_REVIEW: "true",
+      GITHUB_APP_ID: "1",
+      GITHUB_WEBHOOK_SECRET: "s",
+      GITHUB_APP_PRIVATE_KEY: "k",
+    });
+    const store = new JobStore(openDb(":memory:"));
+    const priorFinding = {
+      severity: "high" as const,
+      confidence: 0.9,
+      category: "security",
+      file: "src/billing.ts",
+      line: 2,
+      summary: "secret printed to stdout",
+      body: "handle with care",
+    };
+    const fingerprint = fingerprintFinding(priorFinding);
+    store.upsertFinding({
+      repoFullName: "acme/widgets",
+      prNumber: 0,
+      fingerprint,
+      status: "open",
+      reviewedSha: "old",
+      summary: priorFinding.summary,
+      lastJobId: 1,
+    });
+    const created = store.enqueue({
+      ...jobInput("scan0002scan0002scan0002scan0002"),
+      reviewers: [],
+      jobType: "health_scan",
+      prNumber: 0,
+      headSha: "scan0002scan0002scan0002scan0002",
+    });
+    store.recordScanIssue({
+      jobId: created.job.id,
+      repoFullName: created.job.repo_full_name,
+      fingerprint,
+      issueNumber: 44,
+      issueUrl: "https://github.com/acme/widgets/issues/44",
+      title: priorFinding.summary,
+    });
+    await createPipeline({
+      config,
+      store,
+      github: {
+        ...scanGithub(),
+        getIssue: async () => ({
+          number: 44,
+          title: priorFinding.summary,
+          body: `<!-- maomao-scan-issue ${fingerprint} @ old -->\n\nsecret`,
+          state: "open",
+          url: "https://github.com/acme/widgets/issues/44",
+          isPullRequest: false,
+        }),
+        closeIssue: async () => {
+          throw Object.assign(new Error("Resource not accessible by integration"), { status: 403 });
+        },
+      },
+      checkout: await fixtureCheckout(),
+      opencode: {
+        async run(input) {
+          if (input.prompt.includes("finding verifier")) {
+            return {
+              stdout: "",
+              stderr: "",
+              exitCode: 0,
+              text: JSON.stringify({
+                classifications: [
+                  { fingerprint, status: "resolved", confidence: 0.96, reason: "the log line is gone from HEAD" },
+                ],
+              }),
+              usage: {},
+            };
+          }
+          if (input.prompt.includes("Role id:")) {
+            const text = JSON.stringify({
+              schema_version: 1,
+              reviewer: "correctness",
+              verdict: "clean",
+              findings: [],
+            });
+            return { stdout: text, stderr: "", exitCode: 0, text, usage: {} };
+          }
+          const text = JSON.stringify({ schema_version: 1, verdict: "clean", summary: "clean", findings: [] });
+          return { stdout: text, stderr: "", exitCode: 0, text, usage: {} };
+        },
+      },
+    }).run(created.job.id);
+    const row = store.getFinding("acme/widgets", 0, fingerprint);
+    expect(row?.status).toBe("uncertain");
+    expect(row?.reconciliation_reason).toContain("GitHub App lacks permission");
+    expect(row?.reconciliation_reason).toContain("will retry next scan");
+    expect(store.listLogs(created.job.id).map((line) => line.message).join("\n")).toContain(
+      "Could not close issue",
+    );
   });
 
   it("leaves prior scan findings open when the verifier is not confident", async () => {
