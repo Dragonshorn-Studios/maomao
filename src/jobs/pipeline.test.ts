@@ -2673,3 +2673,114 @@ describe("repository health scan", () => {
 function created_repo(): string {
   return "acme/widgets";
 }
+
+describe("cancellation races", () => {
+  it("runs no work for a job already cancelled before claiming", async () => {
+    const config = loadConfig({ REVIEWER_ROLES: "correctness" });
+    const store = new JobStore(openDb(":memory:"));
+    const created = store.enqueue({
+      repoFullName: "acme/widgets",
+      repoOwner: "acme",
+      repoName: "widgets",
+      installationId: 9,
+      prNumber: 4,
+      prTitle: "t",
+      prBody: "",
+      prHtmlUrl: "",
+      prAuthor: "dev",
+      baseSha: "base",
+      headSha: "cafebabe",
+      baseRef: "main",
+      headRef: "feat",
+      reviewers: [{ role: "correctness", title: "Correctness" }],
+    });
+    const cancelled = store.cancelJobs({ jobId: created.job.id }, "pr_merged", null);
+    expect(cancelled).toEqual([created.job.id]);
+    let preparations = 0;
+    const pipeline = createPipeline({
+      config,
+      store,
+      github: githubPort({
+        getPullDiff: async () => {
+          throw new Error("getPullDiff must not run for a cancelled job");
+        },
+      }),
+      checkout: {
+        async prepare() {
+          preparations += 1;
+          throw new Error("checkout must not run for a cancelled job");
+        },
+        async cleanup() {},
+      },
+      opencode: {
+        async run() {
+          throw new Error("opencode must not run for a cancelled job");
+        },
+      },
+    });
+    await pipeline.run(created.job.id);
+    expect(preparations).toBe(0);
+    const job = store.getJob(created.job.id);
+    expect(job?.state).toBe("cancelled");
+    expect(job?.cancelled_reason).toBe("pr_merged");
+  });
+
+  it("a job cancelled mid-review never publishes and stays cancelled", async () => {
+    const config = loadConfig({ REVIEWER_ROLES: "correctness", POST_EMPTY_REVIEW: "true" });
+    const store = new JobStore(openDb(":memory:"));
+    const created = store.enqueue({
+      repoFullName: "acme/widgets",
+      repoOwner: "acme",
+      repoName: "widgets",
+      installationId: 9,
+      prNumber: 4,
+      prTitle: "t",
+      prBody: "",
+      prHtmlUrl: "",
+      prAuthor: "dev",
+      baseSha: "base",
+      headSha: "cafebabe",
+      baseRef: "main",
+      headRef: "feat",
+      reviewers: [{ role: "correctness", title: "Correctness" }],
+    });
+    const posted: number[] = [];
+    let releaseReviewers: (() => void) | undefined;
+    const reviewerGate = new Promise<void>((resolve) => {
+      releaseReviewers = resolve;
+    });
+    const pipeline = createPipeline({
+      config,
+      store,
+      github: githubPort({
+        createCommentReview: async () => {
+          posted.push(1);
+          return { id: "99", url: "https://example.test/reviews/99" };
+        },
+      }),
+      checkout: await fixtureCheckout(),
+      opencode: {
+        async run() {
+          await reviewerGate;
+          return { stdout: reviewerJson("correctness"), stderr: "", exitCode: 0, text: reviewerJson("correctness"), usage: { promptTokens: 1, completionTokens: 1 } };
+        },
+      },
+    });
+    const running = pipeline.run(created.job.id);
+    await vi.waitFor(() => {
+      expect(store.getJob(created.job.id)?.state).toBe("reviewing");
+    });
+    // The merge webhook path: cancel in the store, then the queue aborts the controller.
+    const cancelled = store.cancelJobs({ jobId: created.job.id }, "pr_merged", null);
+    expect(cancelled).toEqual([created.job.id]);
+    pipeline.abortJob(created.job.id);
+    releaseReviewers?.();
+    await running;
+
+    expect(posted).toHaveLength(0);
+    const job = store.getJob(created.job.id);
+    expect(job?.state).toBe("cancelled");
+    expect(job?.failure_reason).toBeNull();
+    expect(store.listLogs(created.job.id).some((line) => line.message.includes("Job cancelled before publish"))).toBe(true);
+  });
+});

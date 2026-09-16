@@ -12,6 +12,7 @@ import {
 } from "./client.js";
 import type { EnqueueResult, JobStore } from "../jobs/store.js";
 import { enqueuePullJob } from "../jobs/enqueue.js";
+import { cancelJobsForPull } from "../jobs/cancel.js";
 import { logAuthorizationRejection, logRateLimited, positiveGithubId, rejectUnauthorized } from "./authorize.js";
 import { repoRateLimitActive, type RepoRateLimiter } from "./rate-limit.js";
 import {
@@ -32,6 +33,8 @@ export type WebhookHandleResult = {
   body: Record<string, unknown>;
   enqueue?: EnqueueResult;
   dispatchJobId?: number;
+  /** Jobs moved to `cancelled` by this delivery; the server must drop them from the queue. */
+  cancelledJobIds?: number[];
 };
 
 export interface IssueCommentWebhookPayload {
@@ -93,6 +96,7 @@ export interface PullRequestWebhookPayload {
     body?: string | null;
     html_url?: string;
     draft?: boolean;
+    merged?: boolean;
     user?: { login?: string };
     base?: { sha?: string; ref?: string };
     head?: { sha?: string; ref?: string };
@@ -177,6 +181,61 @@ function ignored(reason: string): WebhookHandleResult {
   return { status: 202, body: { ok: true, ignored: true, reason } };
 }
 
+/**
+ * `pull_request.closed` with the authoritative `merged: true` flag: cancel every
+ * non-terminal review job for that repository + PR (all head SHAs) through the
+ * centralized cancellation service. Fails safe — an incomplete payload or an
+ * uncertain merge state cancels nothing.
+ */
+function handlePullClosed(
+  input: {
+    config: Config;
+    store: JobStore;
+    request: WebhookRequest;
+  },
+  payload: PullRequestWebhookPayload,
+): WebhookHandleResult {
+  const installationId = numericId(payload.installation?.id);
+  const githubAccountId =
+    numericId(payload.installation?.account?.id) ?? numericId(payload.repository?.owner?.id);
+  const githubRepositoryId = numericId(payload.repository?.id);
+  const repoOwner = payload.repository?.owner?.login;
+  const repoName = payload.repository?.name;
+  const repoFullName = payload.repository?.full_name;
+  const prNumber = payload.pull_request?.number;
+  if (!installationId || !repoOwner || !repoName || !repoFullName || !prNumber) {
+    return ignored("closed payload missing installation, repository, or pull request context");
+  }
+  // Never infer a merge from the PR merely being closed.
+  if (payload.pull_request?.merged !== true) {
+    return ignored("pull request closed without merge");
+  }
+  const auth = rejectUnauthorized(input.config, {
+    installationId,
+    accountId: githubAccountId,
+    repositoryId: githubRepositoryId,
+  });
+  if (!auth.ok) {
+    return ignored(auth.reason);
+  }
+  if (input.store.hasWebhookDelivery(input.request.deliveryId)) {
+    return { status: 200, body: { ok: true, duplicate: true, reason: "duplicate delivery" } };
+  }
+  const deliveryId = input.request.deliveryId;
+  const { cancelledJobIds } = cancelJobsForPull(input.store, {
+    repoFullName,
+    prNumber,
+    reason: "pr_merged",
+    note: deliveryId ? `webhook delivery ${deliveryId}` : undefined,
+  });
+  input.store.claimWebhookDelivery(deliveryId, input.request.event, "pr_merged_cancel");
+  return {
+    status: 200,
+    body: { ok: true, cancelled: cancelledJobIds.length, cancelledJobIds, repoFullName, prNumber },
+    cancelledJobIds,
+  };
+}
+
 export async function handleGithubWebhook(input: {
   config: Config;
   store: JobStore;
@@ -214,6 +273,10 @@ export async function handleGithubWebhook(input: {
     payload = JSON.parse(input.request.rawBody) as PullRequestWebhookPayload;
   } catch {
     return { status: 400, body: { error: "invalid JSON" } };
+  }
+
+  if (payload.action === "closed") {
+    return handlePullClosed(input, payload);
   }
 
   const decision = shouldHandlePullRequest(input.config, payload);

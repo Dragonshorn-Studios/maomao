@@ -309,7 +309,12 @@ async function runJob(deps: PipelineDeps, jobId: number, signal: AbortSignal): P
     });
   } catch (error) {
     if (store.isStale(jobId) || signal.aborted) {
-      store.log(jobId, "Job aborted or marked stale; skipping publish", "warn");
+      const cancelled = store.getJob(jobId)?.state === "cancelled";
+      store.log(
+        jobId,
+        cancelled ? "Job cancelled before publish; no review posted" : "Job aborted or marked stale; skipping publish",
+        "warn",
+      );
       const runningInternal = store.getJob(jobId)?.internal_escalation_state === "running";
       if (runningInternal) {
         store.patchJob(jobId, {
@@ -455,7 +460,8 @@ async function runScanJob(deps: PipelineDeps, jobId: number, signal: AbortSignal
     store.log(jobId, `Health scan completed: ${persisted} finding(s) persisted; no GitHub review posted`);
   } catch (error) {
     if (store.isStale(jobId) || signal.aborted) {
-      store.log(jobId, "Scan aborted or marked stale", "warn");
+      const cancelled = store.getJob(jobId)?.state === "cancelled";
+      store.log(jobId, cancelled ? "Scan cancelled" : "Scan aborted or marked stale", "warn");
       if (!store.isStale(jobId)) store.setJobState(jobId, "stale", { finished_at: nowIso() });
       return;
     }

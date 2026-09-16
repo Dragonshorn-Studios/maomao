@@ -12,3 +12,4 @@ github-app.pem
 coverage/
 .DS_Store
 *.log
+.zcode/

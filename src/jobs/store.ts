@@ -33,6 +33,8 @@ export interface JobRow {
   review_event: string | null;
   review_event_reason: string | null;
   aggregator_fallback: number | null;
+  cancelled_reason: string | null;
+  cancelled_by: string | null;
   profile_revision_id: number | null;
   job_type: string;
   scan_branch: string | null;
@@ -188,7 +190,7 @@ export interface EscalationDispatchRow {
   updated_at: string;
 }
 
-const ACTIVE_JOB_STATES: JobState[] = [
+export const ACTIVE_JOB_STATES: JobState[] = [
   "queued",
   "preparing",
   "reconciling",
@@ -216,6 +218,8 @@ const JOB_PATCH_KEYS = new Set<string>([
   "review_event",
   "review_event_reason",
   "aggregator_fallback",
+  "cancelled_reason",
+  "cancelled_by",
   "workspace_path",
   "github_review_id",
   "github_review_url",
@@ -407,7 +411,9 @@ export class JobStore {
   setJobState(id: number, state: JobState, extra: Partial<JobRow> = {}): void {
     const job = this.getJob(id);
     if (!job) return;
-    if (job.state === "stale" && state !== "stale") return;
+    // `stale` and `cancelled` are one-way terminal states: a late pipeline
+    // failure (or a racing transition) must not resurrect or relabel them.
+    if ((job.state === "stale" || job.state === "cancelled") && state !== job.state) return;
     const updatedAt = nowIso();
     const startedAt = extra.started_at ?? job.started_at ?? (state !== "queued" ? updatedAt : null);
     const finishedAt =
@@ -440,6 +446,45 @@ export class JobStore {
   isStale(id: number): boolean {
     const job = this.getJob(id);
     return !job || job.state === "stale" || job.state === "cancelled";
+  }
+
+  /**
+   * Atomically moves every matching non-terminal job to `cancelled` in one
+   * transaction and returns the ids that actually transitioned. Idempotent by
+   * construction: terminal jobs (completed, failed, stale, already cancelled)
+   * never match, so a duplicate merge webhook is a no-op.
+   */
+  cancelJobs(
+    where: { jobId?: number; repoFullName?: string; prNumber?: number },
+    reason: string,
+    actor: string | null,
+  ): number[] {
+    const now = nowIso();
+    const states = ACTIVE_JOB_STATES.map((state) => `'${state}'`).join(", ");
+    const clauses = [`state IN (${states})`];
+    const values: unknown[] = [reason, actor, now, now];
+    if (where.jobId != null) {
+      clauses.push("id = ?");
+      values.push(where.jobId);
+    }
+    if (where.repoFullName != null) {
+      clauses.push("repo_full_name = ?");
+      values.push(where.repoFullName);
+    }
+    if (where.prNumber != null) {
+      clauses.push("pr_number = ?");
+      values.push(where.prNumber);
+    }
+    const rows = this.db
+      .prepare(
+        `UPDATE jobs
+         SET state = 'cancelled', cancelled_reason = ?, cancelled_by = ?,
+             finished_at = COALESCE(finished_at, ?), updated_at = ?
+         WHERE ${clauses.join(" AND ")}
+         RETURNING id`,
+      )
+      .all(...values) as { id: number }[];
+    return rows.map((row) => row.id);
   }
 
   resetInterrupted(id: number): void {
