@@ -1,3 +1,4 @@
+import type { SqliteDb } from "./db.js";
 import { nowIso } from "./util.js";
 import { KNOWN_REVIEWER_ROLES } from "./prompts.js";
 import type { Severity } from "./schema.js";
@@ -7,7 +8,6 @@ import { z } from "zod";
 /** System caps a draft cannot exceed, regardless of operator input. */
 export const PROFILE_MAX_REVIEWERS = 12;
 export const PROFILE_MAX_TIMEOUT_MS = 30 * 60 * 1000;
-export const PROFILE_MAX_RETRIES = 5;
 export const PROFILE_MAX_TOTAL_COST_USD = 5;
 export const PROFILE_MAX_TOTAL_TOKENS = 2_000_000;
 
@@ -62,14 +62,6 @@ export class ConfigValidationError extends Error {
   }
 }
 
-export interface ConfigStoreDb {
-  prepare(sql: string): {
-    run(...args: unknown[]): unknown;
-    get(...args: unknown[]): unknown;
-    all(...args: unknown[]): unknown[];
-  };
-}
-
 /** Audit actions recorded for every lifecycle transition. */
 export type ConfigAuditAction =
   | "draft_created"
@@ -88,12 +80,11 @@ export type ConfigAuditAction =
  */
 export class ReviewConfigStore {
   constructor(
-    private readonly db: ConfigStoreDb,
+    private readonly db: SqliteDb,
     private readonly modelCatalog: string[] = [],
   ) {}
 
   createDraft(input: {
-    name: string;
     definition: unknown;
     note?: string;
     createdBy: string;
@@ -105,21 +96,19 @@ export class ReviewConfigStore {
     const catalogIssues = validateModelCatalog(parsed.data, this.modelCatalog);
     if (catalogIssues.length > 0) return { error: "invalid", issues: catalogIssues };
     const now = nowIso();
+    // The row name comes from the definition itself, so consumers keying on "default"
+    // can never diverge from what the operator configured.
     const result = this.db
       .prepare(
         `INSERT INTO profile_revisions (name, status, definition_json, note, created_by, schema_version, created_at, updated_at)
          VALUES (?, 'draft', ?, ?, ?, ?, ?, ?)`,
       )
-      .run(input.name, JSON.stringify(parsed.data), input.note ?? null, input.createdBy, PROFILE_SCHEMA_VERSION, now, now);
+      .run(parsed.data.name, JSON.stringify(parsed.data), input.note ?? null, input.createdBy, PROFILE_SCHEMA_VERSION, now, now);
     const id = Number((result as { lastInsertRowid: unknown }).lastInsertRowid);
-    this.audit("draft_created", input.createdBy, id, `draft of ${input.name}`);
+    this.audit("draft_created", input.createdBy, id, `draft of ${parsed.data.name}`);
     return { revision: this.getRevision(id)! };
   }
 
-  /**
-   * Updates a draft. `expectedUpdatedAt` provides optimistic concurrency: if another operator
-   * saved the same draft first, the update is rejected as a conflict.
-   */
   /**
    * Updates a draft. `expectedEditSeq` provides optimistic concurrency: if another operator
    * saved the same draft first, the update is rejected as a conflict.
@@ -152,20 +141,26 @@ export class ReviewConfigStore {
     return { revision: this.getRevision(input.id)! };
   }
 
-  /** Activation requires the revision to be a draft and to validate cleanly. */
+  /** Activation requires the revision to be a draft and to validate cleanly (catalog included). */
   activateRevision(id: number, actor: string): { revision: ProfileRevisionRow } | { error: string } {
     const revision = this.getRevision(id);
     if (!revision || revision.status === "active") return { error: "revision not found or already active" };
-    if (revision.status === "retired") return { error: "cannot activate a retired revision directly" };
-    const issues = validateProfileDefinition(revision.definition);
+    if (revision.status === "retired") return { error: "cannot activate a retired revision directly; roll back instead" };
+    const issues = [...validateProfileDefinition(revision.definition), ...validateModelCatalog(revision.definition, this.modelCatalog)];
     if (issues.length > 0) return { error: `cannot activate invalid revision: ${issues.join("; ")}` };
     const now = nowIso();
-    this.db
-      .prepare(`UPDATE profile_revisions SET status = 'retired', activated_at = ? WHERE name = ? AND status = 'active'`)
-      .run(now, revision.name);
-    this.db
-      .prepare(`UPDATE profile_revisions SET status = 'active', activated_at = ?, updated_at = ? WHERE id = ?`)
-      .run(now, now, id);
+    const superseded = this.getActiveRevision(revision.name);
+    this.db.transaction(() => {
+      if (superseded) {
+        this.db
+          .prepare(`UPDATE profile_revisions SET status = 'retired', activated_at = ? WHERE id = ?`)
+          .run(now, superseded.id);
+      }
+      this.db
+        .prepare(`UPDATE profile_revisions SET status = 'active', activated_at = ?, updated_at = ? WHERE id = ?`)
+        .run(now, now, id);
+      if (superseded) this.audit("retired", actor, superseded.id, `${superseded.name} superseded by #${id}`);
+    })();
     this.audit("activated", actor, id, `${revision.name} activated`);
     return { revision: this.getRevision(id)! };
   }
@@ -174,15 +169,21 @@ export class ReviewConfigStore {
   rollbackRevision(id: number, actor: string): { revision: ProfileRevisionRow } | { error: string } {
     const revision = this.getRevision(id);
     if (!revision || revision.status !== "retired") return { error: "only a retired revision can be re-activated" };
-    const issues = validateProfileDefinition(revision.definition);
+    const issues = [...validateProfileDefinition(revision.definition), ...validateModelCatalog(revision.definition, this.modelCatalog)];
     if (issues.length > 0) return { error: `cannot activate invalid revision: ${issues.join("; ")}` };
     const now = nowIso();
-    this.db
-      .prepare(`UPDATE profile_revisions SET status = 'retired' WHERE name = ? AND status = 'active'`)
-      .run(revision.name);
-    this.db
-      .prepare(`UPDATE profile_revisions SET status = 'active', updated_at = ? WHERE id = ?`)
-      .run(now, id);
+    const superseded = this.getActiveRevision(revision.name);
+    this.db.transaction(() => {
+      if (superseded) {
+        this.db
+          .prepare(`UPDATE profile_revisions SET status = 'retired' WHERE id = ?`)
+          .run(superseded.id);
+      }
+      this.db
+        .prepare(`UPDATE profile_revisions SET status = 'active', activated_at = ?, updated_at = ? WHERE id = ?`)
+        .run(now, now, id);
+      if (superseded) this.audit("retired", actor, superseded.id, `${superseded.name} superseded by rollback to #${id}`);
+    })();
     this.audit("rolled_back", actor, id, `${revision.name} re-activated`);
     return { revision: this.getRevision(id)! };
   }
@@ -234,23 +235,24 @@ export class ReviewConfigStore {
   }
 
   /** Imports revisions as drafts regardless of the source status; activation stays explicit. */
-  importConfig(input: { payload: unknown; actor: string }): { imported: number } | { error: string } {
+  importConfig(input: { payload: unknown; actor: string }): { imported: number; skipped: number } | { error: string } {
     const payload = input.payload as { schema_version?: unknown; revisions?: unknown };
     if (payload?.schema_version !== PROFILE_SCHEMA_VERSION || !Array.isArray(payload.revisions)) {
       return { error: `unsupported config export (schema_version must be ${PROFILE_SCHEMA_VERSION})` };
     }
     let imported = 0;
-    for (const entry of payload.revisions as Array<{ name?: unknown; definition?: unknown; note?: unknown }>) {
+    let skipped = 0;
+    for (const entry of payload.revisions as Array<{ definition?: unknown; note?: unknown }>) {
       const result = this.createDraft({
-        name: typeof entry.name === "string" ? entry.name : "",
         definition: entry.definition,
         note: typeof entry.note === "string" ? `imported: ${entry.note}` : "imported",
         createdBy: input.actor,
       });
       if ("revision" in result) imported += 1;
+      else skipped += 1;
     }
-    this.audit("imported", input.actor, null, `${imported} revision(s) imported as drafts`);
-    return { imported };
+    this.audit("imported", input.actor, null, `${imported} imported as drafts, ${skipped} skipped`);
+    return { imported, skipped };
   }
 }
 
@@ -278,8 +280,8 @@ export function validateProfileDefinition(definition: ProfileDefinition): string
     if (seen.has(reviewer.role)) issues.push(`duplicate specialist role: ${reviewer.role}`);
     seen.add(reviewer.role);
   }
-  if (!KNOWN_REVIEWER_ROLES.some((role) => role.id === definition.reviewers[0]?.role)) {
-    issues.push("the first reviewer must be a known specialist role");
+  if (definition.reviewers.length === 0) {
+    issues.push("at least one specialist role is required");
   }
   for (const reviewer of definition.reviewers) {
     const model = reviewer.model;
@@ -291,10 +293,20 @@ export function validateProfileDefinition(definition: ProfileDefinition): string
 }
 
 function rowToRevision(row: Record<string, unknown>): ProfileRevisionRow {
+  const schemaVersion = Number(row.schema_version ?? PROFILE_SCHEMA_VERSION);
   let definition: ProfileDefinition;
   try {
+    if (schemaVersion !== PROFILE_SCHEMA_VERSION) {
+      console.warn(
+        `config: revision #${row.id} has schema_version ${schemaVersion}; expected ${PROFILE_SCHEMA_VERSION} — re-validate before activating`,
+      );
+    }
     definition = profileDefinitionSchema.parse(JSON.parse(String(row.definition_json)));
-  } catch {
+  } catch (error) {
+    console.warn(
+      `config: revision #${row.id} has an unreadable definition; treating as empty`,
+      error instanceof Error ? error.message : error,
+    );
     definition = { name: String(row.name), reviewers: [], minPublishableSeverity: "info" as Severity } as ProfileDefinition;
   }
   return {

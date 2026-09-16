@@ -10,7 +10,7 @@ import {
   type OpenCodeRunResult,
 } from "../opencode/parse.js";
 import { buildAggregatorPrompt, buildReviewerPrompt } from "../prompts.js";
-import { reviewerSpecs } from "./enqueue.js";
+import { applyProfileToSpecs, reviewerSpecs } from "./enqueue.js";
 import {
   fallbackAggregator,
   parseAggregatorResult,
@@ -358,25 +358,6 @@ function persistDecision(
   });
 }
 
-/** Constrains reviewer specs to the active profile revision: roles, order, and per-role models. */
-function applyProfileToSpecs(
-  store: JobStore,
-  config: Config,
-  specs: NewJobInput["reviewers"],
-): NewJobInput["reviewers"] {
-  const revision = store.configs.getActiveRevision("default");
-  if (!revision) return specs;
-  const byRole = new Map(revision.definition.reviewers.map((reviewer) => [reviewer.role, reviewer]));
-  let constrained: NewJobInput["reviewers"] = specs.filter((spec) => byRole.has(spec.role));
-  if (constrained.length === 0) {
-    constrained = reviewerSpecs(config, [...byRole.keys()]);
-  }
-  return constrained.map((spec) => {
-    const override = byRole.get(spec.role);
-    return override?.model ? { ...spec, model: override.model } : spec;
-  });
-}
-
 async function routeSpecialists(
   deps: PipelineDeps,
   job: JobRow,
@@ -390,7 +371,9 @@ async function routeSpecialists(
   const allowlist = config.reviewers.map((role) => role.id);
 
   if (config.routing.mode === "fixed") {
-    if (existing.length === 0) store.ensureReviewerRuns(job.id, applyProfileToSpecs(store, config, reviewerSpecs(config)));
+    if (existing.length === 0) {
+      store.ensureReviewerRuns(job.id, applyProfileToSpecs(store, config, reviewerSpecs(config), job.profile_revision_id));
+    }
     const roles = store.listReviewerRuns(job.id).map((run) => run.role);
     persistDecision(store, job.id, {
       profile: "diagnosis",
@@ -428,7 +411,9 @@ async function routeSpecialists(
   store.setJobState(job.id, "routing", { routing_state: "running", routing_mode: config.routing.mode });
   const signals = scanRoutingSignals({ diff, title: job.pr_title, body: job.pr_body });
   let decision: RoutingDecision;
-  const profileRouterModel = store.configs.getActiveRevision("default")?.definition.routerModel;
+  const profileRouterModel = job.profile_revision_id
+    ? store.configs.getRevision(job.profile_revision_id)?.definition.routerModel
+    : undefined;
   const routerModel = profileRouterModel || config.routing.model || config.opencode.reviewerModel;
   const useModel = (config.routing.mode === "model" || config.routing.mode === "hybrid") && Boolean(routerModel);
 
@@ -500,7 +485,10 @@ async function routeSpecialists(
     decision.profile === "poison-alert" ? config.poisonAlert.policy : null,
     { routing_mode: config.routing.mode },
   );
-  store.ensureReviewerRuns(job.id, applyProfileToSpecs(store, config, reviewerSpecs(config, decision.reviewers)));
+  store.ensureReviewerRuns(
+    job.id,
+    applyProfileToSpecs(store, config, reviewerSpecs(config, decision.reviewers), job.profile_revision_id),
+  );
   store.log(
     job.id,
     `Routed profile=${decision.profile} source=${decision.source} reviewers=${decision.reviewers.join(", ")} reason=${decision.reason}`,
@@ -840,9 +828,10 @@ async function publishReview(
   }
 
   let publishable = findingsForPublish(aggregated.findings, snapshot);
+  // severityRank is inverted (blocker=0), so "at or above" the minimum means rank <= threshold.
   const profileRevision = job.profile_revision_id
     ? deps.store.configs.getRevision(job.profile_revision_id)
-    : deps.store.configs.getActiveRevision("default");
+    : undefined;
   if (profileRevision) {
     const threshold = severityRank(profileRevision.definition.minPublishableSeverity);
     publishable = publishable.filter(

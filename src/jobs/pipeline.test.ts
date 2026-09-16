@@ -2284,7 +2284,6 @@ describe("profile revision consumption", () => {
     });
     const store = new JobStore(openDb(":memory:"));
     const draft = store.configs.createDraft({
-      name: "default",
       definition: {
         name: "default",
         reviewers: [{ role: "security", model: "test/override" }],
@@ -2323,6 +2322,71 @@ describe("profile revision consumption", () => {
     expect(runs.map((run) => run.role)).toEqual(["security"]);
     expect(runs[0]?.model).toBe("test/override");
     expect(store.getJob(created.job.id)?.profile_revision_id).toBe(draft.revision.id);
+  });
+
+  it("filters published findings by the revision's minimum publishable severity", async () => {
+    const config = loadConfig({
+      REVIEWER_ROUTING: "fixed",
+      REVIEWER_ROLES: "correctness",
+      OPENCODE_REVIEWER_MODEL: "test/model",
+      POST_EMPTY_REVIEW: "true",
+      GITHUB_APP_ID: "1",
+      GITHUB_WEBHOOK_SECRET: "s",
+      GITHUB_APP_PRIVATE_KEY: "k",
+    });
+    const store = new JobStore(openDb(":memory:"));
+    const draft = store.configs.createDraft({
+      definition: {
+        name: "default",
+        reviewers: [{ role: "correctness" }],
+        minPublishableSeverity: "medium",
+      },
+      createdBy: "octocat",
+    });
+    if (!("revision" in draft)) throw new Error("draft failed");
+    store.configs.activateRevision(draft.revision.id, "octocat");
+
+    const bodies: string[] = [];
+    const github: GithubPort = githubPort({
+      getPullDiff: async () => "diff --git a/example.ts b/example.ts\n",
+      listReviews: async () => [],
+      createCommentReview: async (input) => {
+        bodies.push(
+          [input.body, ...input.comments.map((comment) => comment.body)].join("\n"),
+        );
+        return { id: "6", url: "u" };
+      },
+    });
+    const opencode: OpenCodePort = {
+      async run(input) {
+        const roleMatch = input.prompt.match(/Role id: (\w+)/);
+        const text = roleMatch
+          ? JSON.stringify({
+              schema_version: 1,
+              reviewer: roleMatch[1],
+              verdict: "findings",
+              findings: [
+                { severity: "blocker", confidence: 0.9, category: "correctness", file: "a.ts", line: 1, summary: "severe bug", reason: "fix" },
+                { severity: "low", confidence: 0.9, category: "docs", file: "b.ts", line: 2, summary: "typo nit", reason: "nit" },
+              ],
+            })
+          : JSON.stringify({
+              schema_version: 1,
+              verdict: "comment",
+              summary: "agg",
+              findings: [
+                { severity: "blocker", confidence: 0.9, category: "correctness", file: "a.ts", line: 1, summary: "severe bug", body: "fix" },
+                { severity: "low", confidence: 0.9, category: "docs", file: "b.ts", line: 2, summary: "typo nit", body: "nit" },
+              ],
+            });
+        return { stdout: text, stderr: "", exitCode: 0, text, usage: {} };
+      },
+    };
+    const created = store.enqueue({ ...jobInput("sevsha"), reviewers: [] });
+    await createPipeline({ config, store, github, checkout: await fixtureCheckout(), opencode }).run(created.job.id);
+    expect(bodies).toHaveLength(1);
+    expect(bodies[0]).toContain("severe bug");
+    expect(bodies[0]).not.toContain("typo nit");
   });
 
   it("uses all config roles when no revision is active", async () => {

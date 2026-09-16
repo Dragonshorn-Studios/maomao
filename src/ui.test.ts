@@ -3,7 +3,7 @@ import { openDb } from "./db.js";
 import { seedDemoJobs } from "./demo/fixtures.js";
 import { JobStore } from "./jobs/store.js";
 import { THEME_CSS } from "./ui/theme.js";
-import { renderHome, renderJob, renderLogin } from "./ui/pages.js";
+import { renderConfigPage, renderHome, renderJob, renderLogin } from "./ui/pages.js";
 import { settledFindingsCopy } from "./ui/copy.js";
 import { formatCost, formatTokens, jobMetrics } from "./ui/metrics.js";
 
@@ -507,5 +507,42 @@ describe("finding mini diffs", () => {
     });
     expect(html).toContain("No diff preview: binary file.");
     expect(html).not.toContain("Show diff");
+  });
+});
+
+describe("config page", () => {
+  it("renders revisions, write controls only for operators, and escapes definitions", () => {
+    const data = {
+      revisions: [
+        {
+          id: 3,
+          name: "default",
+          status: "draft",
+          definition: { name: "default", reviewers: [{ role: "correctness" }], minPublishableSeverity: "info" },
+          note: null,
+          created_by: "octocat",
+          created_at: "2026-01-01T00:00:00Z",
+          updated_at: "2026-01-01T00:00:00Z",
+          activated_at: "2026-01-01T00:00:00Z",
+          editSeq: 2,
+        },
+      ],
+      audit: [{ id: 1, action: "draft_created", actor: "octocat", revision_id: 3, detail: "draft of default", created_at: "2026-01-01T00:00:00Z" }],
+      csrfToken: "tok",
+      canWrite: true,
+    };
+    const html = renderConfigPage(data);
+    expect(html).toContain("Review configuration");
+    // The definition JSON is rendered escaped inside the edit textarea.
+    expect(html).toContain("&quot;reviewers&quot;");
+    expect(html).toContain('name="csrf_token"');
+    expect(html).toContain("Activate");
+    expect(html).toContain("expected_edit_seq");
+    expect(html).toContain("Audit history");
+
+    const readonly = renderConfigPage({ ...data, canWrite: false, csrfToken: undefined });
+    expect(readonly).not.toContain("Activate");
+    expect(readonly).not.toContain('name="csrf_token"');
+    expect(readonly).toContain("requires an operator OAuth identity");
   });
 });

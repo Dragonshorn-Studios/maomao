@@ -475,8 +475,8 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
   const configWriteDenied = (c: Context<AppEnv>) =>
     c.html(
       renderConfigPage({
-        revisions: [],
-        audit: [],
+        revisions: ctx.store.configs.listRevisions(),
+        audit: ctx.store.configs.listAudit(),
         canWrite: false,
         error: "Writing configuration requires an operator GitHub OAuth identity.",
       }),
@@ -512,6 +512,7 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
       "draft-saved": "Draft saved.",
       activated: "Revision activated.",
       "rolled-back": "Revision rolled back.",
+      imported: "Configuration imported as drafts.",
     };
     const noticeKey = c.req.query("notice") ?? "";
     return c.html(
@@ -532,9 +533,7 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
     const body = await c.req.parseBody();
     const parsed = parseDefinition(typeof body.definition === "string" ? body.definition : undefined);
     if (!parsed.ok) return renderConfigWithError(c, parsed.error, 400);
-    const name = typeof body.name === "string" ? body.name.trim() : "default";
     const result = ctx.store.configs.createDraft({
-      name: name || "default",
       definition: parsed.definition,
       createdBy: actor.login,
     });
@@ -556,14 +555,9 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
       updatedBy: actor.login,
     });
     if ("error" in result && result.error === "conflict") {
-      return c.html(
-        renderConfigPage({
-          revisions: ctx.store.configs.listRevisions(),
-          audit: ctx.store.configs.listAudit(),
-          canWrite: true,
-          error: "Conflict: this draft was saved by someone else. Reload and re-apply your edit.",
-          csrfToken: ensureCsrfToken(c, ctx.config.uiSessionSecret),
-        }),
+      return renderConfigWithError(
+        c,
+        "Conflict: this draft was saved by someone else. Reload and re-apply your edit.",
         409,
       );
     }
@@ -608,7 +602,7 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
     }
     const result = ctx.store.configs.importConfig({ payload, actor: actor.login });
     if ("error" in result) return renderConfigWithError(c, result.error, 400);
-    return c.redirect(`/config?notice=imported-${result.imported}`, 302);
+    return c.redirect("/config?notice=imported", 302);
   });
 
   app.get("/api/jobs", (c) => {

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { openDb } from "./db.js";
-import { ReviewConfigStore, PROFILE_MAX_RETRIES, validateProfileDefinition } from "./config-revisions.js";
+import { ReviewConfigStore, validateModelCatalog, validateProfileDefinition } from "./config-revisions.js";
 
 function store() {
   return new ReviewConfigStore(openDb(":memory:"));
@@ -15,13 +15,15 @@ const definition = {
 describe("profile revision lifecycle", () => {
   it("creates a validated draft, activates it, and retires the previous active", () => {
     const configs = store();
-    const first = configs.createDraft({ name: "default", definition, createdBy: "octocat" });
+    const first = configs.createDraft({
+      definition, createdBy: "octocat" });
     if (!("revision" in first)) throw new Error("draft creation failed");
     const activated = configs.activateRevision(first.revision.id, "octocat");
     if (!("revision" in activated)) throw new Error(activated.error);
     expect(activated.revision.status).toBe("active");
 
-    const second = configs.createDraft({ name: "default", definition, createdBy: "octocat" });
+    const second = configs.createDraft({
+      definition, createdBy: "octocat" });
     if (!("revision" in second)) throw new Error("second draft failed");
     const activated2 = configs.activateRevision(second.revision.id, "octocat");
     if (!("revision" in activated2)) throw new Error(activated2.error);
@@ -31,10 +33,12 @@ describe("profile revision lifecycle", () => {
 
   it("cannot activate a retired revision directly except via rollback", () => {
     const configs = store();
-    const first = configs.createDraft({ name: "default", definition, createdBy: "octocat" });
+    const first = configs.createDraft({
+      definition, createdBy: "octocat" });
     if (!("revision" in first)) throw new Error("draft failed");
     configs.activateRevision(first.revision.id, "octocat");
-    const second = configs.createDraft({ name: "default", definition, createdBy: "octocat" });
+    const second = configs.createDraft({
+      definition, createdBy: "octocat" });
     if (!("revision" in second)) throw new Error("second draft failed");
     configs.activateRevision(second.revision.id, "octocat");
     const rollback = configs.rollbackRevision(first.revision.id, "octocat");
@@ -45,7 +49,8 @@ describe("profile revision lifecycle", () => {
   it("rejects activation of an invalid revision", () => {
     const configs = store();
     const bad = { ...definition, reviewers: [] };
-    const draft = configs.createDraft({ name: "default", definition: bad, createdBy: "octocat" });
+    const draft = configs.createDraft({
+      definition: bad, createdBy: "octocat" });
     if (!("revision" in draft)) throw new Error("draft failed");
     const result = configs.activateRevision(draft.revision.id, "octocat");
     expect("error" in result).toBe(true);
@@ -53,7 +58,8 @@ describe("profile revision lifecycle", () => {
 
   it("records audit entries for lifecycle transitions", () => {
     const configs = store();
-    const draft = configs.createDraft({ name: "default", definition, createdBy: "octocat" });
+    const draft = configs.createDraft({
+      definition, createdBy: "octocat" });
     if (!("revision" in draft)) throw new Error("draft failed");
     configs.activateRevision(draft.revision.id, "octocat");
     const audit = configs.listAudit();
@@ -63,7 +69,8 @@ describe("profile revision lifecycle", () => {
 
   it("exports and imports definitions without secrets and as drafts only", () => {
     const configs = store();
-    const draft = configs.createDraft({ name: "default", definition, createdBy: "octocat" });
+    const draft = configs.createDraft({
+      definition, createdBy: "octocat" });
     if (!("revision" in draft)) throw new Error("draft failed");
     configs.activateRevision(draft.revision.id, "octocat");
     const exported = configs.exportConfig();
@@ -73,7 +80,7 @@ describe("profile revision lifecycle", () => {
 
     const other = store();
     const result = other.importConfig({ payload: exported, actor: "octocat" });
-    expect(result).toEqual({ imported: 1 });
+    expect(result).toEqual({ imported: 1, skipped: 0 });
     // Imported revisions are drafts: activation stays explicit.
     expect(other.getActiveRevision("default")).toBeUndefined();
     expect(other.listRevisions()[0]?.status).toBe("draft");
@@ -81,9 +88,10 @@ describe("profile revision lifecycle", () => {
 });
 
 describe("draft editing and conflicts", () => {
-  it("detects concurrent edits via expectedUpdatedAt", () => {
+  it("detects concurrent edits via the expected edit sequence", () => {
     const configs = store();
-    const draft = configs.createDraft({ name: "default", definition, createdBy: "octocat" });
+    const draft = configs.createDraft({
+      definition, createdBy: "octocat" });
     if (!("revision" in draft)) throw new Error("draft failed");
     const first = configs.updateDraft({
       id: draft.revision.id,
@@ -104,7 +112,8 @@ describe("draft editing and conflicts", () => {
 
   it("refuses to update a revision that is not a draft", () => {
     const configs = store();
-    const draft = configs.createDraft({ name: "default", definition, createdBy: "octocat" });
+    const draft = configs.createDraft({
+      definition, createdBy: "octocat" });
     if (!("revision" in draft)) throw new Error("draft failed");
     configs.activateRevision(draft.revision.id, "octocat");
     const result = configs.updateDraft({
@@ -121,7 +130,6 @@ describe("profile validation and caps", () => {
   it("rejects unknown roles, oversized caps, and malformed models", () => {
     const configs = store();
     const bad = configs.createDraft({
-      name: "default",
       definition: {
         name: "default",
         reviewers: [{ role: "not-a-role" }],
@@ -135,16 +143,25 @@ describe("profile validation and caps", () => {
     expect(bad.issues.join(" ")).toContain("maxTotalCostUsd");
   });
 
-  it("enforces the retry cap in validation", () => {
-    expect(PROFILE_MAX_RETRIES).toBeLessThanOrEqual(5);
+  it("requires at least one specialist role", () => {
     const issues = validateProfileDefinition({ name: "default", reviewers: [], minPublishableSeverity: "info" });
-    expect(issues).toContain("the first reviewer must be a known specialist role");
+    expect(issues).toContain("at least one specialist role is required");
+  });
+
+  it("enforces the model catalog when one is configured", () => {
+    const definition = {
+      name: "default",
+      reviewers: [{ role: "correctness", model: "openai/gpt-4.1" }],
+      minPublishableSeverity: "info" as const,
+    };
+    expect(validateModelCatalog(definition, ["anthropic/claude-sonnet-4-5"])).toHaveLength(1);
+    expect(validateModelCatalog(definition, ["openai/gpt-4.1"])).toHaveLength(0);
+    expect(validateModelCatalog(definition, [])).toHaveLength(0);
   });
 
   it("rejects an invalid severity", () => {
     const configs = store();
     const bad = configs.createDraft({
-      name: "default",
       definition: { ...definition, minPublishableSeverity: "catastrophic" },
       createdBy: "octocat",
     });

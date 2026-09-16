@@ -834,7 +834,6 @@ export function renderConfigPage(data: ConfigPageData): string {
         <summary>Create a new draft</summary>
         <form method="post" action="/config/drafts">
           ${csrf}
-          <label>Name <input name="name" required/></label>
           <textarea name="definition" rows="12" cols="72">${escapeHtml(
             JSON.stringify(
               {

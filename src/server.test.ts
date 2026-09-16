@@ -900,3 +900,108 @@ describe("oauth operator login hardening", () => {
     expect(tokenless.status).toBe(403);
   });
 });
+
+describe("review configuration routes", () => {
+  const oauthEnv = {
+    UI_SESSION_SECRET: "session-secret-for-tests",
+    GITHUB_OAUTH_CLIENT_ID: "cid",
+    GITHUB_OAUTH_CLIENT_SECRET: "csecret",
+    MAOMAO_ADMIN_GITHUB_IDS: "1001",
+    MAOMAO_PUBLIC_URL: "https://maomao.example",
+  };
+  const definition = {
+    name: "default",
+    reviewers: [{ role: "correctness" }],
+    minPublishableSeverity: "medium",
+  };
+
+  async function oauthSession(app: ReturnType<typeof createApp>): Promise<string> {
+    const start = await app.request("/login/github");
+    const state = start.headers.get("location")?.match(/state=([^&]+)/)?.[1];
+    if (!state) throw new Error("missing oauth state");
+    const callback = await app.request(`/login/github/callback?code=good-code&state=${state}`);
+    return cookieFrom(callback);
+  }
+
+  it("denies config writes without an oauth identity and allows them for operators", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    const { app, store } = testApp(
+      { ...oauthEnv, UI_PASSWORD: "hunter2", UI_LOCAL_LOGIN: "true" },
+      mockGithub(),
+      mockOauthFetch({ id: 1001, login: "octocat" }),
+    );
+
+    // Password-only session: the config page reads fine, but writes are denied.
+    const page = await app.request("/login");
+    const { csrfCookie, csrfToken } = await csrfArtifacts(page);
+    const login = await app.request("/login", {
+      method: "POST",
+      headers: { cookie: csrfCookie, "content-type": "application/x-www-form-urlencoded" },
+      body: `password=hunter2&next=%2F&csrf_token=${encodeURIComponent(csrfToken)}`,
+    });
+    const passwordCookies = cookieFrom(login);
+
+    const denied = await app.request("/config/drafts", {
+      method: "POST",
+      headers: { cookie: passwordCookies, "content-type": "application/x-www-form-urlencoded" },
+      body: `definition=${encodeURIComponent(JSON.stringify(definition))}`,
+    });
+    expect(denied.status).toBe(403);
+    expect(store.configs.listRevisions()).toEqual([]);
+
+    // OAuth operator session: the same write succeeds.
+    const start = await app.request("/login/github");
+    const state = start.headers.get("location")?.match(/state=([^&]+)/)?.[1] ?? "";
+    const callback = await app.request(`/login/github/callback?code=good-code&state=${state}`);
+    const session = cookieFrom(callback);
+    const configPage = await app.request("/config", { headers: { cookie: session } });
+    const artifacts = await csrfArtifacts(configPage);
+
+    const created = await app.request("/config/drafts", {
+      method: "POST",
+      headers: {
+        cookie: `${session}; ${artifacts.csrfCookie}`,
+        "content-type": "application/x-www-form-urlencoded",
+      },
+      body: `definition=${encodeURIComponent(JSON.stringify(definition))}&csrf_token=${encodeURIComponent(artifacts.csrfToken)}`,
+    });
+    expect(created.status).toBe(302);
+    expect(created.headers.get("location")).toContain("draft-created");
+    expect(store.configs.listRevisions()).toHaveLength(1);
+    expect(store.configs.listRevisions()[0]?.created_by).toBe("octocat");
+    warn.mockRestore();
+    log.mockRestore();
+  });
+
+  it("conflicts on a stale draft save and exports without credentials", async () => {
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    const { app, store } = testApp(oauthEnv, undefined, mockOauthFetch({ id: 1001, login: "octocat" }));
+    const start = await app.request("/login/github");
+    const state = start.headers.get("location")?.match(/state=([^&]+)/)?.[1] ?? "";
+    const callback = await app.request(`/login/github/callback?code=good-code&state=${state}`);
+    const session = cookieFrom(callback);
+
+    store.configs.createDraft({ definition, createdBy: "octocat" });
+    const draft = store.configs.listRevisions()[0];
+
+    const configPage = await app.request("/config", { headers: { cookie: session } });
+    const { csrfCookie, csrfToken } = await csrfArtifacts(configPage);
+
+    const conflict = await app.request(`/config/drafts/${draft.id}`, {
+      method: "POST",
+      headers: { cookie: `${session}; ${csrfCookie}`, "content-type": "application/x-www-form-urlencoded" },
+      body: `definition=${encodeURIComponent(JSON.stringify(definition))}&expected_edit_seq=999&csrf_token=${encodeURIComponent(csrfToken)}`,
+    });
+    expect(conflict.status).toBe(409);
+    expect(await conflict.text()).toContain("saved by someone else");
+
+    const exportData = (await (await app.request("/config/export", { headers: { cookie: session } })).json()) as {
+      schema_version: number;
+      revisions: unknown[];
+    };
+    expect(exportData.schema_version).toBe(1);
+    expect(JSON.stringify(exportData)).not.toContain("secret");
+    log.mockRestore();
+  });
+});
