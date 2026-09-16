@@ -74,6 +74,8 @@ export interface Config {
   modelCatalog: string[];
   /** Explicit issue creation from health scans. Disabled by default. */
   issueCreationEnabled: boolean;
+  /** UI flavor copy: "apothecary" (branded default) or "plain" (no flavor). */
+  uiFlavor: "apothecary" | "plain";
   /** Opt-in GitHub review verdicts. Defaults keep every review COMMENT-only. */
   reviewAllowApprove: boolean;
   reviewAllowRequestChanges: boolean;
@@ -250,6 +252,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     publicUrl: env.MAOMAO_PUBLIC_URL?.trim().replace(/\/+$/, "") || "",
     modelCatalog: parseCsv(env.MODEL_CATALOG),
     issueCreationEnabled: parseBoolean(env.GITHUB_ISSUE_CREATION_ENABLED, false),
+    uiFlavor: env.UI_FLAVOR?.trim().toLowerCase() === "plain" ? "plain" : "apothecary",
     reviewAllowApprove: parseBoolean(env.GITHUB_REVIEW_ALLOW_APPROVE, false),
     reviewAllowRequestChanges: parseBoolean(env.GITHUB_REVIEW_ALLOW_REQUEST_CHANGES, false),
     reviewRequestChangesMinSeverity: parseSeverity(

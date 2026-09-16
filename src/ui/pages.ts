@@ -7,6 +7,7 @@ import { elapsedMs, escapeHtml, formatDuration, shortSha } from "../util.js";
 import {
   diffUnavailableCopy,
   emptyQueueCopy,
+  huntersReturnedCopy,
   externalDispatchBadge,
   findingOverrideNote,
   findingStatusLabel,
@@ -14,6 +15,8 @@ import {
   internalEscalationBadge,
   jobStateLabel,
   observationsCopy,
+  reviewerFlavor,
+  roleFlavorHint,
   routingProfileLabel,
   runStateLabel,
   severityLabel,
@@ -92,7 +95,7 @@ export function renderLogin(options: LoginOptions = {}): string {
 export function renderHome(jobs: JobRow[], store: JobStore, options: PageOptions = {}): string {
   const empty = emptyQueueCopy();
   const cards = jobs
-    .map((job) => renderQueueCard(job, jobMetrics(job, store)))
+    .map((job) => renderQueueCard(job, jobMetrics(job, store), options.uiFlavor))
     .join("");
 
   const body = `
@@ -127,7 +130,7 @@ export function renderJob(
 ): string {
   const metrics = jobMetricsFromRuns(job, runs);
   const state = jobStateLabel(job.state);
-  const flavor = flavorForJob(job.state, job.pr_number);
+  const flavor = flavorForJob(job.state, job.pr_number, options.uiFlavor);
   const elapsed = formatDuration(elapsedMs(job.started_at, job.finished_at) ?? elapsedMs(job.created_at));
   const stale = job.state === "stale";
   const failedToRetry = retryableFailedCount(job, runs);
@@ -138,6 +141,11 @@ export function renderJob(
     ${stale ? `<p class="warn" role="status">${escapeHtml(staleBanner())}</p>` : ""}
     <h1>${escapeHtml(job.repo_full_name)}#${job.pr_number}</h1>
     <p class="lede">${escapeHtml(job.pr_title || "")}${flavor ? ` · ${escapeHtml(flavor)}` : ""}</p>
+    ${
+      job.state === "completed"
+        ? `<p class="muted" aria-label="Hunt summary">${escapeHtml(huntersReturnedCopy(metrics.reviewersDone, metrics.findings.total, options.uiFlavor))}</p>`
+        : ""
+    }
     <dl class="meta-grid">
       <div class="sha-block">
         <dt>Reviewed head SHA</dt>
@@ -206,7 +214,7 @@ export function renderJob(
     </div>
     <p class="muted">${escapeHtml(progressCopy(metrics))}</p>
     <div class="cards">
-      ${runs.map((run) => renderRun(run, canRetryRun(job, run), options.csrfToken)).join("")}
+      ${runs.map((run) => renderRun(run, canRetryRun(job, run), options.csrfToken, options.uiFlavor)).join("")}
     </div>
     <h2>Aggregator</h2>
     ${renderAggregator(job, metrics)}
@@ -230,7 +238,7 @@ export function renderJob(
   return layout(`${job.repo_full_name}#${job.pr_number}`, body, options);
 }
 
-function renderQueueCard(job: JobRow, metrics: JobMetrics): string {
+function renderQueueCard(job: JobRow, metrics: JobMetrics, uiFlavor?: "apothecary" | "plain"): string {
   const state = jobStateLabel(job.state);
   const elapsed = formatDuration(elapsedMs(job.started_at, job.finished_at) ?? elapsedMs(job.created_at));
   const live: readonly JobState[] = [
@@ -243,7 +251,7 @@ function renderQueueCard(job: JobRow, metrics: JobMetrics): string {
     "publishing",
   ];
   const isLive = live.includes(job.state);
-  const flavor = flavorForJob(job.state, job.pr_number);
+  const flavor = flavorForJob(job.state, job.pr_number, uiFlavor);
   return `<li>
     <article class="specimen${isLive ? " is-live" : ""}">
       <div class="specimen-head">
@@ -497,10 +505,17 @@ function renderJobRetry(jobId: number, count: number, csrfToken?: string): strin
   </form>`;
 }
 
-function renderRun(run: ReviewerRunRow, showRetry = false, csrfToken?: string): string {
+function renderRun(
+  run: ReviewerRunRow,
+  showRetry = false,
+  csrfToken?: string,
+  uiFlavor?: "apothecary" | "plain",
+): string {
   const parsed = parseReviewerResult(run.normalized_json);
   const findingCount = parsed?.findings.length ?? 0;
   const state = runStateLabel(run.state);
+  const hunt = reviewerFlavor(run.state, findingCount, uiFlavor);
+  const hint = roleFlavorHint(run.role, uiFlavor);
   const tokenCount =
     run.total_tokens ??
     (run.prompt_tokens ?? 0) +
@@ -518,9 +533,10 @@ function renderRun(run: ReviewerRunRow, showRetry = false, csrfToken?: string): 
   });
   return `<article class="card">
     <header>
-      <span class="role">${roleGlyph(run.role)} <strong>${escapeHtml(run.title || run.role)}</strong> <span class="muted">(${escapeHtml(run.role)})</span></span>
+      <span class="role"${hint ? ` title="${escapeHtml(hint)}"` : ""}>${roleGlyph(run.role)} <strong>${escapeHtml(run.title || run.role)}</strong> <span class="muted">(${escapeHtml(run.role)})</span></span>
       ${renderState(run.state, state.text, state.hint, state.mark)}
     </header>
+    ${hunt ? `<p class="muted">${escapeHtml(hunt)}</p>` : ""}
     <p class="muted">
       model <code class="metric">${escapeHtml(run.model || "default model")}</code>
       ${run.provider ? ` · provider <code class="metric">${escapeHtml(run.provider)}</code>` : ""}

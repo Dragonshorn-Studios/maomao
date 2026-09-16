@@ -16,6 +16,7 @@ export interface PageOptions {
   identity?: { login: string; avatarUrl: string | null };
   /** Latest reviewed head SHA for this pull request, for stale-finding detection. */
   prHeadSha?: string;
+  uiFlavor?: "apothecary" | "plain";
 }
 
 export function csrfInput(token: string | undefined): string {
