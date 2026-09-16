@@ -655,8 +655,9 @@ describe("repository health scan UI", () => {
     });
     expect(html).toContain("Confirm repository health scan");
     expect(html).toContain(HEAD);
+    expect(html).toContain(`name="sha" value="${HEAD}"`);
     expect(html).toContain('name="branch" value="main"');
-    expect(html).toContain('name="sha"');
+    expect(html).toContain('name="revision_id" value="3"');
     expect(html).toContain('aria-label="Run repository health scan"');
     expect(html).toContain("Sniff sniff");
     expect(html).toContain("1.0 MiB");
@@ -672,13 +673,31 @@ describe("repository health scan UI", () => {
       repo: "acme/widgets",
       branch: "main",
       sha: HEAD,
+      profileRevision: null,
       severityFloor: "info",
-      limits: { diffCapBytes: 1024, reviewerTimeoutMs: 60_000, maxRetries: 0 },
-      movedFromSha: "oldsha",
+      limits: { diffCapBytes: null, reviewerTimeoutMs: 60_000, maxRetries: 0 },
+      notice: { kind: "sha", fromSha: "oldsha" },
     });
     expect(html).toContain("moved since you confirmed");
     expect(html).toContain("oldsha");
     expect(html).toContain(HEAD);
+    expect(html).toContain("no cap");
+    expect(html).toContain('name="revision_id" value=""');
+  });
+
+  it("warns when the confirmed branch name is stale", () => {
+    const html = renderScanConfirmPage({
+      csrfToken: "tok",
+      repo: "acme/widgets",
+      branch: "main",
+      sha: HEAD,
+      profileRevision: null,
+      severityFloor: "info",
+      limits: { diffCapBytes: 4096, reviewerTimeoutMs: 60_000, maxRetries: 0 },
+      notice: { kind: "branch", fromBranch: "develop" },
+    });
+    expect(html).toContain("you confirmed (develop)");
+    expect(html).not.toContain("The scan reviews this exact revision");
   });
 
   it("renders the scan page with identity, nav link, and the branded scan action", () => {
@@ -687,6 +706,7 @@ describe("repository health scan UI", () => {
       identity: { login: "octocat", avatarUrl: null },
       csrfToken: "tok",
       issueCreationEnabled: false,
+      profileRevision: null,
     });
     expect(html).toContain('aria-label="Run repository health scan"');
     expect(html).toContain("Sniff sniff");

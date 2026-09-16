@@ -5,6 +5,11 @@ import { PRODUCT_TAGLINE, type UiFlavor } from "./copy.js";
 import { brandMark } from "./glyphs.js";
 import { THEME_HREF } from "./theme.js";
 
+export interface UiIdentity {
+  login: string;
+  avatarUrl: string | null;
+}
+
 export interface PageOptions {
   showLogout?: boolean;
   live?: boolean;
@@ -13,7 +18,7 @@ export interface PageOptions {
   reviewUrl?: string;
   prFindings?: FindingRow[];
   csrfToken?: string;
-  identity?: { login: string; avatarUrl: string | null };
+  identity?: UiIdentity;
   /** Latest reviewed head SHA for this pull request, for stale-finding detection. */
   prHeadSha?: string;
   uiFlavor?: UiFlavor;

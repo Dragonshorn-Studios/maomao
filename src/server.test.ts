@@ -89,6 +89,13 @@ async function loginSession(
   return { session, csrfToken, cookies: `${session}; ${csrfCookie}` };
 }
 
+async function operatorSession(app: ReturnType<typeof createApp>): Promise<string> {
+  const start = await app.request("/login/github");
+  const state = start.headers.get("location")?.match(/state=([^&]+)/)?.[1] ?? "";
+  const callback = await app.request(`/login/github/callback?code=good-code&state=${state}`);
+  return cookieFrom(callback);
+}
+
 const openedPayload = JSON.stringify({
   action: "opened",
   installation: { id: 1, account: { id: 1001 } },
@@ -1152,8 +1159,8 @@ describe("health scan routes", () => {
   }
 
   function hiddenValue(html: string, name: string): string {
-    const match = html.match(new RegExp(`name="${name}" value="([^"]+)"`));
-    if (!match?.[1]) throw new Error(`missing hidden field ${name} in confirm page`);
+    const match = html.match(new RegExp(`name="${name}" value="([^"]*)"`));
+    if (match?.[1] === undefined) throw new Error(`missing hidden field ${name} in confirm page`);
     return match[1];
   }
 
@@ -1161,7 +1168,36 @@ describe("health scan routes", () => {
     const scanPage = await app.request("/scan", { headers: { cookie: session } });
     expect(scanPage.status).toBe(200);
     const artifacts = await csrfArtifacts(scanPage);
-    return { ...artifacts, pageHtml: artifacts.html };
+    return { ...artifacts, html: artifacts.html };
+  }
+
+  /** Step 1 of the scan flow: POST the repo, returning the rendered confirmation page. */
+  async function scanPreview(
+    app: ReturnType<typeof createApp>,
+    session: string,
+    csrfCookie: string,
+    csrfToken: string,
+  ): Promise<string> {
+    const preview = await app.request("/scan", {
+      method: "POST",
+      headers: { cookie: `${session}; ${csrfCookie}`, "content-type": "application/x-www-form-urlencoded" },
+      body: `repo=acme%2Fwidgets&csrf_token=${encodeURIComponent(csrfToken)}`,
+    });
+    expect(preview.status).toBe(200);
+    return preview.text();
+  }
+
+  /** Step 2 of the scan flow: POST the confirmation fields shown on a preview page. */
+  function confirmBody(html: string, csrfToken: string, overrides: Record<string, string> = {}): string {
+    const fields = new URLSearchParams({
+      repo: hiddenValue(html, "repo"),
+      branch: hiddenValue(html, "branch"),
+      sha: hiddenValue(html, "sha"),
+      revision_id: hiddenValue(html, "revision_id"),
+      csrf_token: csrfToken,
+      ...overrides,
+    });
+    return fields.toString();
   }
 
   it("queues a scan only for operators, pinned to the confirmed head SHA", async () => {
@@ -1181,31 +1217,23 @@ describe("health scan routes", () => {
     expect(denied.headers.get("location")).toContain("/login");
     expect(store.listJobs()).toEqual([]);
 
-    const start = await app.request("/login/github");
-    const state = start.headers.get("location")?.match(/state=([^&]+)/)?.[1] ?? "";
-    const callback = await app.request(`/login/github/callback?code=good-code&state=${state}`);
-    const session = cookieFrom(callback);
+    const session = await operatorSession(app);
     const page = await operatorCsrf(app, session);
-    expect(page.pageHtml).toContain('href="/scan"'); // reachable from the header nav
+    expect(page.html).toContain('href="/scan"'); // reachable from the header nav
 
     // Step 1 shows the resolved branch + exact head SHA and enqueues nothing.
-    const preview = await app.request("/scan", {
-      method: "POST",
-      headers: { cookie: `${session}; ${page.csrfCookie}`, "content-type": "application/x-www-form-urlencoded" },
-      body: `repo=acme%2Fwidgets&csrf_token=${encodeURIComponent(page.csrfToken)}`,
-    });
-    expect(preview.status).toBe(200);
-    const previewHtml = await preview.text();
+    const previewHtml = await scanPreview(app, session, page.csrfCookie, page.csrfToken);
     expect(previewHtml).toContain("Confirm repository health scan");
     expect(previewHtml).toContain("head111head111head111head111head11111");
     expect(hiddenValue(previewHtml, "branch")).toBe("main");
     expect(store.listJobs()).toEqual([]);
 
-    // Step 2 (operator confirms the shown SHA) enqueues one pinned scan.
+    // Step 2 (operator confirms the shown revision) enqueues one pinned scan. The
+    // confirming fields are read back from the rendered form, not restated.
     const queued = await app.request("/scan", {
       method: "POST",
       headers: { cookie: `${session}; ${page.csrfCookie}`, "content-type": "application/x-www-form-urlencoded" },
-      body: `repo=acme%2Fwidgets&branch=main&sha=head111head111head111head111head11111&csrf_token=${encodeURIComponent(page.csrfToken)}`,
+      body: confirmBody(previewHtml, page.csrfToken),
     });
     expect(queued.status).toBe(302);
     const job = store.listJobs()[0];
@@ -1215,26 +1243,135 @@ describe("health scan routes", () => {
     log.mockRestore();
   });
 
-  it("re-confirms instead of enqueueing when the default branch moved after the operator confirmed", async () => {
+  it("re-renders with a notice instead of enqueueing when the default branch moved after the operator confirmed", async () => {
     const log = vi.spyOn(console, "log").mockImplementation(() => {});
-    const github = scanGithub();
-    const { app, store } = testApp(oauthEnv, github, mockOauthFetch({ id: 1001, login: "octocat" }));
-    const start = await app.request("/login/github");
-    const state = start.headers.get("location")?.match(/state=([^&]+)/)?.[1] ?? "";
-    const callback = await app.request(`/login/github/callback?code=good-code&state=${state}`);
-    const session = cookieFrom(callback);
+    const { app, store } = testApp(oauthEnv, scanGithub(), mockOauthFetch({ id: 1001, login: "octocat" }));
+    const session = await operatorSession(app);
     const page = await operatorCsrf(app, session);
+    const previewHtml = await scanPreview(app, session, page.csrfCookie, page.csrfToken);
 
+    // The operator sat on the confirmation page while the branch advanced: the
+    // confirming POST still carries the SHA that was shown at preview time.
     const stale = await app.request("/scan", {
       method: "POST",
       headers: { cookie: `${session}; ${page.csrfCookie}`, "content-type": "application/x-www-form-urlencoded" },
-      body: `repo=acme%2Fwidgets&branch=main&sha=oldsha&csrf_token=${encodeURIComponent(page.csrfToken)}`,
+      body: confirmBody(previewHtml, page.csrfToken, { sha: "oldsha" }),
     });
     expect(stale.status).toBe(200);
     const staleHtml = await stale.text();
     expect(staleHtml).toContain("moved since you confirmed");
-    expect(staleHtml).toContain("head111head111head111head111head11111");
+    expect(staleHtml).toContain("oldsha");
+    expect(hiddenValue(staleHtml, "sha")).toBe("head111head111head111head111head11111");
     expect(store.listJobs()).toEqual([]);
+    log.mockRestore();
+  });
+
+  it("re-renders with a notice instead of enqueueing when only the confirmed branch name is stale", async () => {
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    const { app, store } = testApp(oauthEnv, scanGithub(), mockOauthFetch({ id: 1001, login: "octocat" }));
+    const session = await operatorSession(app);
+    const page = await operatorCsrf(app, session);
+    const previewHtml = await scanPreview(app, session, page.csrfCookie, page.csrfToken);
+
+    const stale = await app.request("/scan", {
+      method: "POST",
+      headers: { cookie: `${session}; ${page.csrfCookie}`, "content-type": "application/x-www-form-urlencoded" },
+      body: confirmBody(previewHtml, page.csrfToken, { branch: "develop" }),
+    });
+    expect(stale.status).toBe(200);
+    const staleHtml = await stale.text();
+    expect(staleHtml).toContain("you confirmed (develop)");
+    expect(store.listJobs()).toEqual([]);
+    log.mockRestore();
+  });
+
+  it("shows the active revision's severity floor on the confirm page and snapshots the confirmed revision", async () => {
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    const { app, store } = testApp(oauthEnv, scanGithub(), mockOauthFetch({ id: 1001, login: "octocat" }));
+    const created = store.configs.createDraft({
+      definition: { name: "default", reviewers: [{ role: "correctness" }], minPublishableSeverity: "high" },
+      createdBy: "octocat",
+    });
+    if ("error" in created) throw new Error("fixture draft rejected");
+    const activated = store.configs.activateRevision(created.revision.id, "octocat");
+    if ("error" in activated) throw new Error(`fixture activation failed: ${activated.error}`);
+    const session = await operatorSession(app);
+    const page = await operatorCsrf(app, session);
+
+    const preview = await app.request("/scan", {
+      method: "POST",
+      headers: { cookie: `${session}; ${page.csrfCookie}`, "content-type": "application/x-www-form-urlencoded" },
+      body: `repo=acme%2Fwidgets&csrf_token=${encodeURIComponent(page.csrfToken)}`,
+    });
+    expect(preview.status).toBe(200);
+    const previewHtml = await preview.text();
+    expect(previewHtml).toContain(">high<");
+    expect(previewHtml).toContain(`<code>#${created.revision.id}</code>`);
+    expect(hiddenValue(previewHtml, "revision_id")).toBe(String(created.revision.id));
+
+    const queued = await app.request("/scan", {
+      method: "POST",
+      headers: { cookie: `${session}; ${page.csrfCookie}`, "content-type": "application/x-www-form-urlencoded" },
+      body: confirmBody(previewHtml, page.csrfToken),
+    });
+    expect(queued.status).toBe(302);
+    expect(store.listJobs()[0]?.profile_revision_id).toBe(created.revision.id);
+    log.mockRestore();
+  });
+
+  it("does not spend the scan rate budget when only rendering the confirmation", async () => {
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    const { app, store } = testApp(
+      { ...oauthEnv, REPO_RATE_LIMIT_PER_WINDOW: "1", REPO_RATE_WINDOW_MS: "3600000" },
+      scanGithub(),
+      mockOauthFetch({ id: 1001, login: "octocat" }),
+    );
+    const session = await operatorSession(app);
+    const page = await operatorCsrf(app, session);
+
+    // With a budget of 1, the confirm step can only succeed if the preview spent nothing.
+    const preview = await app.request("/scan", {
+      method: "POST",
+      headers: { cookie: `${session}; ${page.csrfCookie}`, "content-type": "application/x-www-form-urlencoded" },
+      body: `repo=acme%2Fwidgets&csrf_token=${encodeURIComponent(page.csrfToken)}`,
+    });
+    expect(preview.status).toBe(200);
+    const previewHtml = await preview.text();
+
+    const queued = await app.request("/scan", {
+      method: "POST",
+      headers: { cookie: `${session}; ${page.csrfCookie}`, "content-type": "application/x-www-form-urlencoded" },
+      body: confirmBody(previewHtml, page.csrfToken),
+    });
+    expect(queued.status).toBe(302);
+    expect(queued.headers.get("location")).toContain("scan-queued");
+    expect(store.listJobs()).toHaveLength(1);
+    log.mockRestore();
+  });
+
+  it("rescanning the same confirmed SHA reports exists without creating a second job", async () => {
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    const { app, store } = testApp(oauthEnv, scanGithub(), mockOauthFetch({ id: 1001, login: "octocat" }));
+    const session = await operatorSession(app);
+    const page = await operatorCsrf(app, session);
+    const previewHtml = await scanPreview(app, session, page.csrfCookie, page.csrfToken);
+
+    const first = await app.request("/scan", {
+      method: "POST",
+      headers: { cookie: `${session}; ${page.csrfCookie}`, "content-type": "application/x-www-form-urlencoded" },
+      body: confirmBody(previewHtml, page.csrfToken),
+    });
+    expect(first.status).toBe(302);
+    expect(first.headers.get("location")).toContain("scan-queued");
+
+    const duplicate = await app.request("/scan", {
+      method: "POST",
+      headers: { cookie: `${session}; ${page.csrfCookie}`, "content-type": "application/x-www-form-urlencoded" },
+      body: confirmBody(previewHtml, page.csrfToken),
+    });
+    expect(duplicate.status).toBe(302);
+    expect(duplicate.headers.get("location")).toContain("notice=exists");
+    expect(store.listJobs()).toHaveLength(1);
     log.mockRestore();
   });
 
@@ -1246,16 +1383,14 @@ describe("health scan routes", () => {
       scanGithub(),
       mockOauthFetch({ id: 1001, login: "octocat" }),
     );
-    const start = await app.request("/login/github");
-    const state = start.headers.get("location")?.match(/state=([^&]+)/)?.[1] ?? "";
-    const callback = await app.request(`/login/github/callback?code=good-code&state=${state}`);
-    const session = cookieFrom(callback);
+    const session = await operatorSession(app);
     const page = await operatorCsrf(app, session);
+    const previewHtml = await scanPreview(app, session, page.csrfCookie, page.csrfToken);
 
     const first = await app.request("/scan", {
       method: "POST",
       headers: { cookie: `${session}; ${page.csrfCookie}`, "content-type": "application/x-www-form-urlencoded" },
-      body: `repo=acme%2Fwidgets&branch=main&sha=head111head111head111head111head11111&csrf_token=${encodeURIComponent(page.csrfToken)}`,
+      body: confirmBody(previewHtml, page.csrfToken),
     });
     expect(first.status).toBe(302);
     expect(store.listJobs()).toHaveLength(1);
@@ -1275,10 +1410,7 @@ describe("health scan routes", () => {
   it("rejects a scan POST without a valid CSRF token before touching GitHub", async () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     const { app, store } = testApp(oauthEnv, scanGithub(), mockOauthFetch({ id: 1001, login: "octocat" }));
-    const start = await app.request("/login/github");
-    const state = start.headers.get("location")?.match(/state=([^&]+)/)?.[1] ?? "";
-    const callback = await app.request(`/login/github/callback?code=good-code&state=${state}`);
-    const session = cookieFrom(callback);
+    const session = await operatorSession(app);
 
     const rejected = await app.request("/scan", {
       method: "POST",
@@ -1290,7 +1422,7 @@ describe("health scan routes", () => {
     warn.mockRestore();
   });
 
-  it("rejects scans of repositories outside the allowlists before any GitHub call but the installation lookup", async () => {
+  it("rejects scans of repositories outside the account allowlist before any GitHub call but the installation lookup", async () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     const github = scanGithub();
     let headCalls = 0;
@@ -1299,17 +1431,40 @@ describe("health scan routes", () => {
       return { defaultBranch: "main", headSha: "x" };
     };
     const { app, store } = testApp({ ...oauthEnv, ALLOWED_GITHUB_ACCOUNT_IDS: "999999" }, github, mockOauthFetch({ id: 1001, login: "octocat" }));
-    const start = await app.request("/login/github");
-    const state = start.headers.get("location")?.match(/state=([^&]+)/)?.[1] ?? "";
-    const callback = await app.request(`/login/github/callback?code=good-code&state=${state}`);
-    const session = cookieFrom(callback);
-    const scanPage = await app.request("/scan", { headers: { cookie: session } });
-    const { csrfCookie, csrfToken } = await csrfArtifacts(scanPage);
+    const session = await operatorSession(app);
+    const page = await operatorCsrf(app, session);
 
     const denied = await app.request("/scan", {
       method: "POST",
-      headers: { cookie: `${session}; ${csrfCookie}`, "content-type": "application/x-www-form-urlencoded" },
-      body: `repo=acme%2Fwidgets&csrf_token=${encodeURIComponent(csrfToken)}`,
+      headers: { cookie: `${session}; ${page.csrfCookie}`, "content-type": "application/x-www-form-urlencoded" },
+      body: `repo=acme%2Fwidgets&csrf_token=${encodeURIComponent(page.csrfToken)}`,
+    });
+    expect(denied.status).toBe(403);
+    expect(headCalls).toBe(0);
+    expect(store.listJobs()).toEqual([]);
+    warn.mockRestore();
+  });
+
+  it("rejects scans of repositories outside the repository allowlist before head resolution", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const github = scanGithub();
+    let headCalls = 0;
+    github.getRepositoryHead = async () => {
+      headCalls += 1;
+      return { defaultBranch: "main", headSha: "x" };
+    };
+    const { app, store } = testApp(
+      { ...oauthEnv, ALLOWED_GITHUB_ACCOUNT_IDS: "1001", ALLOWED_GITHUB_REPOSITORY_IDS: "999999" },
+      github,
+      mockOauthFetch({ id: 1001, login: "octocat" }),
+    );
+    const session = await operatorSession(app);
+    const page = await operatorCsrf(app, session);
+
+    const denied = await app.request("/scan", {
+      method: "POST",
+      headers: { cookie: `${session}; ${page.csrfCookie}`, "content-type": "application/x-www-form-urlencoded" },
+      body: `repo=acme%2Fwidgets&csrf_token=${encodeURIComponent(page.csrfToken)}`,
     });
     expect(denied.status).toBe(403);
     expect(headCalls).toBe(0);
@@ -1378,13 +1533,6 @@ describe("scan issue creation", () => {
         return { number: 100 + created.length, url: `https://github.com/acme/widgets/issues/${100 + created.length}` };
       },
     } as unknown as ManualTriggerPort & Partial<GithubPort>;
-  }
-
-  async function operatorSession(app: ReturnType<typeof createApp>): Promise<string> {
-    const start = await app.request("/login/github");
-    const state = start.headers.get("location")?.match(/state=([^&]+)/)?.[1] ?? "";
-    const callback = await app.request(`/login/github/callback?code=good-code&state=${state}`);
-    return cookieFrom(callback);
   }
 
   it("blocks issue creation entirely while the capability is disabled", async () => {

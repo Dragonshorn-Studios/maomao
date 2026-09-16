@@ -3,6 +3,7 @@ import type { FindingRow } from "../findings/types.js";
 import { fingerprintFinding } from "../findings/identity.js";
 import { POLICIES_WITH_EXTERNAL, POLICIES_WITH_INTERNAL } from "../routing/types.js";
 import type { JobState } from "../config.js";
+import type { Severity } from "../schema.js";
 import { elapsedMs, escapeHtml, formatDuration, shortSha } from "../util.js";
 import {
   diffUnavailableCopy,
@@ -28,7 +29,7 @@ import {
   usageReportedCopy,
 } from "./copy.js";
 import { roleGlyph } from "./glyphs.js";
-import { csrfInput, layout, type PageOptions } from "./layout.js";
+import { csrfInput, layout, type PageOptions, type UiIdentity } from "./layout.js";
 import {
   findingLocation,
   formatCost,
@@ -1071,25 +1072,32 @@ export function renderPromptConfigPage(data: PromptConfigPageData): string {
 
 export interface ScanPageData {
   canScan: boolean;
-  identity?: { login: string; avatarUrl: string | null };
+  identity?: UiIdentity;
   csrfToken?: string;
   issueCreationEnabled: boolean;
-  profileRevision?: { id: number; name: string } | null;
+  profileRevision: { id: number; name: string } | null;
   error?: string;
 }
 
+/** Why a confirming POST was rejected; the page re-renders fresh values alongside it. */
+export type ScanConfirmNotice =
+  | { kind: "sha"; fromSha: string }
+  | { kind: "branch"; fromBranch: string }
+  | { kind: "revision" }
+  | { kind: "incomplete" };
+
 export interface ScanConfirmData {
-  identity?: { login: string; avatarUrl: string | null };
-  csrfToken?: string;
+  identity?: UiIdentity;
+  csrfToken: string;
   repo: string;
   branch: string;
   sha: string;
-  profileRevision?: { id: number; name: string } | null;
+  profileRevision: { id: number; name: string } | null;
   /** Minimum persisted severity from the active profile revision ("info" when no revision is active). */
-  severityFloor: string;
-  limits: { diffCapBytes: number; reviewerTimeoutMs: number; maxRetries: number };
-  /** Set when the operator confirmed an SHA that is no longer the default branch head. */
-  movedFromSha?: string;
+  severityFloor: Severity;
+  /** Max diff size in bytes; null when the cap is disabled (`MAX_DIFF_BYTES=0`). */
+  limits: { diffCapBytes: number | null; reviewerTimeoutMs: number; maxRetries: number };
+  notice?: ScanConfirmNotice;
 }
 
 function formatBytes(bytes: number): string {
@@ -1098,15 +1106,30 @@ function formatBytes(bytes: number): string {
   return `${bytes} B`;
 }
 
+function scanConfirmNoticeText(notice: ScanConfirmNotice): string {
+  switch (notice.kind) {
+    case "sha":
+      return `The default branch moved since you confirmed: ${notice.fromSha} is no longer the head. Review the new SHA and confirm again.`;
+    case "branch":
+      return `The default branch is different from the one you confirmed (${notice.fromBranch}). Review and confirm again.`;
+    case "revision":
+      return "The active profile revision changed since you confirmed. Review the revision below and confirm again.";
+    case "incomplete":
+      return "Confirmation incomplete — the revision shown here is the one that will be scanned. Confirm again.";
+  }
+}
+
 export function renderScanConfirmPage(data: ScanConfirmData): string {
-  const moved = Boolean(data.movedFromSha);
+  const notice = data.notice
+    ? `<p class="warn" role="alert">${escapeHtml(scanConfirmNoticeText(data.notice))}</p>`
+    : "";
+  const lede = data.notice
+    ? ""
+    : `<p class="lede">The scan reviews this exact revision, read-only. Nothing is created on GitHub by scanning.</p>`;
   const body = `
     <h1>Confirm repository health scan</h1>
-    ${
-      moved
-        ? `<p class="warn" role="alert">The default branch moved since you confirmed: ${escapeHtml(data.movedFromSha!)} is no longer the head. Review the new SHA below and confirm again.</p>`
-        : `<p class="lede">The scan reviews this exact revision, read-only. Nothing is created on GitHub by scanning.</p>`
-    }
+    ${notice}
+    ${lede}
     <dl class="meta-grid">
       <div>
         <dt>Repository</dt>
@@ -1134,7 +1157,7 @@ export function renderScanConfirmPage(data: ScanConfirmData): string {
       </div>
       <div>
         <dt>Limits</dt>
-        <dd class="metric">diff cap ${escapeHtml(formatBytes(data.limits.diffCapBytes))} · reviewer timeout ${escapeHtml(formatDuration(data.limits.reviewerTimeoutMs))} · max retries ${data.limits.maxRetries}</dd>
+        <dd class="metric">diff cap ${escapeHtml(data.limits.diffCapBytes == null ? "no cap" : formatBytes(data.limits.diffCapBytes))} · reviewer timeout ${escapeHtml(formatDuration(data.limits.reviewerTimeoutMs))} · max retries ${data.limits.maxRetries}</dd>
       </div>
     </dl>
     <form class="trigger" method="post" action="/scan">
@@ -1142,6 +1165,7 @@ export function renderScanConfirmPage(data: ScanConfirmData): string {
       <input type="hidden" name="repo" value="${escapeHtml(data.repo)}"/>
       <input type="hidden" name="branch" value="${escapeHtml(data.branch)}"/>
       <input type="hidden" name="sha" value="${escapeHtml(data.sha)}"/>
+      <input type="hidden" name="revision_id" value="${data.profileRevision ? String(data.profileRevision.id) : ""}"/>
       <button type="submit" aria-label="Run repository health scan">Sniff sniff</button>
       <a href="/scan">Cancel</a>
     </form>`;

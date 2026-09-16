@@ -12,7 +12,19 @@ import { parseGithubPullUrl, PullUrlError } from "./github/pull-url.js";
 import { dispatchEnqueue, enqueuePullJob } from "./jobs/enqueue.js";
 import { subscribe } from "./events.js";
 import { escapeHtml } from "./util.js";
-import { renderConfigPage, renderHome, renderJob, renderLogin, renderPromptConfigPage, renderScanConfirmPage, renderScanPage, THEME_CSS, type PageOptions } from "./ui/index.js";
+import {
+  renderScanConfirmPage,
+  renderScanPage,
+  renderConfigPage,
+  renderHome,
+  renderJob,
+  renderLogin,
+  renderPromptConfigPage,
+  THEME_CSS,
+  type PageOptions,
+  type ScanConfirmNotice,
+  type ScanPageData,
+} from "./ui/index.js";
 import type { JobQueue } from "./jobs/queue.js";
 import {
   CSRF_COOKIE,
@@ -816,7 +828,7 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
     return c.redirect(`/config/prompts?notice=evaluated`, 302);
   });
 
-  const scanPageData = (c: Context<AppEnv>, extra: { error?: string; issueCreationEnabled?: boolean } = {}) => {
+  const scanPageData = (c: Context<AppEnv>, extra: Pick<ScanPageData, "error"> = {}): ScanPageData => {
     const profileRevision = ctx.store.configs.getActiveRevision("default");
     return {
       canScan: gateOn,
@@ -893,13 +905,23 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
       if (!repoAuth.ok) {
         return renderScanDenied(c, "Not authorized to scan this installation or repository.");
       }
+      // The rate limiter and the job row both key on this id; a malformed one must not
+      // fall through and masquerade as a rate limit (or as an unkeyed job).
+      if (!Number.isSafeInteger(repository.id) || repository.id <= 0) {
+        return c.html(
+          renderScanPage(scanPageData(c, { error: "Could not resolve a valid repository id for this scan." })),
+          502,
+        );
+      }
       if (!ctx.github.getRepositoryHead || !ctx.github.getCommitDiff) {
         return renderScanDenied(c, "This GitHub client does not support repository scans.");
       }
       const head = await ctx.github.getRepositoryHead(installation.installationId, parsed.owner, parsed.repo);
 
-      // Same per-repository budget as manual PR reviews: checked before the operator
-      // commits to a scan, recorded only when a job is actually created.
+      // Same per-repository budget as manual PR reviews (and webhook reviews).
+      // Previewing a confirmation must not consume budget, so the check is a
+      // wouldAllow probe; the hit is recorded only when a job is actually created
+      // (duplicate no-ops don't count).
       const rateOn = repoRateLimitActive(ctx.config.repoRateLimitPerWindow, ctx.config.repoRateWindowMs);
       if (
         rateOn &&
@@ -913,16 +935,30 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
       }
 
       // Two-step start: the operator first sees the exact revision, then confirms it.
-      // The confirming POST is only valid for the SHA (and branch name) it was shown;
-      // anything else re-renders the confirmation with fresh values. No job is
-      // enqueued from a confirmation that fails this check.
+      // An all-empty confirmation payload means the POST came from the step-1 form
+      // (repo only) — a preview, not a failed confirmation. A confirming POST is
+      // valid only for what the operator was shown: revision id, sha, and branch must
+      // all match the freshly resolved head. Any mismatch re-renders the confirmation
+      // with current values and a notice; no job is enqueued from a confirmation
+      // that fails this check.
       const confirmedSha = typeof body.sha === "string" ? body.sha.trim() : "";
       const confirmedBranch = typeof body.branch === "string" ? body.branch.trim() : "";
-      const staleConfirmation =
-        (confirmedSha !== "" && confirmedSha !== head.headSha) ||
-        (confirmedBranch !== "" && confirmedBranch !== head.defaultBranch);
-      if (confirmedSha === "" || staleConfirmation) {
-        const profileRevision = ctx.store.configs.getActiveRevision("default");
+      const confirmedRevision = typeof body.revision_id === "string" ? body.revision_id.trim() : "";
+      const activeRevision = ctx.store.configs.getActiveRevision("default");
+      const shaConfirmed = confirmedSha === head.headSha;
+      const branchConfirmed = confirmedBranch === head.defaultBranch;
+      const revisionConfirmed = confirmedRevision === (activeRevision ? String(activeRevision.id) : "");
+      if (!shaConfirmed || !branchConfirmed || !revisionConfirmed) {
+        const notice: ScanConfirmNotice | undefined =
+          confirmedSha === "" && confirmedBranch === "" && confirmedRevision === ""
+            ? undefined
+            : confirmedSha !== "" && confirmedSha !== head.headSha
+              ? { kind: "sha", fromSha: confirmedSha }
+              : confirmedBranch !== "" && confirmedBranch !== head.defaultBranch
+                ? { kind: "branch", fromBranch: confirmedBranch }
+                : !revisionConfirmed
+                  ? { kind: "revision" }
+                  : { kind: "incomplete" };
         return c.html(
           renderScanConfirmPage({
             identity: c.get("identity"),
@@ -930,14 +966,14 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
             repo: `${parsed.owner}/${parsed.repo}`,
             branch: head.defaultBranch,
             sha: head.headSha,
-            profileRevision: profileRevision ? { id: profileRevision.id, name: profileRevision.name } : null,
-            severityFloor: profileRevision?.definition.minPublishableSeverity ?? "info",
+            profileRevision: activeRevision ? { id: activeRevision.id, name: activeRevision.name } : null,
+            severityFloor: activeRevision?.definition.minPublishableSeverity ?? "info",
             limits: {
-              diffCapBytes: ctx.config.maxDiffBytes,
+              diffCapBytes: ctx.config.maxDiffBytes > 0 ? ctx.config.maxDiffBytes : null,
               reviewerTimeoutMs: ctx.config.opencode.timeoutMs,
               maxRetries: ctx.config.opencode.maxRetries,
             },
-            movedFromSha: staleConfirmation && confirmedSha !== head.headSha ? confirmedSha : undefined,
+            notice,
           }),
         );
       }
@@ -961,6 +997,8 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
         webhookEvent: "manual.scan",
         jobType: "health_scan",
         scanBranch: head.defaultBranch,
+        // Exactly the revision the operator confirmed, not whatever is active now.
+        profileRevisionId: activeRevision?.id,
         reviewers: [],
       });
       if (created.created && rateOn) {
@@ -971,6 +1009,7 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
       return c.redirect(`/jobs/${created.job.id}?notice=${created.created ? "scan-queued" : "exists"}`, 302);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
+      console.error(`scan: could not start scan for ${parsed.owner}/${parsed.repo}: ${message}`);
       return c.html(renderScanPage(scanPageData(c, { error: message })), 400);
     }
   });
@@ -986,7 +1025,7 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
     }
     if (!ctx.config.issueCreationEnabled) {
       return c.html(
-        renderScanPage(scanPageData(c, { issueCreationEnabled: false, error: "Issue creation is disabled (GITHUB_ISSUE_CREATION_ENABLED=false)." })),
+        renderScanPage(scanPageData(c, { error: "Issue creation is disabled (GITHUB_ISSUE_CREATION_ENABLED=false)." })),
         403,
       );
     }
