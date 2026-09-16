@@ -3,6 +3,7 @@ import type { JobState, ReviewerState } from "../config.js";
 import type { FindingRow, FindingStatus } from "../findings/types.js";
 import { nowIso } from "../util.js";
 import { publish } from "../events.js";
+import { ReviewConfigStore } from "../config-revisions.js";
 
 export interface JobRow {
   id: number;
@@ -31,6 +32,7 @@ export interface JobRow {
   review_event: string | null;
   review_event_reason: string | null;
   aggregator_fallback: number | null;
+  profile_revision_id: number | null;
   aggregator_raw: string | null;
   aggregator_normalized: string | null;
   aggregator_model: string | null;
@@ -273,9 +275,17 @@ const JOB_PATCH_KEYS = new Set<string>([
 ]);
 
 export class JobStore {
-  constructor(private readonly db: SqliteDb) {}
+  /** Versioned review-profile configuration over the same database. */
+  readonly configs: ReviewConfigStore;
 
-  enqueue(input: NewJobInput): EnqueueResult {
+  constructor(
+    private readonly db: SqliteDb,
+    modelCatalog: string[] = [],
+  ) {
+    this.configs = new ReviewConfigStore(db, modelCatalog);
+  }
+
+  enqueue(input: NewJobInput & { profileRevisionId?: number }): EnqueueResult {
     const createdAt = nowIso();
     const staleJobIds: number[] = [];
 
@@ -305,8 +315,8 @@ export class JobStore {
           `INSERT INTO jobs (
             repo_full_name, repo_owner, repo_name, installation_id, github_account_id, github_repository_id, pr_number,
             pr_title, pr_body, pr_html_url, pr_author, base_sha, head_sha, base_ref, head_ref,
-            webhook_delivery_id, webhook_event, state, created_at, updated_at
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?)`,
+            webhook_delivery_id, webhook_event, profile_revision_id, state, created_at, updated_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?)`,
         )
         .run(
           input.repoFullName,
@@ -326,6 +336,7 @@ export class JobStore {
           input.headRef,
           input.webhookDeliveryId ?? null,
           input.webhookEvent ?? null,
+          input.profileRevisionId ?? this.configs.getActiveRevision("default")?.id ?? null,
           createdAt,
           createdAt,
         );

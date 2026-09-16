@@ -762,3 +762,131 @@ function renderFindingDiff(record?: FindingRow): string {
       ${note ? `<p class="muted diff-note">${escapeHtml(note)}</p>` : ""}
     </details>`;
 }
+
+export interface ConfigRevisionView {
+  id: number;
+  name: string;
+  status: string;
+  definition: unknown;
+  note: string | null;
+  created_by: string;
+  created_at: string;
+  updated_at: string;
+  activated_at: string | null;
+  editSeq: number;
+}
+
+export interface ConfigPageData {
+  revisions: ConfigRevisionView[];
+  audit: Array<{ id: number; action: string; actor: string; revision_id: number | null; detail: string | null; created_at: string }>;
+  csrfToken?: string;
+  canWrite: boolean;
+  notice?: string;
+  error?: string;
+}
+
+function revisionCard(revision: ConfigRevisionView, data: ConfigPageData): string {
+  const csrf = csrfInput(data.csrfToken);
+  const actions: string[] = [];
+  if (data.canWrite && revision.status === "draft") {
+    actions.push(`<form method="post" action="/config/revisions/${revision.id}/activate" class="inline-form">
+      ${csrf}
+      <button type="submit">Activate</button>
+    </form>`);
+  }
+  if (data.canWrite && revision.status === "retired") {
+    actions.push(`<form method="post" action="/config/revisions/${revision.id}/rollback" class="inline-form">
+      ${csrf}
+      <button type="submit">Roll back to this revision</button>
+    </form>`);
+  }
+  const definitionJson = JSON.stringify(revision.definition, null, 2);
+  return `<article class="card config-revision">
+    <header>
+      <span class="role"><strong>#${revision.id}</strong> ${escapeHtml(revision.name)} · ${escapeHtml(revision.status)}</span>
+      <span class="muted">by ${escapeHtml(revision.created_by)} · updated ${escapeHtml(revision.updated_at)}</span>
+    </header>
+    ${revision.note ? `<p class="muted">${escapeHtml(revision.note)}</p>` : ""}
+    <details>
+      <summary>Definition</summary>
+      <pre class="log-panel">${escapeHtml(definitionJson)}</pre>
+    </details>
+    ${revision.status === "draft" && data.canWrite ? `<details>
+      <summary>Edit draft</summary>
+      <form method="post" action="/config/drafts/${revision.id}">
+        ${csrf}
+        <input type="hidden" name="expected_edit_seq" value="${revision.editSeq}"/>
+        <textarea name="definition" rows="12" cols="72">${escapeHtml(definitionJson)}</textarea>
+        <button type="submit">Save draft</button>
+      </form>
+    </details>` : ""}
+    <div class="config-actions">${actions.join("")}</div>
+  </article>`;
+}
+
+export function renderConfigPage(data: ConfigPageData): string {
+  const active = data.revisions.filter((revision) => revision.status === "active");
+  const drafts = data.revisions.filter((revision) => revision.status === "draft");
+  const retired = data.revisions.filter((revision) => revision.status === "retired");
+  const csrf = csrfInput(data.csrfToken);
+  const createForm = data.canWrite
+    ? `<details class="config-create">
+        <summary>Create a new draft</summary>
+        <form method="post" action="/config/drafts">
+          ${csrf}
+          <label>Name <input name="name" required/></label>
+          <textarea name="definition" rows="12" cols="72">${escapeHtml(
+            JSON.stringify(
+              {
+                name: "default",
+                reviewers: [{ role: "correctness" }],
+                minPublishableSeverity: "info",
+              },
+              null,
+              2,
+            ),
+          )}</textarea>
+          <button type="submit">Create draft</button>
+        </form>
+      </details>`
+    : `<p class="muted">Writing configuration requires an operator OAuth identity.</p>`;
+  const importForm = data.canWrite
+    ? `<details class="config-import">
+        <summary>Import exported configuration</summary>
+        <form method="post" action="/config/import">
+          ${csrf}
+          <textarea name="payload" rows="8" cols="72"></textarea>
+          <button type="submit">Import as drafts</button>
+        </form>
+      </details>`
+    : "";
+  const auditRows = data.audit
+    .map(
+      (entry) =>
+        `<tr><td>${escapeHtml(entry.created_at)}</td><td>${escapeHtml(entry.action)}</td><td>${escapeHtml(entry.actor)}</td><td>${entry.revision_id ?? "—"}</td><td>${escapeHtml(entry.detail ?? "")}</td></tr>`,
+    )
+    .join("");
+  const body = `
+    <h1>Review configuration</h1>
+    <p class="lede">Versioned review profiles and specialist selection. Activation is explicit and audited; credentials are never part of this configuration.</p>
+    ${data.notice ? `<p class="notice" role="status">${escapeHtml(data.notice)}</p>` : ""}
+    ${data.error ? `<p class="error" role="alert">${escapeHtml(data.error)}</p>` : ""}
+    <p><a href="/config/export">Export configuration (JSON)</a></p>
+    <h2>Active</h2>
+    ${active.map((revision) => revisionCard(revision, data)).join("") || `<p class="muted">No active revision — env configuration applies.</p>`}
+    <h2>Drafts</h2>
+    ${createForm}
+    ${drafts.map((revision) => revisionCard(revision, data)).join("") || `<p class="muted">No open drafts.</p>`}
+    <h2>Retired</h2>
+    ${retired.map((revision) => revisionCard(revision, data)).join("") || `<p class="muted">No retired revisions.</p>`}
+    ${importForm}
+    <h2>Audit history</h2>
+    <table class="config-audit">
+      <thead><tr><th>When</th><th>Action</th><th>Actor</th><th>Revision</th><th>Detail</th></tr></thead>
+      <tbody>${auditRows || `<tr><td colspan="5">No entries</td></tr>`}</tbody>
+    </table>`;
+  return layout("Review configuration", body, {
+    showLogout: data.canWrite || Boolean(data.csrfToken),
+    csrfToken: data.csrfToken,
+  });
+}

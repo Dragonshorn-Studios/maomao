@@ -365,6 +365,17 @@ OpenCode is still a powerful process. Keep Maomao on a locked-down host and do n
 - Duplicate webhook deliveries reuse the existing job; publication also looks for a `<!-- maomao-review sha=... -->` marker
 - Inline comments include `<!-- maomao-finding id=<fingerprint> sha=<reviewed-sha> -->` so later reviews can reconcile the same finding after the line moves
 
+## Review configuration (versioned profiles)
+
+`/config` (in the monitoring UI) manages **versioned review profiles**: named revisions that pin which specialists run, their order, per-role models, the router model, a minimum publishable severity, and optional total cost/token budgets.
+
+- Drafts are validated against a schema plus system caps (≤12 reviewers, ≤30-minute timeouts, ≤5 retries, ≤$5 / 2M-token budgets). Invalid drafts cannot be activated.
+- Activation is explicit and audited; activating a new revision retires the previous active one of the same name. Rollback re-activates a retired revision — history is never rewritten.
+- Every job snapshots the revision it ran with (`profile_revision_id` on the job), so later edits never change historical jobs. Specialist selection, per-role models, and the minimum publishable severity are applied from the active revision; total budgets are enforced as warnings.
+- Draft edits use optimistic concurrency: saving against an older revision returns a conflict instead of overwriting a teammate's change.
+- `MODEL_CATALOG` (comma-separated `provider/model` values) optionally restricts models to an operator-approved catalog. Configuration contains no credentials; export/import is schema-versioned JSON, and imports always land as drafts.
+- All write actions require an operator GitHub OAuth identity and are recorded in the audit history.
+
 ## Finding reconciliation and `@maomao bury`
 
 When a later commit arrives, Maomao fetches its own **unresolved** review threads, applies any human overrides, and re-checks remaining findings against the **current head SHA** with a narrow verifier. Only then does it risk-route (the `poison-alert` insertion point) and run specialists.

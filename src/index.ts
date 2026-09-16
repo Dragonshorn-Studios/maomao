@@ -19,7 +19,7 @@ void sweepWorkspaces(config.workspaceRoot, config.workspaceRetentionHours).then(
 });
 
 const db = openDb(config.databasePath);
-const store = new JobStore(db);
+const store = new JobStore(db, config.modelCatalog);
 const github = new GithubClient(config);
 const pipeline = createPipeline({
   config,

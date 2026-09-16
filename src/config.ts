@@ -70,6 +70,8 @@ export interface Config {
   reconcileMinConfidence: number;
   uiPassword: string;
   uiSessionSecret: string;
+  /** Operator-approved model catalog (provider/model). Empty = allow any well-formed model. */
+  modelCatalog: string[];
   /** Opt-in GitHub review verdicts. Defaults keep every review COMMENT-only. */
   reviewAllowApprove: boolean;
   reviewAllowRequestChanges: boolean;
@@ -244,6 +246,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     adminGithubIds: parseIdList(env.MAOMAO_ADMIN_GITHUB_IDS, "MAOMAO_ADMIN_GITHUB_IDS"),
     uiLocalLogin: parseBoolean(env.UI_LOCAL_LOGIN, false),
     publicUrl: env.MAOMAO_PUBLIC_URL?.trim().replace(/\/+$/, "") || "",
+    modelCatalog: parseCsv(env.MODEL_CATALOG),
     reviewAllowApprove: parseBoolean(env.GITHUB_REVIEW_ALLOW_APPROVE, false),
     reviewAllowRequestChanges: parseBoolean(env.GITHUB_REVIEW_ALLOW_REQUEST_CHANGES, false),
     reviewRequestChangesMinSeverity: parseSeverity(

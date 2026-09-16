@@ -221,6 +221,31 @@ function migrate(db: SqliteDb): void {
       result TEXT NOT NULL,
       created_at TEXT NOT NULL
     );
+
+    CREATE TABLE IF NOT EXISTS profile_revisions (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      name TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'draft',
+      definition_json TEXT NOT NULL,
+      note TEXT,
+      created_by TEXT NOT NULL,
+      schema_version INTEGER NOT NULL DEFAULT 1,
+      edit_seq INTEGER NOT NULL DEFAULT 0,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      activated_at TEXT
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_profile_revisions_name ON profile_revisions(name, status);
+
+    CREATE TABLE IF NOT EXISTS config_audit (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      action TEXT NOT NULL,
+      actor TEXT NOT NULL,
+      revision_id INTEGER,
+      detail TEXT,
+      created_at TEXT NOT NULL
+    );
   `);
   ensureColumn(db, "jobs", "review_event", "TEXT");
   ensureColumn(db, "jobs", "review_event_reason", "TEXT");
@@ -282,6 +307,7 @@ function migrate(db: SqliteDb): void {
     ["escalation_id", "TEXT"],
     ["poison_alert_policy", "TEXT"],
     ["manual_escalate_requested", "INTEGER NOT NULL DEFAULT 0"],
+    ["profile_revision_id", "INTEGER"],
   ];
   for (const [name, ddl] of jobColumns) ensureColumn(db, "jobs", name, ddl);
 

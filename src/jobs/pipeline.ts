@@ -1,5 +1,5 @@
 import type { Config } from "../config.js";
-import type { JobStore, JobRow, ReviewerRunRow } from "./store.js";
+import type { JobStore, JobRow, ReviewerRunRow, NewJobInput } from "./store.js";
 import type { GithubPort } from "../github/client.js";
 import { buildReviewBody, findExistingReview, toInlineComments, inlineCommentFingerprints } from "../github/client.js";
 import type { CheckoutPort } from "../checkout.js";
@@ -15,10 +15,12 @@ import {
   fallbackAggregator,
   parseAggregatorResult,
   parseReviewerResult,
+  severityRank,
   SchemaValidationError,
   extractJsonFromText,
   type AggregatorResult,
   type ReviewerResult,
+  type Severity,
 } from "../schema.js";
 import { classifyPriorFindings, collectPriorFindings, findingsForPublish } from "../findings/reconcile.js";
 import { resolveReviewEvent } from "./verdict.js";
@@ -356,6 +358,25 @@ function persistDecision(
   });
 }
 
+/** Constrains reviewer specs to the active profile revision: roles, order, and per-role models. */
+function applyProfileToSpecs(
+  store: JobStore,
+  config: Config,
+  specs: NewJobInput["reviewers"],
+): NewJobInput["reviewers"] {
+  const revision = store.configs.getActiveRevision("default");
+  if (!revision) return specs;
+  const byRole = new Map(revision.definition.reviewers.map((reviewer) => [reviewer.role, reviewer]));
+  let constrained: NewJobInput["reviewers"] = specs.filter((spec) => byRole.has(spec.role));
+  if (constrained.length === 0) {
+    constrained = reviewerSpecs(config, [...byRole.keys()]);
+  }
+  return constrained.map((spec) => {
+    const override = byRole.get(spec.role);
+    return override?.model ? { ...spec, model: override.model } : spec;
+  });
+}
+
 async function routeSpecialists(
   deps: PipelineDeps,
   job: JobRow,
@@ -369,7 +390,7 @@ async function routeSpecialists(
   const allowlist = config.reviewers.map((role) => role.id);
 
   if (config.routing.mode === "fixed") {
-    if (existing.length === 0) store.ensureReviewerRuns(job.id, reviewerSpecs(config));
+    if (existing.length === 0) store.ensureReviewerRuns(job.id, applyProfileToSpecs(store, config, reviewerSpecs(config)));
     const roles = store.listReviewerRuns(job.id).map((run) => run.role);
     persistDecision(store, job.id, {
       profile: "diagnosis",
@@ -407,7 +428,8 @@ async function routeSpecialists(
   store.setJobState(job.id, "routing", { routing_state: "running", routing_mode: config.routing.mode });
   const signals = scanRoutingSignals({ diff, title: job.pr_title, body: job.pr_body });
   let decision: RoutingDecision;
-  const routerModel = config.routing.model || config.opencode.reviewerModel;
+  const profileRouterModel = store.configs.getActiveRevision("default")?.definition.routerModel;
+  const routerModel = profileRouterModel || config.routing.model || config.opencode.reviewerModel;
   const useModel = (config.routing.mode === "model" || config.routing.mode === "hybrid") && Boolean(routerModel);
 
   if (!useModel) {
@@ -478,7 +500,7 @@ async function routeSpecialists(
     decision.profile === "poison-alert" ? config.poisonAlert.policy : null,
     { routing_mode: config.routing.mode },
   );
-  store.ensureReviewerRuns(job.id, reviewerSpecs(config, decision.reviewers));
+  store.ensureReviewerRuns(job.id, applyProfileToSpecs(store, config, reviewerSpecs(config, decision.reviewers)));
   store.log(
     job.id,
     `Routed profile=${decision.profile} source=${decision.source} reviewers=${decision.reviewers.join(", ")} reason=${decision.reason}`,
@@ -538,7 +560,8 @@ async function runReviewer(
   signal: AbortSignal,
 ): Promise<void> {
   const role = deps.config.reviewers.find((item) => item.id === run.role);
-  const model = role?.model || deps.config.opencode.reviewerModel;
+  // The run's stored model (profile revision / enqueue spec) wins over config defaults.
+  const model = run.model || role?.model || deps.config.opencode.reviewerModel;
   const retries = Math.max(0, deps.config.opencode.maxRetries);
   let lastError = "unknown error";
 
@@ -816,7 +839,16 @@ async function publishReview(
     return { ...already, postedFingerprints: [] };
   }
 
-  const publishable = findingsForPublish(aggregated.findings, snapshot);
+  let publishable = findingsForPublish(aggregated.findings, snapshot);
+  const profileRevision = job.profile_revision_id
+    ? deps.store.configs.getRevision(job.profile_revision_id)
+    : deps.store.configs.getActiveRevision("default");
+  if (profileRevision) {
+    const threshold = severityRank(profileRevision.definition.minPublishableSeverity);
+    publishable = publishable.filter(
+      (finding) => severityRank((finding.severity ?? "info") as Severity) <= threshold,
+    );
+  }
   const dismissedCount = snapshot.items.filter((item) => item.status === "dismissed").length;
   if (dismissedCount > 0) {
     deps.store.log(job.id, `Omitting ${dismissedCount} dismissed finding(s) from this review`);
