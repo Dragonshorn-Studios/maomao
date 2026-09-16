@@ -588,6 +588,7 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
         error: c.req.query("error") || undefined,
         prFindings: ctx.store.listFindings(job.repo_full_name, job.pr_number),
         scanIssueCreation: scanIssueCreationData(job),
+        scanIssues: job.job_type === "health_scan" ? ctx.store.listScanIssues(job.id) : undefined,
       }),
     );
   });
@@ -1342,6 +1343,10 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
             issueUrl: remote[0].url,
             title: `maomao: ${finding.summary ?? finding.fingerprint}`,
           });
+          ctx.store.log(
+            job.id,
+            `Linked existing issue #${remote[0].number} (${remote[0].url}) to finding ${finding.fingerprint}`,
+          );
           skipped += 1;
           continue;
         }
@@ -1364,6 +1369,9 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
             "warn",
           );
         }
+        // Credential-free audit trail: actor is in the summary line below, and
+        // each created issue is tied to its finding fingerprint here.
+        ctx.store.log(job.id, `Created issue #${issue.number} (${issue.url}) for finding ${finding.fingerprint}`);
         createdCount += 1;
       } catch (error) {
         failed += 1;

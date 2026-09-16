@@ -633,6 +633,16 @@ export class JobStore {
     );
   }
 
+  /**
+   * Deletes pending claims (issue_number 0) left behind by a crashed creation
+   * loop. Only safe at boot — while the process runs, an in-flight loop may own
+   * such a row. Returns the number of claims removed.
+   */
+  clearOrphanedScanIssueClaims(): number {
+    const result = this.db.prepare(`DELETE FROM scan_issues WHERE issue_number = 0`).run();
+    return (result as { changes?: number }).changes ?? 0;
+  }
+
   findLatestJobForPull(repoFullName: string, prNumber: number, headSha?: string): JobRow | undefined {
     if (headSha) {
       return this.db

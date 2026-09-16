@@ -124,7 +124,26 @@ export function renderHome(jobs: JobRow[], store: JobStore, options: PageOptions
   return layout("Maomao", body, options);
 }
 
-export type JobPageOptions = PageOptions & { scanIssueCreation?: ScanIssueCreationData };
+export type JobPageOptions = PageOptions & {
+  scanIssueCreation?: ScanIssueCreationData;
+  /** Provenance rows for a health-scan job (fingerprints → GitHub issues). */
+  scanIssues?: Array<{ fingerprint: string; issue_number: number; issue_url: string; title: string }>;
+};
+
+function renderScanIssuesAudit(rows: NonNullable<JobPageOptions["scanIssues"]>): string {
+  const items = rows
+    .map(
+      (row) => `<li>${
+        row.issue_number === 0
+          ? `<span class="muted">pending claim</span>`
+          : `<a href="${escapeHtml(row.issue_url)}">#${row.issue_number}</a>`
+      } — <code>${escapeHtml(row.fingerprint)}</code> ${escapeHtml(row.title)}</li>`,
+    )
+    .join("");
+  return `<h2>GitHub issues from this scan</h2>
+    <ul class="logs" aria-label="GitHub issues created from this scan">${items}</ul>
+    <p class="muted">Fingerprints are stable per finding, so rescans and retries reuse these links instead of creating duplicates.</p>`;
+}
 
 export function renderJob(
   job: JobRow,
@@ -232,6 +251,7 @@ export function renderJob(
       prHtmlUrl: job.pr_html_url,
     })}
     ${options.scanIssueCreation ? renderScanIssueCreation(options.scanIssueCreation, options.csrfToken) : ""}
+    ${options.scanIssues?.length ? renderScanIssuesAudit(options.scanIssues) : ""}
     <h2>Logs</h2>
     <ol class="logs" aria-label="Job logs">
       ${

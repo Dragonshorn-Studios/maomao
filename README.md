@@ -153,7 +153,7 @@ Create a GitHub App for your user or org. Maomao needs **least privilege**:
 | Metadata | Read | Identify the installation / repository |
 | Contents | **Read** | Fetch the PR head into a workspace |
 | Pull requests | Read & write | Read the diff; post a `COMMENT` review |
-| Issues | Write (optional) | Poison-alert mention/command comments on the PR conversation |
+| Issues | Write (optional) | Poison-alert mention/command comments on the PR conversation, and creating issues from health scans (`GITHUB_ISSUE_CREATION_ENABLED=true`) |
 
 Do **not** grant Contents write, Actions write, Administration, Secrets, merge, or branch push. The strongest action Maomao can take is posting a pull request review.
 
@@ -297,7 +297,7 @@ Aliases: `MAOMAO_UI_PASSWORD`, `MAOMAO_UI_SESSION_SECRET`. Setting `UI_PASSWORD`
 
 With the password gate on, GET/POST `/login` issues an **HttpOnly**, **SameSite=Lax** cookie (`maomao_session`), signed with `UI_SESSION_SECRET`. The cookie is **Secure** when the request is HTTPS (including `X-Forwarded-Proto: https`). Unauthenticated HTML pages redirect to `/login`; `/api/*` and `/events` return 401. `/webhooks/github`, `/health`, and `/assets/maomao.css` stay public (no cookie).
 
-**CSRF protection.** While the gate is on, every `POST` request except the GitHub webhook must carry a valid CSRF token — today that is exactly the UI forms (`POST /login`, `/reviews`, `/logout`, and the retry forms). The token is a signed double-submit cookie (`maomao_csrf`, HttpOnly, SameSite=Lax, Secure on HTTPS — same as the session cookie, signed with `UI_SESSION_SECRET`, valid for 7 days) whose value must also be present in the form's hidden `csrf_token` field. Requests without a matching, unexpired token are rejected with 403 and logged. A page load issues a new token only when the cookie is missing or expired; otherwise the existing token is reused, so several tabs or a stale form can share one token. The GitHub webhook is exempt — it is authenticated by its own `x-hub-signature-256` signature. When the gate is off (local development), no tokens are issued or enforced.
+**CSRF protection.** While the gate is on, every `POST` request except the GitHub webhook must carry a valid CSRF token — today that is every UI form (`POST /login`, `/logout`, `/reviews`, `/scan`, `/scan/issues/*`, `/config/*`, and the job retry forms). The token is a signed double-submit cookie (`maomao_csrf`, HttpOnly, SameSite=Lax, Secure on HTTPS — same as the session cookie, signed with `UI_SESSION_SECRET`, valid for 7 days) whose value must also be present in the form's hidden `csrf_token` field. Requests without a matching, unexpired token are rejected with 403 and logged. A page load issues a new token only when the cookie is missing or expired; otherwise the existing token is reused, so several tabs or a stale form can share one token. The GitHub webhook is exempt — it is authenticated by its own `x-hub-signature-256` signature. When the gate is off (local development), no tokens are issued or enforced.
 
 If both variables are unset, the UI stays open so `npm run dev` on loopback still works. Do not ship that configuration on a public address.
 
@@ -371,10 +371,11 @@ OpenCode is still a powerful process. Keep Maomao on a locked-down host and do n
 
 `/scan` (operator UI) runs a one-off **health scan** of an allowlisted repository's default branch at its exact head SHA. It is manual only — there is no scheduler — and read-only: nothing is published to GitHub and no issue is created automatically.
 
-- The default branch and head SHA are resolved and pinned before the scan is enqueued; the scan reviews that immutable SHA. Repository access uses the same installation/repository allowlists as everything else.
-- The scan reuses the existing isolated checkout, specialist, and aggregation pipeline, snapshots the active profile revision, persists validated findings locally (with anchored mini diffs), and records token/cost usage and budgets.
+- The default branch and head SHA are resolved and pinned before the scan is enqueued; the scan reviews that immutable SHA. Starting a scan is a two-step confirm: the operator first sees the repository, default branch, exact head SHA, snapshotted profile revision, severity floor, and effective limits, and the job is enqueued only when they confirm that revision. Repository access uses the same installation/repository allowlists as everything else, re-checked at issue-creation time.
+- The scan reuses the existing isolated checkout, specialist, and aggregation pipeline, snapshots the active profile revision, persists findings locally (with anchored mini diffs), and records token/cost usage and budgets.
 - The scan button is labeled **Sniff sniff** with the accessible name "Run repository health scan".
-- **Issue creation is a separate, explicit, capability-gated action** (`GITHUB_ISSUE_CREATION_ENABLED=false` by default). When enabled, an operator selects a completed scan and Maomao creates GitHub issues for validated findings using the App installation identity (never the human OAuth token). Issues deduplicate by fingerprint with a hidden machine-readable marker, already-linked issues are skipped, retries are idempotent, and partial failures are visible and retryable. Every creation is audited credential-free.
+- **Issue creation is a separate, explicit, capability-gated action** (`GITHUB_ISSUE_CREATION_ENABLED=false` by default). When enabled, the completed scan's job page lets the operator select findings, preview the exact proposed issue title and body, and publish. Only findings above the publication bar (aggregator confidence ≥ 70% and ≥ 2 agreeing specialists) can be published; speculative observations stay visible but cannot become issues. Scans also surface likely human-authored duplicate issues for review — Maomao never modifies them.
+- Published issues use the App installation identity (never the human OAuth token), carry the exact reviewed SHA and a hidden machine-readable marker, and deduplicate by stable fingerprint: already-linked issues are skipped, retries are idempotent, permission denials stop the run with an explicit notice, and partial failures are visible and safely retryable. The job page shows every resulting issue with its finding fingerprint (credential-free audit trail), and pending claims orphaned by a crash are cleared at startup.
 
 ## Specialist prompts, fixtures, and offline evaluation
 

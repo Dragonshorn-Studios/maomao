@@ -25,6 +25,12 @@ describe("loadConfig", () => {
     expect(config.maxDiffBytes).toBe(1_048_576);
     expect(config.repoRateLimitPerWindow).toBe(6);
     expect(config.opencode.maxRetries).toBe(1);
+    expect(config.issueCreationEnabled).toBe(false);
+  });
+
+  it("enables scan issue creation only when explicitly configured", () => {
+    expect(loadConfig({ GITHUB_ISSUE_CREATION_ENABLED: "true" }).issueCreationEnabled).toBe(true);
+    expect(loadConfig({ GITHUB_ISSUE_CREATION_ENABLED: "false" }).issueCreationEnabled).toBe(false);
   });
 
   it("parses numeric GitHub allowlists and defense-in-depth limits", () => {

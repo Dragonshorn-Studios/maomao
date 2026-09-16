@@ -2315,4 +2315,53 @@ describe("scan issue creation", () => {
     log.mockRestore();
     warn.mockRestore();
   });
+
+  it("keeps a credential-free audit trail of every resulting issue", async () => {
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    const created: Array<{ title: string; body: string }> = [];
+    const { app, store } = testApp(
+      { ...oauthEnv, GITHUB_ISSUE_CREATION_ENABLED: "true" },
+      issueGithub(created),
+      mockOauthFetch({ id: 1001, login: "octocat" }),
+    );
+    const seeded = seedScan(store);
+    const { session, csrfCookie, csrfToken } = await operatorWithCsrf(app);
+
+    const res = await app.request("/scan/issues", {
+      method: "POST",
+      headers: { cookie: `${session}; ${csrfCookie}`, "content-type": "application/x-www-form-urlencoded" },
+      body: issuePostBody(seeded.jobId, [seeded.fingerprints[0]], csrfToken),
+    });
+    expect(res.status).toBe(302);
+
+    // Per-issue log line ties the issue to the finding fingerprint; the summary
+    // line names the actor. Neither contains credentials.
+    const messages = store.listLogs(seeded.jobId).map((entry) => entry.message);
+    expect(messages.some((message) => message.includes("Created issue #101") && message.includes(seeded.fingerprints[0]))).toBe(true);
+    expect(messages.some((message) => message.includes("Issue creation by octocat"))).toBe(true);
+
+    // The job page shows the resulting issues with their fingerprints.
+    const jobPage = await app.request(`/jobs/${seeded.jobId}`, { headers: { cookie: session } });
+    expect(jobPage.status).toBe(200);
+    const html = await jobPage.text();
+    expect(html).toContain("GitHub issues from this scan");
+    expect(html).toContain('href="https://github.com/acme/widgets/issues/101"');
+    expect(html).toContain(seeded.fingerprints[0]);
+    log.mockRestore();
+  });
+
+  it("renders the permission-denied notice on the job page", async () => {
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    const { app, store } = testApp(
+      { ...oauthEnv, GITHUB_ISSUE_CREATION_ENABLED: "true" },
+      issueGithub([]),
+      mockOauthFetch({ id: 1001, login: "octocat" }),
+    );
+    const seeded = seedScan(store);
+    const session = await operatorSession(app);
+    const page = await app.request(`/jobs/${seeded.jobId}?notice=issues-permission`, { headers: { cookie: session } });
+    expect(page.status).toBe(200);
+    expect(await page.text()).toContain("Issues: write permission");
+    log.mockRestore();
+  });
 });

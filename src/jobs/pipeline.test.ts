@@ -2626,6 +2626,48 @@ describe("repository health scan", () => {
     expect(first).toBe(second); // same repo+SHA reuses the same job
     expect(store.listFindings(created_repo(), 0)).toHaveLength(1);
   });
+
+  it("fails closed without any GitHub work when the allowlists were revoked after enqueue", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const config = loadConfig({
+      REVIEWER_ROUTING: "fixed",
+      REVIEWER_ROLES: "correctness",
+      OPENCODE_REVIEWER_MODEL: "test/model",
+      POST_EMPTY_REVIEW: "true",
+      GITHUB_APP_ID: "1",
+      GITHUB_WEBHOOK_SECRET: "s",
+      GITHUB_APP_PRIVATE_KEY: "k",
+      ALLOWED_GITHUB_ACCOUNT_IDS: "999999",
+    });
+    const store = new JobStore(openDb(":memory:"));
+    let diffCalls = 0;
+    const github: GithubPort = scanGithub();
+    const baseGetCommitDiff = github.getCommitDiff;
+    if (!baseGetCommitDiff) throw new Error("fixture missing getCommitDiff");
+    github.getCommitDiff = async (installationId, owner, repo, sha) => {
+      diffCalls += 1;
+      return baseGetCommitDiff(installationId, owner, repo, sha);
+    };
+    const created = store.enqueue({
+      ...jobInput("head111head111head111head111head11111"),
+      reviewers: [],
+      jobType: "health_scan",
+      scanBranch: "main",
+      prNumber: 0,
+      headSha: "head111head111head111head111head11111",
+      githubAccountId: 1001,
+      githubRepositoryId: 2002,
+    });
+    await createPipeline({ config, store, github, checkout: await fixtureCheckout(), opencode: scanOpencode() }).run(
+      created.job.id,
+    );
+    const job = store.getJob(created.job.id);
+    expect(job?.state).toBe("failed");
+    expect(job?.failure_reason).toContain("unauthorized");
+    expect(diffCalls).toBe(0);
+    expect(store.listFindings(created.job.repo_full_name, 0)).toHaveLength(0);
+    warn.mockRestore();
+  });
 });
 
 function created_repo(): string {
