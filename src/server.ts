@@ -12,7 +12,7 @@ import { parseGithubPullUrl, PullUrlError } from "./github/pull-url.js";
 import { dispatchEnqueue, enqueuePullJob } from "./jobs/enqueue.js";
 import { subscribe } from "./events.js";
 import { escapeHtml } from "./util.js";
-import { renderConfigPage, renderHome, renderJob, renderLogin, renderPromptConfigPage, renderScanPage, THEME_CSS } from "./ui/index.js";
+import { renderConfigPage, renderHome, renderJob, renderLogin, renderPromptConfigPage, renderScanPage, THEME_CSS, type PageOptions } from "./ui/index.js";
 import type { JobQueue } from "./jobs/queue.js";
 import {
   CSRF_COOKIE,
@@ -1165,13 +1165,7 @@ function ensureCsrfToken(c: Context, secret: string): string {
   return token;
 }
 
-function retryJob(
-  c: Context<AppEnv>,
-  ctx: ServerContext,
-  pageOpts: { showLogout: boolean },
-  jobId: number,
-  runId?: number,
-) {
+function retryJob(c: Context<AppEnv>, ctx: ServerContext, pageOpts: PageOptions, jobId: number, runId?: number) {
   const job = ctx.store.getJob(jobId);
   if (!job) return c.text("Not found", 404);
   const result = ctx.store.retryFailedReviewers(jobId, runId);

@@ -8,6 +8,7 @@ import {
   diffUnavailableCopy,
   emptyQueueCopy,
   huntersReturnedCopy,
+  type UiFlavor,
   externalDispatchBadge,
   findingOverrideNote,
   findingStatusLabel,
@@ -143,7 +144,7 @@ export function renderJob(
     <p class="lede">${escapeHtml(job.pr_title || "")}${flavor ? ` · ${escapeHtml(flavor)}` : ""}</p>
     ${
       job.state === "completed"
-        ? `<p class="muted" aria-label="Hunt summary">${escapeHtml(huntersReturnedCopy(metrics.reviewersDone, metrics.findings.total, options.uiFlavor))}</p>`
+        ? `<p class="muted">${escapeHtml(huntersReturnedCopy(metrics.reviewersDone, metrics.findings.total, options.uiFlavor))}</p>`
         : ""
     }
     <dl class="meta-grid">
@@ -238,7 +239,7 @@ export function renderJob(
   return layout(`${job.repo_full_name}#${job.pr_number}`, body, options);
 }
 
-function renderQueueCard(job: JobRow, metrics: JobMetrics, uiFlavor?: "apothecary" | "plain"): string {
+function renderQueueCard(job: JobRow, metrics: JobMetrics, uiFlavor?: UiFlavor): string {
   const state = jobStateLabel(job.state);
   const elapsed = formatDuration(elapsedMs(job.started_at, job.finished_at) ?? elapsedMs(job.created_at));
   const live: readonly JobState[] = [
@@ -509,7 +510,7 @@ function renderRun(
   run: ReviewerRunRow,
   showRetry = false,
   csrfToken?: string,
-  uiFlavor?: "apothecary" | "plain",
+  uiFlavor?: UiFlavor,
 ): string {
   const parsed = parseReviewerResult(run.normalized_json);
   const findingCount = parsed?.findings.length ?? 0;

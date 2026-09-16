@@ -578,6 +578,19 @@ describe("cat-hunt flavor", () => {
     expect(plain).toContain("Reviewers");
   });
 
+  it("keeps failed runs technical with no hunt copy", () => {
+    const store = seededStore();
+    const job = store.listJobs(50).find((row) => row.pr_number === 412)!;
+    const run = store.listReviewerRuns(job.id)[0];
+    store.patchReviewer(run.id, { state: "failed", validation_error: "runner crashed" });
+    const updated = store.getJob(job.id)!;
+    const failedHtml = renderJob(updated, store.listReviewerRuns(job.id), store.listLogs(job.id), {
+      uiFlavor: "apothecary",
+    });
+    expect(failedHtml).toContain("runner crashed");
+    expect(failedHtml).not.toContain("Hunting through the diff…");
+  });
+
   it("keeps queue card flavor and job-state labels technical", () => {
     const store = seededStore();
     const html = renderHome(store.listJobs(50), store, { uiFlavor: "apothecary" });

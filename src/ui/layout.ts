@@ -1,7 +1,7 @@
 import { escapeHtml } from "../util.js";
 import { CSRF_FIELD } from "../auth.js";
 import type { FindingRow } from "../findings/types.js";
-import { PRODUCT_TAGLINE } from "./copy.js";
+import { PRODUCT_TAGLINE, type UiFlavor } from "./copy.js";
 import { brandMark } from "./glyphs.js";
 import { THEME_HREF } from "./theme.js";
 
@@ -16,7 +16,7 @@ export interface PageOptions {
   identity?: { login: string; avatarUrl: string | null };
   /** Latest reviewed head SHA for this pull request, for stale-finding detection. */
   prHeadSha?: string;
-  uiFlavor?: "apothecary" | "plain";
+  uiFlavor?: UiFlavor;
 }
 
 export function csrfInput(token: string | undefined): string {
