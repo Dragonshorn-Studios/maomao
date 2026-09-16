@@ -36,6 +36,12 @@ describe("theme tokens", () => {
     expect(THEME_CSS).toContain("details.finding-diff > summary");
     expect(THEME_CSS).toContain(".trigger .typeahead-wrap");
     expect(THEME_CSS).toContain(".pierre-diff diffs-container");
+    expect(THEME_CSS).toContain("--diffs-bg: var(--code-bg)");
+    expect(THEME_CSS).toContain("--diffs-fg: var(--ink)");
+    expect(THEME_CSS).toContain("--diffs-addition-color-override: var(--jade)");
+    expect(THEME_CSS).toContain("--diffs-deletion-color-override: var(--cinnabar)");
+    expect(THEME_CSS).not.toContain("--diffs-foreground");
+    expect(THEME_CSS).not.toContain("--diffs-background");
     expect(THEME_CSS).not.toContain(".diff-gutter");
     expect(THEME_CSS).not.toContain(".word-add");
     expect(THEME_CSS).toContain(".typeahead-listbox");

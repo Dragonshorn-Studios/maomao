@@ -322,12 +322,13 @@ function seedCompletedWithFindings(store: JobStore): void {
     summary: cookieFinding.summary,
     category: cookieFinding.category,
     severity: "high",
-    diffHunk: `@@ -51 +54 @@
- function cookieSecure(proto) {
--  return String(proto).startsWith("https");
-+  return String(proto).split(",")[0].trim().startsWith("https");
-   setCookie(name, value, { secure: cookieSecure(forwarded) });
-`,
+    diffHunk: [
+      "@@ -51 +54 @@",
+      " function cookieSecure(proto) {",
+      '-  return String(proto).startsWith("https");',
+      '+  return String(proto).split(",")[0].trim().startsWith("https");',
+      "   setCookie(name, value, { secure: cookieSecure(forwarded) });",
+    ].join("\n"),
   });
 }
 
