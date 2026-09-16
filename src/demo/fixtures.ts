@@ -2,6 +2,7 @@ import type { ReviewerRole } from "../prompts.js";
 import { DEFAULT_REVIEWER_ROLES } from "../prompts.js";
 import { fingerprintFinding } from "../findings/identity.js";
 import type { JobStore, NewJobInput } from "../jobs/store.js";
+import { cancelJob, cancelJobsForPull } from "../jobs/cancel.js";
 
 const MODEL = "anthropic/claude-sonnet-4-5";
 const AGG_MODEL = "anthropic/claude-opus-4-6";
@@ -85,6 +86,7 @@ export function seedDemoJobs(store: JobStore): void {
   seedClean(store);
   seedPoisonInternalOnly(store);
   seedPoisonSniffing(store);
+  seedCancelled(store);
 }
 
 function seedCompletedWithFindings(store: JobStore): void {
@@ -481,6 +483,40 @@ function seedAggregating(store: JobStore): void {
     aggregator_started_at: ago(2),
   });
   store.log(job.id, "Aggregation in progress");
+}
+
+/** Merge-cancelled and manually dequeued fixtures: exercises the cancelled
+ * banner and the absence of dequeue/cancel controls on terminal jobs. */
+function seedCancelled(store: JobStore): void {
+  const merged = store.enqueue(
+    baseJob({
+      prNumber: 77,
+      prTitle: "Drop the deprecated v1 export",
+      headSha: "deadc0dedeadc0dedeadc0dedeadc0dedeadc0de",
+      headRef: "drop-v1",
+    }),
+  );
+  store.markPullMerged(merged.job.repo_full_name, merged.job.pr_number, "demo-fixture");
+  cancelJobsForPull(store, {
+    repoFullName: merged.job.repo_full_name,
+    prNumber: merged.job.pr_number,
+    reason: "pr_merged",
+    note: "webhook delivery demo-fixture",
+  });
+
+  const dequeued = store.enqueue(
+    baseJob({
+      repoFullName: "novacorp/api",
+      repoOwner: "novacorp",
+      repoName: "api",
+      prNumber: 92,
+      prTitle: "Backfill changelog entries",
+      prHtmlUrl: "https://github.com/novacorp/api/pull/92",
+      headSha: "feedfacefeedfacefeedfacefeedfacefeedface",
+      headRef: "changelog-backfill",
+    }),
+  );
+  cancelJob(store, dequeued.job.id, { reason: "manual_dequeue", actor: "octocat" });
 }
 
 function seedQueued(store: JobStore): void {
