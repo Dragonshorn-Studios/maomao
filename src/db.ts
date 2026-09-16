@@ -195,6 +195,8 @@ function migrate(db: SqliteDb): void {
       reopen_command TEXT,
       reconciliation_confidence REAL,
       reconciliation_reason TEXT,
+      diff_hunk TEXT,
+      diff_note TEXT,
       last_job_id INTEGER,
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL,
@@ -219,7 +221,87 @@ function migrate(db: SqliteDb): void {
       result TEXT NOT NULL,
       created_at TEXT NOT NULL
     );
+
+    CREATE TABLE IF NOT EXISTS profile_revisions (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      name TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'draft',
+      definition_json TEXT NOT NULL,
+      note TEXT,
+      created_by TEXT NOT NULL,
+      schema_version INTEGER NOT NULL DEFAULT 1,
+      edit_seq INTEGER NOT NULL DEFAULT 0,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      activated_at TEXT
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_profile_revisions_name ON profile_revisions(name, status);
+
+    CREATE TABLE IF NOT EXISTS config_audit (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      action TEXT NOT NULL,
+      actor TEXT NOT NULL,
+      revision_id INTEGER,
+      detail TEXT,
+      created_at TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS prompt_revisions (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      role_id TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'draft',
+      body TEXT NOT NULL,
+      note TEXT,
+      created_by TEXT NOT NULL,
+      edit_seq INTEGER NOT NULL DEFAULT 0,
+      validation_issues TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      activated_at TEXT
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_prompt_revisions_role ON prompt_revisions(role_id, status);
+
+    CREATE TABLE IF NOT EXISTS scan_issues (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      job_id INTEGER NOT NULL,
+      repo_full_name TEXT NOT NULL,
+      fingerprint TEXT NOT NULL,
+      issue_number INTEGER NOT NULL,
+      issue_url TEXT NOT NULL,
+      title TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      UNIQUE (repo_full_name, fingerprint)
+    );
+
+    CREATE TABLE IF NOT EXISTS eval_fixtures (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      name TEXT NOT NULL,
+      pr_meta TEXT NOT NULL DEFAULT '{}',
+      diff TEXT NOT NULL,
+      expectations_json TEXT,
+      saved_by TEXT NOT NULL,
+      created_at TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS prompt_evaluations (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      prompt_revision_id INTEGER NOT NULL,
+      fixture_id INTEGER NOT NULL,
+      model TEXT NOT NULL,
+      status TEXT NOT NULL,
+      findings_json TEXT,
+      usage_json TEXT,
+      signals_json TEXT,
+      duration_ms INTEGER,
+      error TEXT,
+      created_at TEXT NOT NULL
+    );
   `);
+  ensureColumn(db, "jobs", "review_event", "TEXT");
+  ensureColumn(db, "jobs", "review_event_reason", "TEXT");
+  ensureColumn(db, "jobs", "aggregator_fallback", "INTEGER");
   ensureColumn(db, "jobs", "github_account_id", "INTEGER");
   ensureColumn(db, "jobs", "github_repository_id", "INTEGER");
   ensureColumn(db, "jobs", "reconciliation_json", "TEXT");
@@ -237,6 +319,7 @@ function migrate(db: SqliteDb): void {
   ensureColumn(db, "reviewer_runs", "total_tokens", "INTEGER");
   ensureColumn(db, "reviewer_runs", "usage_complete", "INTEGER");
   ensureColumn(db, "reviewer_runs", "usage_warning", "TEXT");
+  ensureColumn(db, "reviewer_runs", "prompt_revision_id", "INTEGER");
   const jobColumns: Array<[string, string]> = [
     ["routing_state", "TEXT NOT NULL DEFAULT 'queued'"],
     ["routing_mode", "TEXT"],
@@ -277,8 +360,17 @@ function migrate(db: SqliteDb): void {
     ["escalation_id", "TEXT"],
     ["poison_alert_policy", "TEXT"],
     ["manual_escalate_requested", "INTEGER NOT NULL DEFAULT 0"],
+    ["profile_revision_id", "INTEGER"],
+    ["job_type", "TEXT NOT NULL DEFAULT 'pr_review'"],
+    ["scan_branch", "TEXT"],
   ];
   for (const [name, ddl] of jobColumns) ensureColumn(db, "jobs", name, ddl);
+
+  const findingColumns: [string, string][] = [
+    ["diff_hunk", "TEXT"],
+    ["diff_note", "TEXT"],
+  ];
+  for (const [name, ddl] of findingColumns) ensureColumn(db, "findings", name, ddl);
 }
 
 function columnNames(db: SqliteDb, table: string): Set<string> {

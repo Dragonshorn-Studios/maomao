@@ -5,24 +5,39 @@ import type { Config } from "./config.js";
 import type { JobStore } from "./jobs/store.js";
 import { handleGithubWebhook } from "./github/webhooks.js";
 import type { ManualTriggerPort, GithubPort } from "./github/client.js";
-import { authorizeGithubAccount, logAuthorizationRejection, logRateLimited, rejectUnauthorized } from "./github/authorize.js";
-import { repoRateLimitActive, RepoRateLimiter } from "./github/rate-limit.js";
+import type { OpenCodePort } from "./opencode/parse.js";
+import { authorizeGithubAccount, authorizeGithubTarget, logAuthorizationRejection, logRateLimited, rejectUnauthorized } from "./github/authorize.js";
+import { repoRateLimitActive, RepoRateLimiter, WindowRateLimiter } from "./github/rate-limit.js";
 import { parseGithubPullUrl, PullUrlError } from "./github/pull-url.js";
 import { dispatchEnqueue, enqueuePullJob } from "./jobs/enqueue.js";
 import { subscribe } from "./events.js";
-import { renderHome, renderJob, renderLogin, THEME_CSS } from "./ui/index.js";
+import { escapeHtml } from "./util.js";
+import { renderConfigPage, renderHome, renderJob, renderLogin, renderPromptConfigPage, renderScanPage, THEME_CSS } from "./ui/index.js";
 import type { JobQueue } from "./jobs/queue.js";
 import {
+  CSRF_COOKIE,
+  CSRF_FIELD,
+  CSRF_TTL_MS,
+  OAuthStateStore,
   SESSION_COOKIE,
   SESSION_TTL_MS,
   cookieSecure,
+  csrfExemptPath,
+  csrfRejectReason,
   isPublicPath,
+  issueCsrfToken,
   passwordsMatch,
   safeNextPath,
+  signOAuthSession,
   signSession,
   uiGateEnabled,
+  verifyCsrfRequest,
+  verifyCsrfToken,
+  verifyOAuthSession,
   verifySession,
+  type OAuthSession,
 } from "./auth.js";
+import { exchangeOAuthCode, fetchGithubUser, oauthAuthorizeUrl, oauthEnabled } from "./oauth.js";
 
 export interface ServerContext {
   config: Config;
@@ -31,17 +46,70 @@ export interface ServerContext {
   startedAt: number;
   github?: ManualTriggerPort & Partial<GithubPort>;
   rateLimiter?: RepoRateLimiter;
+  /** Injectable transport for the GitHub OAuth operator-login endpoints (tests). */
+  oauthFetch?: typeof fetch;
+  /** Offline prompt-evaluation runner (never touches GitHub). */
+  opencode?: OpenCodePort;
 }
 
-export function createApp(ctx: ServerContext): Hono {
-  const app = new Hono();
-  const gateOn = uiGateEnabled(ctx.config.uiPassword, ctx.config.uiSessionSecret);
+const OAUTH_STATE_TTL_MS = 10 * 60 * 1000;
+const OAUTH_START_LIMIT = 30;
+const OAUTH_FAIL_LIMIT = 10;
+const OAUTH_WINDOW_MS = 10 * 60 * 1000;
+/** Global ceilings (10x per-IP) contain distributed abuse without letting one visitor lock everyone out. */
+const OAUTH_GLOBAL_MULTIPLIER = 10;
+
+type AppEnv = { Variables: { identity?: OAuthSession } };
+
+function clientKey(c: Context<AppEnv>): string {
+  const first = c.req.header("x-forwarded-for")?.split(",")[0]?.trim();
+  return first || "local";
+}
+
+function setSessionCookie(c: Context<AppEnv>, value: string): void {
+  setCookie(c, SESSION_COOKIE, value, {
+    httpOnly: true,
+    sameSite: "Lax",
+    secure: cookieSecure(c.req.url, c.req.header("x-forwarded-proto")),
+    path: "/",
+    maxAge: Math.floor(SESSION_TTL_MS / 1000),
+  });
+}
+
+export function createApp(ctx: ServerContext): Hono<AppEnv> {
+  const app = new Hono<AppEnv>();
+  const oauthOn = oauthEnabled(ctx.config);
+  const passwordGateOn = uiGateEnabled(ctx.config.uiPassword, ctx.config.uiSessionSecret);
+  const gateOn = oauthOn || passwordGateOn;
+  const passwordLoginOn = passwordGateOn && (!oauthOn || ctx.config.uiLocalLogin);
   const pageOpts = { showLogout: gateOn };
+  const loginPageOpts = { showGithub: oauthOn, showPassword: passwordLoginOn };
+  const renderLoginDenied = (c: Context<AppEnv>) => {
+    deleteCookie(c, SESSION_COOKIE, { path: "/" });
+    return c.html(renderLogin({ ...loginPageOpts, error: "oauth-denied" }), 403);
+  };
   const rateLimiter = ctx.rateLimiter ?? new RepoRateLimiter();
+  const authLimiter = new WindowRateLimiter();
+  const oauthStates = new OAuthStateStore();
 
   app.use("*", async (c, next) => {
     if (!gateOn || isPublicPath(c.req.path)) return next();
     const token = getCookie(c, SESSION_COOKIE);
+    const oauthSession = verifyOAuthSession(ctx.config.uiSessionSecret, token);
+    if (oauthSession) {
+      // Re-check the allowlist on every request so removing an id revokes live sessions immediately.
+      if (!ctx.config.adminGithubIds.includes(oauthSession.id)) {
+        console.warn(`auth: session denied (not allowlisted) id=${oauthSession.id} login=${oauthSession.login}`);
+        // Clear the stale cookie so the noise (and the denial) ends after this response.
+        deleteCookie(c, SESSION_COOKIE, { path: "/" });
+        if (c.req.path.startsWith("/api/") || c.req.path === "/events") {
+          return c.json({ error: "forbidden" }, 403);
+        }
+        return renderLoginDenied(c);
+      }
+      c.set("identity", oauthSession);
+      return next();
+    }
     if (verifySession(ctx.config.uiSessionSecret, token)) return next();
     if (c.req.path.startsWith("/api/") || c.req.path === "/events") {
       return c.json({ error: "unauthorized" }, 401);
@@ -50,33 +118,154 @@ export function createApp(ctx: ServerContext): Hono {
     return c.redirect(`/login?next=${encodeURIComponent(`${url.pathname}${url.search}`)}`, 302);
   });
 
+  app.use("*", async (c, next) => {
+    if (!gateOn || c.req.method !== "POST" || csrfExemptPath(c.req.path)) return next();
+    const cookieToken = getCookie(c, CSRF_COOKIE);
+    let fieldToken: string | undefined;
+    let bodyNext: string | undefined;
+    try {
+      // parseBody caches the parsed form on the request, so route handlers can parse it again.
+      const body = await c.req.parseBody();
+      if (typeof body[CSRF_FIELD] === "string") fieldToken = body[CSRF_FIELD];
+      if (typeof body.next === "string") bodyNext = body.next;
+    } catch (error) {
+      console.warn(
+        `csrf: could not parse body for ${c.req.path}:`,
+        error instanceof Error ? error.message : error,
+      );
+      fieldToken = undefined;
+    }
+    if (!verifyCsrfRequest(ctx.config.uiSessionSecret, cookieToken, fieldToken)) {
+      console.warn(`csrf rejected: ${csrfRejectReason(cookieToken, fieldToken)} path=${c.req.path}`);
+      if (c.req.path === "/login") {
+        return c.html(
+          renderLogin({
+            ...loginPageOpts,
+            error: "csrf",
+            nextPath: safeNextPath(bodyNext ?? c.req.query("next")),
+            csrfToken: passwordLoginOn ? ensureCsrfToken(c, ctx.config.uiSessionSecret) : undefined,
+          }),
+          403,
+        );
+      }
+      return c.html(CSRF_FAILURE_HTML, 403);
+    }
+    return next();
+  });
+
   app.get("/login", (c) => {
     if (!gateOn) return c.redirect("/", 302);
     const token = getCookie(c, SESSION_COOKIE);
     const nextPath = safeNextPath(c.req.query("next"));
-    if (verifySession(ctx.config.uiSessionSecret, token)) return c.redirect(nextPath, 302);
-    return c.html(renderLogin(false, nextPath));
+    if (verifySession(ctx.config.uiSessionSecret, token) || verifyOAuthSession(ctx.config.uiSessionSecret, token)) {
+      return c.redirect(nextPath, 302);
+    }
+    return c.html(
+      renderLogin({
+        ...loginPageOpts,
+        nextPath,
+        csrfToken: passwordLoginOn ? ensureCsrfToken(c, ctx.config.uiSessionSecret) : undefined,
+      }),
+    );
   });
 
   app.post("/login", async (c) => {
-    if (!gateOn) return c.redirect("/", 302);
+    if (!passwordLoginOn) {
+      console.warn("auth: password login attempted while disabled");
+      return c.redirect("/login", 302);
+    }
     const body = await c.req.parseBody();
     const password = typeof body.password === "string" ? body.password : "";
     const nextPath = safeNextPath(typeof body.next === "string" ? body.next : c.req.query("next"));
-    if (!passwordsMatch(password, ctx.config.uiPassword)) {
-      return c.html(renderLogin(true, nextPath), 401);
+    // The explicit uiPassword check matters: passwordsMatch("", "") is true, and uiPassword is
+    // "" whenever the password gate is off.
+    if (!ctx.config.uiPassword || !passwordsMatch(password, ctx.config.uiPassword)) {
+      console.warn("auth: password login failed");
+      return c.html(
+        renderLogin({
+          ...loginPageOpts,
+          error: "invalid",
+          nextPath,
+          csrfToken: ensureCsrfToken(c, ctx.config.uiSessionSecret),
+        }),
+        401,
+      );
     }
-    setCookie(c, SESSION_COOKIE, signSession(ctx.config.uiSessionSecret), {
-      httpOnly: true,
-      sameSite: "Lax",
-      secure: cookieSecure(c.req.url, c.req.header("x-forwarded-proto")),
-      path: "/",
-      maxAge: Math.floor(SESSION_TTL_MS / 1000),
-    });
+    console.log("auth: password login");
+    setSessionCookie(c, signSession(ctx.config.uiSessionSecret));
     return c.redirect(nextPath, 302);
   });
 
+  app.get("/login/github", (c) => {
+    if (!oauthOn) return c.redirect("/login", 302);
+    const ip = clientKey(c);
+    if (
+      !authLimiter.wouldAllow(`start:${ip}`, OAUTH_START_LIMIT, OAUTH_WINDOW_MS) ||
+      !authLimiter.wouldAllow("start:global", OAUTH_START_LIMIT * OAUTH_GLOBAL_MULTIPLIER, OAUTH_WINDOW_MS)
+    ) {
+      console.warn(`auth: oauth start rate limit tripped ip=${ip}`);
+      return c.text("Too many sign-in attempts; try again later.", 429);
+    }
+    authLimiter.record(`start:${ip}`, OAUTH_START_LIMIT, OAUTH_WINDOW_MS);
+    authLimiter.record("start:global", OAUTH_START_LIMIT * OAUTH_GLOBAL_MULTIPLIER, OAUTH_WINDOW_MS);
+    const state = oauthStates.issue(Date.now(), OAUTH_STATE_TTL_MS, safeNextPath(c.req.query("next")));
+    return c.redirect(oauthAuthorizeUrl(ctx.config, state), 302);
+  });
+
+  app.get("/login/github/callback", async (c) => {
+    if (!oauthOn) return c.redirect("/login", 302);
+    const ip = clientKey(c);
+    if (
+      !authLimiter.wouldAllow(`fail:${ip}`, OAUTH_FAIL_LIMIT, OAUTH_WINDOW_MS) ||
+      !authLimiter.wouldAllow("fail:global", OAUTH_FAIL_LIMIT * OAUTH_GLOBAL_MULTIPLIER, OAUTH_WINDOW_MS)
+    ) {
+      console.warn(`auth: oauth failure rate limit tripped ip=${ip}`);
+      return c.text("Too many failed sign-ins; try again later.", 429);
+    }
+    const url = new URL(c.req.url);
+    const next = oauthStates.consume(url.searchParams.get("state") ?? undefined);
+    if (next === undefined) {
+      authLimiter.record(`fail:${ip}`, OAUTH_FAIL_LIMIT, OAUTH_WINDOW_MS);
+      authLimiter.record("fail:global", OAUTH_FAIL_LIMIT * OAUTH_GLOBAL_MULTIPLIER, OAUTH_WINDOW_MS);
+      console.warn(`auth: oauth state rejected (missing, expired, or replayed) ip=${ip}`);
+      return c.html(renderLogin({ ...loginPageOpts, error: "oauth-state" }), 403);
+    }
+    const providerError = url.searchParams.get("error");
+    if (providerError) {
+      // User-initiated cancel or provider-side refusal: no code exists, so this is not a
+      // protocol failure and does not count toward the failure budget.
+      console.log(`auth: oauth sign-in not completed at provider (${providerError}) ip=${ip}`);
+      return c.html(renderLogin({ ...loginPageOpts, error: "oauth-cancelled" }), 400);
+    }
+    const fetchImpl = ctx.oauthFetch ?? fetch;
+    const accessToken = await exchangeOAuthCode(ctx.config, url.searchParams.get("code") ?? "", fetchImpl);
+    const user = accessToken ? await fetchGithubUser(accessToken, fetchImpl) : undefined;
+    if (!user) {
+      authLimiter.record(`fail:${ip}`, OAUTH_FAIL_LIMIT, OAUTH_WINDOW_MS);
+      authLimiter.record("fail:global", OAUTH_FAIL_LIMIT * OAUTH_GLOBAL_MULTIPLIER, OAUTH_WINDOW_MS);
+      console.warn("auth: oauth token exchange or user lookup failed");
+      return c.html(renderLogin({ ...loginPageOpts, error: "oauth-failed" }), 502);
+    }
+    if (!ctx.config.adminGithubIds.includes(user.id)) {
+      authLimiter.record(`fail:${ip}`, OAUTH_FAIL_LIMIT, OAUTH_WINDOW_MS);
+      authLimiter.record("fail:global", OAUTH_FAIL_LIMIT * OAUTH_GLOBAL_MULTIPLIER, OAUTH_WINDOW_MS);
+      console.warn(`auth: oauth login denied id=${user.id} login=${user.login} ip=${ip}`);
+      return renderLoginDenied(c);
+    }
+    // Rotation: always issue a fresh session value at login; the human access token above is
+    // used once for identity and never stored.
+    setSessionCookie(
+      c,
+      signOAuthSession(ctx.config.uiSessionSecret, { id: user.id, login: user.login, avatarUrl: user.avatarUrl }),
+    );
+    console.log(`auth: oauth login id=${user.id} login=${user.login}`);
+    return c.redirect(safeNextPath(next), 302);
+  });
+
   app.post("/logout", (c) => {
+    // /logout is a public path, so the session middleware never set `identity`; derive it here.
+    const identity = verifyOAuthSession(ctx.config.uiSessionSecret, getCookie(c, SESSION_COOKIE));
+    if (identity) console.log(`auth: logout id=${identity.id} login=${identity.login}`);
     deleteCookie(c, SESSION_COOKIE, { path: "/" });
     return c.redirect(gateOn ? "/login" : "/", 302);
   });
@@ -124,9 +313,17 @@ export function createApp(ctx: ServerContext): Hono {
   app.post("/reviews", async (c) => {
     const body = await c.req.parseBody();
     const rawUrl = typeof body.url === "string" ? body.url : "";
+    const csrfToken = gateOn ? ensureCsrfToken(c, ctx.config.uiSessionSecret) : undefined;
+    const identity = c.get("identity");
     const home = (extra: { error?: string; notice?: string; reviewUrl?: string } = {}) =>
       c.html(
-        renderHome(ctx.store.listJobs(75), ctx.store, { ...pageOpts, ...extra, reviewUrl: extra.reviewUrl ?? rawUrl }),
+        renderHome(ctx.store.listJobs(75), ctx.store, {
+          ...pageOpts,
+          identity,
+          csrfToken,
+          ...extra,
+          reviewUrl: extra.reviewUrl ?? rawUrl,
+        }),
         extra.error ? 400 : 200,
       );
 
@@ -246,6 +443,8 @@ export function createApp(ctx: ServerContext): Hono {
     return c.html(
       renderHome(jobs, ctx.store, {
         ...pageOpts,
+        identity: c.get("identity"),
+        csrfToken: gateOn ? ensureCsrfToken(c, ctx.config.uiSessionSecret) : undefined,
         notice: noticeText(c.req.query("notice")),
         error: c.req.query("error") || undefined,
       }),
@@ -256,20 +455,627 @@ export function createApp(ctx: ServerContext): Hono {
     const id = Number(c.req.param("id"));
     const job = ctx.store.getJob(id);
     if (!job) return c.text("Not found", 404);
+    const latest = ctx.store.findLatestJobForPull(job.repo_full_name, job.pr_number);
     return c.html(
       renderJob(job, ctx.store.listReviewerRuns(id), ctx.store.listLogs(id), {
         ...pageOpts,
+        identity: c.get("identity"),
+        csrfToken: gateOn ? ensureCsrfToken(c, ctx.config.uiSessionSecret) : undefined,
+        prHeadSha: latest?.head_sha ?? job.head_sha,
         notice: noticeText(c.req.query("notice"), job.repo_full_name, job.pr_number, job.head_sha),
+        error: c.req.query("error") || undefined,
         prFindings: ctx.store.listFindings(job.repo_full_name, job.pr_number),
       }),
     );
   });
 
-  app.post("/jobs/:id/retry", (c) => retryJob(c, ctx, Number(c.req.param("id"))));
+  app.post("/jobs/:id/retry", (c) => retryJob(c, ctx, pageOpts, Number(c.req.param("id"))));
   app.post("/jobs/:id/reviewers/:runId/retry", (c) => {
     const runId = Number(c.req.param("runId"));
     if (!Number.isFinite(runId)) return c.text("Not found", 404);
-    return retryJob(c, ctx, Number(c.req.param("id")), runId);
+    return retryJob(c, ctx, pageOpts, Number(c.req.param("id")), runId);
+  });
+
+  // ---- Versioned review-profile configuration (/config) ----
+  const configWriteDenied = (c: Context<AppEnv>) =>
+    c.html(
+      renderConfigPage({
+        revisions: ctx.store.configs.listRevisions(),
+        audit: ctx.store.configs.listAudit(),
+        canWrite: false,
+        error: "Writing configuration requires an operator GitHub OAuth identity.",
+      }),
+      403,
+    );
+  const configActor = (c: Context<AppEnv>): { login: string } | undefined => c.get("identity");
+  const parseDefinition = (
+    raw: string | undefined,
+  ): { ok: true; definition: unknown } | { ok: false; error: string } => {
+    try {
+      return { ok: true, definition: JSON.parse(raw ?? "{}") };
+    } catch {
+      return { ok: false, error: "Definition must be valid JSON." };
+    }
+  };
+  const renderConfigWithError = (c: Context<AppEnv>, message: string, status: 400 | 403 | 409) => {
+    return c.html(
+      renderConfigPage({
+        revisions: ctx.store.configs.listRevisions(),
+        audit: ctx.store.configs.listAudit(),
+        canWrite: gateOn,
+        error: message,
+        csrfToken: gateOn ? ensureCsrfToken(c, ctx.config.uiSessionSecret) : undefined,
+      }),
+      status,
+    );
+  };
+
+  app.get("/config", (c) => {
+    if (!gateOn) return c.redirect("/", 302);
+    const notices: Record<string, string> = {
+      "draft-created": "Draft created.",
+      "draft-saved": "Draft saved.",
+      activated: "Revision activated.",
+      "rolled-back": "Revision rolled back.",
+      imported: "Configuration imported as drafts.",
+    };
+    const noticeKey = c.req.query("notice") ?? "";
+    return c.html(
+      renderConfigPage({
+        revisions: ctx.store.configs.listRevisions(),
+        audit: ctx.store.configs.listAudit(),
+        canWrite: gateOn,
+        csrfToken: gateOn ? ensureCsrfToken(c, ctx.config.uiSessionSecret) : undefined,
+        notice: notices[noticeKey],
+      }),
+    );
+  });
+
+  app.post("/config/drafts", async (c) => {
+    if (!gateOn) return c.redirect("/", 302);
+    const actor = configActor(c);
+    if (!actor) return configWriteDenied(c);
+    const body = await c.req.parseBody();
+    const parsed = parseDefinition(typeof body.definition === "string" ? body.definition : undefined);
+    if (!parsed.ok) return renderConfigWithError(c, parsed.error, 400);
+    const result = ctx.store.configs.createDraft({
+      definition: parsed.definition,
+      createdBy: actor.login,
+    });
+    if ("error" in result) return renderConfigWithError(c, result.issues.join("; "), 400);
+    return c.redirect("/config?notice=draft-created", 302);
+  });
+
+  app.post("/config/drafts/:id", async (c) => {
+    if (!gateOn) return c.redirect("/", 302);
+    const actor = configActor(c);
+    if (!actor) return configWriteDenied(c);
+    const body = await c.req.parseBody();
+    const parsed = parseDefinition(typeof body.definition === "string" ? body.definition : undefined);
+    if (!parsed.ok) return renderConfigWithError(c, parsed.error, 400);
+    const result = ctx.store.configs.updateDraft({
+      id: Number(c.req.param("id")),
+      definition: parsed.definition,
+      expectedEditSeq: Number(body.expected_edit_seq ?? -1),
+      updatedBy: actor.login,
+    });
+    if ("error" in result && result.error === "conflict") {
+      return renderConfigWithError(
+        c,
+        "Conflict: this draft was saved by someone else. Reload and re-apply your edit.",
+        409,
+      );
+    }
+    if ("error" in result) return renderConfigWithError(c, result.error === "invalid" ? result.issues.join("; ") : "Draft not found.", 400);
+    return c.redirect("/config?notice=draft-saved", 302);
+  });
+
+  app.post("/config/revisions/:id/activate", (c) => {
+    if (!gateOn) return c.redirect("/", 302);
+    const actor = configActor(c);
+    if (!actor) return configWriteDenied(c);
+    const result = ctx.store.configs.activateRevision(Number(c.req.param("id")), actor.login);
+    if ("error" in result) return renderConfigWithError(c, result.error, 400);
+    return c.redirect("/config?notice=activated", 302);
+  });
+
+  app.post("/config/revisions/:id/rollback", (c) => {
+    if (!gateOn) return c.redirect("/", 302);
+    const actor = configActor(c);
+    if (!actor) return configWriteDenied(c);
+    const result = ctx.store.configs.rollbackRevision(Number(c.req.param("id")), actor.login);
+    if ("error" in result) return renderConfigWithError(c, result.error, 400);
+    return c.redirect("/config?notice=rolled-back", 302);
+  });
+
+  app.get("/config/export", (c) => {
+    if (!gateOn) return c.redirect("/", 302);
+    return c.json(ctx.store.configs.exportConfig());
+  });
+
+  app.post("/config/import", async (c) => {
+    if (!gateOn) return c.redirect("/", 302);
+    const actor = configActor(c);
+    if (!actor) return configWriteDenied(c);
+    const body = await c.req.parseBody();
+    const raw = typeof body.payload === "string" ? body.payload : "";
+    let payload: unknown;
+    try {
+      payload = JSON.parse(raw);
+    } catch {
+      return renderConfigWithError(c, "Import payload must be valid JSON.", 400);
+    }
+    const result = ctx.store.configs.importConfig({ payload, actor: actor.login });
+    if ("error" in result) return renderConfigWithError(c, result.error, 400);
+    return c.redirect("/config?notice=imported", 302);
+  });
+
+  // ---- Versioned specialist prompts, fixtures, and evaluation (/config/prompts) ----
+  const promptViews = () =>
+    ctx.store.prompts.listPromptRevisions().map((revision) => ({
+      id: revision.id,
+      role_id: revision.role_id,
+      status: revision.status,
+      body: revision.body,
+      note: revision.note,
+      created_by: revision.created_by,
+      editSeq: revision.edit_seq,
+      created_at: revision.created_at,
+      updated_at: revision.updated_at,
+      activated_at: revision.activated_at,
+    }));
+  const fixtureViews = () =>
+    ctx.store.prompts.listFixtures().map((fixture) => ({
+      id: fixture.id,
+      name: fixture.name,
+      prMeta: JSON.parse(fixture.pr_meta) as Record<string, unknown>,
+      diffChars: fixture.diff.length,
+      expectations: JSON.parse(fixture.expectations_json ?? "[]") as Array<{
+        severity: string;
+        category?: string;
+        pathContains?: string;
+      }>,
+      saved_by: fixture.saved_by,
+      created_at: fixture.created_at,
+    }));
+  const evaluationViews = () =>
+    ctx.store.prompts.listEvaluations().map((evaluation) => ({
+      id: evaluation.id,
+      prompt_revision_id: evaluation.prompt_revision_id,
+      fixture_id: evaluation.fixture_id,
+      model: evaluation.model,
+      status: evaluation.status,
+      findings: JSON.parse(evaluation.findings_json ?? "[]") as Array<{
+        severity?: string;
+        category?: string;
+        file?: string;
+        summary?: string;
+      }>,
+      usage: evaluation.usage_json ? (JSON.parse(evaluation.usage_json) as { cost?: number; totalTokens?: number }) : null,
+      duration_ms: evaluation.duration_ms,
+      error: evaluation.error,
+      created_at: evaluation.created_at,
+    }));
+
+  const promptWriteDenied = (c: Context<AppEnv>) =>
+    c.html(
+      renderPromptConfigPage({
+        revisions: promptViews(),
+        fixtures: fixtureViews(),
+        evaluations: evaluationViews(),
+        canWrite: false,
+        error: "Writing prompt configuration requires an operator GitHub OAuth identity.",
+      }),
+      403,
+    );
+
+  const renderPromptError = (c: Context<AppEnv>, message: string, status: 400 | 403 | 409 | 503 = 400) =>
+    c.html(
+      renderPromptConfigPage({
+        revisions: promptViews(),
+        fixtures: fixtureViews(),
+        evaluations: evaluationViews(),
+        canWrite: gateOn,
+        error: message,
+        csrfToken: gateOn ? ensureCsrfToken(c, ctx.config.uiSessionSecret) : undefined,
+      }),
+      status,
+    );
+
+  app.get("/config/prompts", (c) => {
+    if (!gateOn) return c.redirect("/", 302);
+    const notices: Record<string, string> = {
+      "draft-created": "Prompt draft created.",
+      "draft-saved": "Prompt draft saved.",
+      activated: "Prompt revision activated.",
+      "rolled-back": "Prompt revision rolled back.",
+      "fixture-saved": "Fixture saved.",
+      evaluated: "Evaluation recorded.",
+    };
+    return c.html(
+      renderPromptConfigPage({
+        revisions: promptViews(),
+        fixtures: fixtureViews(),
+        evaluations: evaluationViews(),
+        canWrite: gateOn,
+        csrfToken: gateOn ? ensureCsrfToken(c, ctx.config.uiSessionSecret) : undefined,
+        notice: notices[c.req.query("notice") ?? ""],
+      }),
+    );
+  });
+
+  app.post("/config/prompts/drafts", async (c) => {
+    if (!gateOn) return c.redirect("/", 302);
+    const actor = configActor(c);
+    if (!actor) return promptWriteDenied(c);
+    const body = await c.req.parseBody();
+    const result = ctx.store.prompts.createDraft({
+      roleId: typeof body.role_id === "string" ? body.role_id.trim() : "",
+      body: typeof body.body === "string" ? body.body : "",
+      createdBy: actor.login,
+    });
+    if ("error" in result) return renderPromptError(c, result.issues.join("; "));
+    return c.redirect("/config/prompts?notice=draft-created", 302);
+  });
+
+  app.post("/config/prompts/drafts/:id", async (c) => {
+    if (!gateOn) return c.redirect("/", 302);
+    const actor = configActor(c);
+    if (!actor) return promptWriteDenied(c);
+    const body = await c.req.parseBody();
+    const result = ctx.store.prompts.updatePromptDraft({
+      id: Number(c.req.param("id")),
+      body: typeof body.body === "string" ? body.body : "",
+      expectedEditSeq: Number(body.expected_edit_seq ?? -1),
+      updatedBy: actor.login,
+    });
+    if ("error" in result && result.error === "conflict") {
+      return renderPromptError(c, "Conflict: this draft was saved by someone else. Reload and re-apply your edit.", 409);
+    }
+    if ("error" in result) {
+      return renderPromptError(c, result.error === "invalid" ? result.issues.join("; ") : "Prompt draft not found.", 400);
+    }
+    return c.redirect("/config/prompts?notice=draft-saved", 302);
+  });
+
+  app.post("/config/prompts/:id/activate", (c) => {
+    if (!gateOn) return c.redirect("/", 302);
+    const actor = configActor(c);
+    if (!actor) return promptWriteDenied(c);
+    const result = ctx.store.prompts.activatePromptRevision(Number(c.req.param("id")), actor.login);
+    if ("error" in result) return renderPromptError(c, result.error, 400);
+    return c.redirect("/config/prompts?notice=activated", 302);
+  });
+
+  app.post("/config/prompts/:id/rollback", (c) => {
+    if (!gateOn) return c.redirect("/", 302);
+    const actor = configActor(c);
+    if (!actor) return promptWriteDenied(c);
+    const result = ctx.store.prompts.rollbackPromptRevision(Number(c.req.param("id")), actor.login);
+    if ("error" in result) return renderPromptError(c, result.error, 400);
+    return c.redirect("/config/prompts?notice=rolled-back", 302);
+  });
+
+  app.post("/config/prompts/fixtures", async (c) => {
+    if (!gateOn) return c.redirect("/", 302);
+    const actor = configActor(c);
+    if (!actor) return promptWriteDenied(c);
+    const body = await c.req.parseBody();
+    let prMeta: Record<string, unknown> = {};
+    try {
+      prMeta = JSON.parse(typeof body.pr_meta === "string" && body.pr_meta ? body.pr_meta : "{}");
+    } catch {
+      return renderPromptError(c, "Fixture PR metadata must be valid JSON.", 400);
+    }
+    const result = ctx.store.prompts.saveFixture({
+      name: typeof body.name === "string" ? body.name : "",
+      prMeta,
+      diff: typeof body.diff === "string" ? body.diff : "",
+      savedBy: actor.login,
+      acknowledged: body.acknowledged === "on" || body.acknowledged === "true",
+    });
+    if ("error" in result) return renderPromptError(c, result.issues.join("; "), 400);
+    return c.redirect("/config/prompts?notice=fixture-saved", 302);
+  });
+
+  app.post("/config/prompts/evaluate", async (c) => {
+    if (!gateOn) return c.redirect("/", 302);
+    const actor = configActor(c);
+    if (!actor) return promptWriteDenied(c);
+    if (!ctx.opencode) return renderPromptError(c, "Prompt evaluation is unavailable on this process (no OpenCode runner).", 503);
+    const body = await c.req.parseBody();
+    const promptRevisionId = Number(body.prompt_revision_id);
+    const fixtureId = Number(body.fixture_id);
+    const maxCostUsd = typeof body.max_cost_usd === "string" && body.max_cost_usd ? Number(body.max_cost_usd) : undefined;
+    if (!Number.isFinite(promptRevisionId) || !Number.isFinite(fixtureId)) {
+      return renderPromptError(c, "Prompt revision and fixture must be numeric ids.", 400);
+    }
+    if (maxCostUsd !== undefined && !Number.isFinite(maxCostUsd)) {
+      return renderPromptError(c, "Max cost must be a number.", 400);
+    }
+    let expectations: Array<{ severity: string; category?: string; pathContains?: string }> = [];
+    try {
+      expectations = JSON.parse(typeof body.expectations === "string" && body.expectations ? body.expectations : "[]");
+    } catch {
+      return renderPromptError(c, "Expectations must be valid JSON.", 400);
+    }
+    void expectations; // stored on the fixture; evaluation compares against fixture.expectations
+    const result = await ctx.store.prompts.evaluatePrompt({
+      promptRevisionId,
+      fixtureId,
+      model: typeof body.model === "string" && body.model ? body.model : ctx.config.opencode.reviewerModel,
+      maxCostUsd,
+      actor: actor.login,
+      opencode: ctx.opencode,
+      extraArgs: ctx.config.opencode.extraArgs,
+    });
+    if ("error" in result) return renderPromptError(c, result.error, 400);
+    if (result.evaluation.status === "failed") {
+      return renderPromptError(c, `Evaluation failed: ${result.evaluation.error ?? "unknown error"}`, 400);
+    }
+    return c.redirect(`/config/prompts?notice=evaluated`, 302);
+  });
+
+  const renderScanDenied = (c: Context<AppEnv>, ctx2: ServerContext, message: string) =>
+    c.html(
+      renderScanPage({
+        canScan: gateOn,
+        csrfToken: gateOn ? ensureCsrfToken(c, ctx2.config.uiSessionSecret) : undefined,
+        issueCreationEnabled: ctx2.config.issueCreationEnabled,
+        error: message,
+      }),
+      403,
+    );
+
+  // ---- On-demand repository health scans (/scan) ----
+  const parseRepoInput = (raw: string): { owner: string; repo: string } | undefined => {
+    const trimmed = raw.trim();
+    const short = trimmed.match(/^([\w.-]+)\/([\w.-]+)$/);
+    if (short) return { owner: short[1], repo: short[2].replace(/\.git$/, "") };
+    try {
+      const url = new URL(trimmed);
+      if (url.hostname !== "github.com") return undefined;
+      const parts = url.pathname.split("/").filter(Boolean);
+      if (parts.length < 2) return undefined;
+      return { owner: parts[0], repo: parts[1].replace(/\.git$/, "") };
+    } catch {
+      return undefined;
+    }
+  };
+
+  app.get("/scan", (c) => {
+    if (!gateOn) return c.redirect("/", 302);
+    const identity = c.get("identity");
+    const profileRevision = ctx.store.configs.getActiveRevision("default");
+    return c.html(
+      renderScanPage({
+        canScan: gateOn,
+        identityLogin: identity?.login,
+        csrfToken: gateOn ? ensureCsrfToken(c, ctx.config.uiSessionSecret) : undefined,
+        issueCreationEnabled: ctx.config.issueCreationEnabled,
+        profileRevision: profileRevision ? { id: profileRevision.id, name: profileRevision.name } : null,
+      }),
+    );
+  });
+
+  app.post("/scan", async (c) => {
+    if (!gateOn) return c.redirect("/", 302);
+    const actor = configActor(c);
+    if (!actor) {
+      return c.html(
+        renderScanPage({
+          canScan: gateOn,
+          csrfToken: ensureCsrfToken(c, ctx.config.uiSessionSecret),
+          issueCreationEnabled: ctx.config.issueCreationEnabled,
+          error: "Scanning requires an operator GitHub OAuth identity.",
+        }),
+        403,
+      );
+    }
+    if (!ctx.github || !isReviewGithub(ctx.github)) {
+      return c.html(
+        renderScanPage({
+          canScan: true,
+          csrfToken: ensureCsrfToken(c, ctx.config.uiSessionSecret),
+          issueCreationEnabled: ctx.config.issueCreationEnabled,
+          error: "GitHub App client is not configured on this process.",
+        }),
+        503,
+      );
+    }
+    const body = await c.req.parseBody();
+    const parsed = parseRepoInput(typeof body.repo === "string" ? body.repo : "");
+    if (!parsed) {
+      return c.html(
+        renderScanPage({
+          canScan: true,
+          csrfToken: ensureCsrfToken(c, ctx.config.uiSessionSecret),
+          issueCreationEnabled: ctx.config.issueCreationEnabled,
+          error: "Enter a repository as owner/repo or a GitHub URL.",
+        }),
+        400,
+      );
+    }
+    try {
+      const installation = await ctx.github.getRepoInstallation(parsed.owner, parsed.repo);
+      const accountAuth = authorizeGithubAccount(ctx.config, {
+        installationId: installation.installationId,
+        accountId: installation.accountId,
+      });
+      if (!accountAuth.ok) {
+        logAuthorizationRejection({ installationId: installation.installationId, reason: accountAuth.reason });
+        return renderScanDenied(c, ctx, "Not authorized to scan this installation or repository.");
+      }
+      const repository = await ctx.github.getRepository(parsed.owner, parsed.repo, installation.installationId);
+      const repoAuth = rejectUnauthorized(ctx.config, {
+        installationId: installation.installationId,
+        accountId: installation.accountId,
+        repositoryId: repository.id,
+      });
+      if (!repoAuth.ok) {
+        return renderScanDenied(c, ctx, "Not authorized to scan this installation or repository.");
+      }
+      if (!ctx.github.getRepositoryHead || !ctx.github.getCommitDiff) {
+        return renderScanDenied(c, ctx, "This GitHub client does not support repository scans.");
+      }
+      const head = await ctx.github.getRepositoryHead(installation.installationId, parsed.owner, parsed.repo);
+      const created = ctx.store.enqueue({
+        repoFullName: `${parsed.owner}/${parsed.repo}`,
+        repoOwner: parsed.owner,
+        repoName: parsed.repo,
+        installationId: installation.installationId,
+        githubAccountId: installation.accountId,
+        githubRepositoryId: repository.id,
+        prNumber: 0,
+        prTitle: `Repository health scan (${head.defaultBranch})`,
+        prBody: `Manual health scan of the default branch (${head.defaultBranch}) at a pinned SHA.`,
+        prHtmlUrl: `https://github.com/${parsed.owner}/${parsed.repo}`,
+        prAuthor: actor.login,
+        baseSha: head.headSha,
+        headSha: head.headSha,
+        baseRef: head.defaultBranch,
+        headRef: head.defaultBranch,
+        webhookEvent: "manual.scan",
+        jobType: "health_scan",
+        scanBranch: head.defaultBranch,
+        reviewers: [],
+      });
+      ctx.store.log(created.job.id, `Health scan enqueued by ${actor.login} for ${head.defaultBranch} @ ${head.headSha}`);
+      dispatchEnqueue(ctx.queue, created);
+      return c.redirect(`/jobs/${created.job.id}?notice=${created.created ? "scan-queued" : "exists"}`, 302);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      return c.html(
+        renderScanPage({
+          canScan: true,
+          csrfToken: ensureCsrfToken(c, ctx.config.uiSessionSecret),
+          issueCreationEnabled: ctx.config.issueCreationEnabled,
+          error: message,
+        }),
+        400,
+      );
+    }
+  });
+
+  app.post("/scan/issues", async (c) => {
+    if (!gateOn) return c.redirect("/", 302);
+    const actor = configActor(c);
+    if (!actor) {
+      return c.html(
+        renderScanPage({
+          canScan: true,
+          csrfToken: ensureCsrfToken(c, ctx.config.uiSessionSecret),
+          issueCreationEnabled: ctx.config.issueCreationEnabled,
+          error: "Creating issues requires an operator GitHub OAuth identity.",
+        }),
+        403,
+      );
+    }
+    if (!ctx.config.issueCreationEnabled) {
+      return c.html(
+        renderScanPage({
+          canScan: true,
+          csrfToken: ensureCsrfToken(c, ctx.config.uiSessionSecret),
+          issueCreationEnabled: false,
+          error: "Issue creation is disabled (GITHUB_ISSUE_CREATION_ENABLED=false).",
+        }),
+        403,
+      );
+    }
+    if (!ctx.config.issueCreationEnabled) {
+      return renderScanDenied(c, ctx, "Issue creation is disabled (GITHUB_ISSUE_CREATION_ENABLED=false).");
+    }
+    if (!ctx.github || !isReviewGithub(ctx.github)) {
+      return renderScanDenied(c, ctx, "GitHub App client is not configured on this process.");
+    }
+    if (!ctx.github.createIssue || !ctx.github.listOpenIssuesByMarker) {
+      return renderScanDenied(c, ctx, "This GitHub client does not support issue creation.");
+    }
+    const body = await c.req.parseBody();
+    const jobId = Number(body.job_id);
+    const job = Number.isFinite(jobId) ? ctx.store.getJob(jobId) : undefined;
+    if (!job || job.job_type !== "health_scan" || job.state !== "completed") {
+      return renderScanDenied(c, ctx, "Issue creation requires a completed health-scan job.");
+    }
+    // Allowlists may have changed since the scan ran; the GitHub write path re-checks them.
+    const writeAuth = authorizeGithubTarget(ctx.config, {
+      installationId: job.installation_id,
+      accountId: job.github_account_id ?? undefined,
+      repositoryId: job.github_repository_id ?? undefined,
+    });
+    if (!writeAuth.ok) {
+      logAuthorizationRejection({ installationId: job.installation_id, reason: writeAuth.reason });
+      return renderScanDenied(c, ctx, "Not authorized to create issues in this installation or repository.");
+    }
+    // Only findings produced by this scan, not stale rows from older scans.
+    const findings = ctx.store
+      .listFindings(job.repo_full_name, job.pr_number)
+      .filter((row) => row.status === "open" && row.last_job_id === job.id);
+    let createdCount = 0;
+    let skipped = 0;
+    let failed = 0;
+    for (const finding of findings) {
+      const markerBase = `<!-- maomao-scan-issue ${finding.fingerprint}`;
+      const marker = `${markerBase} @ ${finding.reviewed_sha} -->`;
+      try {
+        const existingLocal = ctx.store.hasScanIssue(job.repo_full_name, finding.fingerprint);
+        if (existingLocal) {
+          skipped += 1;
+          continue;
+        }
+        // Claim the fingerprint before the GitHub write: a concurrent submit loses the race.
+        ctx.store.claimScanIssue({
+          jobId: job.id,
+          repoFullName: job.repo_full_name,
+          fingerprint: finding.fingerprint,
+          title: finding.summary ?? finding.fingerprint,
+        });
+        if (ctx.store.getScanIssue(job.repo_full_name, finding.fingerprint)?.issue_number !== 0) {
+          skipped += 1;
+          continue;
+        }
+        const remote = await ctx.github.listOpenIssuesByMarker(job.installation_id, job.repo_owner, job.repo_name, `${markerBase} `);
+        if (remote.length > 0) {
+          ctx.store.recordScanIssue({
+            jobId: job.id,
+            repoFullName: job.repo_full_name,
+            fingerprint: finding.fingerprint,
+            issueNumber: remote[0].number,
+            issueUrl: remote[0].url,
+            title: `maomao: ${finding.summary ?? finding.fingerprint}`,
+          });
+          skipped += 1;
+          continue;
+        }
+        const severity = (finding.severity ?? "info").toUpperCase();
+        const title = `[maomao] ${severity}: ${finding.summary ?? finding.fingerprint}`;
+        const evidence = finding.diff_hunk ? `\n\n\`\`\`diff\n${finding.diff_hunk}\n\`\`\`` : "";
+        const issueBody = `${marker}\n\n**${severity}** — ${escapeHtml(finding.summary ?? "")}\n\n${escapeHtml(finding.body ?? "")}\n\nFile: \`${finding.current_path ?? "unknown"}${finding.current_line ? `:${finding.current_line}` : ""}\`\nReviewed SHA: ${finding.reviewed_sha}\nDiscovered by a manual Maomao health scan (job ${job.id}).${evidence}`;
+        const issue = await ctx.github.createIssue(job.installation_id, job.repo_owner, job.repo_name, title, issueBody);
+        ctx.store.recordScanIssue({
+          jobId: job.id,
+          repoFullName: job.repo_full_name,
+          fingerprint: finding.fingerprint,
+          issueNumber: issue.number,
+          issueUrl: issue.url,
+          title,
+        });
+        createdCount += 1;
+      } catch (error) {
+        failed += 1;
+        // Release the claim so a later retry can try this finding again.
+        ctx.store.clearScanIssue(job.repo_full_name, finding.fingerprint);
+        ctx.store.log(job.id, `Issue creation failed for ${finding.fingerprint}: ${error instanceof Error ? error.message : String(error)}`, "warn");
+      }
+    }
+    ctx.store.log(
+      job.id,
+      `Issue creation by ${actor.login}: ${createdCount} created, ${skipped} skipped (already present), ${failed} failed`,
+    );
+    if (failed > 0) {
+      return c.redirect(`/jobs/${job.id}?error=issues-partial:${failed}`, 302);
+    }
+    return c.redirect(`/jobs/${job.id}?notice=issues-created`, 302);
   });
 
   app.get("/api/jobs", (c) => {
@@ -326,6 +1132,15 @@ function noticeText(
     const short = sha ? ` (${sha.slice(0, 12)})` : "";
     return `Queued a review${target}${short} for this exact head SHA.`;
   }
+  if (code === "scan-queued") {
+    return "Health scan queued for the pinned default-branch head SHA.";
+  }
+  if (code === "issues-created") {
+    return "GitHub issues created for the validated findings (deduplicated).";
+  }
+  if (code?.startsWith("issues-partial")) {
+    return `Some issues could not be created (${code.split(":")[1] ?? "unknown"} failures). Retrying is safe: already-created issues are skipped.`;
+  }
   if (code === "exists") {
     return "A job already exists for this repository, pull request, and head SHA.";
   }
@@ -335,14 +1150,39 @@ function noticeText(
   return undefined;
 }
 
-function retryJob(c: Context, ctx: ServerContext, jobId: number, runId?: number) {
+// Reuses a still-valid token instead of rotating: per-request rotation would 403 forms open in other tabs.
+function ensureCsrfToken(c: Context, secret: string): string {
+  const existing = getCookie(c, CSRF_COOKIE);
+  if (existing && verifyCsrfToken(secret, existing)) return existing;
+  const token = issueCsrfToken(secret);
+  setCookie(c, CSRF_COOKIE, token, {
+    httpOnly: true,
+    sameSite: "Lax",
+    secure: cookieSecure(c.req.url, c.req.header("x-forwarded-proto")),
+    path: "/",
+    maxAge: Math.floor(CSRF_TTL_MS / 1000),
+  });
+  return token;
+}
+
+function retryJob(
+  c: Context<AppEnv>,
+  ctx: ServerContext,
+  pageOpts: { showLogout: boolean },
+  jobId: number,
+  runId?: number,
+) {
   const job = ctx.store.getJob(jobId);
   if (!job) return c.text("Not found", 404);
   const result = ctx.store.retryFailedReviewers(jobId, runId);
   if (!result.ok) {
+    const latest = ctx.store.findLatestJobForPull(job.repo_full_name, job.pr_number);
     return c.html(
       renderJob(job, ctx.store.listReviewerRuns(jobId), ctx.store.listLogs(jobId), {
-        showLogout: uiGateEnabled(ctx.config.uiPassword, ctx.config.uiSessionSecret),
+        ...pageOpts,
+        identity: c.get("identity"),
+        csrfToken: pageOpts.showLogout ? ensureCsrfToken(c, ctx.config.uiSessionSecret) : undefined,
+        prHeadSha: latest?.head_sha ?? job.head_sha,
         error: result.error,
         prFindings: ctx.store.listFindings(job.repo_full_name, job.pr_number),
       }),
@@ -352,6 +1192,22 @@ function retryJob(c: Context, ctx: ServerContext, jobId: number, runId?: number)
   ctx.queue.enqueue(jobId);
   return c.redirect(`/jobs/${jobId}?notice=retry`, 302);
 }
+
+const CSRF_FAILURE_HTML = `<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <title>Maomao — form expired</title>
+  <link rel="stylesheet" href="/assets/maomao.css"/>
+</head>
+<body>
+  <main id="main">
+    <p class="error" role="alert">This form was missing a valid CSRF token, or its token expired. Go back, reload the page, and try again.</p>
+    <p><a href="/">Back to jobs</a></p>
+  </main>
+</body>
+</html>`;
 
 function isReviewGithub(github: (ManualTriggerPort & Partial<GithubPort>) | undefined): github is ManualTriggerPort & GithubPort {
   return Boolean(

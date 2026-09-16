@@ -64,6 +64,8 @@ export interface ReviewThread {
   comments: ReviewThreadComment[];
 }
 
+export type ReviewEvent = "COMMENT" | "APPROVE" | "REQUEST_CHANGES";
+
 export interface GithubPort {
   getInstallationToken(installationId: number): Promise<string>;
   getPullDiff(
@@ -87,7 +89,27 @@ export interface GithubPort {
     commitId: string;
     body: string;
     comments: PullReviewComment[];
+    event?: ReviewEvent;
   }): Promise<PostedReview>;
+  getRepositoryHead?(
+    installationId: number,
+    owner: string,
+    repo: string,
+  ): Promise<{ defaultBranch: string; headSha: string }>;
+  getCommitDiff?(installationId: number, owner: string, repo: string, sha: string): Promise<string>;
+  listOpenIssuesByMarker?(
+    installationId: number,
+    owner: string,
+    repo: string,
+    marker: string,
+  ): Promise<Array<{ number: number; title: string; url: string; state: string }>>;
+  createIssue?(
+    installationId: number,
+    owner: string,
+    repo: string,
+    title: string,
+    body: string,
+  ): Promise<{ number: number; url: string }>;
   listIssueComments?(
     installationId: number,
     owner: string,
@@ -281,6 +303,43 @@ export class GithubClient implements GithubPort, ManualTriggerPort {
     }));
   }
 
+  async getRepositoryHead(installationId: number, owner: string, repo: string) {
+    const octokit = this.installationOctokit(installationId);
+    const info = await octokit.rest.repos.get({ owner, repo });
+    const branch = await octokit.rest.repos.getBranch({ owner, repo, branch: info.data.default_branch });
+    return { defaultBranch: info.data.default_branch, headSha: branch.data.commit.sha };
+  }
+
+  async getCommitDiff(installationId: number, owner: string, repo: string, sha: string) {
+    const octokit = this.installationOctokit(installationId);
+    const response = await octokit.request("GET /repos/{owner}/{repo}/commits/{ref}", {
+      owner,
+      repo,
+      ref: sha,
+      headers: { accept: "application/vnd.github.diff" },
+    });
+    return String(response.data);
+  }
+
+  async listOpenIssuesByMarker(installationId: number, owner: string, repo: string, marker: string) {
+    const octokit = this.installationOctokit(installationId);
+    const issues = await octokit.paginate(octokit.rest.issues.listForRepo, {
+      owner,
+      repo,
+      state: "open",
+      per_page: 100,
+    });
+    return issues
+      .filter((issue) => !issue.pull_request && (issue.body ?? "").includes(marker))
+      .map((issue) => ({ number: issue.number, title: issue.title ?? "", url: issue.html_url, state: issue.state }));
+  }
+
+  async createIssue(installationId: number, owner: string, repo: string, title: string, body: string) {
+    const octokit = this.installationOctokit(installationId);
+    const response = await octokit.rest.issues.create({ owner, repo, title, body });
+    return { number: response.data.number, url: response.data.html_url };
+  }
+
   async createCommentReview(input: {
     installationId: number;
     owner: string;
@@ -289,15 +348,17 @@ export class GithubClient implements GithubPort, ManualTriggerPort {
     commitId: string;
     body: string;
     comments: PullReviewComment[];
+    event?: ReviewEvent;
   }): Promise<PostedReview> {
     const octokit = this.installationOctokit(input.installationId);
+    const event = input.event ?? "COMMENT";
     try {
       const response = await octokit.rest.pulls.createReview({
         owner: input.owner,
         repo: input.repo,
         pull_number: input.pullNumber,
         commit_id: input.commitId,
-        event: "COMMENT",
+        event,
         body: input.body,
         comments: input.comments.map((comment) => ({
           path: comment.path,
@@ -309,13 +370,13 @@ export class GithubClient implements GithubPort, ManualTriggerPort {
       return { id: String(response.data.id), url: response.data.html_url ?? "" };
     } catch (error) {
       if (input.comments.length === 0) throw error;
-      // Inline comments must land on diff lines; fall back to a body-only COMMENT.
+      // Inline comments must land on diff lines; fall back to a body-only review.
       const response = await octokit.rest.pulls.createReview({
         owner: input.owner,
         repo: input.repo,
         pull_number: input.pullNumber,
         commit_id: input.commitId,
-        event: "COMMENT",
+        event,
         body: `${input.body}\n\n_Inline comments were omitted because GitHub rejected one or more diff locations._`,
       });
       return { id: String(response.data.id), url: response.data.html_url ?? "" };

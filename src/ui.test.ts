@@ -3,7 +3,7 @@ import { openDb } from "./db.js";
 import { seedDemoJobs } from "./demo/fixtures.js";
 import { JobStore } from "./jobs/store.js";
 import { THEME_CSS } from "./ui/theme.js";
-import { renderHome, renderJob, renderLogin } from "./ui/pages.js";
+import { renderConfigPage, renderHome, renderJob, renderLogin } from "./ui/pages.js";
 import { settledFindingsCopy } from "./ui/copy.js";
 import { formatCost, formatTokens, jobMetrics } from "./ui/metrics.js";
 
@@ -44,7 +44,7 @@ describe("theme tokens", () => {
 
 describe("monitoring pages", () => {
   it("renders login with appearance controls and no live SSE", () => {
-    const html = renderLogin(false, "/jobs/1");
+    const html = renderLogin({ nextPath: "/jobs/1", showPassword: true });
     expect(html).toContain("Sign in");
     expect(html).toContain('data-appearance="light"');
     expect(html).toContain('data-appearance="dark"');
@@ -107,7 +107,10 @@ describe("monitoring pages", () => {
       store.listReviewerRuns(observation!.id),
       store.listLogs(observation!.id),
     );
-    expect(observationWithPolicy).not.toContain("Poison alert");
+    // A policy without observed channels still renders the card, with both channels queued.
+    expect(observationWithPolicy).toContain("Poison alert");
+    expect(observationWithPolicy).toContain("laboratory re-check, then external dispatch");
+    expect(observationWithPolicy).toContain("Waiting on specialists and the aggregator");
   });
 
   it("renders job detail with reviewer cards, findings, and a log panel", () => {
@@ -136,8 +139,8 @@ describe("monitoring pages", () => {
     expect(html).toMatch(/Reconciliation<\/dt>\s*<dd>—<\/dd>/);
     expect(html).toContain("internal_and_external");
     expect(html).toContain("anthropic/claude-opus-4-6");
-    expect(html).toContain("dispatched (notification accepted)");
-    expect(html).toContain("does not track whether an external reviewer finished");
+    expect(html).toContain("Dispatched");
+    expect(html).toContain("Fire-and-forget: Maomao records only the immediate notification outcome");
   });
 
   it("collapses buried and resolved findings under a compact summary", () => {
@@ -202,6 +205,24 @@ describe("monitoring pages", () => {
     expect(staleHtml).toContain("6 / 6 reviewers done");
     expect(staleHtml).not.toContain(">Retry</button>");
   });
+
+  it("embeds the CSRF token in every state-changing form when provided", () => {
+    const store = seededStore();
+    const failed = store.listJobs(20).find((row) => row.state === "failed")!;
+    const token = "csrf-test-token";
+    const html = renderJob(failed, store.listReviewerRuns(failed.id), store.listLogs(failed.id), {
+      showLogout: true,
+      csrfToken: token,
+    });
+    const inputs = html.match(/<input type="hidden" name="csrf_token" value="[^"]*"/g) ?? [];
+    expect(inputs.length).toBeGreaterThanOrEqual(3);
+    expect(html).toContain(`name="csrf_token" value="${token}"/>`);
+    const home = renderHome(store.listJobs(20), store, { showLogout: true, csrfToken: token });
+    expect(home).toContain(`name="csrf_token" value="${token}"/>`);
+    const bare = renderJob(failed, store.listReviewerRuns(failed.id), store.listLogs(failed.id));
+    expect(bare).not.toContain('name="csrf_token"');
+    expect(renderHome([], store)).not.toContain('name="csrf_token"');
+  });
 });
 
 describe("job metrics", () => {
@@ -246,5 +267,282 @@ describe("job metrics", () => {
     const html = renderJob(job, store.listReviewerRuns(job.id), store.listLogs(job.id));
     expect(html).toContain("incomplete");
     expect(html).toContain("step_finish");
+  });
+});
+
+describe("poison alert card", () => {
+  function jobByTitle(store: JobStore, title: string) {
+    const job = store.listJobs(50).find((row) => row.pr_title === title);
+    if (!job) throw new Error(`fixture job not found: ${title}`);
+    return job;
+  }
+
+  it("hides the card entirely for ordinary (observation) jobs", () => {
+    const store = seededStore();
+    const job = jobByTitle(store, "Deprecate v1 list endpoint");
+    const html = renderJob(job, store.listReviewerRuns(job.id), store.listLogs(job.id));
+    expect(html).not.toContain("Poison alert");
+  });
+
+  it("renders only the internal channel for internal_only policies", () => {
+    const store = seededStore();
+    const job = jobByTitle(store, "Rotate billing webhook signing keys");
+    const html = renderJob(job, store.listReviewerRuns(job.id), store.listLogs(job.id));
+    const card = html.slice(html.indexOf("<h2>Poison alert</h2>"));
+    expect(card).toContain("Poison alert");
+    expect(card).toContain("laboratory re-check only");
+    expect(card).toContain("Internal model");
+    expect(card).toContain("Laboratory re-check finished");
+    expect(card).not.toContain("External dispatch");
+    expect(card).not.toContain("0 tokens");
+  });
+
+  it("renders both channels with badges when the policy requests them", () => {
+    const store = seededStore();
+    const job = store.listJobs(50).find((row) => row.poison_alert_policy === "internal_and_external");
+    if (!job) throw new Error("fixture job not found: internal_and_external");
+    const html = renderJob(job, store.listReviewerRuns(job.id), store.listLogs(job.id));
+    const card = html.slice(html.indexOf("<h2>Poison alert</h2>"));
+    expect(card).toContain("laboratory re-check, then external dispatch");
+    expect(card).toContain("Internal model");
+    expect(card).toContain("External dispatch");
+    expect(card).toContain("Dispatched");
+    expect(card).toContain("mention @repository-owner");
+    // The routing reason belongs to the Routing card, not the escalation status.
+    expect(card).not.toContain("Authentication flow changed");
+  });
+
+  it("renders external-only jobs without an internal block", () => {
+    const store = seededStore();
+    const job = jobByTitle(store, "Rotate billing webhook signing keys");
+    store.patchJob(job.id, {
+      poison_alert_policy: "external_only",
+      internal_escalation_state: "not_requested",
+      internal_escalation_model: null,
+      internal_escalation_reason: null,
+      external_dispatch_status: "dispatched",
+      external_dispatch_targets: JSON.stringify([{ type: "command", recipient: "@oncall", command: "review" }]),
+    });
+    const updated = store.getJob(job.id)!;
+    const html = renderJob(updated, store.listReviewerRuns(job.id), store.listLogs(job.id));
+    expect(html).toContain("external dispatch only");
+    expect(html).toContain("External dispatch");
+    expect(html).toContain("Dispatched");
+    expect(html).toContain("command @oncall review");
+    expect(html).not.toContain("Internal model");
+  });
+
+  it("shows queued channels while an in-progress job has not reached them", () => {
+    const store = seededStore();
+    const job = jobByTitle(store, "Deprecate v1 list endpoint");
+    store.patchJob(job.id, {
+      poison_alert_policy: "internal_and_external",
+      routing_profile: "poison-alert",
+      internal_escalation_state: "not_requested",
+      external_dispatch_status: "not_requested",
+    });
+    const updated = store.getJob(job.id)!;
+    const html = renderJob(updated, store.listReviewerRuns(job.id), store.listLogs(job.id));
+    expect(html).toContain("laboratory re-check, then external dispatch");
+    expect(html).toContain("Waiting on specialists and the aggregator");
+    expect(html).toContain("Dispatches after the GitHub review is posted");
+  });
+
+  it("gives sniffing jobs their own state, flavor, and running lab badge", () => {
+    const store = seededStore();
+    const job = jobByTitle(store, "Add deferred payment capture endpoint");
+    expect(job.state).toBe("sniffing");
+    const html = renderJob(job, store.listReviewerRuns(job.id), store.listLogs(job.id));
+    expect(html).toContain("Sniffing");
+    expect(html).toContain("Laboratory re-check for PR #96");
+    expect(html).toContain("Laboratory model in flight");
+    expect(html).toContain("Internal model");
+    expect(html).toContain("External dispatch");
+    expect(html).toContain("Dispatches after the GitHub review is posted");
+    expect(html).not.toContain("Aggregating");
+  });
+
+  it("keeps aggregating flavor distinct from sniffing", () => {
+    const store = seededStore();
+    const aggregating = jobByTitle(store, "Deprecate v1 list endpoint");
+    const html = renderJob(aggregating, store.listReviewerRuns(aggregating.id), store.listLogs(aggregating.id));
+    expect(html).toContain("Aggregation in progress");
+    expect(html).not.toContain("Laboratory re-check of the aggregated findings");
+    expect(html).not.toContain("Laboratory re-check for PR #88");
+  });
+
+  it("renders manual-policy jobs as waiting, or both channels once escalate is requested", () => {
+    const store = seededStore();
+    const job = jobByTitle(store, "Rotate billing webhook signing keys");
+    store.patchJob(job.id, {
+      poison_alert_policy: "manual",
+      internal_escalation_state: "not_requested",
+      manual_escalate_requested: 0,
+    });
+    const waiting = renderJob(store.getJob(job.id)!, store.listReviewerRuns(job.id), store.listLogs(job.id));
+    const waitingCard = waiting.slice(waiting.indexOf("<h2>Poison alert</h2>"));
+    expect(waitingCard).toContain("waiting for a manual @maomao escalate");
+    expect(waitingCard).not.toContain("Internal model");
+    expect(waitingCard).not.toContain("External dispatch");
+
+    store.patchJob(job.id, { manual_escalate_requested: 1 });
+    const requested = renderJob(store.getJob(job.id)!, store.listReviewerRuns(job.id), store.listLogs(job.id));
+    const requestedCard = requested.slice(requested.indexOf("<h2>Poison alert</h2>"));
+    // Manual escalate triggers the external dispatch; the internal pass is policy-gated elsewhere.
+    expect(requestedCard).toContain("manual escalate requested");
+    expect(requestedCard).toContain("external dispatch only");
+    expect(requestedCard).toContain("External dispatch");
+    expect(requestedCard).not.toContain("Internal model");
+  });
+
+  it("renders a pending policy for a poison-alert profile before the pipeline records one", () => {
+    const store = seededStore();
+    const job = jobByTitle(store, "Deprecate v1 list endpoint");
+    store.patchJob(job.id, { routing_profile: "poison-alert", poison_alert_policy: null });
+    const html = renderJob(store.getJob(job.id)!, store.listReviewerRuns(job.id), store.listLogs(job.id));
+    expect(html).toContain("Poison alert");
+    expect(html).not.toContain("Policy</strong> manual");
+    expect(html).toContain("Policy</strong> pending");
+  });
+});
+
+describe("finding mini diffs", () => {
+  const hunk = "@@ -50,6 +50,7 @@\n   const prior = 1;\n+  console.log(\"leak\", secret);\n   return token();";
+
+  it("renders the stored hunk, permalink, and stale marking on finding cards", () => {
+    const store = seededStore();
+    const job = store.listJobs(50).find((row) => row.state === "completed")!;
+    store.upsertFinding({
+      repoFullName: job.repo_full_name,
+      prNumber: job.pr_number,
+      fingerprint: "fp-hunk-test",
+      status: "open",
+      reviewedSha: job.head_sha,
+      currentSha: job.head_sha,
+      originalPath: "src/auth.ts",
+      originalLine: 51,
+      currentPath: "src/auth.ts",
+      currentLine: 51,
+      summary: "secret leaks into the log",
+      severity: "high",
+    });
+    store.upsertFinding({
+      repoFullName: job.repo_full_name,
+      prNumber: job.pr_number,
+      fingerprint: "fp-hunk-test",
+      status: "open",
+      reviewedSha: job.head_sha,
+      summary: "secret leaks into the log",
+      diffHunk: hunk,
+    });
+    const row = store.listFindings(job.repo_full_name, job.pr_number).find((f) => f.fingerprint === "fp-hunk-test")!;
+
+    const html = renderJob(job, store.listReviewerRuns(job.id), store.listLogs(job.id), {
+      prFindings: [row],
+      prHeadSha: job.head_sha,
+    });
+    expect(html).toContain("Show diff");
+    expect(html).toContain("diff-panel");
+    expect(html).toContain("+  console.log(&quot;leak&quot;, secret);");
+    expect(html).toContain('class="diff-add"');
+    expect(html).toContain('class="diff-ctx"');
+    expect(html).toContain(`blob/${job.head_sha}/src/auth.ts#L51`);
+    expect(html).toContain("view at this SHA");
+    expect(html).not.toContain("Older SHA");
+
+    const staleHtml = renderJob(job, store.listReviewerRuns(job.id), store.listLogs(job.id), {
+      prFindings: [row],
+      prHeadSha: "0000000newersha",
+    });
+    expect(staleHtml).toContain("Older SHA");
+    expect(staleHtml).toContain("is-stale-sha");
+  });
+
+  it("escapes diff content so findings cannot inject HTML", () => {
+    const store = seededStore();
+    const job = store.listJobs(50).find((row) => row.state === "completed")!;
+    store.upsertFinding({
+      repoFullName: job.repo_full_name,
+      prNumber: job.pr_number,
+      fingerprint: "fp-xss-test",
+      status: "open",
+      reviewedSha: job.head_sha,
+      summary: "script injection attempt",
+      diffHunk: '@@ -1 +1 @@\n+<script>alert(1)</script><img src=x onerror=alert(2)>',
+    });
+    const row = store.listFindings(job.repo_full_name, job.pr_number).find((f) => f.fingerprint === "fp-xss-test")!;
+    const html = renderJob(job, store.listReviewerRuns(job.id), store.listLogs(job.id), {
+      prFindings: [row],
+      prHeadSha: job.head_sha,
+    });
+    expect(html).toContain("&lt;script&gt;");
+    expect(html).not.toContain("<script>alert(1)</script>");
+  });
+
+  it("explains when no diff preview is possible instead of guessing", () => {
+    const store = seededStore();
+    const job = store.listJobs(50).find((row) => row.state === "completed")!;
+    store.upsertFinding({
+      repoFullName: job.repo_full_name,
+      prNumber: job.pr_number,
+      fingerprint: "fp-no-hunk",
+      status: "open",
+      reviewedSha: job.head_sha,
+      currentPath: "assets/logo.png",
+      summary: "binary asset finding",
+    });
+    store.upsertFinding({
+      repoFullName: job.repo_full_name,
+      prNumber: job.pr_number,
+      fingerprint: "fp-no-hunk",
+      status: "open",
+      reviewedSha: job.head_sha,
+      summary: "binary asset finding",
+      diffNote: "binary",
+    });
+    const row = store.listFindings(job.repo_full_name, job.pr_number).find((f) => f.fingerprint === "fp-no-hunk")!;
+    const html = renderJob(job, store.listReviewerRuns(job.id), store.listLogs(job.id), {
+      prFindings: [row],
+      prHeadSha: job.head_sha,
+    });
+    expect(html).toContain("No diff preview: binary file.");
+    expect(html).not.toContain("Show diff");
+  });
+});
+
+describe("config page", () => {
+  it("renders revisions, write controls only for operators, and escapes definitions", () => {
+    const data = {
+      revisions: [
+        {
+          id: 3,
+          name: "default",
+          status: "draft",
+          definition: { name: "default", reviewers: [{ role: "correctness" }], minPublishableSeverity: "info" },
+          note: null,
+          created_by: "octocat",
+          created_at: "2026-01-01T00:00:00Z",
+          updated_at: "2026-01-01T00:00:00Z",
+          activated_at: "2026-01-01T00:00:00Z",
+          editSeq: 2,
+        },
+      ],
+      audit: [{ id: 1, action: "draft_created", actor: "octocat", revision_id: 3, detail: "draft of default", created_at: "2026-01-01T00:00:00Z" }],
+      csrfToken: "tok",
+      canWrite: true,
+    };
+    const html = renderConfigPage(data);
+    expect(html).toContain("Review configuration");
+    // The definition JSON is rendered escaped inside the edit textarea.
+    expect(html).toContain("&quot;reviewers&quot;");
+    expect(html).toContain('name="csrf_token"');
+    expect(html).toContain("Activate");
+    expect(html).toContain("expected_edit_seq");
+    expect(html).toContain("Audit history");
+
+    const readonly = renderConfigPage({ ...data, canWrite: false, csrfToken: undefined });
+    expect(readonly).not.toContain("Activate");
+    expect(readonly).not.toContain('name="csrf_token"');
+    expect(readonly).toContain("requires an operator OAuth identity");
   });
 });

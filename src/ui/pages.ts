@@ -1,16 +1,20 @@
 import type { JobRow, JobStore, ReviewerRunRow } from "../jobs/store.js";
 import type { FindingRow } from "../findings/types.js";
 import { fingerprintFinding } from "../findings/identity.js";
+import { POLICIES_WITH_EXTERNAL, POLICIES_WITH_INTERNAL } from "../routing/types.js";
+import type { JobState } from "../config.js";
 import { elapsedMs, escapeHtml, formatDuration, shortSha } from "../util.js";
 import {
+  diffUnavailableCopy,
   emptyQueueCopy,
+  externalDispatchBadge,
   findingOverrideNote,
   findingStatusLabel,
   flavorForJob,
+  internalEscalationBadge,
   jobStateLabel,
   observationsCopy,
   routingProfileLabel,
-  dispatchStatusLabel,
   runStateLabel,
   severityLabel,
   settledFindingsCopy,
@@ -20,12 +24,13 @@ import {
   usageReportedCopy,
 } from "./copy.js";
 import { roleGlyph } from "./glyphs.js";
-import { layout, type PageOptions } from "./layout.js";
+import { csrfInput, layout, type PageOptions } from "./layout.js";
 import {
   findingLocation,
   formatCost,
   formatTokens,
   formatUsageBreakdown,
+  githubFileLink,
   jobMetrics,
   jobMetricsFromRuns,
   parseReviewerResult,
@@ -35,19 +40,52 @@ import {
 
 export type { PageOptions };
 
-export function renderLogin(error: boolean, nextPath: string): string {
-  const body = `
-    <h1>Sign in</h1>
-    <p class="lede">Enter the monitoring password to view jobs, logs, and APIs.</p>
-    ${error ? `<p class="error" role="alert">Invalid password.</p>` : ""}
-    <form class="login" method="post" action="/login">
+export type LoginError = "invalid" | "csrf" | "oauth-state" | "oauth-denied" | "oauth-failed" | "oauth-cancelled";
+
+const LOGIN_ERRORS: Record<LoginError, string> = {
+  invalid: "Invalid password.",
+  csrf: "This form's security token was missing or expired. Go back and try again.",
+  "oauth-state": "Sign-in could not be verified (the state was missing, expired, or replayed). Start again.",
+  "oauth-denied":
+    "Your GitHub account is not authorized to operate this Maomao instance. Ask an operator to add your GitHub user id, or sign out of GitHub and retry with a different account.",
+  "oauth-failed": "GitHub sign-in failed. Try again shortly.",
+  "oauth-cancelled": "GitHub sign-in was cancelled. You can try again.",
+};
+
+export interface LoginOptions {
+  error?: LoginError;
+  nextPath?: string;
+  csrfToken?: string;
+  showGithub?: boolean;
+  showPassword?: boolean;
+}
+
+export function renderLogin(options: LoginOptions = {}): string {
+  const { error, nextPath = "/", csrfToken, showGithub = false, showPassword = false } = options;
+  const errorCopy = error ? LOGIN_ERRORS[error] : "";
+  const githubButton = showGithub
+    ? `<a class="button github-login" href="/login/github${
+        nextPath !== "/" ? `?next=${encodeURIComponent(nextPath)}` : ""
+      }">Sign in with GitHub</a>`
+    : "";
+  const passwordForm = showPassword
+    ? `<form class="login" method="post" action="/login">
+      ${csrfInput(csrfToken)}
       <input type="hidden" name="next" value="${escapeHtml(nextPath)}"/>
       <label>
         Password
         <input type="password" name="password" autocomplete="current-password" autofocus required/>
       </label>
       <button type="submit">Sign in</button>
-    </form>`;
+    </form>`
+    : "";
+  const body = `
+    <h1>Sign in</h1>
+    <p class="lede">Sign in to view jobs, logs, and APIs.</p>
+    ${errorCopy ? `<p class="error" role="alert">${escapeHtml(errorCopy)}</p>` : ""}
+    ${githubButton}
+    ${githubButton && passwordForm ? `<p class="muted">or</p>` : ""}
+    ${passwordForm}`;
   return layout("Maomao sign in", body, { live: false });
 }
 
@@ -63,6 +101,7 @@ export function renderHome(jobs: JobRow[], store: JobStore, options: PageOptions
     ${options.notice ? `<p class="notice" role="status">${escapeHtml(options.notice)}</p>` : ""}
     ${options.error ? `<p class="error" role="alert">${escapeHtml(options.error)}</p>` : ""}
     <form class="trigger" method="post" action="/reviews">
+      ${csrfInput(options.csrfToken)}
       <label>
         Queue a GitHub pull request
         <input type="url" name="url" placeholder="https://github.com/owner/repo/pull/123" value="${escapeHtml(options.reviewUrl ?? "")}" required/>
@@ -145,11 +184,17 @@ export function renderJob(
         <dt>GitHub review</dt>
         <dd>${
           job.github_review_url
-            ? `<a href="${escapeHtml(job.github_review_url)}">${escapeHtml(job.github_review_id || "view COMMENT review")}</a>`
+            ? `<a href="${escapeHtml(job.github_review_url)}">${escapeHtml(job.github_review_id || "view review")}</a>`
             : job.state === "completed"
               ? "not published"
               : "—"
-        }</dd>
+        }
+          ${
+            job.review_event
+              ? `<div class="muted" title="${escapeHtml(job.review_event_reason || "")}">Event: <code class="metric">${escapeHtml(job.review_event)}</code>${job.review_event_reason ? ` — ${escapeHtml(job.review_event_reason)}` : ""}</div>`
+              : ""
+          }
+        </dd>
       </div>
     </dl>
     ${renderRouting(job)}
@@ -157,16 +202,19 @@ export function renderJob(
     ${job.failure_reason ? `<p class="error" role="alert"><strong>Failure:</strong> ${escapeHtml(job.failure_reason)}</p>` : ""}
     <div class="section-head">
       <h2>Reviewers</h2>
-      ${failedToRetry > 0 ? renderJobRetry(job.id, failedToRetry) : ""}
+      ${failedToRetry > 0 ? renderJobRetry(job.id, failedToRetry, options.csrfToken) : ""}
     </div>
     <p class="muted">${escapeHtml(progressCopy(metrics))}</p>
     <div class="cards">
-      ${runs.map((run) => renderRun(run, canRetryRun(job, run))).join("")}
+      ${runs.map((run) => renderRun(run, canRetryRun(job, run), options.csrfToken)).join("")}
     </div>
     <h2>Aggregator</h2>
     ${renderAggregator(job, metrics)}
     <h2 id="findings">Findings</h2>
-    ${renderFindings(metrics, options.prFindings ?? [])}
+    ${renderFindings(metrics, options.prFindings ?? [], {
+      prHeadSha: options.prHeadSha,
+      prHtmlUrl: job.pr_html_url,
+    })}
     <h2>Logs</h2>
     <ol class="logs" aria-label="Job logs">
       ${
@@ -185,10 +233,19 @@ export function renderJob(
 function renderQueueCard(job: JobRow, metrics: JobMetrics): string {
   const state = jobStateLabel(job.state);
   const elapsed = formatDuration(elapsedMs(job.started_at, job.finished_at) ?? elapsedMs(job.created_at));
-  const live = ["preparing", "reconciling", "routing", "reviewing", "aggregating", "publishing"].includes(job.state);
+  const live: readonly JobState[] = [
+    "preparing",
+    "reconciling",
+    "routing",
+    "reviewing",
+    "aggregating",
+    "sniffing",
+    "publishing",
+  ];
+  const isLive = live.includes(job.state);
   const flavor = flavorForJob(job.state, job.pr_number);
   return `<li>
-    <article class="specimen${live ? " is-live" : ""}">
+    <article class="specimen${isLive ? " is-live" : ""}">
       <div class="specimen-head">
         <span class="specimen-id">Specimen · job ${job.id}</span>
         ${renderState(job.state, state.text, state.hint, state.mark)}
@@ -237,45 +294,77 @@ function renderRouting(job: JobRow): string {
 }
 
 function renderEscalation(job: JobRow): string {
+  // The pipeline persists poison_alert_policy only once work starts, so an absent policy is
+  // rendered as "pending" (a live poison-alert job has not reached its escalation plan yet).
+  const policy = job.poison_alert_policy || "";
+  const manual = Boolean(job.manual_escalate_requested);
+  const internalState = job.internal_escalation_state;
+  const externalStatus = job.external_dispatch_status;
+  const internalObserved = Boolean(internalState && internalState !== "not_requested");
+  const externalObserved = Boolean(externalStatus && externalStatus !== "not_requested");
   const show =
-    job.routing_profile === "poison-alert" ||
-    (job.internal_escalation_state && job.internal_escalation_state !== "not_requested") ||
-    (job.external_dispatch_status && job.external_dispatch_status !== "not_requested") ||
-    Boolean(job.manual_escalate_requested);
+    Boolean(policy) || job.routing_profile === "poison-alert" || manual || internalObserved || externalObserved;
   if (!show) return "";
-  const targets = safeParseTargets(job.external_dispatch_targets);
-  const targetText =
-    targets.length > 0
-      ? targets
-          .map((target) => {
-            if (target.type === "mention") return `mention ${target.recipient}`;
-            if (target.type === "command") return `command ${target.recipient} ${target.command}`;
-            return `webhook ${target.urlSecretRef}`;
-          })
-          .join("; ")
-      : "none configured";
-  return `<h2>Poison alert</h2>
-    <article class="card">
-      <p><strong>Policy</strong> ${escapeHtml(job.poison_alert_policy || "—")}</p>
-      <p class="muted">${escapeHtml(job.routing_reason || "High-risk routing selected poison-alert.")}</p>
-      <h3>Internal model</h3>
-      <p class="muted">
-        state ${escapeHtml(job.internal_escalation_state || "not_requested")}
-        ${job.internal_escalation_model ? ` · model <code class="metric">${escapeHtml(job.internal_escalation_model)}</code>` : ""}
-        ${job.internal_escalation_provider ? ` · provider <code class="metric">${escapeHtml(job.internal_escalation_provider)}</code>` : ""}
-        · ${escapeHtml(formatTokens(job.internal_escalation_total_tokens))} tokens
-        · ${escapeHtml(formatCost(job.internal_escalation_cost))}
+
+  const internalRequested =
+    (POLICIES_WITH_INTERNAL as readonly string[]).includes(policy) || internalObserved;
+  const externalRequested =
+    (POLICIES_WITH_EXTERNAL as readonly string[]).includes(policy) ||
+    (policy === "manual" && manual) ||
+    (!policy && manual) ||
+    externalObserved;
+
+  const plan = internalRequested && externalRequested
+    ? "laboratory re-check, then external dispatch"
+    : internalRequested
+      ? "laboratory re-check only"
+      : externalRequested
+        ? "external dispatch only"
+        : policy === "manual" || (!policy && !internalObserved && !externalObserved)
+          ? "waiting for a manual @maomao escalate"
+          : "escalation pending";
+
+  const channels: string[] = [];
+  if (internalRequested) {
+    const badge = internalEscalationBadge(internalState);
+    const ran = internalState === "done" || internalState === "failed";
+    channels.push(`<h3>Internal model</h3>
+      <p>${renderState(badge.stateClass, badge.text, badge.hint, badge.mark)}
+        ${job.internal_escalation_model ? ` <code class="metric">${escapeHtml(job.internal_escalation_model)}</code>` : ""}
+        ${job.internal_escalation_provider ? `<span class="muted"> · <code class="metric">${escapeHtml(job.internal_escalation_provider)}</code></span>` : ""}
       </p>
-      ${job.internal_escalation_reason ? `<p>${escapeHtml(job.internal_escalation_reason)}</p>` : ""}
-      <p class="muted">Internal usage is recorded separately from specialist and aggregator totals.</p>
-      <h3>External dispatch</h3>
-      <p class="muted">
-        ${escapeHtml(dispatchStatusLabel(job.external_dispatch_status))}
-        · targets ${escapeHtml(targetText)}
+      ${
+        ran
+          ? `<p class="muted">${escapeHtml(formatTokens(job.internal_escalation_total_tokens))} tokens · ${escapeHtml(formatCost(job.internal_escalation_cost))}</p>`
+          : ""
+      }
+      ${job.internal_escalation_reason ? `<p>${escapeHtml(job.internal_escalation_reason)}</p>` : ""}`);
+  }
+  if (externalRequested) {
+    const decided = Boolean(job.external_dispatch_reason);
+    const badge = externalDispatchBadge(externalStatus, decided);
+    const targets = safeParseTargets(job.external_dispatch_targets);
+    const targetText = targets
+      .map((target) => {
+        if (target.type === "mention") return `mention ${target.recipient}`;
+        if (target.type === "command") return `command ${target.recipient} ${target.command}`;
+        return `webhook ${target.urlSecretRef}`;
+      })
+      .join("; ");
+    channels.push(`<h3>External dispatch</h3>
+      <p>${renderState(badge.stateClass, badge.text, badge.hint, badge.mark)}
+        ${externalObserved ? `<span class="muted">${targetText ? ` · ${escapeHtml(targetText)}` : ""}</span>` : ""}
       </p>
       ${job.external_dispatch_reason ? `<p>${escapeHtml(job.external_dispatch_reason)}</p>` : ""}
       ${job.external_dispatch_error ? `<p class="error">${escapeHtml(job.external_dispatch_error)}</p>` : ""}
-      <p class="muted">Maomao records only the immediate notification outcome. It does not track whether an external reviewer finished.</p>
+      <p class="muted">Fire-and-forget: Maomao records only the immediate notification outcome, not whether an external reviewer finished.</p>`);
+  }
+
+  const policyLabel = policy || "pending";
+  return `<h2>Poison alert</h2>
+    <article class="card">
+      <p><strong>Policy</strong> ${escapeHtml(policyLabel)} — ${escapeHtml(plan)}${manual ? " · <strong>manual escalate requested</strong>" : ""}</p>
+      ${channels.join("\n")}
     </article>`;
 }
 
@@ -400,14 +489,15 @@ function canRetryRun(job: JobRow, run: ReviewerRunRow): boolean {
   return ["failed", "completed"].includes(job.state) && run.state === "failed";
 }
 
-function renderJobRetry(jobId: number, count: number): string {
+function renderJobRetry(jobId: number, count: number, csrfToken?: string): string {
   const label = count === 1 ? "Retry failed reviewer" : `Retry ${count} failed reviewers`;
   return `<form class="retry-job" method="post" action="/jobs/${jobId}/retry">
+    ${csrfInput(csrfToken)}
     <button type="submit">${escapeHtml(label)}</button>
   </form>`;
 }
 
-function renderRun(run: ReviewerRunRow, showRetry = false): string {
+function renderRun(run: ReviewerRunRow, showRetry = false, csrfToken?: string): string {
   const parsed = parseReviewerResult(run.normalized_json);
   const findingCount = parsed?.findings.length ?? 0;
   const state = runStateLabel(run.state);
@@ -446,6 +536,7 @@ function renderRun(run: ReviewerRunRow, showRetry = false): string {
     ${
       showRetry
         ? `<form class="retry" method="post" action="/jobs/${run.job_id}/reviewers/${run.id}/retry">
+             ${csrfInput(csrfToken)}
              <button type="submit">Retry</button>
            </form>`
         : ""
@@ -485,7 +576,11 @@ function renderAggregator(job: JobRow, metrics: JobMetrics): string {
   </article>`;
 }
 
-function renderFindings(metrics: JobMetrics, persisted: FindingRow[] = []): string {
+function renderFindings(
+  metrics: JobMetrics,
+  persisted: FindingRow[] = [],
+  context: { prHeadSha?: string; prHtmlUrl?: string } = {},
+): string {
   const unconfirmed = !metrics.findingsConfirmed;
   const items = metrics.findingsConfirmed
     ? (metrics.aggregator?.findings ?? []).map((finding) => ({
@@ -504,7 +599,7 @@ function renderFindings(metrics: JobMetrics, persisted: FindingRow[] = []): stri
     cardInput: Parameters<typeof renderFindingCard>[0],
   ) => {
     const settledRow = cardInput.record?.status === "dismissed" || cardInput.record?.status === "resolved";
-    (settledRow ? settled : active).push(renderFindingCard(cardInput, settledRow));
+    (settledRow ? settled : active).push(renderFindingCard(cardInput, context, settledRow));
   };
 
   for (const finding of items) {
@@ -569,6 +664,7 @@ function renderFindingCard(
     unconfirmed: boolean;
     record?: FindingRow;
   },
+  context: { prHeadSha?: string; prHtmlUrl?: string } = {},
   collapsed = false,
 ): string {
   const sev = severityLabel(input.severity);
@@ -578,6 +674,15 @@ function renderFindingCard(
   const override = record ? findingOverrideNote(record) : undefined;
   const buried = record?.status === "dismissed";
   const resolved = record?.status === "resolved";
+  const stale = Boolean(
+    record?.reviewed_sha && context.prHeadSha && record.reviewed_sha !== context.prHeadSha,
+  );
+  const permalink = githubFileLink(
+    context.prHtmlUrl,
+    record?.reviewed_sha,
+    input.file ?? "",
+    input.line ?? null,
+  );
   const attention =
     !buried && !resolved && (input.severity === "blocker" || input.severity === "high")
       ? "Finding requires attention"
@@ -588,6 +693,7 @@ function renderFindingCard(
     buried ? "is-buried" : "",
     resolved ? "is-resolved" : "",
     collapsed ? "is-collapsed" : "",
+    stale ? "is-stale-sha" : "",
     record && record.status !== "open" ? `finding-status-${escapeHtml(record.status)}` : "",
   ]
     .filter(Boolean)
@@ -595,16 +701,25 @@ function renderFindingCard(
   const statusBadge = status
     ? `<span class="finding-status finding-status-${escapeHtml(record!.status)}" title="${escapeHtml(status.hint)}">${escapeHtml(status.text)}</span>`
     : "";
+  const staleBadge = stale
+    ? `<span class="stale-sha" title="Reviewed at ${escapeHtml(record!.reviewed_sha)}; a newer head SHA exists for this pull request.">Older SHA</span>`
+    : "";
+  const locLink = permalink
+    ? ` <a class="loc-link" href="${escapeHtml(permalink)}" title="Open this file at the exact reviewed revision on GitHub">view at this SHA</a>`
+    : "";
+  const diffBlock = renderFindingDiff(record);
   const body = `
         ${override ? `<p class="finding-override" role="status"><strong>${escapeHtml(override)}</strong></p>` : ""}
         ${attention ? `<p><strong>${attention}</strong></p>` : ""}
         ${input.reason ? `<p>${escapeHtml(input.reason)}</p>` : ""}
         ${input.suggested ? `<p class="muted">Suggested check: ${escapeHtml(input.suggested)}</p>` : ""}
-        ${input.agreed?.length ? `<p class="muted">reviewers: ${escapeHtml(input.agreed.join(", "))}</p>` : ""}`;
+        ${input.agreed?.length ? `<p class="muted">reviewers: ${escapeHtml(input.agreed.join(", "))}</p>` : ""}
+        ${diffBlock}`;
   if (collapsed) {
     return `<details class="${classes}">
         <summary>
           ${statusBadge}
+          ${staleBadge}
           <span class="sev sev-${escapeHtml(input.severity)}"><span class="mark" aria-hidden="true">${sev.mark}</span> ${sev.text}</span>
           ${loc ? `<span class="loc">${escapeHtml(loc)}</span>` : ""}
           <span class="finding-title">${escapeHtml(input.summary)}</span>
@@ -617,12 +732,360 @@ function renderFindingCard(
         <div class="finding-head">
           <span class="sev sev-${escapeHtml(input.severity)}"><span class="mark" aria-hidden="true">${sev.mark}</span> ${sev.text}</span>
           ${statusBadge}
+          ${staleBadge}
           ${input.unconfirmed ? `<span class="unconfirmed">Unconfirmed</span>` : ""}
           ${input.category ? `<span>· ${escapeHtml(input.category)}</span>` : ""}
           ${input.agreed?.length ? `<span class="muted">reviewers: ${escapeHtml(input.agreed.join(", "))}</span>` : ""}
         </div>
-        ${loc ? `<p class="loc">${escapeHtml(loc)}</p>` : ""}
+        ${loc ? `<p class="loc">${escapeHtml(loc)}${locLink}</p>` : ""}
         <h3>${escapeHtml(input.summary)}</h3>
         ${body}
       </article>`;
+}
+
+function renderFindingDiff(record?: FindingRow): string {
+  if (!record) return "";
+  const note = diffUnavailableCopy(record.diff_note);
+  if (!record.diff_hunk) {
+    return note ? `<p class="muted diff-note">${escapeHtml(note)}</p>` : "";
+  }
+  const lines = record.diff_hunk
+    .split("\n")
+    .map((line) => {
+      const cls = line.startsWith("+") ? "add" : line.startsWith("-") ? "del" : "ctx";
+      return `<span class="diff-${cls}">${escapeHtml(line)}</span>`;
+    })
+    .join("\n");
+  return `<details class="finding-diff">
+      <summary>Show diff</summary>
+      <pre class="diff-panel" aria-label="Diff hunk from the reviewed revision">${lines}</pre>
+      ${note ? `<p class="muted diff-note">${escapeHtml(note)}</p>` : ""}
+    </details>`;
+}
+
+export interface ConfigRevisionView {
+  id: number;
+  name: string;
+  status: string;
+  definition: unknown;
+  note: string | null;
+  created_by: string;
+  created_at: string;
+  updated_at: string;
+  activated_at: string | null;
+  editSeq: number;
+}
+
+export interface ConfigPageData {
+  revisions: ConfigRevisionView[];
+  audit: Array<{ id: number; action: string; actor: string; revision_id: number | null; detail: string | null; created_at: string }>;
+  csrfToken?: string;
+  canWrite: boolean;
+  notice?: string;
+  error?: string;
+}
+
+function revisionCard(revision: ConfigRevisionView, data: ConfigPageData): string {
+  const csrf = csrfInput(data.csrfToken);
+  const actions: string[] = [];
+  if (data.canWrite && revision.status === "draft") {
+    actions.push(`<form method="post" action="/config/revisions/${revision.id}/activate" class="inline-form">
+      ${csrf}
+      <button type="submit">Activate</button>
+    </form>`);
+  }
+  if (data.canWrite && revision.status === "retired") {
+    actions.push(`<form method="post" action="/config/revisions/${revision.id}/rollback" class="inline-form">
+      ${csrf}
+      <button type="submit">Roll back to this revision</button>
+    </form>`);
+  }
+  const definitionJson = JSON.stringify(revision.definition, null, 2);
+  return `<article class="card config-revision">
+    <header>
+      <span class="role"><strong>#${revision.id}</strong> ${escapeHtml(revision.name)} · ${escapeHtml(revision.status)}</span>
+      <span class="muted">by ${escapeHtml(revision.created_by)} · updated ${escapeHtml(revision.updated_at)}</span>
+    </header>
+    ${revision.note ? `<p class="muted">${escapeHtml(revision.note)}</p>` : ""}
+    <details>
+      <summary>Definition</summary>
+      <pre class="log-panel">${escapeHtml(definitionJson)}</pre>
+    </details>
+    ${revision.status === "draft" && data.canWrite ? `<details>
+      <summary>Edit draft</summary>
+      <form method="post" action="/config/drafts/${revision.id}">
+        ${csrf}
+        <input type="hidden" name="expected_edit_seq" value="${revision.editSeq}"/>
+        <textarea name="definition" rows="12" cols="72">${escapeHtml(definitionJson)}</textarea>
+        <button type="submit">Save draft</button>
+      </form>
+    </details>` : ""}
+    <div class="config-actions">${actions.join("")}</div>
+  </article>`;
+}
+
+export function renderConfigPage(data: ConfigPageData): string {
+  const active = data.revisions.filter((revision) => revision.status === "active");
+  const drafts = data.revisions.filter((revision) => revision.status === "draft");
+  const retired = data.revisions.filter((revision) => revision.status === "retired");
+  const csrf = csrfInput(data.csrfToken);
+  const createForm = data.canWrite
+    ? `<details class="config-create">
+        <summary>Create a new draft</summary>
+        <form method="post" action="/config/drafts">
+          ${csrf}
+          <textarea name="definition" rows="12" cols="72">${escapeHtml(
+            JSON.stringify(
+              {
+                name: "default",
+                reviewers: [{ role: "correctness" }],
+                minPublishableSeverity: "info",
+              },
+              null,
+              2,
+            ),
+          )}</textarea>
+          <button type="submit">Create draft</button>
+        </form>
+      </details>`
+    : `<p class="muted">Writing configuration requires an operator OAuth identity.</p>`;
+  const importForm = data.canWrite
+    ? `<details class="config-import">
+        <summary>Import exported configuration</summary>
+        <form method="post" action="/config/import">
+          ${csrf}
+          <textarea name="payload" rows="8" cols="72"></textarea>
+          <button type="submit">Import as drafts</button>
+        </form>
+      </details>`
+    : "";
+  const auditRows = data.audit
+    .map(
+      (entry) =>
+        `<tr><td>${escapeHtml(entry.created_at)}</td><td>${escapeHtml(entry.action)}</td><td>${escapeHtml(entry.actor)}</td><td>${entry.revision_id ?? "—"}</td><td>${escapeHtml(entry.detail ?? "")}</td></tr>`,
+    )
+    .join("");
+  const body = `
+    <h1>Review configuration</h1>
+    <p class="lede">Versioned review profiles and specialist selection. Activation is explicit and audited; credentials are never part of this configuration.</p>
+    ${data.notice ? `<p class="notice" role="status">${escapeHtml(data.notice)}</p>` : ""}
+    ${data.error ? `<p class="error" role="alert">${escapeHtml(data.error)}</p>` : ""}
+    <p><a href="/config/export">Export configuration (JSON)</a></p>
+    <h2>Active</h2>
+    ${active.map((revision) => revisionCard(revision, data)).join("") || `<p class="muted">No active revision — env configuration applies.</p>`}
+    <h2>Drafts</h2>
+    ${createForm}
+    ${drafts.map((revision) => revisionCard(revision, data)).join("") || `<p class="muted">No open drafts.</p>`}
+    <h2>Retired</h2>
+    ${retired.map((revision) => revisionCard(revision, data)).join("") || `<p class="muted">No retired revisions.</p>`}
+    ${importForm}
+    <h2>Audit history</h2>
+    <table class="config-audit">
+      <thead><tr><th>When</th><th>Action</th><th>Actor</th><th>Revision</th><th>Detail</th></tr></thead>
+      <tbody>${auditRows || `<tr><td colspan="5">No entries</td></tr>`}</tbody>
+    </table>`;
+  return layout("Review configuration", body, {
+    showLogout: data.canWrite || Boolean(data.csrfToken),
+    csrfToken: data.csrfToken,
+  });
+}
+
+export interface PromptRevisionView {
+  id: number;
+  role_id: string;
+  status: string;
+  body: string;
+  note: string | null;
+  created_by: string;
+  editSeq: number;
+  created_at: string;
+  updated_at: string;
+  activated_at: string | null;
+}
+
+export interface PromptFixtureView {
+  id: number;
+  name: string;
+  prMeta: Record<string, unknown>;
+  diffChars: number;
+  expectations: Array<{ severity: string; category?: string; pathContains?: string }>;
+  saved_by: string;
+  created_at: string;
+}
+
+export interface PromptEvaluationView {
+  id: number;
+  prompt_revision_id: number;
+  fixture_id: number;
+  model: string;
+  status: string;
+  findings: Array<{ severity?: string; category?: string; file?: string; summary?: string }>;
+  usage: { cost?: number; totalTokens?: number } | null;
+  duration_ms: number | null;
+  error: string | null;
+  created_at: string;
+}
+
+export interface PromptConfigPageData {
+  revisions: PromptRevisionView[];
+  fixtures: PromptFixtureView[];
+  evaluations: PromptEvaluationView[];
+  canWrite: boolean;
+  csrfToken?: string;
+  notice?: string;
+  error?: string;
+}
+
+function promptRevisionCard(revision: PromptRevisionView, data: PromptConfigPageData): string {
+  const csrf = csrfInput(data.csrfToken);
+  const actions: string[] = [];
+  if (data.canWrite && revision.status === "draft") {
+    actions.push(`<form method="post" action="/config/prompts/${revision.id}/activate" class="inline-form">
+      ${csrf}
+      <button type="submit">Activate</button>
+    </form>`);
+  }
+  if (data.canWrite && revision.status === "retired") {
+    actions.push(`<form method="post" action="/config/prompts/${revision.id}/rollback" class="inline-form">
+      ${csrf}
+      <button type="submit">Roll back to this revision</button>
+    </form>`);
+  }
+  return `<article class="card config-revision">
+    <header>
+      <span class="role"><strong>#${revision.id}</strong> ${escapeHtml(revision.role_id)} · ${escapeHtml(revision.status)}</span>
+      <span class="muted">by ${escapeHtml(revision.created_by)} · updated ${escapeHtml(revision.updated_at)}</span>
+    </header>
+    ${revision.note ? `<p class="muted">${escapeHtml(revision.note)}</p>` : ""}
+    <details>
+      <summary>Editable instructions (guardrails are composed at runtime and are not editable)</summary>
+      <pre class="log-panel">${escapeHtml(revision.body)}</pre>
+    </details>
+    ${revision.status === "draft" && data.canWrite ? `<details>
+      <summary>Edit draft</summary>
+      <form method="post" action="/config/prompts/drafts/${revision.id}">
+        ${csrf}
+        <input type="hidden" name="expected_edit_seq" value="${revision.editSeq}"/>
+        <textarea name="body" rows="10" cols="72">${escapeHtml(revision.body)}</textarea>
+        <button type="submit">Save draft</button>
+      </form>
+    </details>` : ""}
+    <div class="config-actions">${actions.join("")}</div>
+  </article>`;
+}
+
+export function renderPromptConfigPage(data: PromptConfigPageData): string {
+  const csrf = csrfInput(data.csrfToken);
+  const createForm = data.canWrite
+    ? `<details class="config-create">
+        <summary>Create a prompt draft</summary>
+        <form method="post" action="/config/prompts/drafts">
+          ${csrf}
+          <label>Role <input name="role_id" required/></label>
+          <textarea name="body" rows="10" cols="72" placeholder="Editable instructions only — guardrails are composed at runtime"></textarea>
+          <button type="submit">Create draft</button>
+        </form>
+      </details>`
+    : `<p class="muted">Writing prompt configuration requires an operator OAuth identity.</p>`;
+  const fixtureForm = data.canWrite
+    ? `<details class="config-import">
+        <summary>Save an evaluation fixture (explicit sanitize/provenance acknowledgement required)</summary>
+        <form method="post" action="/config/prompts/fixtures">
+          ${csrf}
+          <label>Name <input name="name" required/></label>
+          <label>PR metadata (JSON) <input name="pr_meta" value="{}"/></label>
+          <textarea name="diff" rows="8" cols="72" placeholder="Sanitized unified diff"></textarea>
+          <label><input type="checkbox" name="acknowledged"/> I confirm this fixture is sanitized and safe to store</label>
+          <button type="submit">Save fixture</button>
+        </form>
+      </details>`
+    : "";
+  const evalForm = data.canWrite
+    ? `<details class="config-import">
+        <summary>Evaluate a draft prompt against a fixture (offline, never publishes)</summary>
+        <form method="post" action="/config/prompts/evaluate">
+          ${csrf}
+          <label>Prompt revision <input name="prompt_revision_id" required/></label>
+          <label>Fixture <input name="fixture_id" required/></label>
+          <label>Model <input name="model"/></label>
+          <label>Max cost (USD) <input name="max_cost_usd"/></label>
+          <button type="submit">Evaluate</button>
+        </form>
+      </details>`
+    : "";
+  const revisionCards = data.revisions.map((revision) => promptRevisionCard(revision, data)).join("");
+  const fixtureRows = data.fixtures
+    .map(
+      (fixture) =>
+        `<tr><td>${fixture.id}</td><td>${escapeHtml(fixture.name)}</td><td>${fixture.diffChars}</td><td>${fixture.expectations.length}</td><td>${escapeHtml(fixture.saved_by)}</td></tr>`,
+    )
+    .join("");
+  const evaluationRows = data.evaluations
+    .map((evaluation) => {
+      const detail = evaluation.status === "failed" ? escapeHtml(evaluation.error ?? "failed") : `${evaluation.findings.length} finding(s)`;
+      return `<tr><td>${evaluation.id}</td><td>#${evaluation.prompt_revision_id}</td><td>#${evaluation.fixture_id}</td><td>${escapeHtml(evaluation.model)}</td><td>${escapeHtml(evaluation.status)}</td><td>${detail}</td></tr>`;
+    })
+    .join("");
+  const body = `
+    <h1>Specialist prompts</h1>
+    <p class="lede">Versioned prompt revisions with offline fixture evaluation. Security guardrails are composed at runtime and are not editable. Evaluation never publishes to GitHub or activates a prompt.</p>
+    <p><a href="/config">Back to review configuration</a></p>
+    ${data.notice ? `<p class="notice" role="status">${escapeHtml(data.notice)}</p>` : ""}
+    ${data.error ? `<p class="error" role="alert">${escapeHtml(data.error)}</p>` : ""}
+    <h2>Revisions</h2>
+    ${createForm}
+    ${revisionCards || `<p class="muted">No prompt revisions — env-authored role prompts apply.</p>`}
+    <h2>Evaluation fixtures</h2>
+    ${fixtureForm}
+    ${data.fixtures.length > 0 ? `<table class="config-audit"><thead><tr><th>ID</th><th>Name</th><th>Diff chars</th><th>Expectations</th><th>Saved by</th></tr></thead><tbody>${fixtureRows}</tbody></table>` : `<p class="muted">No fixtures saved.</p>`}
+    <h2>Evaluations</h2>
+    ${evalForm}
+    ${data.evaluations.length > 0 ? `<table class="config-audit"><thead><tr><th>ID</th><th>Prompt</th><th>Fixture</th><th>Model</th><th>Status</th><th>Result</th></tr></thead><tbody>${evaluationRows}</tbody></table>` : `<p class="muted">No evaluations recorded.</p>`}`;
+  return layout("Specialist prompts", body, {
+    showLogout: data.canWrite || Boolean(data.csrfToken),
+    csrfToken: data.csrfToken,
+  });
+}
+
+export interface ScanPageData {
+  canScan: boolean;
+  identityLogin?: string;
+  csrfToken?: string;
+  issueCreationEnabled: boolean;
+  profileRevision?: { id: number; name: string } | null;
+  error?: string;
+}
+
+export function renderScanPage(data: ScanPageData): string {
+  const csrf = csrfInput(data.csrfToken);
+  const body = `
+    <h1>Repository health scan</h1>
+    <p class="lede">Run a manual, read-only specialist scan of a repository's default branch and optionally create GitHub issues for validated findings. Nothing is created automatically.</p>
+    ${data.error ? `<p class="error" role="alert">${escapeHtml(data.error)}</p>` : ""}
+    ${data.canScan ? `
+    <form class="trigger" method="post" action="/scan">
+      ${csrf}
+      <label>
+        Repository (owner/repo — must be an allowlisted installation)
+        <input name="repo" placeholder="owner/repo" required/>
+      </label>
+      <button type="submit" aria-label="Run repository health scan">Sniff sniff</button>
+    </form>
+    <p class="muted">${data.profileRevision ? `Active profile revision: #${data.profileRevision.id} (${escapeHtml(data.profileRevision.name)}) — snapshotted onto the scan job.` : "No active profile revision — env configuration applies."}</p>
+    <h2>Create GitHub issues from a completed scan</h2>
+    ${
+      data.issueCreationEnabled
+        ? `<form class="trigger" method="post" action="/scan/issues">
+            ${csrf}
+            <label>Completed scan job ID <input name="job_id" required/></label>
+            <button type="submit" aria-label="Create GitHub issues for validated findings">Create issues for validated findings</button>
+          </form>
+          <p class="muted">Findings are deduplicated per repository + fingerprint; already-linked GitHub issues are skipped. Partial failures can be retried safely.</p>`
+        : `<p class="muted">Issue creation is disabled (GITHUB_ISSUE_CREATION_ENABLED=false).</p>`
+    }`
+    : `<p class="muted">Scanning requires an operator GitHub OAuth identity.</p>`}`;
+  return layout("Repository health scan", body, {
+    showLogout: data.canScan || Boolean(data.csrfToken),
+    csrfToken: data.csrfToken,
+  });
 }

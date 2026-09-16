@@ -1,5 +1,5 @@
 import type { Config } from "../config.js";
-import type { JobStore, JobRow, ReviewerRunRow } from "./store.js";
+import type { JobStore, JobRow, ReviewerRunRow, NewJobInput } from "./store.js";
 import type { GithubPort } from "../github/client.js";
 import { buildReviewBody, findExistingReview, toInlineComments, inlineCommentFingerprints } from "../github/client.js";
 import type { CheckoutPort } from "../checkout.js";
@@ -10,18 +10,23 @@ import {
   type OpenCodeRunResult,
 } from "../opencode/parse.js";
 import { buildAggregatorPrompt, buildReviewerPrompt } from "../prompts.js";
-import { reviewerSpecs } from "./enqueue.js";
+import { applyProfileToSpecs, reviewerSpecs } from "./enqueue.js";
 import {
   fallbackAggregator,
   parseAggregatorResult,
   parseReviewerResult,
+  severityRank,
   SchemaValidationError,
   extractJsonFromText,
   type AggregatorResult,
   type ReviewerResult,
+  type Severity,
 } from "../schema.js";
 import { classifyPriorFindings, collectPriorFindings, findingsForPublish } from "../findings/reconcile.js";
+import { resolveReviewEvent } from "./verdict.js";
 import { applyReconciliationThreads, persistClassifications, persistThreadsAsFindings } from "../findings/apply.js";
+import { findingDiffContext } from "../findings/apply.js";
+import { fingerprintFinding } from "../findings/identity.js";
 import type { ReconciliationSnapshot } from "../findings/types.js";
 import { currentFindingsForRisk } from "../findings/types.js";
 import { mapLimit, nowIso, sleep, truncate } from "../util.js";
@@ -81,7 +86,12 @@ export function createPipeline(deps: PipelineDeps) {
       const controller = new AbortController();
       aborts.set(jobId, controller);
       try {
-        await runJob(deps, jobId, controller.signal);
+        const job = deps.store.getJob(jobId);
+        if (job?.job_type === "health_scan") {
+          await runScanJob(deps, jobId, controller.signal);
+        } else {
+          await runJob(deps, jobId, controller.signal);
+        }
       } finally {
         if (aborts.get(jobId) === controller) aborts.delete(jobId);
       }
@@ -234,16 +244,19 @@ async function runJob(deps: PipelineDeps, jobId: number, signal: AbortSignal): P
     store.patchJob(jobId, { aggregator_normalized: JSON.stringify(aggregated, null, 2) });
 
     store.setJobState(jobId, "publishing", { aggregator_state: "done" });
-    const posted = await publishReview(deps, job, aggregated, parsedReviewers.length, snapshot);
+    const posted = await publishReview(deps, job, aggregated, parsedReviewers.length, snapshot, signal);
     const afterPublish = store.getJob(jobId) ?? job;
     if (posted) {
       store.patchJob(jobId, { github_review_id: posted.id, github_review_url: posted.url });
     }
-    store.log(jobId, posted ? `Published COMMENT review ${posted.id}` : "No GitHub review posted");
+    store.log(
+      jobId,
+      posted ? `Published ${store.getJob(jobId)?.review_event ?? "COMMENT"} review ${posted.id}` : "No GitHub review posted",
+    );
     if (store.isStale(jobId)) {
       throw new Error("stale");
     }
-    persistClassifications(store, job, snapshot.items);
+    persistClassifications(store, job, snapshot.items, diff);
     try {
       const threads = await deps.github.listReviewThreads(
         job.installation_id,
@@ -255,7 +268,8 @@ async function runJob(deps: PipelineDeps, jobId: number, signal: AbortSignal): P
         store,
         job,
         threads,
-        publishedFingerprints: posted?.postedFingerprints ?? [],
+        postedFingerprints: posted?.postedFingerprints ?? [],
+        diff,
       });
     } catch (error) {
       store.log(jobId, `Could not refresh finding thread ids: ${formatError(error)}`, "warn");
@@ -286,6 +300,13 @@ async function runJob(deps: PipelineDeps, jobId: number, signal: AbortSignal): P
   } catch (error) {
     if (store.isStale(jobId) || signal.aborted) {
       store.log(jobId, "Job aborted or marked stale; skipping publish", "warn");
+      const runningInternal = store.getJob(jobId)?.internal_escalation_state === "running";
+      if (runningInternal) {
+        store.patchJob(jobId, {
+          internal_escalation_state: "failed",
+          internal_escalation_reason: "job ended before the internal pass finished",
+        });
+      }
       if (!store.isStale(jobId)) store.setJobState(jobId, "stale", { finished_at: nowIso() });
       return;
     }
@@ -308,6 +329,145 @@ async function runJob(deps: PipelineDeps, jobId: number, signal: AbortSignal): P
   }
 }
 
+/**
+ * On-demand repository health scan of the pinned default-branch head SHA. Read-only:
+ * checkout + specialists + aggregation, findings persisted locally. Never publishes a
+ * GitHub review and never creates issues — issue creation is a separate operator action.
+ */
+async function runScanJob(deps: PipelineDeps, jobId: number, signal: AbortSignal): Promise<void> {
+  const store = deps.store;
+  const config = deps.config;
+  const job = store.getJob(jobId);
+  if (!job) return;
+  try {
+    // Allowlists can change after enqueue; re-check before doing any work.
+    const auth = authorizeGithubTarget(config, {
+      installationId: job.installation_id,
+      accountId: job.github_account_id ?? undefined,
+      repositoryId: job.github_repository_id ?? undefined,
+    });
+    if (!auth.ok) {
+      logAuthorizationRejection({ installationId: job.installation_id, reason: auth.reason });
+      store.setJobState(jobId, "failed", { failure_reason: `unauthorized: ${auth.reason}`, finished_at: nowIso() });
+      return;
+    }
+    store.setJobState(jobId, "preparing", { started_at: nowIso() });
+    store.log(jobId, `Health scan of ${job.repo_full_name} at ${job.head_sha}`);
+    const token = deps.getInstallationToken
+      ? await deps.getInstallationToken(job.installation_id)
+      : job.installation_id === 0
+        ? undefined
+        : await deps.github.getInstallationToken(job.installation_id);
+    if (!deps.github.getCommitDiff) throw new Error("health scans require a GitHub client with commit diff support");
+    const diff = await deps.github.getCommitDiff(job.installation_id, job.repo_owner, job.repo_name, job.head_sha);
+    if (config.maxDiffBytes > 0 && diff.length > config.maxDiffBytes) {
+      throw new Error(`commit diff exceeds MAX_DIFF_BYTES (${diff.length} > ${config.maxDiffBytes})`);
+    }
+    const workspace = await deps.checkout.prepare({
+      jobId,
+      installationId: job.installation_id,
+      owner: job.repo_owner,
+      repo: job.repo_name,
+      prNumber: 0,
+      baseSha: job.head_sha,
+      headSha: job.head_sha,
+      token,
+      secrets: githubKeySecrets(config),
+      signal,
+      fetchDiff: async () => diff,
+      metadata: {
+        repo: job.repo_full_name,
+        pr: 0,
+        title: job.pr_title,
+        baseSha: job.head_sha,
+        headSha: job.head_sha,
+      },
+    });
+    store.patchJob(jobId, { workspace_path: workspace.dir });
+    throwIfStale(store, jobId, signal);
+
+    await routeSpecialists(deps, job, diff, workspace.repoDir, [], signal);
+    store.setJobState(jobId, "reviewing");
+    const runs = store.listReviewerRuns(jobId);
+    store.log(jobId, `Running ${runs.length} specialist(s)`);
+    await mapLimit(runs, config.opencode.reviewerConcurrency, (run) => runReviewer(deps, job, run, workspace.repoDir, [workspace.diffPath, workspace.metaPath], signal));
+    const parsedReviewers = runs
+      .map((run) => ({ run: store.getReviewerRun(run.id), role: run.role }))
+      .filter((entry): entry is { run: ReviewerRunRow; role: string } => entry.run?.state === "done")
+      .map((entry) => ({ ...entry, parsed: parseReviewerResult(entry.run.normalized_json ?? "") }));
+    if (parsedReviewers.length === 0) {
+      throw new Error("all specialist reviewers failed or produced invalid JSON");
+    }
+
+    store.setJobState(jobId, "aggregating", {
+      aggregator_state: "running",
+      aggregator_started_at: nowIso(),
+      aggregator_model: config.opencode.aggregatorModel || config.opencode.reviewerModel || null,
+    });
+    let aggregated = await runAggregator(deps, job, parsedReviewers.map((entry) => entry.parsed), workspace.repoDir, [workspace.diffPath], signal);
+    throwIfStale(store, jobId, signal);
+    aggregated = { ...aggregated, findings: assignFindingIds(aggregated.findings) };
+    store.patchJob(jobId, { aggregator_normalized: JSON.stringify(aggregated, null, 2) });
+
+    // Persist scan findings locally; issue creation is a separate, explicit operator action.
+    const profileRevision = job.profile_revision_id ? store.configs.getRevision(job.profile_revision_id) : undefined;
+    const threshold = severityRank(profileRevision?.definition.minPublishableSeverity ?? "info");
+    let persisted = 0;
+    for (const finding of aggregated.findings) {
+      if (severityRank(finding.severity) > threshold) continue;
+      const context = findingDiffContext(diff, finding.file, finding.line);
+      store.upsertFinding({
+        repoFullName: job.repo_full_name,
+        prNumber: 0,
+        fingerprint: fingerprintFinding({ ...finding }),
+        status: "open",
+        reviewedSha: job.head_sha,
+        currentSha: job.head_sha,
+        originalPath: finding.file,
+        originalLine: finding.line,
+        currentPath: finding.file,
+        currentLine: finding.line,
+        category: finding.category,
+        summary: finding.summary,
+        body: finding.body,
+        severity: finding.severity,
+        confidence: finding.confidence,
+        diffHunk: context.diffHunk,
+        diffNote: context.diffNote,
+        lastJobId: job.id,
+      });
+      persisted += 1;
+    }
+    store.setJobState(jobId, "completed", {
+      aggregator_state: "done",
+      finished_at: nowIso(),
+    });
+    store.log(jobId, `Health scan completed: ${persisted} finding(s) persisted; no GitHub review posted`);
+  } catch (error) {
+    if (store.isStale(jobId) || signal.aborted) {
+      store.log(jobId, "Scan aborted or marked stale", "warn");
+      if (!store.isStale(jobId)) store.setJobState(jobId, "stale", { finished_at: nowIso() });
+      return;
+    }
+    const message = error instanceof Error ? error.message : String(error);
+    for (const run of store.listReviewerRuns(jobId)) {
+      if (run.state === "queued" || run.state === "running") {
+        store.patchReviewer(run.id, {
+          state: "failed",
+          validation_error: "job ended before this reviewer finished",
+          finished_at: nowIso(),
+        });
+      }
+    }
+    store.setJobState(jobId, "failed", {
+      failure_reason: message,
+      finished_at: nowIso(),
+      aggregator_state: store.getJob(jobId)?.aggregator_state === "done" ? "done" : "failed",
+    });
+    store.log(jobId, `Scan failed: ${message}`, "error");
+  }
+}
+
 function githubKeySecrets(config: Config): string[] {
   return [config.github.privateKey, config.github.webhookSecret].filter((value) => value.length > 4);
 }
@@ -318,10 +478,19 @@ function throwIfStale(store: JobStore, jobId: number, signal: AbortSignal): void
   }
 }
 
-function persistDecision(store: JobStore, jobId: number, decision: RoutingDecision, extra: Partial<JobRow> = {}): void {
+function persistDecision(
+  store: JobStore,
+  jobId: number,
+  decision: RoutingDecision,
+  poisonAlertPolicy: string | null,
+  extra: Partial<JobRow> = {},
+): void {
   const reason = sanitizePublicReason(decision.reason, 300) || "router decision";
+  // Record the escalation policy as soon as the profile is known, so the UI can show the
+  // planned channels while the job is still running (not only after dispatch).
   store.patchJob(jobId, {
     ...extra,
+    poison_alert_policy: decision.profile === "poison-alert" ? poisonAlertPolicy : null,
     routing_state: "done",
     routing_profile: decision.profile,
     routing_reason: reason,
@@ -348,7 +517,9 @@ async function routeSpecialists(
   const allowlist = config.reviewers.map((role) => role.id);
 
   if (config.routing.mode === "fixed") {
-    if (existing.length === 0) store.ensureReviewerRuns(job.id, reviewerSpecs(config));
+    if (existing.length === 0) {
+      store.ensureReviewerRuns(job.id, applyProfileToSpecs(store, config, reviewerSpecs(config), job.profile_revision_id));
+    }
     const roles = store.listReviewerRuns(job.id).map((run) => run.role);
     persistDecision(store, job.id, {
       profile: "diagnosis",
@@ -358,7 +529,7 @@ async function routeSpecialists(
       source: "fixed",
       signals: scanRoutingSignals({ diff, title: job.pr_title, body: job.pr_body }),
       hardRuleEscalated: false,
-    }, { routing_mode: "fixed" });
+    }, null, { routing_mode: "fixed" });
     store.log(job.id, `Routing skipped (fixed): ${roles.join(", ") || "(none)"}`);
     return;
   }
@@ -378,7 +549,7 @@ async function routeSpecialists(
       source: "fixed",
       signals: scanRoutingSignals({ diff, title: job.pr_title, body: job.pr_body }),
       hardRuleEscalated: false,
-    }, { routing_mode: config.routing.mode });
+    }, null, { routing_mode: config.routing.mode });
     store.log(job.id, `Routing recorded preselected reviewers: ${roles.join(", ")}`);
     return;
   }
@@ -386,7 +557,10 @@ async function routeSpecialists(
   store.setJobState(job.id, "routing", { routing_state: "running", routing_mode: config.routing.mode });
   const signals = scanRoutingSignals({ diff, title: job.pr_title, body: job.pr_body });
   let decision: RoutingDecision;
-  const routerModel = config.routing.model || config.opencode.reviewerModel;
+  const profileRouterModel = job.profile_revision_id
+    ? store.configs.getRevision(job.profile_revision_id)?.definition.routerModel
+    : undefined;
+  const routerModel = profileRouterModel || config.routing.model || config.opencode.reviewerModel;
   const useModel = (config.routing.mode === "model" || config.routing.mode === "hybrid") && Boolean(routerModel);
 
   if (!useModel) {
@@ -450,8 +624,17 @@ async function routeSpecialists(
     }
   }
 
-  persistDecision(store, job.id, decision, { routing_mode: config.routing.mode });
-  store.ensureReviewerRuns(job.id, reviewerSpecs(config, decision.reviewers));
+  persistDecision(
+    store,
+    job.id,
+    decision,
+    decision.profile === "poison-alert" ? config.poisonAlert.policy : null,
+    { routing_mode: config.routing.mode },
+  );
+  store.ensureReviewerRuns(
+    job.id,
+    applyProfileToSpecs(store, config, reviewerSpecs(config, decision.reviewers), job.profile_revision_id),
+  );
   store.log(
     job.id,
     `Routed profile=${decision.profile} source=${decision.source} reviewers=${decision.reviewers.join(", ")} reason=${decision.reason}`,
@@ -511,7 +694,13 @@ async function runReviewer(
   signal: AbortSignal,
 ): Promise<void> {
   const role = deps.config.reviewers.find((item) => item.id === run.role);
-  const model = role?.model || deps.config.opencode.reviewerModel;
+  // The run's stored model (profile revision / enqueue spec) wins over config defaults.
+  const model = run.model || role?.model || deps.config.opencode.reviewerModel;
+  // An active prompt revision overrides the role's authored body; guardrails stay composed here.
+  const promptRevision = deps.store.prompts.getActivePrompt(run.role);
+  if (promptRevision) {
+    deps.store.patchReviewer(run.id, { prompt_revision_id: promptRevision.id });
+  }
   const retries = Math.max(0, deps.config.opencode.maxRetries);
   let lastError = "unknown error";
 
@@ -538,6 +727,7 @@ async function runReviewer(
         baseSha: job.base_sha,
         headSha: job.head_sha,
         author: job.pr_author,
+        promptBody: promptRevision?.body,
       });
       result = await deps.opencode.run({
         cwd,
@@ -637,6 +827,7 @@ async function runAggregator(
       aggregator_model: model || null,
       aggregator_provider: model.includes("/") ? model.split("/")[0] : null,
       aggregator_state: "done",
+      aggregator_fallback: 0,
       aggregator_finished_at: nowIso(),
       aggregator_duration_ms: Date.now() - started,
       ...aggregatorUsagePersistence(result.usage),
@@ -651,6 +842,7 @@ async function runAggregator(
       aggregator_normalized: JSON.stringify(fallback, null, 2),
       aggregator_model: model || null,
       aggregator_state: "done",
+      aggregator_fallback: 1,
       aggregator_finished_at: nowIso(),
       aggregator_duration_ms: Date.now() - started,
     });
@@ -676,6 +868,8 @@ async function runInternalEscalation(
     return firstPass;
   }
 
+  // The lab model runs as its own stage so the UI can say "Sniffing" instead of "Aggregating".
+  deps.store.setJobState(job.id, "sniffing");
   const started = Date.now();
   deps.store.patchJob(job.id, {
     internal_escalation_state: "running",
@@ -770,6 +964,7 @@ async function publishReview(
   aggregated: AggregatorResult,
   reviewerCount: number,
   snapshot: ReconciliationSnapshot,
+  signal: AbortSignal,
 ): Promise<{ id: string; url: string; postedFingerprints: string[] } | undefined> {
   if (deps.store.isStale(job.id)) return undefined;
 
@@ -777,20 +972,55 @@ async function publishReview(
   const already = findExistingReview(existing, job.head_sha);
   if (already) {
     deps.store.log(job.id, `Review already exists for ${job.head_sha}; skipping publish`);
+    deps.store.patchJob(job.id, {
+      review_event: "COMMENT",
+      review_event_reason: "existing maomao review found by marker",
+    });
     return { ...already, postedFingerprints: [] };
   }
 
-  const publishable = findingsForPublish(aggregated.findings, snapshot);
+  let publishable = findingsForPublish(aggregated.findings, snapshot);
+  // severityRank is inverted (blocker=0), so "at or above" the minimum means rank <= threshold.
+  const profileRevision = job.profile_revision_id
+    ? deps.store.configs.getRevision(job.profile_revision_id)
+    : undefined;
+  if (profileRevision) {
+    const threshold = severityRank(profileRevision.definition.minPublishableSeverity);
+    publishable = publishable.filter(
+      (finding) => severityRank((finding.severity ?? "info") as Severity) <= threshold,
+    );
+  }
   const dismissedCount = snapshot.items.filter((item) => item.status === "dismissed").length;
   if (dismissedCount > 0) {
     deps.store.log(job.id, `Omitting ${dismissedCount} dismissed finding(s) from this review`);
   }
   const findingsCount = publishable.length;
-  const verdict = findingsCount === 0 && aggregated.verdict === "clean" ? "clean" : aggregated.verdict;
-  if (findingsCount === 0 && verdict === "clean" && !deps.config.postEmptyReview) {
-    deps.store.log(job.id, "Clean review with no findings; POST_EMPTY_REVIEW is false, not posting");
+  // A review only counts as clean when the aggregator said so AND nothing survived filtering.
+  const clean = findingsCount === 0 && aggregated.verdict === "clean";
+
+  // Only the orchestrator selects the GitHub event; specialists never do.
+  const runs = deps.store.listReviewerRuns(job.id);
+  const allReviewersDone = runs.length > 0 && runs.every((run) => run.state === "done" && !run.validation_error);
+  const aggregatorFallback = (deps.store.getJob(job.id)?.aggregator_fallback ?? 0) === 1;
+  const decision = resolveReviewEvent({
+    allowApprove: deps.config.reviewAllowApprove,
+    allowRequestChanges: deps.config.reviewAllowRequestChanges,
+    minSeverity: deps.config.reviewRequestChangesMinSeverity,
+    clean,
+    findings: publishable,
+    allReviewersDone,
+    aggregatorFallback,
+    stale: deps.store.isStale(job.id),
+  });
+
+  if (clean && !deps.config.postEmptyReview) {
+    const reason = `${decision.reason}; not posting because POST_EMPTY_REVIEW is false`;
+    deps.store.log(job.id, `Clean review with no findings; POST_EMPTY_REVIEW is false, not posting`);
+    deps.store.patchJob(job.id, { review_event: "COMMENT", review_event_reason: reason });
     return undefined;
   }
+
+  deps.store.log(job.id, `Review event: ${decision.event} (${decision.reason})`);
 
   const body = buildReviewBody({
     headSha: job.head_sha,
@@ -800,6 +1030,8 @@ async function publishReview(
   });
   const comments = toInlineComments(publishable, deps.config.maxInlineComments, job.head_sha);
   const postedFingerprints = inlineCommentFingerprints(comments);
+  // Re-check staleness after the decision: an APPROVE must never land on a superseded SHA.
+  throwIfStale(deps.store, job.id, signal);
   const posted = await deps.github.createCommentReview({
     installationId: job.installation_id,
     owner: job.repo_owner,
@@ -808,6 +1040,13 @@ async function publishReview(
     commitId: job.head_sha,
     body,
     comments,
+    event: decision.event,
+  });
+  // Record the event only after GitHub accepted the review, so a recorded event
+  // always corresponds to a delivered one.
+  deps.store.patchJob(job.id, {
+    review_event: decision.event,
+    review_event_reason: decision.reason,
   });
   return { ...posted, postedFingerprints };
 }

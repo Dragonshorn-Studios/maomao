@@ -5,7 +5,8 @@ export interface ReviewerRole {
   model?: string;
 }
 
-const COMMON_RULES = `You are a specialist code reviewer working for Maomao, a pull request review service.
+/** Non-editable security/schema instructions. Always composed at runtime, never stored in revisions. */
+export const REVIEWER_GUARDRAILS = `You are a specialist code reviewer working for Maomao, a pull request review service.
 
 Hard rules:
 - Review the provided diff and repository snapshot only.
@@ -42,7 +43,7 @@ export const OPTIONAL_REVIEWER_ROLES: ReviewerRole[] = [
   {
     id: "data-integrity",
     title: "Data integrity / migrations",
-    prompt: `${COMMON_RULES}
+    prompt: `${REVIEWER_GUARDRAILS}
 
 Role id: data-integrity
 Focus: schema and data migrations, destructive SQL, missing backfills, irreversible data loss, inconsistent writes, and storage invariants.
@@ -51,7 +52,7 @@ Ignore style. If the diff has no data/schema impact, verdict may be clean.`,
   {
     id: "concurrency",
     title: "Concurrency / races",
-    prompt: `${COMMON_RULES}
+    prompt: `${REVIEWER_GUARDRAILS}
 
 Role id: concurrency
 Focus: races, lock ordering, shared mutable state, async interleaving, deadlocks, and lost updates.
@@ -63,7 +64,7 @@ export const DEFAULT_REVIEWER_ROLES: ReviewerRole[] = [
   {
     id: "correctness",
     title: "Correctness / regression hunter",
-    prompt: `${COMMON_RULES}
+    prompt: `${REVIEWER_GUARDRAILS}
 
 Role id: correctness
 Focus: bugs, broken control flow, off-by-one errors, race conditions, incorrect refactors, behavioral regressions, mishandled errors, and logic that cannot do what the PR claims.
@@ -72,7 +73,7 @@ Ignore pure style. Do not suggest new features.`,
   {
     id: "security",
     title: "Security / trust-boundary reviewer",
-    prompt: `${COMMON_RULES}
+    prompt: `${REVIEWER_GUARDRAILS}
 
 Role id: security
 Focus: injection, authz/authn gaps, secret leakage, path traversal, SSRF, unsafe deserialization, untrusted input reaching sinks, and weakened trust boundaries.
@@ -81,7 +82,7 @@ Do not report theoretical issues with no path in this diff.`,
   {
     id: "tests",
     title: "Tests / missing edge cases",
-    prompt: `${COMMON_RULES}
+    prompt: `${REVIEWER_GUARDRAILS}
 
 Role id: tests
 Focus: missing tests for new behavior, untested failure paths, assertions that cannot fail, snapshots that hide regressions, and edge cases the change introduces.
@@ -90,7 +91,7 @@ Do not demand tests for comments or pure formatting.`,
   {
     id: "architecture",
     title: "Architecture / coupling",
-    prompt: `${COMMON_RULES}
+    prompt: `${REVIEWER_GUARDRAILS}
 
 Role id: architecture
 Focus: layering violations, hidden coupling, duplicated abstractions, leaked internals, and changes that make the module harder to maintain.
@@ -99,7 +100,7 @@ Skip nitpicks about import order or naming taste.`,
   {
     id: "api",
     title: "API / backwards compatibility",
-    prompt: `${COMMON_RULES}
+    prompt: `${REVIEWER_GUARDRAILS}
 
 Role id: api
 Focus: public API / CLI / HTTP / schema / event contract changes, breaking callers, missing migration notes, and incompatible defaults.
@@ -108,7 +109,7 @@ If there is no public surface in the diff, verdict may be clean.`,
   {
     id: "maintainer",
     title: "Skeptical maintainer / merge blockers",
-    prompt: `${COMMON_RULES}
+    prompt: `${REVIEWER_GUARDRAILS}
 
 Role id: maintainer
 Focus: merge blockers a careful maintainer would raise: incomplete changes, dangerous defaults, irreversible data risk, unclear ownership, or a PR that should not land as-is.
@@ -117,6 +118,18 @@ Be conservative. Do not invent blockers.`,
 ];
 
 export const KNOWN_REVIEWER_ROLES: ReviewerRole[] = [...DEFAULT_REVIEWER_ROLES, ...OPTIONAL_REVIEWER_ROLES];
+
+/** The operator-editable part of a role prompt: everything after the immutable guardrails. */
+export function promptBodyFromRolePrompt(prompt: string): string {
+  return prompt.startsWith(REVIEWER_GUARDRAILS) ? prompt.slice(REVIEWER_GUARDRAILS.length).trim() : prompt;
+}
+
+/** Composes the runtime prompt: non-editable guardrails first, operator body second. */
+export function composeReviewerPrompt(body: string): string {
+  return `${REVIEWER_GUARDRAILS}
+
+${body}`;
+}
 
 export function buildReviewerPrompt(input: {
   role: ReviewerRole;
@@ -127,8 +140,12 @@ export function buildReviewerPrompt(input: {
   baseSha: string;
   headSha: string;
   author: string;
+  /** Operator-authored body override (active prompt revision); guardrails still composed here. */
+  promptBody?: string;
 }): string {
-  return `${input.role.prompt}
+  // The body is always the editable part; guardrails are composed here, never stored in it.
+  const body = input.promptBody?.trim() ? input.promptBody.trim() : promptBodyFromRolePrompt(input.role.prompt);
+  return `${composeReviewerPrompt(body)}
 
 Repository: ${input.repoFullName}
 PR: #${input.prNumber} ${input.prTitle}

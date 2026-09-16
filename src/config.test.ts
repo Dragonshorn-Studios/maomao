@@ -76,7 +76,57 @@ describe("loadConfig", () => {
           UI_PASSWORD: "pw",
         }),
       ),
-    ).toThrow(/UI_PASSWORD and UI_SESSION_SECRET/);
+    ).toThrow(/UI_PASSWORD requires UI_SESSION_SECRET/);
+  });
+
+  it("rejects half-configured GitHub OAuth", () => {
+    const base = {
+      GITHUB_APP_ID: "1",
+      GITHUB_APP_PRIVATE_KEY: "k",
+      GITHUB_WEBHOOK_SECRET: "s",
+      UI_SESSION_SECRET: "session-secret",
+      MAOMAO_ADMIN_GITHUB_IDS: "1001",
+      MAOMAO_PUBLIC_URL: "https://maomao.example",
+    };
+    expect(() =>
+      assertRuntimeConfig(loadConfig({ ...base, GITHUB_OAUTH_CLIENT_ID: "cid" })),
+    ).toThrow(/GITHUB_OAUTH_CLIENT_ID and GITHUB_OAUTH_CLIENT_SECRET/);
+    expect(() =>
+      assertRuntimeConfig(loadConfig({ ...base, GITHUB_OAUTH_CLIENT_SECRET: "csecret" })),
+    ).toThrow(/GITHUB_OAUTH_CLIENT_ID and GITHUB_OAUTH_CLIENT_SECRET/);
+    expect(() =>
+      assertRuntimeConfig(
+        loadConfig({ ...base, GITHUB_OAUTH_CLIENT_ID: "cid", GITHUB_OAUTH_CLIENT_SECRET: "csecret", MAOMAO_ADMIN_GITHUB_IDS: "" }),
+      ),
+    ).toThrow(/MAOMAO_ADMIN_GITHUB_IDS/);
+    expect(() =>
+      assertRuntimeConfig(
+        loadConfig({ ...base, GITHUB_OAUTH_CLIENT_ID: "cid", GITHUB_OAUTH_CLIENT_SECRET: "csecret", UI_SESSION_SECRET: "" }),
+      ),
+    ).toThrow(/UI_SESSION_SECRET/);
+    expect(() =>
+      assertRuntimeConfig(
+        loadConfig({ ...base, GITHUB_OAUTH_CLIENT_ID: "cid", GITHUB_OAUTH_CLIENT_SECRET: "csecret", MAOMAO_PUBLIC_URL: "" }),
+      ),
+    ).toThrow(/MAOMAO_PUBLIC_URL/);
+    expect(() =>
+      assertRuntimeConfig(
+        loadConfig({ ...base, GITHUB_OAUTH_CLIENT_ID: "cid", GITHUB_OAUTH_CLIENT_SECRET: "csecret" }),
+      ),
+    ).not.toThrow();
+  });
+
+  it("rejects UI_LOCAL_LOGIN without a password gate", () => {
+    expect(() =>
+      assertRuntimeConfig(
+        loadConfig({
+          GITHUB_APP_ID: "1",
+          GITHUB_APP_PRIVATE_KEY: "k",
+          GITHUB_WEBHOOK_SECRET: "s",
+          UI_LOCAL_LOGIN: "true",
+        }),
+      ),
+    ).toThrow(/UI_LOCAL_LOGIN requires both UI_PASSWORD and UI_SESSION_SECRET/);
   });
 
   it("supports unknown reviewer ids", () => {

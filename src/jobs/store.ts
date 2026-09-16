@@ -3,6 +3,8 @@ import type { JobState, ReviewerState } from "../config.js";
 import type { FindingRow, FindingStatus } from "../findings/types.js";
 import { nowIso } from "../util.js";
 import { publish } from "../events.js";
+import { ReviewConfigStore } from "../config-revisions.js";
+import { PromptRevisionStore } from "../prompt-revisions.js";
 
 export interface JobRow {
   id: number;
@@ -28,6 +30,12 @@ export interface JobRow {
   workspace_path: string | null;
   github_review_id: string | null;
   github_review_url: string | null;
+  review_event: string | null;
+  review_event_reason: string | null;
+  aggregator_fallback: number | null;
+  profile_revision_id: number | null;
+  job_type: string;
+  scan_branch: string | null;
   aggregator_raw: string | null;
   aggregator_normalized: string | null;
   aggregator_model: string | null;
@@ -119,6 +127,7 @@ export interface ReviewerRunRow {
   cache_write_tokens: number | null;
   total_tokens: number | null;
   usage_complete: number | null;
+  prompt_revision_id: number | null;
   usage_warning: string | null;
 }
 
@@ -150,6 +159,8 @@ export interface NewJobInput {
   webhookDeliveryId?: string;
   webhookEvent?: string;
   reviewers: { role: string; title: string; model?: string }[];
+  jobType?: "pr_review" | "health_scan";
+  scanBranch?: string | null;
 }
 
 export interface EnqueueResult {
@@ -184,6 +195,7 @@ const ACTIVE_JOB_STATES: JobState[] = [
   "routing",
   "reviewing",
   "aggregating",
+  "sniffing",
   "publishing",
 ];
 
@@ -196,10 +208,14 @@ const TERMINAL_SKIP_REQUEUE: JobState[] = [
   "routing",
   "reviewing",
   "aggregating",
+  "sniffing",
 ];
 
 const JOB_PATCH_KEYS = new Set<string>([
   "failure_reason",
+  "review_event",
+  "review_event_reason",
+  "aggregator_fallback",
   "workspace_path",
   "github_review_id",
   "github_review_url",
@@ -265,9 +281,20 @@ const JOB_PATCH_KEYS = new Set<string>([
 ]);
 
 export class JobStore {
-  constructor(private readonly db: SqliteDb) {}
+  /** Versioned review-profile configuration over the same database. */
+  readonly configs: ReviewConfigStore;
+  /** Versioned specialist prompts, fixtures, and evaluations over the same database. */
+  readonly prompts: PromptRevisionStore;
 
-  enqueue(input: NewJobInput): EnqueueResult {
+  constructor(
+    private readonly db: SqliteDb,
+    modelCatalog: string[] = [],
+  ) {
+    this.configs = new ReviewConfigStore(db, modelCatalog);
+    this.prompts = new PromptRevisionStore(db);
+  }
+
+  enqueue(input: NewJobInput & { profileRevisionId?: number }): EnqueueResult {
     const createdAt = nowIso();
     const staleJobIds: number[] = [];
 
@@ -297,8 +324,8 @@ export class JobStore {
           `INSERT INTO jobs (
             repo_full_name, repo_owner, repo_name, installation_id, github_account_id, github_repository_id, pr_number,
             pr_title, pr_body, pr_html_url, pr_author, base_sha, head_sha, base_ref, head_ref,
-            webhook_delivery_id, webhook_event, state, created_at, updated_at
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?)`,
+            webhook_delivery_id, webhook_event, profile_revision_id, job_type, scan_branch, state, created_at, updated_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?)`,
         )
         .run(
           input.repoFullName,
@@ -318,6 +345,9 @@ export class JobStore {
           input.headRef,
           input.webhookDeliveryId ?? null,
           input.webhookEvent ?? null,
+          input.profileRevisionId ?? this.configs.getActiveRevision("default")?.id ?? null,
+          input.jobType ?? "pr_review",
+          input.scanBranch ?? null,
           createdAt,
           createdAt,
         );
@@ -350,10 +380,10 @@ export class JobStore {
   }
 
   listInterruptedJobs(): JobRow[] {
+    // Derive the IN-list from ACTIVE_JOB_STATES so a new job state cannot drift out of crash recovery.
+    const states = ACTIVE_JOB_STATES.map((state) => `'${state}'`).join(", ");
     return this.db
-      .prepare(
-        `SELECT * FROM jobs WHERE state IN ('queued', 'preparing', 'reconciling', 'routing', 'reviewing', 'aggregating', 'publishing')`,
-      )
+      .prepare(`SELECT * FROM jobs WHERE state IN (${states})`)
       .all() as JobRow[];
   }
 
@@ -414,11 +444,12 @@ export class JobStore {
 
   resetInterrupted(id: number): void {
     const updatedAt = nowIso();
+    const states = [...ACTIVE_JOB_STATES.map((state) => `'${state}'`)].join(", ");
     this.db
       .prepare(
         `UPDATE jobs SET state = 'queued', failure_reason = NULL, started_at = NULL, finished_at = NULL,
          aggregator_state = 'queued', aggregator_started_at = NULL, aggregator_finished_at = NULL, updated_at = ?
-         WHERE id = ? AND state IN ('preparing', 'reconciling', 'routing', 'reviewing', 'aggregating', 'publishing', 'queued')`,
+         WHERE id = ? AND state IN (${states})`,
       )
       .run(updatedAt, id);
     this.db
@@ -535,6 +566,66 @@ export class JobStore {
       insert.run(jobId, reviewer.role, reviewer.title, reviewer.model ?? null);
     }
     publish({ type: "job", jobId });
+  }
+
+  // ---- Health-scan issue creation ----
+
+  /** Claims a fingerprint before issue creation (issue_number 0 = pending). Ignored if already claimed. */
+  claimScanIssue(input: { jobId: number; repoFullName: string; fingerprint: string; title: string }): void {
+    this.db
+      .prepare(
+        `INSERT OR IGNORE INTO scan_issues (job_id, repo_full_name, fingerprint, issue_number, issue_url, title, created_at)
+         VALUES (?, ?, ?, 0, '', ?, ?)`,
+      )
+      .run(input.jobId, input.repoFullName, input.fingerprint, input.title, nowIso());
+  }
+
+  /** Records/updates the resulting issue for a claimed fingerprint. */
+  recordScanIssue(input: {
+    jobId: number;
+    repoFullName: string;
+    fingerprint: string;
+    issueNumber: number;
+    issueUrl: string;
+    title: string;
+  }): void {
+    this.db
+      .prepare(
+        `INSERT INTO scan_issues (job_id, repo_full_name, fingerprint, issue_number, issue_url, title, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(repo_full_name, fingerprint) DO UPDATE SET
+           issue_number = excluded.issue_number,
+           issue_url = excluded.issue_url,
+           title = excluded.title,
+           job_id = excluded.job_id`,
+      )
+      .run(input.jobId, input.repoFullName, input.fingerprint, input.issueNumber, input.issueUrl, input.title, nowIso());
+  }
+
+  listScanIssues(jobId: number): Array<{ id: number; job_id: number; repo_full_name: string; fingerprint: string; issue_number: number; issue_url: string; title: string; created_at: string }> {
+    return this.db
+      .prepare(`SELECT * FROM scan_issues WHERE job_id = ? ORDER BY id ASC`)
+      .all(jobId) as Array<{ id: number; job_id: number; repo_full_name: string; fingerprint: string; issue_number: number; issue_url: string; title: string; created_at: string }>;
+  }
+
+  getScanIssue(repoFullName: string, fingerprint: string): { issue_number: number; issue_url: string; title: string } | undefined {
+    return this.db
+      .prepare(`SELECT issue_number, issue_url, title FROM scan_issues WHERE repo_full_name = ? AND fingerprint = ?`)
+      .get(repoFullName, fingerprint) as { issue_number: number; issue_url: string; title: string } | undefined;
+  }
+
+  clearScanIssue(repoFullName: string, fingerprint: string): void {
+    this.db
+      .prepare(`DELETE FROM scan_issues WHERE repo_full_name = ? AND fingerprint = ? AND issue_number = 0`)
+      .run(repoFullName, fingerprint);
+  }
+
+  hasScanIssue(repoFullName: string, fingerprint: string): boolean {
+    return Boolean(
+      this.db
+        .prepare(`SELECT id FROM scan_issues WHERE repo_full_name = ? AND fingerprint = ?`)
+        .get(repoFullName, fingerprint),
+    );
   }
 
   findLatestJobForPull(repoFullName: string, prNumber: number, headSha?: string): JobRow | undefined {
@@ -669,6 +760,8 @@ export class JobStore {
     reopenCommand?: string | null;
     reconciliationConfidence?: number | null;
     reconciliationReason?: string | null;
+    diffHunk?: string | null;
+    diffNote?: string | null;
     lastJobId?: number | null;
   }): FindingRow {
     const existing = this.getFinding(input.repoFullName, input.prNumber, input.fingerprint);
@@ -687,8 +780,8 @@ export class JobStore {
           github_thread_id, github_comment_id, original_path, original_line, current_path, current_line,
           category, summary, body, severity, confidence,
           dismissed_by, dismissed_at, dismiss_command, reopened_by, reopened_at, reopen_command,
-          reconciliation_confidence, reconciliation_reason, last_job_id, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          reconciliation_confidence, reconciliation_reason, diff_hunk, diff_note, last_job_id, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(repo_full_name, pr_number, fingerprint) DO UPDATE SET
           status = excluded.status,
           reviewed_sha = excluded.reviewed_sha,
@@ -712,6 +805,14 @@ export class JobStore {
           reopen_command = excluded.reopen_command,
           reconciliation_confidence = COALESCE(excluded.reconciliation_confidence, findings.reconciliation_confidence),
           reconciliation_reason = COALESCE(excluded.reconciliation_reason, findings.reconciliation_reason),
+          diff_hunk = CASE
+            WHEN excluded.diff_hunk IS NULL AND excluded.diff_note IS NULL THEN findings.diff_hunk
+            ELSE excluded.diff_hunk
+          END,
+          diff_note = CASE
+            WHEN excluded.diff_hunk IS NULL AND excluded.diff_note IS NULL THEN findings.diff_note
+            ELSE excluded.diff_note
+          END,
           last_job_id = COALESCE(excluded.last_job_id, findings.last_job_id),
           updated_at = excluded.updated_at`,
       )
@@ -741,6 +842,8 @@ export class JobStore {
         input.reopenCommand ?? null,
         input.reconciliationConfidence ?? null,
         input.reconciliationReason ?? null,
+        input.diffHunk ?? null,
+        input.diffNote ?? null,
         input.lastJobId ?? null,
         now,
         now,

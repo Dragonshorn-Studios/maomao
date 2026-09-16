@@ -9,6 +9,7 @@ import { createApp } from "./server.js";
 import { GithubClient } from "./github/client.js";
 import { createCheckout, sweepWorkspaces } from "./checkout.js";
 import { createOpenCodeRunner } from "./opencode/spawn.js";
+import { oauthCallbackUrl, oauthEnabled } from "./oauth.js";
 
 const config = loadConfig();
 assertRuntimeConfig(config);
@@ -18,26 +19,31 @@ void sweepWorkspaces(config.workspaceRoot, config.workspaceRetentionHours).then(
 });
 
 const db = openDb(config.databasePath);
-const store = new JobStore(db);
+const store = new JobStore(db, config.modelCatalog);
 const github = new GithubClient(config);
+const opencode = createOpenCodeRunner(config.opencode.bin);
 const pipeline = createPipeline({
   config,
   store,
   github,
   checkout: createCheckout(config.workspaceRoot),
-  opencode: createOpenCodeRunner(config.opencode.bin),
+  opencode,
 });
 const queue = new JobQueue(store, config.jobConcurrency, (jobId) => pipeline.run(jobId));
 queue.start();
 
-const app = createApp({ config, store, queue, github, startedAt: Date.now() });
+const app = createApp({ config, store, queue, github, opencode, startedAt: Date.now() });
 
 serve({ fetch: app.fetch, hostname: config.host, port: config.port }, (info) => {
   console.log(`Maomao listening on http://${info.address}:${info.port}`);
   console.log(`Webhook: POST /webhooks/github`);
-  if (!config.uiPassword || !config.uiSessionSecret) {
+  if (oauthEnabled(config)) {
+    console.log(`OAuth operator login enabled; callback URL: ${oauthCallbackUrl(config)}`);
+  }
+  const passwordOn = Boolean(config.uiPassword && config.uiSessionSecret);
+  if (!oauthEnabled(config) && !passwordOn) {
     console.warn(
-      "UI_PASSWORD and UI_SESSION_SECRET are unset; / , /jobs, /api, and /events are open. Set both before exposing Maomao.",
+      "No operator login is configured (OAuth or UI_PASSWORD + UI_SESSION_SECRET); / , /jobs, /api, and /events are open. Configure one before exposing Maomao.",
     );
   }
   if (config.allowedGithubAccountIds.length === 0 && config.allowedGithubRepositoryIds.length === 0) {

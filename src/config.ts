@@ -20,6 +20,7 @@ export type JobState =
   | "reconciling"
   | "reviewing"
   | "aggregating"
+  | "sniffing"
   | "publishing"
   | "completed"
   | "failed"
@@ -69,6 +70,23 @@ export interface Config {
   reconcileMinConfidence: number;
   uiPassword: string;
   uiSessionSecret: string;
+  /** Operator-approved model catalog (provider/model). Empty = allow any well-formed model. */
+  modelCatalog: string[];
+  /** Explicit issue creation from health scans. Disabled by default. */
+  issueCreationEnabled: boolean;
+  /** Opt-in GitHub review verdicts. Defaults keep every review COMMENT-only. */
+  reviewAllowApprove: boolean;
+  reviewAllowRequestChanges: boolean;
+  reviewRequestChangesMinSeverity: Severity;
+  /** GitHub OAuth (operator login). Empty strings = OAuth disabled. */
+  oauthClientId: string;
+  oauthClientSecret: string;
+  /** GitHub user REST numeric ids allowed to operate the UI. Empty list refuses to boot when OAuth is enabled. */
+  adminGithubIds: number[];
+  /** Emergency shared-password form on the login page. Only honored while OAuth is enabled. */
+  uiLocalLogin: boolean;
+  /** Public base URL used to build the exact OAuth callback URL. */
+  publicUrl: string;
   /** GitHub user/org REST numeric ids (`installation.account.id`). Empty = unrestricted on this axis. */
   allowedGithubAccountIds: number[];
   /** GitHub repository REST numeric ids (`repository.id`). Empty = unrestricted on this axis. */
@@ -138,10 +156,10 @@ function parsePolicy(raw: string | undefined): PoisonAlertPolicy {
   throw new Error(`POISON_ALERT_POLICY must be one of ${POISON_ALERT_POLICIES.join(", ")}`);
 }
 
-function parseSeverity(raw: string | undefined, fallback: Severity): Severity {
+function parseSeverity(raw: string | undefined, fallback: Severity, source = "severity list"): Severity {
   const value = (raw?.trim().toLowerCase() || fallback) as Severity;
   if (["blocker", "high", "medium", "low", "info"].includes(value)) return value;
-  throw new Error("POISON_ALERT_EXTERNAL_MIN_SEVERITY must be blocker, high, medium, low, or info");
+  throw new Error(`${source} must be blocker, high, medium, low, or info`);
 }
 
 function loadRouting(env: NodeJS.ProcessEnv): RouterConfig {
@@ -178,7 +196,7 @@ function loadPoisonAlert(env: NodeJS.ProcessEnv): PoisonAlertConfig {
     external: {
       enabled: parseBoolean(env.POISON_ALERT_EXTERNAL_ENABLED, false),
       targets: parseExternalTargetsJson(env.POISON_ALERT_EXTERNAL_TARGETS_JSON),
-      minSeverity: parseSeverity(env.POISON_ALERT_EXTERNAL_MIN_SEVERITY, "high"),
+      minSeverity: parseSeverity(env.POISON_ALERT_EXTERNAL_MIN_SEVERITY, "high", "POISON_ALERT_EXTERNAL_MIN_SEVERITY"),
     },
   };
 }
@@ -225,6 +243,20 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     reconcileMinConfidence: clamp01(env.RECONCILE_MIN_CONFIDENCE, 0.7),
     uiPassword: env.UI_PASSWORD?.trim() || env.MAOMAO_UI_PASSWORD?.trim() || "",
     uiSessionSecret: env.UI_SESSION_SECRET?.trim() || env.MAOMAO_UI_SESSION_SECRET?.trim() || "",
+    oauthClientId: env.GITHUB_OAUTH_CLIENT_ID?.trim() || "",
+    oauthClientSecret: env.GITHUB_OAUTH_CLIENT_SECRET?.trim() || "",
+    adminGithubIds: parseIdList(env.MAOMAO_ADMIN_GITHUB_IDS, "MAOMAO_ADMIN_GITHUB_IDS"),
+    uiLocalLogin: parseBoolean(env.UI_LOCAL_LOGIN, false),
+    publicUrl: env.MAOMAO_PUBLIC_URL?.trim().replace(/\/+$/, "") || "",
+    modelCatalog: parseCsv(env.MODEL_CATALOG),
+    issueCreationEnabled: parseBoolean(env.GITHUB_ISSUE_CREATION_ENABLED, false),
+    reviewAllowApprove: parseBoolean(env.GITHUB_REVIEW_ALLOW_APPROVE, false),
+    reviewAllowRequestChanges: parseBoolean(env.GITHUB_REVIEW_ALLOW_REQUEST_CHANGES, false),
+    reviewRequestChangesMinSeverity: parseSeverity(
+      env.GITHUB_REVIEW_REQUEST_CHANGES_MIN_SEVERITY,
+      "blocker",
+      "GITHUB_REVIEW_REQUEST_CHANGES_MIN_SEVERITY",
+    ),
     allowedGithubAccountIds: parseIdList(env.ALLOWED_GITHUB_ACCOUNT_IDS, "ALLOWED_GITHUB_ACCOUNT_IDS"),
     allowedGithubRepositoryIds: parseIdList(env.ALLOWED_GITHUB_REPOSITORY_IDS, "ALLOWED_GITHUB_REPOSITORY_IDS"),
     maxDiffBytes: clamp(parseInteger(env.MAX_DIFF_BYTES, 1_048_576), 0, 50 * 1024 * 1024),
@@ -252,13 +284,34 @@ export function assertRuntimeConfig(config: Config): void {
   }
   const passwordSet = Boolean(config.uiPassword);
   const secretSet = Boolean(config.uiSessionSecret);
-  if (passwordSet !== secretSet) {
-    throw new Error("Set both UI_PASSWORD and UI_SESSION_SECRET (or neither, for an open local UI)");
+  if (passwordSet && !secretSet) {
+    throw new Error("UI_PASSWORD requires UI_SESSION_SECRET (or unset both, for an open local UI)");
+  }
+  const oauthIdSet = Boolean(config.oauthClientId);
+  const oauthSecretSet = Boolean(config.oauthClientSecret);
+  if (oauthIdSet !== oauthSecretSet) {
+    throw new Error("Set both GITHUB_OAUTH_CLIENT_ID and GITHUB_OAUTH_CLIENT_SECRET (or neither)");
+  }
+  if (oauthIdSet) {
+    if (!secretSet) {
+      throw new Error("GitHub OAuth requires UI_SESSION_SECRET for session signing");
+    }
+    if (config.adminGithubIds.length === 0) {
+      throw new Error("GitHub OAuth requires MAOMAO_ADMIN_GITHUB_IDS (numeric GitHub user ids)");
+    }
+    if (!config.publicUrl) {
+      throw new Error("GitHub OAuth requires MAOMAO_PUBLIC_URL to build the exact callback URL");
+    }
+  }
+  if (config.uiLocalLogin && (!passwordSet || !secretSet)) {
+    throw new Error("UI_LOCAL_LOGIN requires both UI_PASSWORD and UI_SESSION_SECRET");
   }
 }
 
 export function githubSecrets(config: Config): string[] {
-  return [config.github.privateKey, config.github.webhookSecret].filter((value) => value.length >= 4);
+  return [config.github.privateKey, config.github.webhookSecret, config.oauthClientSecret].filter(
+    (value) => value.length >= 4,
+  );
 }
 
 function clamp01(value: string | undefined, fallback: number): number {

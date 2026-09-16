@@ -17,6 +17,7 @@ const JOB_STATES: Record<JobState, LabeledState> = {
   reconciling: { text: "Reconciling", hint: "Checking prior findings against this SHA", mark: "◍" },
   reviewing: { text: "Reviewing", hint: "Examining this pull request", mark: "◉" },
   aggregating: { text: "Aggregating", hint: "Aggregation in progress", mark: "◎" },
+  sniffing: { text: "Sniffing", hint: "Laboratory re-check of the aggregated findings", mark: "◔" },
   publishing: { text: "Publishing", hint: "Posting the GitHub COMMENT review", mark: "▣" },
   completed: { text: "Completed", hint: "Examination finished for this SHA", mark: "●" },
   failed: { text: "Failed", hint: "Examination stopped on an error", mark: "!" },
@@ -89,6 +90,7 @@ export function flavorForJob(state: string, prNumber: number): string | undefine
   if (state === "routing") return `Choosing specialists for PR #${prNumber}…`;
   if (state === "reconciling") return `Reconciling prior findings for PR #${prNumber}`;
   if (state === "aggregating") return "Aggregation in progress";
+  if (state === "sniffing") return `Laboratory re-check for PR #${prNumber}`;
   if (state === "queued") return `PR #${prNumber} is queued for examination`;
   return undefined;
 }
@@ -101,16 +103,52 @@ export function routingProfileLabel(profile: string | null | undefined): string 
   return profile || "pending";
 }
 
-export function dispatchStatusLabel(status: string | null | undefined): string {
+/** Badge for the internal (laboratory re-check) escalation channel; same visual language as run states. */
+export function internalEscalationBadge(state: string | null | undefined): LabeledState & { stateClass: string } {
+  switch (state) {
+    case "running":
+      return { stateClass: "running", text: "Running", hint: "Laboratory model in flight", mark: "◉" };
+    case "done":
+      return { stateClass: "done", text: "Done", hint: "Laboratory re-check finished", mark: "●" };
+    case "failed":
+      return { stateClass: "failed", text: "Failed", hint: "Laboratory re-check failed", mark: "!" };
+    case "skipped":
+      return { stateClass: "cancelled", text: "Skipped", hint: "No laboratory model configured", mark: "–" };
+    default:
+      return {
+        stateClass: "queued",
+        text: "Queued",
+        hint: "Waiting on specialists and the aggregator",
+        mark: "○",
+      };
+  }
+}
+
+/** Badge for the external (fire-and-forget) dispatch channel; same visual language as run states.
+ * `decided` marks that the pipeline already decided not to dispatch (status not_requested + reason),
+ * as opposed to the enqueue-time default where dispatch simply has not been reached yet. */
+export function externalDispatchBadge(
+  status: string | null | undefined,
+  decided = false,
+): LabeledState & { stateClass: string } {
   switch (status) {
     case "dispatching":
-      return "dispatching";
+      return { stateClass: "running", text: "Dispatching", hint: "Sending the external notification", mark: "◉" };
     case "dispatched":
-      return "dispatched (notification accepted)";
+      return {
+        stateClass: "done",
+        text: "Dispatched",
+        hint: "External notification accepted (delivery is fire-and-forget)",
+        mark: "●",
+      };
     case "dispatch_failed":
-      return "dispatch failed";
+      return { stateClass: "failed", text: "Failed", hint: "External notification was not delivered", mark: "!" };
+    case "not_requested":
+      return decided
+        ? { stateClass: "cancelled", text: "Held", hint: "External dispatch was not requested for this SHA", mark: "–" }
+        : { stateClass: "queued", text: "Queued", hint: "Dispatches after the GitHub review is posted", mark: "○" };
     default:
-      return "not requested";
+      return { stateClass: "queued", text: "Queued", hint: "Dispatches after the GitHub review is posted", mark: "○" };
   }
 }
 
@@ -164,4 +202,25 @@ export function settledFindingsCopy(buried: number, resolved: number): string {
   if (resolved) parts.push(resolved === 1 ? "1 resolved" : `${resolved} resolved`);
   if (parts.length === 0) return "Settled findings";
   return `${parts.join(", ")} — expand a row for details`;
+}
+
+export function diffUnavailableCopy(note: string | null | undefined): string | undefined {
+  switch (note) {
+    case "file_unchanged":
+      return "No diff preview: the file is not part of the reviewed diff.";
+    case "binary":
+      return "No diff preview: binary file.";
+    case "outside_hunk":
+      return "No diff preview: the reported line is outside the reviewed diff hunks.";
+    case "no_hunks":
+      return "No diff preview: the change contains no diff hunks (rename or mode change only).";
+    case "missing_location":
+      return "No diff preview: no file location was recorded for this finding.";
+    case "no_line":
+      return "No line was recorded for this finding; showing the file's first hunk.";
+    case "truncated":
+      return "Diff preview clipped to the lines around the reported line.";
+    default:
+      return undefined;
+  }
 }

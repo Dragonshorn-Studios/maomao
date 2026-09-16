@@ -210,6 +210,20 @@ a:hover { color: var(--herb); }
   text-decoration: none;
   padding: 0.2rem 0;
 }
+.who {
+  font-size: 0.85rem;
+  color: var(--ink-muted);
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+}
+.who strong { color: var(--ink); }
+.who-avatar { border-radius: 50%; vertical-align: middle; }
+.github-login {
+  display: inline-block;
+  margin: 0.35rem 0;
+  font-weight: 600;
+}
 
 main {
   padding: 1.25rem 1.35rem 3rem;
@@ -428,7 +442,7 @@ button, input, textarea {
 .state-completed, .state-done { background: var(--jade-soft); border-color: var(--jade); }
 .state-failed { background: var(--cinnabar-soft); border-color: var(--cinnabar); }
 .state-stale, .state-cancelled { background: var(--amber-soft); border-color: var(--amber); }
-.state-reviewing, .state-aggregating, .state-publishing, .state-running, .state-preparing, .state-routing, .state-reconciling {
+.state-reviewing, .state-aggregating, .state-sniffing, .state-publishing, .state-running, .state-preparing, .state-routing, .state-reconciling {
   background: var(--working-soft);
   border-color: var(--working);
 }
@@ -436,6 +450,7 @@ button, input, textarea {
 .state-reconciling .mark,
 .state-reviewing .mark,
 .state-aggregating .mark,
+.state-sniffing .mark,
 .state-publishing .mark,
 .state-running .mark,
 .state-routing .mark {
@@ -597,6 +612,44 @@ form.retry, form.retry-job {
 .finding-status-moved { color: var(--amber); background: var(--amber-soft); border-color: var(--amber); }
 .finding-status-uncertain { color: var(--ink-muted); background: var(--surface-2); }
 
+.stale-sha {
+  display: inline-flex;
+  align-items: center;
+  font-family: var(--font-mono);
+  font-size: 0.7rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--amber);
+  background: var(--amber-soft);
+  border: 1px solid var(--amber);
+  padding: 0.05rem 0.4rem;
+}
+.finding.is-stale-sha { border-style: dashed; }
+.loc-link { font-size: 0.8rem; }
+
+.finding-diff { margin: 0.4rem 0 0; }
+.finding-diff summary {
+  cursor: pointer;
+  font-size: 0.85rem;
+  color: var(--ink-muted);
+}
+.diff-panel {
+  font-family: var(--font-mono);
+  font-size: 0.78rem;
+  line-height: 1.45;
+  background: var(--surface-2);
+  border: 1px solid var(--line-strong);
+  padding: 0.5rem 0.75rem;
+  overflow-x: auto;
+  white-space: pre;
+  max-height: 24rem;
+  overflow-y: auto;
+}
+.diff-panel .add { color: var(--jade); display: block; }
+.diff-panel .del { color: var(--cinnabar); display: block; }
+.diff-panel .ctx { color: var(--ink-muted); display: block; }
+.diff-note { font-size: 0.8rem; }
+
 .finding.is-buried,
 .finding.is-resolved {
   border-style: dashed;
@@ -717,6 +770,7 @@ details summary { cursor: pointer; color: var(--ink-muted); }
   .state-reconciling .mark,
   .state-reviewing .mark,
   .state-aggregating .mark,
+  .state-sniffing .mark,
   .state-publishing .mark,
   .state-running .mark,
   .state-routing .mark {

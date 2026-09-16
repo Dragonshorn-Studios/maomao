@@ -213,3 +213,18 @@ export function findingLocation(finding: { file?: string; line?: number }): stri
   if (!finding.file) return "";
   return finding.line ? `${finding.file}:${finding.line}` : finding.file;
 }
+
+/** Permalink to `path` at `sha` on GitHub; null for non-GitHub URLs, missing sha, or unsafe paths. */
+export function githubFileLink(
+  prHtmlUrl: string | null | undefined,
+  sha: string | null | undefined,
+  path: string,
+  line?: number | null,
+): string | null {
+  if (!prHtmlUrl || !sha) return null;
+  const match = prHtmlUrl.match(/^(https:\/\/github\.com\/[^/]+\/[^/]+)\//);
+  if (!match?.[1]) return null;
+  const segments = path.split("/").map((segment) => encodeURIComponent(segment));
+  if (segments.some((segment) => segment === ".." || segment === "")) return null;
+  return `${match[1]}/blob/${sha}/${segments.join("/")}${line ? `#L${line}` : ""}`;
+}

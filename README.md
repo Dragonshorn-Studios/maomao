@@ -270,7 +270,7 @@ The monitoring UI is a small server-rendered apothecary-notebook console (muted 
 
 `/` lists recent jobs as specimen cards: repo, PR, SHA, state, elapsed time, `n / m` reviewers, aggregator, model/provider, token/cost totals, and findings by severity.
 
-`/jobs/:id` shows the immutable reviewed SHA, base/head refs, per-reviewer cards (role, state, duration, model, provider, token breakdown, cost, raw vs normalized output), aggregator diagnosis, findings, and a monospace log panel. Pages refresh over SSE. Token and cost figures are OpenCode/provider-reported usage, not an invoice.
+`/jobs/:id` shows the immutable reviewed SHA, base/head refs, per-reviewer cards (role, state, duration, model, provider, token breakdown, cost, raw vs normalized output), aggregator diagnosis, findings, and a monospace log panel. Each finding card can show a small diff hunk anchored in the reviewed SHA's diff (or an explicit note when none is available) plus a GitHub permalink at that SHA; findings reviewed against an older head SHA are badged "Older SHA". Pages refresh over SSE. Token and cost figures are OpenCode/provider-reported usage, not an invoice.
 
 To preview the UI with fixture jobs (no GitHub App or OpenCode required):
 
@@ -282,7 +282,7 @@ npm run demo
 
 The home page also has an operator form to paste a GitHub pull request URL (`https://github.com/owner/repo/pull/123`). Maomao resolves that PR through the GitHub App installation, applies the **same** account/repository allowlists and per-repository rate limit as webhooks, then enqueues through the **same** job store and queue (same `(repo, PR, head SHA)` idempotency and stale handling). Drafts follow `REVIEW_DRAFTS`. This is for testing before webhooks are wired; it is behind the same session gate as the rest of the UI.
 
-### Session password (required in production)
+### Session password (fallback / emergency login)
 
 `/`, `/jobs/*`, `/api/*`, and `/events` can be left open for local development. **If you expose Maomao beyond localhost, set both:**
 
@@ -291,11 +291,39 @@ UI_PASSWORD=a-long-password
 UI_SESSION_SECRET=a-long-random-string   # e.g. openssl rand -hex 32
 ```
 
-Aliases: `MAOMAO_UI_PASSWORD`, `MAOMAO_UI_SESSION_SECRET`. Setting only one of the two is a startup error.
+Aliases: `MAOMAO_UI_PASSWORD`, `MAOMAO_UI_SESSION_SECRET`. Setting `UI_PASSWORD` without `UI_SESSION_SECRET` is a startup error (`UI_SESSION_SECRET` alone is accepted, but without OAuth **or** `UI_PASSWORD` the gate stays off and the UI is open).
 
-With both set, GET/POST `/login` issues an **HttpOnly**, **SameSite=Lax** cookie (`maomao_session`), signed with `UI_SESSION_SECRET`. The cookie is **Secure** when the request is HTTPS (including `X-Forwarded-Proto: https`). Unauthenticated HTML pages redirect to `/login`; `/api/*` and `/events` return 401. `/webhooks/github`, `/health`, and `/assets/maomao.css` stay public (no cookie). This is a shared-password gate, not HTTP Basic Auth, OAuth, or a user database.
+With the password gate on, GET/POST `/login` issues an **HttpOnly**, **SameSite=Lax** cookie (`maomao_session`), signed with `UI_SESSION_SECRET`. The cookie is **Secure** when the request is HTTPS (including `X-Forwarded-Proto: https`). Unauthenticated HTML pages redirect to `/login`; `/api/*` and `/events` return 401. `/webhooks/github`, `/health`, and `/assets/maomao.css` stay public (no cookie).
+
+**CSRF protection.** While the gate is on, every `POST` request except the GitHub webhook must carry a valid CSRF token — today that is exactly the UI forms (`POST /login`, `/reviews`, `/logout`, and the retry forms). The token is a signed double-submit cookie (`maomao_csrf`, HttpOnly, SameSite=Lax, Secure on HTTPS — same as the session cookie, signed with `UI_SESSION_SECRET`, valid for 7 days) whose value must also be present in the form's hidden `csrf_token` field. Requests without a matching, unexpired token are rejected with 403 and logged. A page load issues a new token only when the cookie is missing or expired; otherwise the existing token is reused, so several tabs or a stale form can share one token. The GitHub webhook is exempt — it is authenticated by its own `x-hub-signature-256` signature. When the gate is off (local development), no tokens are issued or enforced.
 
 If both variables are unset, the UI stays open so `npm run dev` on loopback still works. Do not ship that configuration on a public address.
+
+### Operator login with GitHub OAuth (recommended)
+
+Instead of a shared password, operators sign in with their GitHub account and are authorized by a numeric-id allowlist. A GitHub login only proves identity — it grants nothing by itself:
+
+```bash
+GITHUB_OAUTH_CLIENT_ID=...        # OAuth App on GitHub
+GITHUB_OAUTH_CLIENT_SECRET=...
+MAOMAO_ADMIN_GITHUB_IDS=1001,1002 # numeric GitHub user ids (stale logins are NOT keys)
+MAOMAO_PUBLIC_URL=https://maomao.example
+UI_SESSION_SECRET=a-long-random-string
+```
+
+Register the OAuth App with the exact callback `https://maomao.example/login/github/callback` (no wildcards). Configuration is validated at startup: half-configured OAuth, an empty allowlist, a missing `MAOMAO_PUBLIC_URL`, a missing `UI_SESSION_SECRET`, or `UI_LOCAL_LOGIN` without a working password gate refuses to boot.
+
+Behavior and boundaries:
+
+- The flow is GitHub's authorization-code flow with a short-lived, single-use `state` (10 minutes, in-process) as a confidential client: the state plus the exact registered callback carry the CSRF/code-injection role, and the client secret authenticates the exchange. GitHub has supported PKCE (S256) since 2025-07; adding it would be defense-in-depth.
+- Authorization uses **stable numeric GitHub user ids only** (`MAOMAO_ADMIN_GITHUB_IDS`). The `login` and avatar shown in the header are display-only and never used as an authorization key.
+- The allowlist is re-checked on **every request**, so removing an id revokes live sessions immediately, and the login flow re-checks it before issuing a session. Denials are logged with the numeric id and login but never tokens or secrets.
+- Login always issues a fresh session value (no session fixation), logout invalidates the cookie, and login/callback endpoints are rate-limited (30 starts / 10 callback failures per 10 minutes).
+- The human OAuth access token is used once to resolve identity and is then discarded — it is never stored, logged, or used for review jobs or repository checkout. Reviews keep running under the **GitHub App installation identity**.
+- Logins, logouts, denials, and state rejections all emit credential-free audit lines; password logins (when the emergency path is enabled) do the same.
+- Org/team membership policies are not inferred, and repository visibility grants no UI access.
+
+**Emergency local login.** The shared-password form is hidden while OAuth is enabled. Set `UI_LOCAL_LOGIN=true` (plus `UI_PASSWORD`/`UI_SESSION_SECRET`) to show it as a recovery path; it stays off by default.
 
 ## Security / trust boundary
 
@@ -330,9 +358,40 @@ OpenCode is still a powerful process. Keep Maomao on a locked-down host and do n
 
 - Actionable findings → one `COMMENT` review, SHA-anchored (`commit_id` = job head SHA), with inline comments when GitHub accepts the locations
 - No findings → silent unless `POST_EMPTY_REVIEW=true`
-- **Never** `APPROVE` or `REQUEST_CHANGES` in this version
+- **Opt-in verdicts** (both default to `false`):
+  - `GITHUB_REVIEW_ALLOW_APPROVE=true` — publishes `APPROVE` for clean reviews, but only when every specialist finished without errors, the aggregator did not fall back, and the job is not stale. Any degraded run degrades the review to `COMMENT` (reason logged and shown on the job page). A clean review with `POST_EMPTY_REVIEW=false` posts nothing, so no APPROVE can be delivered either.
+  - `GITHUB_REVIEW_ALLOW_REQUEST_CHANGES=true` — publishes `REQUEST_CHANGES` when surviving findings meet `GITHUB_REVIEW_REQUEST_CHANGES_MIN_SEVERITY` (default `blocker`), subject to the same safety gates as APPROVE. Note that GitHub may **block merges** on `REQUEST_CHANGES` where branch protection requires reviews.
+  - The resolved event and the reason are shown on the job page and logged; the default install stays `COMMENT`-only with no configuration change.
 - Duplicate webhook deliveries reuse the existing job; publication also looks for a `<!-- maomao-review sha=... -->` marker
 - Inline comments include `<!-- maomao-finding id=<fingerprint> sha=<reviewed-sha> -->` so later reviews can reconcile the same finding after the line moves
+
+## Repository health scans (manual, `Sniff sniff`)
+
+`/scan` (operator UI) runs a one-off **health scan** of an allowlisted repository's default branch at its exact head SHA. It is manual only — there is no scheduler — and read-only: nothing is published to GitHub and no issue is created automatically.
+
+- The default branch and head SHA are resolved and pinned before the scan is enqueued; the scan reviews that immutable SHA. Repository access uses the same installation/repository allowlists as everything else.
+- The scan reuses the existing isolated checkout, specialist, and aggregation pipeline, snapshots the active profile revision, persists validated findings locally (with anchored mini diffs), and records token/cost usage and budgets.
+- The scan button is labeled **Sniff sniff** with the accessible name "Run repository health scan".
+- **Issue creation is a separate, explicit, capability-gated action** (`GITHUB_ISSUE_CREATION_ENABLED=false` by default). When enabled, an operator selects a completed scan and Maomao creates GitHub issues for validated findings using the App installation identity (never the human OAuth token). Issues deduplicate by fingerprint with a hidden machine-readable marker, already-linked issues are skipped, retries are idempotent, and partial failures are visible and retryable. Every creation is audited credential-free.
+
+## Specialist prompts, fixtures, and offline evaluation
+
+`/config/prompts` manages **versioned specialist prompts**: per-role revisions with an operator-editable body. Security guardrails (the hard rules and JSON schema) are composed at runtime and are never part of an editable revision — the UI shows them separately.
+
+- Drafts → explicit activation → retired history; rollback re-activates a retired revision. Activation never affects running or historical jobs: each reviewer run stamps the prompt revision it used (`prompt_revision_id`).
+- **Fixtures** are explicitly saved, sanitized inputs (PR metadata plus a bounded diff, with optional severity/category expectations) and require a provenance acknowledgement — they are never auto-captured from reviewed code.
+- **Evaluation** runs a draft prompt against a fixture fully offline: no GitHub writes, no repository credentials, schema-validated findings, recorded usage/duration/model/revision, and an explicit cost cap. Failures (timeouts, invalid output, budget breach) count as evaluation failures, never as passing reviews. Results compare draft against the active prompt with matched/missed/unexpected signals; evaluation never auto-activates.
+
+## Review configuration (versioned profiles)
+
+`/config` (in the monitoring UI) manages **versioned review profiles**: named revisions that pin which specialists run, their order, per-role models, the router model, a minimum publishable severity, and optional total cost/token budgets.
+
+- Drafts are validated against a schema plus system caps (≤12 reviewers, ≤30-minute timeouts, ≤5 retries, ≤$5 / 2M-token budgets). Invalid drafts cannot be activated.
+- Activation is explicit and audited; activating a new revision retires the previous active one of the same name. Rollback re-activates a retired revision — history is never rewritten.
+- Every job snapshots the revision it ran with (`profile_revision_id` on the job), so later edits never change historical jobs. Specialist selection, per-role models, and the minimum publishable severity are applied from the active revision; total budgets are enforced as warnings.
+- Draft edits use optimistic concurrency: saving against an older revision returns a conflict instead of overwriting a teammate's change.
+- `MODEL_CATALOG` (comma-separated `provider/model` values) optionally restricts models to an operator-approved catalog. Configuration contains no credentials; export/import is schema-versioned JSON, and imports always land as drafts.
+- All write actions require an operator GitHub OAuth identity and are recorded in the audit history.
 
 ## Finding reconciliation and `@maomao bury`
 
@@ -373,7 +432,7 @@ The verifier only receives the prior finding plus nearby current file/diff conte
 
 ## Configuration reference
 
-See `.env.example`. Notable knobs: `ALLOWED_GITHUB_ACCOUNT_IDS`, `ALLOWED_GITHUB_REPOSITORY_IDS`, `MAX_DIFF_BYTES`, `REPO_RATE_LIMIT_PER_WINDOW`, `REPO_RATE_WINDOW_MS`, `OPENCODE_MAX_RETRIES`, `REVIEW_DRAFTS`, `POST_EMPTY_REVIEW`, `JOB_CONCURRENCY`, `WORKSPACE_ROOT`, `DATABASE_PATH`, `MAX_INLINE_COMMENTS`, `PULL_REQUEST_ACTIONS`, `OPENCODE_VERIFIER_MODEL`, `RECONCILE_MIN_CONFIDENCE`, `UI_PASSWORD`, `UI_SESSION_SECRET`, `REVIEWER_ROUTING`, `POISON_ALERT_POLICY`.
+See `.env.example`. Notable knobs: `ALLOWED_GITHUB_ACCOUNT_IDS`, `ALLOWED_GITHUB_REPOSITORY_IDS`, `MAX_DIFF_BYTES`, `REPO_RATE_LIMIT_PER_WINDOW`, `REPO_RATE_WINDOW_MS`, `OPENCODE_MAX_RETRIES`, `REVIEW_DRAFTS`, `POST_EMPTY_REVIEW`, `JOB_CONCURRENCY`, `WORKSPACE_ROOT`, `DATABASE_PATH`, `MAX_INLINE_COMMENTS`, `PULL_REQUEST_ACTIONS`, `OPENCODE_VERIFIER_MODEL`, `RECONCILE_MIN_CONFIDENCE`, `GITHUB_OAUTH_CLIENT_ID`, `GITHUB_OAUTH_CLIENT_SECRET`, `MAOMAO_ADMIN_GITHUB_IDS`, `MAOMAO_PUBLIC_URL`, `UI_LOCAL_LOGIN`, `UI_PASSWORD`, `UI_SESSION_SECRET`, `REVIEWER_ROUTING`, `POISON_ALERT_POLICY`.
 
 ## Follow-ups (not in this MVP)
 
