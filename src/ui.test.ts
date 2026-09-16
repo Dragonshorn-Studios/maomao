@@ -1157,3 +1157,56 @@ describe("dequeue and cancel controls", () => {
     expect(dequeuedHtml).toContain("Dequeued by octocat");
   });
 });
+
+describe("cancelled banner honesty", () => {
+  function jobStore() {
+    return new JobStore(openDb(":memory:"));
+  }
+
+  function seed(jobStore: JobStore, prNumber: number, headSha: string) {
+    return jobStore.enqueue({
+      repoFullName: "acme/widgets",
+      repoOwner: "acme",
+      repoName: "widgets",
+      installationId: 1,
+      prNumber,
+      prTitle: "Add a feature",
+      prBody: "",
+      prHtmlUrl: "https://github.com/acme/widgets/pull/9",
+      prAuthor: "dev",
+      baseSha: "b",
+      headSha,
+      baseRef: "main",
+      headRef: "f",
+      reviewers: [{ role: "correctness", title: "Correctness" }],
+    }).job.id;
+  }
+
+  it("does not claim nothing was published when a review was already posted", () => {
+    const store = jobStore();
+    const id = seed(store, 4, "p");
+    store.setJobState(id, "publishing");
+    store.patchJob(id, { github_review_id: "123", github_review_url: "https://github.com/acme/widgets/pull/9#review-123" });
+    store.cancelJobs({ jobId: id }, "manual_cancel", "octocat");
+    const html = renderJob(store.getJob(id)!, store.listReviewerRuns(id), store.listLogs(id), {});
+    expect(html).toContain("the posted review may be stale");
+    expect(html).toContain("View the posted review");
+    expect(html).not.toContain("nothing was published");
+  });
+
+  it("renders manual_cancel copy with the actor, and an honest fallback without one", () => {
+    const store = jobStore();
+    const cancelled = seed(store, 5, "m5");
+    store.setJobState(cancelled, "reviewing");
+    store.cancelJobs({ jobId: cancelled }, "manual_cancel", "octocat");
+    const html = renderJob(store.getJob(cancelled)!, store.listReviewerRuns(cancelled), store.listLogs(cancelled), {});
+    expect(html).toContain("Review cancelled by octocat");
+    expect(html).toContain("the review was not completed");
+
+    const anonymous = seed(store, 6, "m6");
+    store.setJobState(anonymous, "reviewing");
+    store.cancelJobs({ jobId: anonymous }, "manual_cancel", null);
+    const anonHtml = renderJob(store.getJob(anonymous)!, store.listReviewerRuns(anonymous), store.listLogs(anonymous), {});
+    expect(anonHtml).toContain("Review cancelled by an operator");
+  });
+});

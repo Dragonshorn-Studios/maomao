@@ -2722,7 +2722,7 @@ describe("manual dequeue and cancel review", () => {
       } as unknown as JobQueue,
     });
     const jobs = seedJobs(store);
-    const { cookie, csrfToken } = await await csrfFor(app, await operatorSession(app));
+    const { cookie, csrfToken } = await csrfFor(app, await operatorSession(app));
 
     const response = await post(app, jobs.queued, "/dequeue", cookie, csrfToken);
     expect(response.status).toBe(302);
@@ -2814,4 +2814,84 @@ describe("manual dequeue and cancel review", () => {
     expect(response.status).toBe(400);
     expect(store.getJob(jobs.completed)?.state).toBe("completed");
   });
+});
+
+describe("manual cancel and dequeue hardening", () => {
+  const oauthEnv = {
+    UI_SESSION_SECRET: "session-secret-for-tests",
+    GITHUB_OAUTH_CLIENT_ID: "cid",
+    GITHUB_OAUTH_CLIENT_SECRET: "csecret",
+    MAOMAO_ADMIN_GITHUB_IDS: "1001",
+    MAOMAO_PUBLIC_URL: "https://maomao.example",
+  };
+
+  function seedReviewing(store: JobStore) {
+    return store.enqueue({
+      repoFullName: "acme/widgets",
+      repoOwner: "acme",
+      repoName: "widgets",
+      installationId: 1,
+      prNumber: 5,
+      prTitle: "t",
+      prBody: "",
+      prHtmlUrl: "",
+      prAuthor: "dev",
+      baseSha: "b",
+      headSha: "h5",
+      baseRef: "main",
+      headRef: "f",
+      reviewers: [{ role: "correctness", title: "Correctness" }],
+    }).job.id;
+  }
+
+  it("treats a repeated cancel POST on an already-cancelled job as idempotent", async () => {
+    const { app, store } = testApp(oauthEnv, undefined, mockOauthFetch({ id: 1001, login: "octocat" }));
+    const jobId = seedReviewing(store);
+    store.setJobState(jobId, "reviewing");
+    const { cookie, csrfToken } = await csrfForInner(app);
+    await cancelPost(app, jobId, cookie, csrfToken);
+    const second = await cancelPost(app, jobId, cookie, csrfToken);
+    expect(second.status).toBe(302);
+    expect(second.headers.get("location")).toContain("notice=cancel-already");
+    expect(store.getJob(jobId)?.state).toBe("cancelled");
+  });
+
+  it("attributes manual dequeue to a password-gate session without inventing a login", async () => {
+    const { app, store } = testApp({ UI_PASSWORD: "hunter2", UI_SESSION_SECRET: "session-secret-for-tests" });
+    const jobId = seedReviewing(store);
+    const { session } = await loginSession(app);
+    const page = await app.request("/", { headers: { cookie: session } });
+    const { csrfCookie, csrfToken } = await csrfArtifacts(page);
+    const response = await app.request(`/jobs/${jobId}/dequeue`, {
+      method: "POST",
+      headers: { cookie: `${session}; ${csrfCookie}`, "content-type": "application/x-www-form-urlencoded" },
+      body: `csrf_token=${encodeURIComponent(csrfToken)}`,
+    });
+    expect(response.status).toBe(302);
+    const job = store.getJob(jobId);
+    expect(job?.state).toBe("cancelled");
+    expect(job?.cancelled_reason).toBe("manual_dequeue");
+    // No fabricated login in the audit trail: the copy layer renders "an operator".
+    expect(job?.cancelled_by).toBeNull();
+  });
+
+  async function csrfForInner(app: ReturnType<typeof createApp>) {
+    const session = await operatorSession(app);
+    const page = await app.request("/", { headers: { cookie: session } });
+    const { csrfCookie, csrfToken } = await csrfArtifacts(page);
+    return { cookie: `${session}; ${csrfCookie}`, csrfToken };
+  }
+
+  async function cancelPost(
+    app: ReturnType<typeof createApp>,
+    jobId: number,
+    cookie: string,
+    csrfToken: string,
+  ) {
+    return app.request(`/jobs/${jobId}/cancel`, {
+      method: "POST",
+      headers: { cookie, "content-type": "application/x-www-form-urlencoded" },
+      body: `csrf_token=${encodeURIComponent(csrfToken)}`,
+    });
+  }
 });

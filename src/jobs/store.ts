@@ -1,5 +1,6 @@
 import type { SqliteDb } from "../db.js";
 import type { CancelReason, JobState, ReviewerState } from "../config.js";
+import { LIVE_JOB_STATES } from "../config.js";
 import type { FindingRow, FindingStatus } from "../findings/types.js";
 import { nowIso } from "../util.js";
 import { publish } from "../events.js";
@@ -36,7 +37,7 @@ export interface JobRow {
   cancelled_reason: CancelReason | null;
   cancelled_by: string | null;
   profile_revision_id: number | null;
-  job_type: string;
+  job_type: "pr_review" | "health_scan";
   scan_branch: string | null;
   aggregator_raw: string | null;
   aggregator_normalized: string | null;
@@ -190,16 +191,10 @@ export interface EscalationDispatchRow {
   updated_at: string;
 }
 
-const ACTIVE_JOB_STATES: JobState[] = [
-  "queued",
-  "preparing",
-  "reconciling",
-  "routing",
-  "reviewing",
-  "aggregating",
-  "sniffing",
-  "publishing",
-];
+// Non-terminal = claimed-to-be-running states plus queued. Derived, never
+// hand-copied: crash recovery, reset, retry guards, and cancellation all scope
+// to exactly these states via ACTIVE_STATES_SQL.
+const ACTIVE_JOB_STATES: readonly JobState[] = ["queued", ...LIVE_JOB_STATES];
 
 // Single source of truth for "non-terminal": crash recovery, reset, retry guards,
 // and cancellation all scope to exactly these states.

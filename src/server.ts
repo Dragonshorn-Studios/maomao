@@ -1652,7 +1652,7 @@ function noticeText(
     return "This job was already dequeued.";
   }
   if (code === "cancelled-review") {
-    return "Review cancelled. Running work was stopped and nothing will be published to GitHub.";
+    return "Review cancelled. Work stops at the next checkpoint and the review will not be completed; if a review already reached GitHub it is linked from the job page.";
   }
   if (code === "cancel-already") {
     return "This job was already cancelled.";
@@ -1680,26 +1680,19 @@ function retryJob(c: Context<AppEnv>, ctx: ServerContext, pageOpts: PageOptions,
   if (!job) return c.text("Not found", 404);
   const result = ctx.store.retryFailedReviewers(jobId, runId);
   if (!result.ok) {
-    const latest = ctx.store.findLatestJobForPull(job.repo_full_name, job.pr_number);
-    return c.html(
-      renderJob(job, ctx.store.listReviewerRuns(jobId), ctx.store.listLogs(jobId), {
-        ...pageOpts,
-        identity: c.get("identity"),
-        csrfToken: pageOpts.showLogout ? ensureCsrfToken(c, ctx.config.uiSessionSecret) : undefined,
-        prHeadSha: latest?.head_sha ?? job.head_sha,
-        error: result.error,
-        prFindings: ctx.store.listFindings(job.repo_full_name, job.pr_number),
-      }),
-      400,
-    );
+    return renderJobError(c, ctx, pageOpts, job, result.error);
   }
   ctx.queue.enqueue(jobId);
   return c.redirect(`/jobs/${jobId}?notice=retry`, 302);
 }
 
-/** Operator attribution for manual queue actions; password-gate sessions have no identity. */
-function actionActor(c: Context<AppEnv>): string {
-  return c.get("identity")?.login ?? "operator";
+/**
+ * Operator attribution for manual queue actions. Password-gate sessions (and
+ * an open UI) have no identity: persist null and let the copy layer say
+ * "an operator" rather than writing a plausible-looking login into the audit.
+ */
+function actionActor(c: Context<AppEnv>): string | undefined {
+  return c.get("identity")?.login;
 }
 
 function renderJobError(
@@ -1708,7 +1701,6 @@ function renderJobError(
   pageOpts: PageOptions,
   job: JobRow,
   error: string,
-  status: 400 | 404,
 ) {
   const latest = ctx.store.findLatestJobForPull(job.repo_full_name, job.pr_number);
   return c.html(
@@ -1720,7 +1712,7 @@ function renderJobError(
       error,
       prFindings: ctx.store.listFindings(job.repo_full_name, job.pr_number),
     }),
-    status,
+    400,
   );
 }
 
@@ -1736,7 +1728,7 @@ function dequeueJob(c: Context<AppEnv>, ctx: ServerContext, pageOpts: PageOption
     if (job.state === "cancelled" && job.cancelled_reason === "manual_dequeue") {
       return c.redirect(`/jobs/${jobId}?notice=dequeue-already`, 302);
     }
-    return renderJobError(c, ctx, pageOpts, job, `Only queued jobs can be dequeued; this one is ${job.state}.`, 400);
+    return renderJobError(c, ctx, pageOpts, job, `Only queued jobs can be dequeued; this one is ${job.state}.`);
   }
   const result = cancelJob(ctx.store, jobId, {
     reason: "manual_dequeue",
@@ -1744,7 +1736,7 @@ function dequeueJob(c: Context<AppEnv>, ctx: ServerContext, pageOpts: PageOption
     onCancelled: (ids) => ctx.queue.abortMany(ids),
   });
   if (!result.ok) {
-    return renderJobError(c, ctx, pageOpts, job, result.error, 400);
+    return renderJobError(c, ctx, pageOpts, job, result.error);
   }
   return c.redirect(`/jobs/${jobId}?notice=${result.already ? "dequeue-already" : "dequeued"}`, 302);
 }
@@ -1753,19 +1745,25 @@ function renderCancelConfirm(c: Context<AppEnv>, ctx: ServerContext, pageOpts: P
   const job = ctx.store.getJob(jobId);
   if (!job) return c.text("Not found", 404);
   if (!LIVE_JOB_STATES.includes(job.state)) {
-    // Nothing running to cancel: queued jobs use Dequeue, terminal ones nothing.
-    return c.redirect(`/jobs/${jobId}`, 302);
+    // The click must not just disappear: tell the operator why there is no form.
+    const error =
+      job.state === "queued"
+        ? "This job is queued, not running — use Dequeue to remove it."
+        : `This job is no longer running (${job.state}); there is nothing to cancel.`;
+    return c.redirect(`/jobs/${jobId}?error=${encodeURIComponent(error)}`, 302);
   }
   return c.html(
     renderCancelConfirmPage({
       identity: c.get("identity"),
-      csrfToken: ensureCsrfToken(c, ctx.config.uiSessionSecret),
+      csrfToken: pageOpts.showLogout ? ensureCsrfToken(c, ctx.config.uiSessionSecret) : undefined,
+      showLogout: pageOpts.showLogout,
       job: {
         id: job.id,
         repoFullName: job.repo_full_name,
         prNumber: job.pr_number,
         prTitle: job.pr_title,
         headSha: job.head_sha,
+        jobType: job.job_type,
       },
     }),
   );
@@ -1774,6 +1772,10 @@ function renderCancelConfirm(c: Context<AppEnv>, ctx: ServerContext, pageOpts: P
 function cancelRunningJob(c: Context<AppEnv>, ctx: ServerContext, pageOpts: PageOptions, jobId: number) {
   const job = ctx.store.getJob(jobId);
   if (!job) return c.text("Not found", 404);
+  // A resubmission after this cancel already happened is idempotent, not an error.
+  if (job.state === "cancelled" && job.cancelled_reason === "manual_cancel") {
+    return c.redirect(`/jobs/${jobId}?notice=cancel-already`, 302);
+  }
   if (!LIVE_JOB_STATES.includes(job.state)) {
     return renderJobError(
       c,
@@ -1781,7 +1783,6 @@ function cancelRunningJob(c: Context<AppEnv>, ctx: ServerContext, pageOpts: Page
       pageOpts,
       job,
       `Only running reviews can be cancelled this way; this one is ${job.state}.`,
-      400,
     );
   }
   const result = cancelJob(ctx.store, jobId, {
@@ -1790,9 +1791,9 @@ function cancelRunningJob(c: Context<AppEnv>, ctx: ServerContext, pageOpts: Page
     onCancelled: (ids) => ctx.queue.abortMany(ids),
   });
   if (!result.ok) {
-    return renderJobError(c, ctx, pageOpts, job, result.error, 400);
+    return renderJobError(c, ctx, pageOpts, job, result.error);
   }
-  return c.redirect(`/jobs/${jobId}?notice=${result.already ? "cancel-already" : "cancelled-review"}`, 302);
+  return c.redirect(`/jobs/${jobId}?notice=cancelled-review`, 302);
 }
 
 const CSRF_FAILURE_HTML = `<!doctype html>

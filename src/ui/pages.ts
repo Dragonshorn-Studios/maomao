@@ -2,7 +2,7 @@ import type { JobRow, JobStore, ReviewerRunRow } from "../jobs/store.js";
 import type { FindingRow } from "../findings/types.js";
 import { fingerprintFinding, stripHtmlComments } from "../findings/identity.js";
 import { POLICIES_WITH_EXTERNAL, POLICIES_WITH_INTERNAL } from "../routing/types.js";
-import { LIVE_JOB_STATES, type JobState } from "../config.js";
+import { LIVE_JOB_STATES } from "../config.js";
 import type { Severity } from "../schema.js";
 import { elapsedMs, escapeHtml, formatDuration, shortSha } from "../util.js";
 import {
@@ -289,23 +289,26 @@ function renderCancelledBanner(job: JobRow): string {
  * Cancel review for live work, nothing for terminal jobs. The forms must work
  * without JS; layout.ts disables the submit button while a form is in flight.
  */
+/** Single home for the dequeue form markup (job page + queue card). */
+function dequeueForm(jobId: number, csrfToken?: string, hint?: string): string {
+  return `<form class="inline-form" method="post" action="/jobs/${jobId}/dequeue">
+      ${csrfInput(csrfToken)}
+      <button type="submit">Dequeue</button>
+      ${hint ? `<span class="muted">${escapeHtml(hint)}</span>` : ""}
+    </form>`;
+}
+
 function renderJobActions(job: JobRow, csrfToken?: string): string {
-  if (job.state === "queued" && job.job_type === "pr_review") {
-    return `<form class="inline-form" method="post" action="/jobs/${job.id}/dequeue">
-      ${csrfInput(csrfToken)}
-      <button type="submit">Dequeue</button>
-      <span class="muted">Removes this review from the queue. History is kept; nothing is posted to GitHub.</span>
-    </form>`;
-  }
   if (job.state === "queued") {
-    // Health scans have their own page-level controls; a plain dequeue still applies.
-    return `<form class="inline-form" method="post" action="/jobs/${job.id}/dequeue">
-      ${csrfInput(csrfToken)}
-      <button type="submit">Dequeue</button>
-    </form>`;
+    // Health scans are started from /scan, not the queue form; the generic dequeue still applies.
+    const hint =
+      job.job_type === "pr_review"
+        ? "Removes this review from the queue. History is kept; nothing is posted to GitHub."
+        : undefined;
+    return dequeueForm(job.id, csrfToken, hint);
   }
   if (LIVE_JOB_STATES.includes(job.state)) {
-    return `<p><a href="/jobs/${job.id}/cancel">Cancel review…</a> <span class="muted">Stops the running work; partial results are discarded and nothing is published.</span></p>`;
+    return `<p><a href="/jobs/${job.id}/cancel">Cancel review…</a> <span class="muted">Stops this review; it will not be completed. Logs and partial output stay on the job page.</span></p>`;
   }
   return "";
 }
@@ -315,15 +318,12 @@ function renderQueueCard(job: JobRow, metrics: JobMetrics, uiFlavor?: UiFlavor, 
   const elapsed = formatDuration(elapsedMs(job.started_at, job.finished_at) ?? elapsedMs(job.created_at));
   const isLive = LIVE_JOB_STATES.includes(job.state);
   const flavor = flavorForJob(job.state, job.pr_number, uiFlavor);
-  const cardAction =
-    job.state === "queued"
-      ? `<form class="inline-form" method="post" action="/jobs/${job.id}/dequeue">
-          ${csrfInput(csrfToken)}
-          <button type="submit">Dequeue</button>
-        </form>`
-      : isLive
-        ? `<a href="/jobs/${job.id}/cancel">Cancel review…</a>`
-        : "";
+  let cardAction = "";
+  if (job.state === "queued") {
+    cardAction = dequeueForm(job.id, csrfToken);
+  } else if (isLive) {
+    cardAction = `<a href="/jobs/${job.id}/cancel">Cancel review…</a>`;
+  }
   return `<li>
     <article class="specimen${isLive ? " is-live" : ""}">
       <div class="specimen-head">
@@ -1446,31 +1446,34 @@ export function renderScanIssuePreviewPage(data: ScanIssuePreviewData): string {
 
 export interface CancelConfirmData {
   identity?: UiIdentity;
-  csrfToken: string;
-  job: { id: number; repoFullName: string; prNumber: number; prTitle: string; headSha: string };
+  csrfToken?: string;
+  showLogout?: boolean;
+  job: { id: number; repoFullName: string; prNumber: number; prTitle: string; headSha: string; jobType: string };
 }
 
 /**
- * Confirmation gate for stopping live work: cancellation discards partial
- * results, so the operator must re-submit the exact job they saw.
+ * Confirmation gate for stopping live work: the POST is bound to this job id
+ * and re-validated against the live states server-side, so a job that reached
+ * a terminal state in the meantime is refused rather than cancelled.
  */
 export function renderCancelConfirmPage(data: CancelConfirmData): string {
-  const isScan = data.job.prNumber === 0;
+  const isScan = data.job.jobType === "health_scan";
+  const heading = isScan ? "Cancel this scan?" : "Cancel this review?";
   const subject = isScan
     ? `the health scan of ${escapeHtml(data.job.repoFullName)}`
-    : `${escapeHtml(data.job.repoFullName)}#${data.job.prNumber}`;
+    : `${escapeHtml(data.job.repoFullName)}#${data.job.prNumber}${data.job.prTitle ? ` — ${escapeHtml(data.job.prTitle)}` : ""}`;
   const body = `
     <p class="crumb"><a href="/jobs/${data.job.id}">Job ${data.job.id}</a> / cancel</p>
-    <h1>Cancel this review?</h1>
+    <h1>${heading}</h1>
     <p class="lede">You are about to stop the running review of ${subject} at <code class="sha">${escapeHtml(shortSha(data.job.headSha, 12))}</code>.</p>
-    <p class="warn" role="alert">Work already done is discarded, and nothing will be published to GitHub. This cannot be undone — queue the review again if you change your mind.</p>
+    <p class="warn" role="alert">This review will not be completed, and its work cannot be resumed. This cannot be undone — queue the review again if you change your mind.</p>
     <form class="trigger" method="post" action="/jobs/${data.job.id}/cancel">
       ${csrfInput(data.csrfToken)}
       <button type="submit" aria-label="Confirm cancelling this review">Cancel review</button>
       <a href="/jobs/${data.job.id}">Keep it running</a>
     </form>`;
-  return layout("Cancel review", body, {
-    showLogout: Boolean(data.csrfToken),
+  return layout(heading, body, {
+    showLogout: data.showLogout ?? false,
     csrfToken: data.csrfToken,
     identity: data.identity,
   });
