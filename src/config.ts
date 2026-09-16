@@ -30,6 +30,17 @@ export type JobState =
 
 export type ReviewerState = "queued" | "running" | "done" | "failed";
 
+/** States after a worker claimed the job: cancelling these discards partial work. */
+export const LIVE_JOB_STATES: readonly JobState[] = [
+  "preparing",
+  "reconciling",
+  "routing",
+  "reviewing",
+  "aggregating",
+  "sniffing",
+  "publishing",
+];
+
 /** Why a job reached the terminal `cancelled` state; persisted in jobs.cancelled_reason. */
 export type CancelReason = "pr_merged" | "manual_dequeue" | "manual_cancel";
 

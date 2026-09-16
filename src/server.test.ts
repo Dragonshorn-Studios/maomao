@@ -2654,3 +2654,164 @@ describe("webhook merge cancellation wiring", () => {
     expect(job?.cancelled_reason).toBe("pr_merged");
   });
 });
+
+describe("manual dequeue and cancel review", () => {
+  const oauthEnv = {
+    UI_SESSION_SECRET: "session-secret-for-tests",
+    GITHUB_OAUTH_CLIENT_ID: "cid",
+    GITHUB_OAUTH_CLIENT_SECRET: "csecret",
+    MAOMAO_ADMIN_GITHUB_IDS: "1001",
+    MAOMAO_PUBLIC_URL: "https://maomao.example",
+  };
+
+  function seedJobs(store: JobStore): { queued: number; reviewing: number; completed: number } {
+    const seed = (prNumber: number, headSha: string) =>
+      store.enqueue({
+        repoFullName: "acme/widgets",
+        repoOwner: "acme",
+        repoName: "widgets",
+        installationId: 1,
+        prNumber,
+        prTitle: "t",
+        prBody: "",
+        prHtmlUrl: "https://github.com/acme/widgets/pull/x",
+        prAuthor: "dev",
+        baseSha: "b",
+        headSha,
+        baseRef: "main",
+        headRef: "f",
+        reviewers: [{ role: "correctness", title: "Correctness" }],
+      }).job.id;
+    const queued = seed(1, "q1");
+    const reviewing = seed(2, "r1");
+    store.setJobState(reviewing, "reviewing");
+    const completed = seed(3, "c1");
+    store.setJobState(completed, "completed");
+    return { queued, reviewing, completed };
+  }
+
+  /** Session cookie alone is not enough: grab the CSRF cookie+field pair from a page render. */
+  async function csrfFor(app: ReturnType<typeof createApp>, session: string) {
+    const page = await app.request("/", { headers: { cookie: session } });
+    const { csrfCookie, csrfToken } = await csrfArtifacts(page);
+    return { cookie: `${session}; ${csrfCookie}`, csrfToken };
+  }
+
+  async function post(
+    app: ReturnType<typeof createApp>,
+    jobId: number,
+    path: string,
+    cookie: string,
+    csrfToken: string,
+  ) {
+    return app.request(`/jobs/${jobId}${path}`, {
+      method: "POST",
+      headers: { cookie, "content-type": "application/x-www-form-urlencoded" },
+      body: `csrf_token=${encodeURIComponent(csrfToken)}`,
+    });
+  }
+
+  it("dequeues a queued job with actor and reason and aborts the queue", async () => {
+    const aborted: number[][] = [];
+    const { app, store } = testApp(oauthEnv, undefined, mockOauthFetch({ id: 1001, login: "octocat" }), {
+      queue: {
+        enqueue() {},
+        abortMany(ids: number[]) {
+          aborted.push([...ids]);
+        },
+      } as unknown as JobQueue,
+    });
+    const jobs = seedJobs(store);
+    const { cookie, csrfToken } = await await csrfFor(app, await operatorSession(app));
+
+    const response = await post(app, jobs.queued, "/dequeue", cookie, csrfToken);
+    expect(response.status).toBe(302);
+    expect(response.headers.get("location")).toContain("notice=dequeued");
+    const job = store.getJob(jobs.queued);
+    expect(job?.state).toBe("cancelled");
+    expect(job?.cancelled_reason).toBe("manual_dequeue");
+    expect(job?.cancelled_by).toBe("octocat");
+    expect(aborted).toEqual([[jobs.queued]]);
+    expect(store.getJob(jobs.reviewing)?.state).toBe("reviewing");
+  });
+
+  it("is idempotent when the dequeue is repeated", async () => {
+    const { app, store } = testApp(oauthEnv, undefined, mockOauthFetch({ id: 1001, login: "octocat" }));
+    const jobs = seedJobs(store);
+    const { cookie, csrfToken } = await csrfFor(app, await operatorSession(app));
+    await post(app, jobs.queued, "/dequeue", cookie, csrfToken);
+    const second = await post(app, jobs.queued, "/dequeue", cookie, csrfToken);
+    expect(second.status).toBe(302);
+    expect(second.headers.get("location")).toContain("notice=dequeue-already");
+    expect(store.listLogs(jobs.queued).filter((line) => line.message.includes("Cancelled"))).toHaveLength(1);
+  });
+
+  it("refuses to dequeue a running job and a completed job", async () => {
+    const { app, store } = testApp(oauthEnv, undefined, mockOauthFetch({ id: 1001, login: "octocat" }));
+    const jobs = seedJobs(store);
+    const { cookie, csrfToken } = await csrfFor(app, await operatorSession(app));
+    const running = await post(app, jobs.reviewing, "/dequeue", cookie, csrfToken);
+    expect(running.status).toBe(400);
+    expect(await running.text()).toContain("Only queued jobs can be dequeued");
+    const done = await post(app, jobs.completed, "/dequeue", cookie, csrfToken);
+    expect(done.status).toBe(400);
+    expect(store.getJob(jobs.reviewing)?.state).toBe("reviewing");
+    expect(store.getJob(jobs.completed)?.state).toBe("completed");
+  });
+
+  it("requires a session for dequeue posts", async () => {
+    const { app, store } = testApp(oauthEnv);
+    const jobs = seedJobs(store);
+    const response = await app.request(`/jobs/${jobs.queued}/dequeue`, { method: "POST" });
+    expect(response.status).toBe(302);
+    expect(response.headers.get("location")).toContain("/login");
+    expect(store.getJob(jobs.queued)?.state).toBe("queued");
+  });
+
+  it("cancels a running review through the confirmation page", async () => {
+    const aborted: number[][] = [];
+    const { app, store } = testApp(oauthEnv, undefined, mockOauthFetch({ id: 1001, login: "octocat" }), {
+      queue: {
+        enqueue() {},
+        abortMany(ids: number[]) {
+          aborted.push([...ids]);
+        },
+      } as unknown as JobQueue,
+    });
+    const jobs = seedJobs(store);
+    const { cookie, csrfToken } = await csrfFor(app, await operatorSession(app));
+
+    // Queued jobs redirect to the job page (no confirmation to see).
+    const queuedConfirm = await app.request(`/jobs/${jobs.queued}/cancel`, { headers: { cookie } });
+    expect(queuedConfirm.status).toBe(302);
+
+    const confirmPage = await app.request(`/jobs/${jobs.reviewing}/cancel`, { headers: { cookie } });
+    expect(confirmPage.status).toBe(200);
+    const html = await confirmPage.text();
+    expect(html).toContain("Cancel this review?");
+    const tokenMatch = html.match(/name="csrf_token" value="([^"]+)"/);
+    expect(tokenMatch?.[1]).toBeTruthy();
+
+    const response = await app.request(`/jobs/${jobs.reviewing}/cancel`, {
+      method: "POST",
+      headers: { cookie, "content-type": "application/x-www-form-urlencoded" },
+      body: `csrf_token=${encodeURIComponent(tokenMatch![1])}`,
+    });
+    expect(response.status).toBe(302);
+    expect(response.headers.get("location")).toContain("notice=cancelled-review");
+    const job = store.getJob(jobs.reviewing);
+    expect(job?.state).toBe("cancelled");
+    expect(job?.cancelled_reason).toBe("manual_cancel");
+    expect(job?.cancelled_by).toBe("octocat");
+    expect(aborted).toEqual([[jobs.reviewing]]);
+  });
+
+  it("refuses the cancel POST for a terminal job", async () => {
+    const { app, store } = testApp(oauthEnv, undefined, mockOauthFetch({ id: 1001, login: "octocat" }));
+    const jobs = seedJobs(store);
+    const { cookie, csrfToken } = await csrfFor(app, await operatorSession(app));
+    const response = await post(app, jobs.completed, "/cancel", cookie, csrfToken);
+    expect(response.status).toBe(400);
+    expect(store.getJob(jobs.completed)?.state).toBe("completed");
+  });
+});

@@ -4,6 +4,8 @@ export {
   renderJob,
   renderLogin,
   renderScanIssuePreviewPage,
+  renderCancelConfirmPage,
+  type CancelConfirmData,
   type JobPageOptions,
   type LoginError,
   type LoginOptions,

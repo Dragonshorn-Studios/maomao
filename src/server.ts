@@ -10,6 +10,8 @@ import { authorizeGithubAccount, authorizeGithubRepository, authorizeGithubTarge
 import { repoRateLimitActive, RepoRateLimiter, WindowRateLimiter } from "./github/rate-limit.js";
 import { parseGithubPullUrl, PullUrlError } from "./github/pull-url.js";
 import { dispatchEnqueue, enqueuePullJob } from "./jobs/enqueue.js";
+import { cancelJob } from "./jobs/cancel.js";
+import { LIVE_JOB_STATES } from "./config.js";
 import { subscribe } from "./events.js";
 import { redactSecrets } from "./util.js";
 import { readFileSync } from "node:fs";
@@ -18,6 +20,7 @@ import {
   renderScanConfirmPage,
   renderScanIssuePreviewPage,
   renderScanPage,
+  renderCancelConfirmPage,
   renderConfigPage,
   renderHome,
   renderJob,
@@ -676,6 +679,10 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
     if (!Number.isFinite(runId)) return c.text("Not found", 404);
     return retryJob(c, ctx, pageOpts, Number(c.req.param("id")), runId);
   });
+
+  app.post("/jobs/:id/dequeue", (c) => dequeueJob(c, ctx, pageOpts, Number(c.req.param("id"))));
+  app.get("/jobs/:id/cancel", (c) => renderCancelConfirm(c, ctx, pageOpts, Number(c.req.param("id"))));
+  app.post("/jobs/:id/cancel", (c) => cancelRunningJob(c, ctx, pageOpts, Number(c.req.param("id"))));
 
   // ---- Versioned review-profile configuration (/config) ----
   const configWriteDenied = (c: Context<AppEnv>) =>
@@ -1638,6 +1645,18 @@ function noticeText(
   if (code === "retry") {
     return "Re-queued failed reviewer(s) for this head SHA.";
   }
+  if (code === "dequeued") {
+    return "Job dequeued. It will not run; history and logs are preserved. Nothing was posted to GitHub.";
+  }
+  if (code === "dequeue-already") {
+    return "This job was already dequeued.";
+  }
+  if (code === "cancelled-review") {
+    return "Review cancelled. Running work was stopped and nothing will be published to GitHub.";
+  }
+  if (code === "cancel-already") {
+    return "This job was already cancelled.";
+  }
   return undefined;
 }
 
@@ -1676,6 +1695,104 @@ function retryJob(c: Context<AppEnv>, ctx: ServerContext, pageOpts: PageOptions,
   }
   ctx.queue.enqueue(jobId);
   return c.redirect(`/jobs/${jobId}?notice=retry`, 302);
+}
+
+/** Operator attribution for manual queue actions; password-gate sessions have no identity. */
+function actionActor(c: Context<AppEnv>): string {
+  return c.get("identity")?.login ?? "operator";
+}
+
+function renderJobError(
+  c: Context<AppEnv>,
+  ctx: ServerContext,
+  pageOpts: PageOptions,
+  job: JobRow,
+  error: string,
+  status: 400 | 404,
+) {
+  const latest = ctx.store.findLatestJobForPull(job.repo_full_name, job.pr_number);
+  return c.html(
+    renderJob(job, ctx.store.listReviewerRuns(job.id), ctx.store.listLogs(job.id), {
+      ...pageOpts,
+      identity: c.get("identity"),
+      csrfToken: pageOpts.showLogout ? ensureCsrfToken(c, ctx.config.uiSessionSecret) : undefined,
+      prHeadSha: latest?.head_sha ?? job.head_sha,
+      error,
+      prFindings: ctx.store.listFindings(job.repo_full_name, job.pr_number),
+    }),
+    status,
+  );
+}
+
+/**
+ * Removes a queued job through the shared cancellation service: atomic,
+ * idempotent, history preserved, and nothing is posted to GitHub.
+ */
+function dequeueJob(c: Context<AppEnv>, ctx: ServerContext, pageOpts: PageOptions, jobId: number) {
+  const job = ctx.store.getJob(jobId);
+  if (!job) return c.text("Not found", 404);
+  if (job.state !== "queued") {
+    // Repeated clicks and stale UI submissions are idempotent, not errors.
+    if (job.state === "cancelled" && job.cancelled_reason === "manual_dequeue") {
+      return c.redirect(`/jobs/${jobId}?notice=dequeue-already`, 302);
+    }
+    return renderJobError(c, ctx, pageOpts, job, `Only queued jobs can be dequeued; this one is ${job.state}.`, 400);
+  }
+  const result = cancelJob(ctx.store, jobId, {
+    reason: "manual_dequeue",
+    actor: actionActor(c),
+    onCancelled: (ids) => ctx.queue.abortMany(ids),
+  });
+  if (!result.ok) {
+    return renderJobError(c, ctx, pageOpts, job, result.error, 400);
+  }
+  return c.redirect(`/jobs/${jobId}?notice=${result.already ? "dequeue-already" : "dequeued"}`, 302);
+}
+
+function renderCancelConfirm(c: Context<AppEnv>, ctx: ServerContext, pageOpts: PageOptions, jobId: number) {
+  const job = ctx.store.getJob(jobId);
+  if (!job) return c.text("Not found", 404);
+  if (!LIVE_JOB_STATES.includes(job.state)) {
+    // Nothing running to cancel: queued jobs use Dequeue, terminal ones nothing.
+    return c.redirect(`/jobs/${jobId}`, 302);
+  }
+  return c.html(
+    renderCancelConfirmPage({
+      identity: c.get("identity"),
+      csrfToken: ensureCsrfToken(c, ctx.config.uiSessionSecret),
+      job: {
+        id: job.id,
+        repoFullName: job.repo_full_name,
+        prNumber: job.pr_number,
+        prTitle: job.pr_title,
+        headSha: job.head_sha,
+      },
+    }),
+  );
+}
+
+function cancelRunningJob(c: Context<AppEnv>, ctx: ServerContext, pageOpts: PageOptions, jobId: number) {
+  const job = ctx.store.getJob(jobId);
+  if (!job) return c.text("Not found", 404);
+  if (!LIVE_JOB_STATES.includes(job.state)) {
+    return renderJobError(
+      c,
+      ctx,
+      pageOpts,
+      job,
+      `Only running reviews can be cancelled this way; this one is ${job.state}.`,
+      400,
+    );
+  }
+  const result = cancelJob(ctx.store, jobId, {
+    reason: "manual_cancel",
+    actor: actionActor(c),
+    onCancelled: (ids) => ctx.queue.abortMany(ids),
+  });
+  if (!result.ok) {
+    return renderJobError(c, ctx, pageOpts, job, result.error, 400);
+  }
+  return c.redirect(`/jobs/${jobId}?notice=${result.already ? "cancel-already" : "cancelled-review"}`, 302);
 }
 
 const CSRF_FAILURE_HTML = `<!doctype html>

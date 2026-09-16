@@ -84,6 +84,14 @@ export function layout(title: string, body: string, options: PageOptions = {}): 
   const script = live
     ? `<script>
     if (!new URLSearchParams(location.search).has("static")) {
+      // One-shot guard against double submits (dequeue, retry, logout): the
+      // button disables while the form navigates. Forms still work without JS.
+      document.addEventListener("submit", function (event) {
+        var form = event.target;
+        if (form.method && form.method.toLowerCase() !== "post") return;
+        var button = form.querySelector('button[type="submit"]');
+        if (button) button.disabled = true;
+      });
       const events = new EventSource("/events");
       events.addEventListener("message", () => {});
       events.onmessage = (event) => {

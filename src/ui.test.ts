@@ -1082,3 +1082,78 @@ describe("scan typeahead combobox (fake DOM)", () => {
     expect(empty.input.listenerNames()).toEqual([]);
   });
 });
+
+describe("dequeue and cancel controls", () => {
+  function jobStore() {
+    return new JobStore(openDb(":memory:"));
+  }
+
+  function seed(jobStore: JobStore, prNumber: number, headSha: string) {
+    return jobStore.enqueue({
+      repoFullName: "acme/widgets",
+      repoOwner: "acme",
+      repoName: "widgets",
+      installationId: 1,
+      prNumber,
+      prTitle: "Add a feature",
+      prBody: "",
+      prHtmlUrl: "https://github.com/acme/widgets/pull/9",
+      prAuthor: "dev",
+      baseSha: "b",
+      headSha,
+      baseRef: "main",
+      headRef: "f",
+      reviewers: [{ role: "correctness", title: "Correctness" }],
+    }).job.id;
+  }
+
+  it("shows Dequeue on queued cards, Cancel review on live cards, nothing on terminal cards", () => {
+    const store = jobStore();
+    const queued = seed(store, 1, "q");
+    const reviewing = seed(store, 2, "r");
+    store.setJobState(reviewing, "reviewing");
+    const completed = seed(store, 3, "c");
+    store.setJobState(completed, "completed");
+    const html = renderHome(store.listJobs(20), store, { csrfToken: "tok-123" });
+
+    expect(html).toContain(`/jobs/${queued}/dequeue`);
+    expect(html).toContain(`/jobs/${reviewing}/cancel`);
+    // Terminal jobs must not expose an active control.
+    expect(html).not.toContain(`/jobs/${completed}/dequeue`);
+    expect(html).not.toContain(`/jobs/${completed}/cancel`);
+    expect(html).toContain('value="tok-123"');
+  });
+
+  it("shows job-level actions on the job page for queued and live jobs only", () => {
+    const store = jobStore();
+    const queued = seed(store, 1, "q");
+    const html = renderJob(store.getJob(queued)!, store.listReviewerRuns(queued), store.listLogs(queued), {
+      csrfToken: "tok-123",
+    });
+    expect(html).toContain(`/jobs/${queued}/dequeue`);
+    expect(html).toContain("Removes this review from the queue");
+
+    const reviewing = seed(store, 2, "r");
+    store.setJobState(reviewing, "reviewing");
+    const liveHtml = renderJob(store.getJob(reviewing)!, store.listReviewerRuns(reviewing), store.listLogs(reviewing), {});
+    expect(liveHtml).toContain(`/jobs/${reviewing}/cancel`);
+    expect(liveHtml).toContain("Cancel review");
+  });
+
+  it("renders a reason-aware cancelled banner that never reads as a failure", () => {
+    const store = jobStore();
+    const merged = seed(store, 1, "m");
+    store.cancelJobs({ jobId: merged }, "pr_merged", null);
+    const html = renderJob(store.getJob(merged)!, store.listReviewerRuns(merged), store.listLogs(merged), {});
+    expect(html).toContain("Cancelled — PR merged");
+    expect(html).toContain("View the merged pull request");
+    expect(html).not.toContain("role=\"alert\"");
+    expect(html).not.toContain("/dequeue");
+    expect(html).not.toContain("/cancel");
+
+    const dequeued = seed(store, 2, "d");
+    store.cancelJobs({ jobId: dequeued }, "manual_dequeue", "octocat");
+    const dequeuedHtml = renderJob(store.getJob(dequeued)!, store.listReviewerRuns(dequeued), store.listLogs(dequeued), {});
+    expect(dequeuedHtml).toContain("Dequeued by octocat");
+  });
+});

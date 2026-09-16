@@ -2,10 +2,11 @@ import type { JobRow, JobStore, ReviewerRunRow } from "../jobs/store.js";
 import type { FindingRow } from "../findings/types.js";
 import { fingerprintFinding, stripHtmlComments } from "../findings/identity.js";
 import { POLICIES_WITH_EXTERNAL, POLICIES_WITH_INTERNAL } from "../routing/types.js";
-import type { JobState } from "../config.js";
+import { LIVE_JOB_STATES, type JobState } from "../config.js";
 import type { Severity } from "../schema.js";
 import { elapsedMs, escapeHtml, formatDuration, shortSha } from "../util.js";
 import {
+  cancelledBannerCopy,
   diffUnavailableCopy,
   emptyQueueCopy,
   huntersReturnedCopy,
@@ -98,7 +99,7 @@ export function renderLogin(options: LoginOptions = {}): string {
 export function renderHome(jobs: JobRow[], store: JobStore, options: PageOptions = {}): string {
   const empty = emptyQueueCopy();
   const cards = jobs
-    .map((job) => renderQueueCard(job, jobMetrics(job, store), options.uiFlavor))
+    .map((job) => renderQueueCard(job, jobMetrics(job, store), options.uiFlavor, options.csrfToken))
     .join("");
 
   const body = `
@@ -162,13 +163,20 @@ export function renderJob(
   const heading = isScan
     ? `Health scan · ${escapeHtml(job.repo_full_name)} @ ${escapeHtml(shortSha(job.head_sha, 12))}`
     : `${escapeHtml(job.repo_full_name)}#${job.pr_number}`;
+  const cancelledBanner =
+    job.state === "cancelled"
+      ? renderCancelledBanner(job)
+      : "";
+  const jobActions = renderJobActions(job, options.csrfToken);
   const body = `
     <p class="crumb"><a href="/">Jobs</a> / job ${job.id}</p>
     ${options.notice ? `<p class="notice" role="status">${escapeHtml(options.notice)}</p>` : ""}
     ${options.error ? `<p class="error" role="alert">${escapeHtml(options.error)}</p>` : ""}
+    ${cancelledBanner}
     ${stale ? `<p class="warn" role="status">${escapeHtml(staleBanner())}</p>` : ""}
     <h1>${heading}</h1>
     <p class="lede">${escapeHtml(job.pr_title || "")}${flavor ? ` · ${escapeHtml(flavor)}` : ""}</p>
+    ${jobActions}
     ${
       job.state === "completed"
         ? `<p class="muted">${escapeHtml(huntersReturnedCopy(metrics.reviewersDone, metrics.findings.total, options.uiFlavor))}</p>`
@@ -268,20 +276,54 @@ export function renderJob(
   return layout(isScan ? `Health scan · ${job.repo_full_name}` : `${job.repo_full_name}#${job.pr_number}`, body, options);
 }
 
-function renderQueueCard(job: JobRow, metrics: JobMetrics, uiFlavor?: UiFlavor): string {
+function renderCancelledBanner(job: JobRow): string {
+  const banner = cancelledBannerCopy(job);
+  const link = banner.link
+    ? ` <a href="${escapeHtml(banner.link.href)}">${escapeHtml(banner.link.label)}</a>`
+    : "";
+  return `<p class="warn" role="status">${escapeHtml(banner.text)}${link}</p>`;
+}
+
+/**
+ * Server-rendered controls: Dequeue for queued work, a confirmation-gated
+ * Cancel review for live work, nothing for terminal jobs. The forms must work
+ * without JS; layout.ts disables the submit button while a form is in flight.
+ */
+function renderJobActions(job: JobRow, csrfToken?: string): string {
+  if (job.state === "queued" && job.job_type === "pr_review") {
+    return `<form class="inline-form" method="post" action="/jobs/${job.id}/dequeue">
+      ${csrfInput(csrfToken)}
+      <button type="submit">Dequeue</button>
+      <span class="muted">Removes this review from the queue. History is kept; nothing is posted to GitHub.</span>
+    </form>`;
+  }
+  if (job.state === "queued") {
+    // Health scans have their own page-level controls; a plain dequeue still applies.
+    return `<form class="inline-form" method="post" action="/jobs/${job.id}/dequeue">
+      ${csrfInput(csrfToken)}
+      <button type="submit">Dequeue</button>
+    </form>`;
+  }
+  if (LIVE_JOB_STATES.includes(job.state)) {
+    return `<p><a href="/jobs/${job.id}/cancel">Cancel review…</a> <span class="muted">Stops the running work; partial results are discarded and nothing is published.</span></p>`;
+  }
+  return "";
+}
+
+function renderQueueCard(job: JobRow, metrics: JobMetrics, uiFlavor?: UiFlavor, csrfToken?: string): string {
   const state = jobStateLabel(job.state);
   const elapsed = formatDuration(elapsedMs(job.started_at, job.finished_at) ?? elapsedMs(job.created_at));
-  const live: readonly JobState[] = [
-    "preparing",
-    "reconciling",
-    "routing",
-    "reviewing",
-    "aggregating",
-    "sniffing",
-    "publishing",
-  ];
-  const isLive = live.includes(job.state);
+  const isLive = LIVE_JOB_STATES.includes(job.state);
   const flavor = flavorForJob(job.state, job.pr_number, uiFlavor);
+  const cardAction =
+    job.state === "queued"
+      ? `<form class="inline-form" method="post" action="/jobs/${job.id}/dequeue">
+          ${csrfInput(csrfToken)}
+          <button type="submit">Dequeue</button>
+        </form>`
+      : isLive
+        ? `<a href="/jobs/${job.id}/cancel">Cancel review…</a>`
+        : "";
   return `<li>
     <article class="specimen${isLive ? " is-live" : ""}">
       <div class="specimen-head">
@@ -297,6 +339,7 @@ function renderQueueCard(job: JobRow, metrics: JobMetrics, uiFlavor?: UiFlavor):
         ${metrics.provider ? `<span class="pair">Provider <strong><code class="metric">${escapeHtml(metrics.provider)}</code></strong></span>` : ""}
         <span class="pair">Tokens <strong class="metric">${escapeHtml(formatTokens(metrics.tokens))}${metrics.usageComplete ? "" : "+"}</strong></span>
         <span class="pair">Cost <strong class="metric">${escapeHtml(formatCost(metrics.cost))}</strong></span>
+        ${cardAction}
       </div>
       ${renderDiagnosis(metrics, job.aggregator_state)}
       ${renderSeverityChips(metrics.findings, !metrics.findingsConfirmed)}
@@ -1395,6 +1438,38 @@ export function renderScanIssuePreviewPage(data: ScanIssuePreviewData): string {
     ${cards}
     ${confirmForm}`;
   return layout("Preview GitHub issues", body, {
+    showLogout: Boolean(data.csrfToken),
+    csrfToken: data.csrfToken,
+    identity: data.identity,
+  });
+}
+
+export interface CancelConfirmData {
+  identity?: UiIdentity;
+  csrfToken: string;
+  job: { id: number; repoFullName: string; prNumber: number; prTitle: string; headSha: string };
+}
+
+/**
+ * Confirmation gate for stopping live work: cancellation discards partial
+ * results, so the operator must re-submit the exact job they saw.
+ */
+export function renderCancelConfirmPage(data: CancelConfirmData): string {
+  const isScan = data.job.prNumber === 0;
+  const subject = isScan
+    ? `the health scan of ${escapeHtml(data.job.repoFullName)}`
+    : `${escapeHtml(data.job.repoFullName)}#${data.job.prNumber}`;
+  const body = `
+    <p class="crumb"><a href="/jobs/${data.job.id}">Job ${data.job.id}</a> / cancel</p>
+    <h1>Cancel this review?</h1>
+    <p class="lede">You are about to stop the running review of ${subject} at <code class="sha">${escapeHtml(shortSha(data.job.headSha, 12))}</code>.</p>
+    <p class="warn" role="alert">Work already done is discarded, and nothing will be published to GitHub. This cannot be undone — queue the review again if you change your mind.</p>
+    <form class="trigger" method="post" action="/jobs/${data.job.id}/cancel">
+      ${csrfInput(data.csrfToken)}
+      <button type="submit" aria-label="Confirm cancelling this review">Cancel review</button>
+      <a href="/jobs/${data.job.id}">Keep it running</a>
+    </form>`;
+  return layout("Cancel review", body, {
     showLogout: Boolean(data.csrfToken),
     csrfToken: data.csrfToken,
     identity: data.identity,

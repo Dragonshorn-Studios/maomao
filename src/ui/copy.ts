@@ -85,6 +85,38 @@ export function staleBanner(): string {
   return "This job reviewed an older commit. A newer head SHA exists for this pull request; do not treat this result as current.";
 }
 
+/**
+ * Reason-aware copy for the terminal `cancelled` state. Deliberately not
+ * failure-flavoured: cancellation is an outcome, not an error.
+ */
+export function cancelledBannerCopy(job: {
+  cancelled_reason: string | null;
+  cancelled_by: string | null;
+  pr_html_url: string;
+  job_type: string;
+}): { text: string; link?: { href: string; label: string } } {
+  if (job.job_type === "health_scan") {
+    return { text: "Scan cancelled. Nothing was persisted from a partial run." };
+  }
+  if (job.cancelled_reason === "pr_merged") {
+    return {
+      text: "Cancelled — PR merged. The pull request merged before this review ran; nothing was published.",
+      link: job.pr_html_url ? { href: job.pr_html_url, label: "View the merged pull request" } : undefined,
+    };
+  }
+  if (job.cancelled_reason === "manual_dequeue") {
+    return {
+      text: `Dequeued by ${job.cancelled_by ?? "an operator"}. Removed from the queue before work started; nothing was published.`,
+    };
+  }
+  if (job.cancelled_reason === "manual_cancel") {
+    return {
+      text: `Review cancelled by ${job.cancelled_by ?? "an operator"}. Running work was stopped; nothing was published.`,
+    };
+  }
+  return { text: "Cancelled. Nothing was published." };
+}
+
 export type UiFlavor = "apothecary" | "plain";
 
 export function flavorForJob(state: string, prNumber: number, flavor: UiFlavor = "apothecary"): string | undefined {
