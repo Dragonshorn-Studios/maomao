@@ -43,6 +43,16 @@ describe("synthesisePatch", () => {
     const body = "-removed\n+added";
     expect(synthesisePatch(body, "a.ts")).toContain(body);
   });
+
+  it("does not count trailing empty lines or no-newline markers as context", () => {
+    const trailing = synthesisePatch("@@ -51 +54 @@\n keep\n-old\n+new\n keep2\n", "a.ts");
+    expect(trailing).toContain("@@ -51,3 +54,3 @@");
+    expect(trailing).not.toContain("@@ -51,4 +54,4 @@");
+
+    const marker = synthesisePatch("@@ -1 +1 @@\n-old\n+new\n\\ No newline at end of file", "a.ts");
+    expect(marker).toContain("@@ -1,1 +1,1 @@");
+    expect(marker).toContain("\\ No newline at end of file");
+  });
 });
 
 describe("annotationForLine", () => {
@@ -85,5 +95,15 @@ describe("diffLayoutOptions", () => {
   it("toggles layouts", () => {
     expect(nextLayout("split")).toBe("unified");
     expect(nextLayout("unified")).toBe("split");
+  });
+});
+
+describe("pierre-entry mount contract", () => {
+  it("mounts FileDiff via containerWrapper so diffs-container can adopt its stylesheet", async () => {
+    const { readFile } = await import("node:fs/promises");
+    const source = await readFile(new URL("./pierre-entry.ts", import.meta.url), "utf8");
+    expect(source).toContain("containerWrapper: container");
+    expect(source).not.toMatch(/fileContainer:\s*container/);
+    expect(source).toContain("diffs-container");
   });
 });

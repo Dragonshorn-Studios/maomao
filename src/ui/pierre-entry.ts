@@ -3,6 +3,12 @@
 // unified/split toggle, and a severity-tinted line annotation. The
 // server-rendered spans stay as the no-JS fallback; when this bundle is
 // missing (404) the enhancement simply never runs.
+//
+// FileDiff must mount via `containerWrapper`, not `fileContainer`. Passing our
+// `.pierre-diff` div as fileContainer makes the library attachShadow() on it
+// and skip the `diffs-container` custom element — whose constructor is what
+// adopts the library stylesheet. The viewer then renders unstyled (or blank)
+// and hides the fallback in the unslotted light DOM.
 
 import { FileDiff, getSingularPatch, type FileDiffMetadata } from "@pierre/diffs";
 import { annotationForLine, diffLayoutOptions, nextLayout, type DiffLayout, synthesisePatch } from "./pierre-glue.js";
@@ -54,12 +60,23 @@ function renderInto(container: HTMLElement): void {
       return node;
     },
   });
-  container.querySelector(".diff-panel")?.remove();
-  fileDiff.render({
-    fileDiff: metadata,
-    lineAnnotations: annotation ? [annotation] : [],
-    fileContainer: container,
-  });
+  try {
+    fileDiff.render({
+      fileDiff: metadata,
+      lineAnnotations: annotation ? [annotation] : [],
+      containerWrapper: container,
+    });
+  } catch {
+    fileDiff.cleanUp();
+    return;
+  }
+  if (!container.querySelector("diffs-container")) {
+    fileDiff.cleanUp();
+    return;
+  }
+  // Hide (don't destroy) the no-JS panel; .diff-raw stays for layout toggles.
+  const fallback = container.querySelector<HTMLElement>(".diff-panel");
+  if (fallback) fallback.hidden = true;
   container.setAttribute("data-enhanced", "1");
   instances.set(container, fileDiff);
 }
@@ -67,11 +84,17 @@ function renderInto(container: HTMLElement): void {
 function applyLayout(layout: DiffLayout): void {
   localStorage.setItem(LAYOUT_STORAGE_KEY, layout);
   for (const container of Array.from(document.querySelectorAll<HTMLElement>(".pierre-diff[data-enhanced]"))) {
-    // Drop the torn-down viewer so the theme observer stops mutating detached DOM.
+    const previous = instances.get(container);
+    previous?.cleanUp();
     instances.delete(container);
     container.removeAttribute("data-enhanced");
     for (const child of Array.from(container.children)) {
-      if (!child.classList.contains("diff-raw")) child.remove();
+      if (child.classList.contains("diff-raw")) continue;
+      if (child.classList.contains("diff-panel")) {
+        (child as HTMLElement).hidden = false;
+        continue;
+      }
+      child.remove();
     }
     renderInto(container);
   }
@@ -103,17 +126,26 @@ function enhanceAll(): void {
     const label = (layout: DiffLayout) => `Switch diffs to ${layout === "split" ? "unified" : "split"} view`;
     button.textContent = currentLayout() === "split" ? "Split view" : "Unified view";
     button.setAttribute("aria-label", label(currentLayout()));
+    // Buttons inside <summary> otherwise toggle the <details> in some browsers.
+    button.addEventListener("mousedown", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+    });
     button.addEventListener("click", (event) => {
       event.preventDefault();
       event.stopPropagation();
       const next = nextLayout(currentLayout());
       applyLayout(next);
-      button.textContent = next === "split" ? "Split view" : "Unified view";
-      button.setAttribute("aria-label", label(next));
+      for (const toggle of document.querySelectorAll<HTMLButtonElement>(".diff-layout-toggle")) {
+        toggle.textContent = next === "split" ? "Split view" : "Unified view";
+        toggle.setAttribute("aria-label", label(next));
+      }
     });
     summary.appendChild(button);
   }
 }
+
+export { enhanceAll as enhance, applyLayout };
 
 globalThis.__maomaoPierre = { enhance: enhanceAll, applyLayout };
 const pierre = globalThis.__maomaoPierre;

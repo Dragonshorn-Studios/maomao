@@ -33,6 +33,15 @@ describe("theme tokens", () => {
     expect(THEME_CSS).toContain("--diffs-font-family");
     expect(THEME_CSS).toContain(".pierre-annotation");
     expect(THEME_CSS).toContain(".diff-layout-toggle");
+    expect(THEME_CSS).toContain("details.finding-diff > summary");
+    expect(THEME_CSS).toContain(".trigger .typeahead-wrap");
+    expect(THEME_CSS).toContain(".pierre-diff diffs-container");
+    expect(THEME_CSS).toContain("--diffs-bg: var(--code-bg)");
+    expect(THEME_CSS).toContain("--diffs-fg: var(--ink)");
+    expect(THEME_CSS).toContain("--diffs-addition-color-override: var(--jade)");
+    expect(THEME_CSS).toContain("--diffs-deletion-color-override: var(--cinnabar)");
+    expect(THEME_CSS).not.toContain("--diffs-foreground");
+    expect(THEME_CSS).not.toContain("--diffs-background");
     expect(THEME_CSS).not.toContain(".diff-gutter");
     expect(THEME_CSS).not.toContain(".word-add");
     expect(THEME_CSS).toContain(".typeahead-listbox");
@@ -64,6 +73,7 @@ describe("monitoring pages", () => {
     expect(html).toContain('rel="apple-touch-icon" href="/assets/icon.png"');
     expect(html).not.toContain("EventSource");
     expect(html).toContain("Skip to content");
+    expect(html).toContain('<script src="/assets/vendor/pierre-diffs.js" defer></script>');
   });
 
   it("renders the empty queue with restrained flavor", () => {
@@ -904,6 +914,7 @@ describe("scan repository typeahead", () => {
 
   it("serves a script with a debug hook and DOM-safe rendering", () => {
     expect(TYPEAHEAD_JS).toContain("__maomaoTypeahead");
+    expect(TYPEAHEAD_JS).toContain('credentials: "same-origin"');
     expect(TYPEAHEAD_JS).not.toContain("innerHTML");
     expect(TYPEAHEAD_JS).not.toMatch(/https?:\/\//);
   });
@@ -924,6 +935,14 @@ describe("scan repository typeahead", () => {
     expect(html).toContain('role="listbox"');
     expect(html).toContain('<script src="/assets/typeahead.js" defer></script>');
     expect(html).toContain('aria-label="Run repository health scan"');
+    // The wrap lives inside the label so `.trigger label { flex: 1 }` gives the
+    // combobox (and its absolutely positioned listbox) the full field width.
+    const labelAt = html.indexOf('for="scan-repo-input"');
+    const wrapAt = html.indexOf("typeahead-wrap");
+    const labelEnd = html.indexOf("</label>", labelAt);
+    expect(labelAt).toBeGreaterThan(-1);
+    expect(wrapAt).toBeGreaterThan(labelAt);
+    expect(wrapAt).toBeLessThan(labelEnd);
   });
 });
 

@@ -340,6 +340,7 @@ button, input, textarea {
   padding: 0.85rem 1rem;
 }
 .trigger label { flex: 1; min-width: 16rem; color: var(--ink-muted); font-size: 0.85rem; }
+.trigger .typeahead-wrap { position: relative; display: block; z-index: 5; }
 
 .queue {
   list-style: none;
@@ -653,16 +654,36 @@ form.retry, form.retry-job {
 .diff-panel .diff-ctx { color: var(--ink-muted); }
 .diff-note { font-size: 0.8rem; }
 
-/* @pierre/diffs bridge: point the library's CSS variables at Maomao tokens
-   (variable names come from formatCSSVariablePrefix("diffs") → --diffs-*). */
+/* @pierre/diffs bridge: point the library's CSS variables at Maomao tokens.
+   Pierre paints chrome from --diffs-bg/--diffs-fg and add/del mix-ins; those
+   are set on :host inside a CSS layer, so unlayered rules on the custom
+   element win and keep the viewer on paper/ink/jade/cinnabar instead of
+   Pierre's stock white/neon palette. Syntax tokens still come from the
+   bundled pierre-light/dark Shiki themes. */
 .pierre-diff,
+.pierre-diff diffs-container,
 details.finding-diff {
   --diffs-font-family: var(--font-mono);
   --diffs-font-size: 0.78rem;
-}
-html[data-theme="dark"] .pierre-diff {
-  --diffs-foreground: var(--ink);
-  --diffs-background: var(--surface-2);
+  --diffs-header-font-family: var(--font-ui);
+  --diffs-bg: var(--code-bg);
+  --diffs-fg: var(--ink);
+  --diffs-light-bg: var(--code-bg);
+  --diffs-dark-bg: var(--code-bg);
+  --diffs-light: var(--ink);
+  --diffs-dark: var(--ink);
+  --diffs-fg-number-override: var(--ink-muted);
+  --diffs-addition-color-override: var(--jade);
+  --diffs-deletion-color-override: var(--cinnabar);
+  --diffs-modified-color-override: var(--herb);
+  --diffs-added-light: var(--jade);
+  --diffs-added-dark: var(--jade);
+  --diffs-deleted-light: var(--cinnabar);
+  --diffs-deleted-dark: var(--cinnabar);
+  --diffs-modified-light: var(--herb);
+  --diffs-modified-dark: var(--herb);
+  --diffs-warning-light: var(--amber);
+  --diffs-warning-dark: var(--amber);
 }
 .pierre-annotation {
   border-left: 3px solid var(--amber);
@@ -677,6 +698,12 @@ html[data-theme="dark"] .pierre-diff {
 .pierre-annotation.severity-medium { border-left-color: var(--amber); }
 .pierre-annotation.severity-low,
 .pierre-annotation.severity-info { border-left-color: var(--herb); }
+details.finding-diff > summary {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  cursor: pointer;
+}
 .diff-layout-toggle {
   margin-left: auto;
   font-size: 0.72rem;
@@ -686,6 +713,15 @@ html[data-theme="dark"] .pierre-diff {
   background: transparent;
   border: 1px solid var(--line-strong);
   border-radius: 6px;
+}
+.pierre-diff diffs-container {
+  display: block;
+  min-height: 4rem;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius);
+  overflow: hidden;
+  background: var(--code-bg);
+  color: var(--ink);
 }
 /* Scan-page repository typeahead (progressively enhanced by /assets/typeahead.js) */
 .typeahead-wrap { position: relative; display: block; }

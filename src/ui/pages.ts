@@ -1243,13 +1243,14 @@ export function renderScanPage(data: ScanPageData): string {
     ${data.canScan ? `
     <form class="trigger" method="post" action="/scan">
       ${csrf}
-      <label for="scan-repo-input">Repository (owner/repo — must be an allowlisted installation)</label>
-      <span class="typeahead-wrap">
-        <input id="scan-repo-input" name="repo" placeholder="owner/repo — start typing to search" required autocomplete="off"
-          role="combobox" aria-expanded="false" aria-controls="repo-listbox" aria-autocomplete="list"
-          data-repo-typeahead/>
-        <ul id="repo-listbox" role="listbox" aria-label="Allowlisted repositories" class="typeahead-listbox" hidden></ul>
-      </span>
+      <label for="scan-repo-input">Repository (owner/repo — must be an allowlisted installation)
+        <span class="typeahead-wrap">
+          <input id="scan-repo-input" name="repo" placeholder="owner/repo — start typing to search" required autocomplete="off"
+            role="combobox" aria-expanded="false" aria-controls="repo-listbox" aria-autocomplete="list"
+            data-repo-typeahead/>
+          <ul id="repo-listbox" role="listbox" aria-label="Allowlisted repositories" class="typeahead-listbox" hidden></ul>
+        </span>
+      </label>
       <button type="submit" aria-label="Run repository health scan">Sniff sniff</button>
     </form>
     <p class="muted">${data.profileRevision ? `Active profile revision: #${data.profileRevision.id} (${escapeHtml(data.profileRevision.name)}) — snapshotted onto the scan job.` : "No active profile revision — env configuration applies."}</p>

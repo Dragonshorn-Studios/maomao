@@ -16,9 +16,12 @@ export interface PatchAnnotation {
 }
 
 /** Classifies one hunk body line (the `@@` header and file markers excluded). */
-function lineType(line: string): "add" | "del" | "ctx" {
+function lineType(line: string): "add" | "del" | "ctx" | "meta" {
   if (line.startsWith("+")) return "add";
   if (line.startsWith("-")) return "del";
+  // Trailing empty lines (template-string hunks) and the unified "No newline"
+  // marker are not diff rows; counting them as context desyncs Pierre.
+  if (line.length === 0 || line.startsWith("\\")) return "meta";
   return "ctx";
 }
 
@@ -28,7 +31,9 @@ function lineType(line: string): "add" | "del" | "ctx" {
  * library's parser warn and drop rows).
  */
 function withCorrectedCounts(rawHunk: string): string {
-  const lines = rawHunk.split("\n");
+  // Drop trailing newlines from template-literal hunks so they never become
+  // a phantom context row (Pierre's parser skips them; mismatched counts warn).
+  const lines = rawHunk.replace(/\n+$/, "").split("\n");
   const header = lines[0] ?? "";
   const body = lines.slice(1);
   if (!header.startsWith("@@")) return rawHunk;
@@ -36,6 +41,7 @@ function withCorrectedCounts(rawHunk: string): string {
   let newCount = 0;
   for (const line of body) {
     const type = lineType(line);
+    if (type === "meta") continue;
     if (type !== "add") oldCount += 1;
     if (type !== "del") newCount += 1;
   }
@@ -86,6 +92,7 @@ export function annotationForLine(
   let newLine = Number.parseInt(startMatch[1], 10);
   for (const line of lines.slice(1)) {
     const type = lineType(line);
+    if (type === "meta") continue;
     // Deletion rows have no new-file number, so they can never match a
     // persisted (new-file-numbered) finding line; ctx and add rows advance it.
     if (type === "add" || type === "ctx") {

@@ -303,6 +303,33 @@ function seedCompletedWithFindings(store: JobStore): void {
   store.log(job.id, "6 reviewer runs finished");
   store.log(job.id, "Aggregator posted COMMENT review 424242");
   seedSettledFindingsForCompletedJob(store, job.repo_full_name, job.pr_number, job.head_sha);
+  const cookieFinding = {
+    category: "security",
+    file: "src/auth.ts",
+    summary: "Session cookie Secure flag can be dropped when X-Forwarded-Proto contains multiple values",
+  };
+  store.upsertFinding({
+    repoFullName: job.repo_full_name,
+    prNumber: job.pr_number,
+    fingerprint: fingerprintFinding(cookieFinding),
+    status: "open",
+    reviewedSha: job.head_sha,
+    currentSha: job.head_sha,
+    originalPath: cookieFinding.file,
+    originalLine: 54,
+    currentPath: cookieFinding.file,
+    currentLine: 54,
+    summary: cookieFinding.summary,
+    category: cookieFinding.category,
+    severity: "high",
+    diffHunk: [
+      "@@ -51 +54 @@",
+      " function cookieSecure(proto) {",
+      '-  return String(proto).startsWith("https");',
+      '+  return String(proto).split(",")[0].trim().startsWith("https");',
+      "   setCookie(name, value, { secure: cookieSecure(forwarded) });",
+    ].join("\n"),
+  });
 }
 
 function seedSettledFindingsForCompletedJob(
