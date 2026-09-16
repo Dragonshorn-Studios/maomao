@@ -22,6 +22,8 @@ import {
   renderLogin,
   renderPromptConfigPage,
   THEME_CSS,
+  DIFFS_HREF,
+  DIFFS_JS,
   FAVICON_SVG,
   FAVICON_PNG_BASE64,
   LARGE_ICON_SVG,
@@ -407,6 +409,13 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
   app.get("/assets/maomao.css", (c) =>
     c.newResponse(THEME_CSS, 200, {
       "content-type": "text/css; charset=utf-8",
+      "cache-control": "public, max-age=3600",
+    }),
+  );
+
+  app.get(DIFFS_HREF, (c) =>
+    c.newResponse(DIFFS_JS, 200, {
+      "content-type": "text/javascript; charset=utf-8",
       "cache-control": "public, max-age=3600",
     }),
   );

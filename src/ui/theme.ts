@@ -644,10 +644,58 @@ form.retry, form.retry-job {
   white-space: pre;
   max-height: 24rem;
   overflow-y: auto;
+  position: relative;
 }
-.diff-panel .add { color: var(--jade); display: block; }
-.diff-panel .del { color: var(--cinnabar); display: block; }
-.diff-panel .ctx { color: var(--ink-muted); display: block; }
+/* Server-rendered line spans (no-JS fallback) and the enhanced rows share tokens. */
+.diff-panel .diff-add { color: var(--jade); display: block; }
+.diff-panel .diff-del { color: var(--cinnabar); display: block; }
+.diff-panel .diff-ctx { color: var(--ink-muted); display: block; }
+.diff-table { display: block; }
+.diff-row {
+  display: grid;
+  grid-template-columns: 2.8em 2.8em 1fr;
+  min-height: 1.35em;
+  align-items: baseline;
+}
+.diff-row.is-add { background: color-mix(in srgb, var(--jade) 10%, transparent); }
+.diff-row.is-del { background: color-mix(in srgb, var(--cinnabar) 10%, transparent); }
+.diff-row.is-hunk { margin-top: 0.2rem; }
+.diff-row.diff-collapsed { display: none; }
+.diff-gutter {
+  color: var(--ink-muted);
+  text-align: right;
+  padding-right: 0.6em;
+  user-select: none;
+  opacity: 0.7;
+}
+.diff-code { white-space: pre; padding-right: 0.5em; }
+.diff-row.is-add .diff-code { color: var(--jade); }
+.diff-row.is-del .diff-code { color: var(--cinnabar); }
+.word-add { background: color-mix(in srgb, var(--jade) 34%, transparent); border-radius: 2px; }
+.word-del { background: color-mix(in srgb, var(--cinnabar) 34%, transparent); border-radius: 2px; }
+.diff-copy {
+  position: sticky;
+  top: 0.25rem;
+  float: right;
+  font-size: 0.72rem;
+  padding: 0.1rem 0.5rem;
+  cursor: pointer;
+  color: var(--ink);
+  background: var(--paper);
+  border: 1px solid var(--line-strong);
+  border-radius: 6px;
+}
+.diff-more {
+  display: block;
+  margin-top: 0.25rem;
+  font-size: 0.75rem;
+  padding: 0.1rem 0.5rem;
+  cursor: pointer;
+  color: var(--ink);
+  background: var(--paper);
+  border: 1px solid var(--line-strong);
+  border-radius: 6px;
+}
 .diff-note { font-size: 0.8rem; }
 
 .finding.is-buried,
