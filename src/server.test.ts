@@ -1471,6 +1471,140 @@ describe("health scan routes", () => {
     expect(store.listJobs()).toEqual([]);
     warn.mockRestore();
   });
+
+  it("re-renders with a revision notice instead of enqueueing when the active revision changed after preview", async () => {
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    const { app, store } = testApp(oauthEnv, scanGithub(), mockOauthFetch({ id: 1001, login: "octocat" }));
+    const activate = (definition: Record<string, unknown>) => {
+      const created = store.configs.createDraft({ definition, createdBy: "octocat" });
+      if ("error" in created) throw new Error("fixture draft rejected");
+      const activated = store.configs.activateRevision(created.revision.id, "octocat");
+      if ("error" in activated) throw new Error(`fixture activation failed: ${activated.error}`);
+      return created.revision.id;
+    };
+    const oldRevisionId = activate({ name: "default", reviewers: [{ role: "correctness" }], minPublishableSeverity: "medium" });
+    const session = await operatorSession(app);
+    const page = await operatorCsrf(app, session);
+    const previewHtml = await scanPreview(app, session, page.csrfCookie, page.csrfToken);
+    expect(hiddenValue(previewHtml, "revision_id")).toBe(String(oldRevisionId));
+
+    // The operator sat on the confirmation page while revision B was published.
+    const newRevisionId = activate({ name: "default", reviewers: [{ role: "correctness" }, { role: "security" }], minPublishableSeverity: "high" });
+    const stale = await app.request("/scan", {
+      method: "POST",
+      headers: { cookie: `${session}; ${page.csrfCookie}`, "content-type": "application/x-www-form-urlencoded" },
+      body: confirmBody(previewHtml, page.csrfToken),
+    });
+    expect(stale.status).toBe(200);
+    const staleHtml = await stale.text();
+    expect(staleHtml).toContain("profile revision changed");
+    expect(hiddenValue(staleHtml, "revision_id")).toBe(String(newRevisionId));
+    expect(store.listJobs()).toEqual([]);
+    log.mockRestore();
+  });
+
+  it("renders the incomplete-confirmation notice for a partially populated confirm POST", async () => {
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    const { app, store } = testApp(oauthEnv, scanGithub(), mockOauthFetch({ id: 1001, login: "octocat" }));
+    const created = store.configs.createDraft({
+      definition: { name: "default", reviewers: [{ role: "correctness" }], minPublishableSeverity: "medium" },
+      createdBy: "octocat",
+    });
+    if ("error" in created) throw new Error("fixture draft rejected");
+    const activated = store.configs.activateRevision(created.revision.id, "octocat");
+    if ("error" in activated) throw new Error(`fixture activation failed: ${activated.error}`);
+    const session = await operatorSession(app);
+    const page = await operatorCsrf(app, session);
+    const previewHtml = await scanPreview(app, session, page.csrfCookie, page.csrfToken);
+
+    // Correct revision id but no sha/branch: a confirmation attempt, not a preview.
+    const partial = await app.request("/scan", {
+      method: "POST",
+      headers: { cookie: `${session}; ${page.csrfCookie}`, "content-type": "application/x-www-form-urlencoded" },
+      body: `repo=acme%2Fwidgets&revision_id=${encodeURIComponent(hiddenValue(previewHtml, "revision_id"))}&csrf_token=${encodeURIComponent(page.csrfToken)}`,
+    });
+    expect(partial.status).toBe(200);
+    expect(await partial.text()).toContain("Confirmation incomplete");
+    expect(store.listJobs()).toEqual([]);
+    log.mockRestore();
+  });
+
+  it("returns 502 and enqueues nothing when GitHub yields a malformed repository id", async () => {
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const github = scanGithub();
+    github.getRepository = async () => ({ id: 0 });
+    const { app, store } = testApp(oauthEnv, github, mockOauthFetch({ id: 1001, login: "octocat" }));
+    const session = await operatorSession(app);
+    const page = await operatorCsrf(app, session);
+
+    const preview = await app.request("/scan", {
+      method: "POST",
+      headers: { cookie: `${session}; ${page.csrfCookie}`, "content-type": "application/x-www-form-urlencoded" },
+      body: `repo=acme%2Fwidgets&csrf_token=${encodeURIComponent(page.csrfToken)}`,
+    });
+    expect(preview.status).toBe(502);
+    expect(await preview.text()).toContain("Could not resolve a valid repository id");
+    expect(store.listJobs()).toEqual([]);
+    log.mockRestore();
+    warn.mockRestore();
+  });
+
+  it("logs unexpected scan-start failures server-side and returns 400", async () => {
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const github = scanGithub();
+    github.getRepositoryHead = async () => {
+      throw new Error("upstream exploded");
+    };
+    const { app, store } = testApp(oauthEnv, github, mockOauthFetch({ id: 1001, login: "octocat" }));
+    const session = await operatorSession(app);
+    const page = await operatorCsrf(app, session);
+
+    const failed = await app.request("/scan", {
+      method: "POST",
+      headers: { cookie: `${session}; ${page.csrfCookie}`, "content-type": "application/x-www-form-urlencoded" },
+      body: `repo=acme%2Fwidgets&csrf_token=${encodeURIComponent(page.csrfToken)}`,
+    });
+    expect(failed.status).toBe(400);
+    expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining("acme/widgets"));
+    expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining("upstream exploded"));
+    expect(store.listJobs()).toEqual([]);
+    log.mockRestore();
+    errorSpy.mockRestore();
+  });
+
+  it("does not spend the rate budget on a rejected (stale) confirmation", async () => {
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    const { app, store } = testApp(
+      { ...oauthEnv, REPO_RATE_LIMIT_PER_WINDOW: "1", REPO_RATE_WINDOW_MS: "3600000" },
+      scanGithub(),
+      mockOauthFetch({ id: 1001, login: "octocat" }),
+    );
+    const session = await operatorSession(app);
+    const page = await operatorCsrf(app, session);
+    const previewHtml = await scanPreview(app, session, page.csrfCookie, page.csrfToken);
+
+    // The stale confirm re-renders without recording a hit, so the operator's
+    // corrective confirm still fits in the budget of 1.
+    const stale = await app.request("/scan", {
+      method: "POST",
+      headers: { cookie: `${session}; ${page.csrfCookie}`, "content-type": "application/x-www-form-urlencoded" },
+      body: confirmBody(previewHtml, page.csrfToken, { sha: "oldsha" }),
+    });
+    expect(stale.status).toBe(200);
+
+    const retryHtml = await stale.text();
+    const corrective = await app.request("/scan", {
+      method: "POST",
+      headers: { cookie: `${session}; ${page.csrfCookie}`, "content-type": "application/x-www-form-urlencoded" },
+      body: confirmBody(retryHtml, page.csrfToken),
+    });
+    expect(corrective.status).toBe(302);
+    expect(corrective.headers.get("location")).toContain("scan-queued");
+    expect(store.listJobs()).toHaveLength(1);
+    log.mockRestore();
+  });
 });
 
 describe("scan issue creation", () => {

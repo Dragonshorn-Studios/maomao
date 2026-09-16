@@ -57,6 +57,12 @@ describe("loadConfig", () => {
     ).toThrow(/REST numeric IDs/);
   });
 
+  it("fails fast when OPENCODE_TIMEOUT_MS is not positive", () => {
+    const base = { GITHUB_APP_ID: "1", GITHUB_APP_PRIVATE_KEY: "k", GITHUB_WEBHOOK_SECRET: "s" };
+    expect(() => assertRuntimeConfig(loadConfig({ ...base, OPENCODE_TIMEOUT_MS: "0" }))).toThrow(/OPENCODE_TIMEOUT_MS/);
+    expect(() => assertRuntimeConfig(loadConfig({ ...base, OPENCODE_TIMEOUT_MS: "-5" }))).toThrow(/OPENCODE_TIMEOUT_MS/);
+  });
+
   it("reads UI password aliases and rejects a half-configured gate", () => {
     const config = loadConfig({
       GITHUB_APP_ID: "1",
