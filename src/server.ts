@@ -10,7 +10,7 @@ import { repoRateLimitActive, RepoRateLimiter, WindowRateLimiter } from "./githu
 import { parseGithubPullUrl, PullUrlError } from "./github/pull-url.js";
 import { dispatchEnqueue, enqueuePullJob } from "./jobs/enqueue.js";
 import { subscribe } from "./events.js";
-import { renderHome, renderJob, renderLogin, THEME_CSS } from "./ui/index.js";
+import { renderConfigPage, renderHome, renderJob, renderLogin, THEME_CSS } from "./ui/index.js";
 import type { JobQueue } from "./jobs/queue.js";
 import {
   CSRF_COOKIE,
@@ -469,6 +469,146 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
     const runId = Number(c.req.param("runId"));
     if (!Number.isFinite(runId)) return c.text("Not found", 404);
     return retryJob(c, ctx, pageOpts, Number(c.req.param("id")), runId);
+  });
+
+  // ---- Versioned review-profile configuration (/config) ----
+  const configWriteDenied = (c: Context<AppEnv>) =>
+    c.html(
+      renderConfigPage({
+        revisions: [],
+        audit: [],
+        canWrite: false,
+        error: "Writing configuration requires an operator GitHub OAuth identity.",
+      }),
+      403,
+    );
+  const configActor = (c: Context<AppEnv>): { login: string } | undefined => c.get("identity");
+  const parseDefinition = (
+    raw: string | undefined,
+  ): { ok: true; definition: unknown } | { ok: false; error: string } => {
+    try {
+      return { ok: true, definition: JSON.parse(raw ?? "{}") };
+    } catch {
+      return { ok: false, error: "Definition must be valid JSON." };
+    }
+  };
+  const renderConfigWithError = (c: Context<AppEnv>, message: string, status: 400 | 403 | 409) => {
+    return c.html(
+      renderConfigPage({
+        revisions: ctx.store.configs.listRevisions(),
+        audit: ctx.store.configs.listAudit(),
+        canWrite: gateOn,
+        error: message,
+        csrfToken: gateOn ? ensureCsrfToken(c, ctx.config.uiSessionSecret) : undefined,
+      }),
+      status,
+    );
+  };
+
+  app.get("/config", (c) => {
+    if (!gateOn) return c.redirect("/", 302);
+    const notices: Record<string, string> = {
+      "draft-created": "Draft created.",
+      "draft-saved": "Draft saved.",
+      activated: "Revision activated.",
+      "rolled-back": "Revision rolled back.",
+    };
+    const noticeKey = c.req.query("notice") ?? "";
+    return c.html(
+      renderConfigPage({
+        revisions: ctx.store.configs.listRevisions(),
+        audit: ctx.store.configs.listAudit(),
+        canWrite: gateOn,
+        csrfToken: gateOn ? ensureCsrfToken(c, ctx.config.uiSessionSecret) : undefined,
+        notice: notices[noticeKey],
+      }),
+    );
+  });
+
+  app.post("/config/drafts", async (c) => {
+    if (!gateOn) return c.redirect("/", 302);
+    const actor = configActor(c);
+    if (!actor) return configWriteDenied(c);
+    const body = await c.req.parseBody();
+    const parsed = parseDefinition(typeof body.definition === "string" ? body.definition : undefined);
+    if (!parsed.ok) return renderConfigWithError(c, parsed.error, 400);
+    const name = typeof body.name === "string" ? body.name.trim() : "default";
+    const result = ctx.store.configs.createDraft({
+      name: name || "default",
+      definition: parsed.definition,
+      createdBy: actor.login,
+    });
+    if ("error" in result) return renderConfigWithError(c, result.issues.join("; "), 400);
+    return c.redirect("/config?notice=draft-created", 302);
+  });
+
+  app.post("/config/drafts/:id", async (c) => {
+    if (!gateOn) return c.redirect("/", 302);
+    const actor = configActor(c);
+    if (!actor) return configWriteDenied(c);
+    const body = await c.req.parseBody();
+    const parsed = parseDefinition(typeof body.definition === "string" ? body.definition : undefined);
+    if (!parsed.ok) return renderConfigWithError(c, parsed.error, 400);
+    const result = ctx.store.configs.updateDraft({
+      id: Number(c.req.param("id")),
+      definition: parsed.definition,
+      expectedEditSeq: Number(body.expected_edit_seq ?? -1),
+      updatedBy: actor.login,
+    });
+    if ("error" in result && result.error === "conflict") {
+      return c.html(
+        renderConfigPage({
+          revisions: ctx.store.configs.listRevisions(),
+          audit: ctx.store.configs.listAudit(),
+          canWrite: true,
+          error: "Conflict: this draft was saved by someone else. Reload and re-apply your edit.",
+          csrfToken: ensureCsrfToken(c, ctx.config.uiSessionSecret),
+        }),
+        409,
+      );
+    }
+    if ("error" in result) return renderConfigWithError(c, result.error === "invalid" ? result.issues.join("; ") : "Draft not found.", 400);
+    return c.redirect("/config?notice=draft-saved", 302);
+  });
+
+  app.post("/config/revisions/:id/activate", (c) => {
+    if (!gateOn) return c.redirect("/", 302);
+    const actor = configActor(c);
+    if (!actor) return configWriteDenied(c);
+    const result = ctx.store.configs.activateRevision(Number(c.req.param("id")), actor.login);
+    if ("error" in result) return renderConfigWithError(c, result.error, 400);
+    return c.redirect("/config?notice=activated", 302);
+  });
+
+  app.post("/config/revisions/:id/rollback", (c) => {
+    if (!gateOn) return c.redirect("/", 302);
+    const actor = configActor(c);
+    if (!actor) return configWriteDenied(c);
+    const result = ctx.store.configs.rollbackRevision(Number(c.req.param("id")), actor.login);
+    if ("error" in result) return renderConfigWithError(c, result.error, 400);
+    return c.redirect("/config?notice=rolled-back", 302);
+  });
+
+  app.get("/config/export", (c) => {
+    if (!gateOn) return c.redirect("/", 302);
+    return c.json(ctx.store.configs.exportConfig());
+  });
+
+  app.post("/config/import", async (c) => {
+    if (!gateOn) return c.redirect("/", 302);
+    const actor = configActor(c);
+    if (!actor) return configWriteDenied(c);
+    const body = await c.req.parseBody();
+    const raw = typeof body.payload === "string" ? body.payload : "";
+    let payload: unknown;
+    try {
+      payload = JSON.parse(raw);
+    } catch {
+      return renderConfigWithError(c, "Import payload must be valid JSON.", 400);
+    }
+    const result = ctx.store.configs.importConfig({ payload, actor: actor.login });
+    if ("error" in result) return renderConfigWithError(c, result.error, 400);
+    return c.redirect(`/config?notice=imported-${result.imported}`, 302);
   });
 
   app.get("/api/jobs", (c) => {

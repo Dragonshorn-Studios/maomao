@@ -2270,3 +2270,88 @@ describe("review verdict events", () => {
     expect(job?.review_event_reason).toContain("did not finish");
   });
 });
+
+describe("profile revision consumption", () => {
+  it("applies the active revision: constrains roles, overrides models, stamps the job", async () => {
+    const config = loadConfig({
+      REVIEWER_ROUTING: "fixed",
+      REVIEWER_ROLES: "correctness,security",
+      OPENCODE_REVIEWER_MODEL: "test/model",
+      POST_EMPTY_REVIEW: "true",
+      GITHUB_APP_ID: "1",
+      GITHUB_WEBHOOK_SECRET: "s",
+      GITHUB_APP_PRIVATE_KEY: "k",
+    });
+    const store = new JobStore(openDb(":memory:"));
+    const draft = store.configs.createDraft({
+      name: "default",
+      definition: {
+        name: "default",
+        reviewers: [{ role: "security", model: "test/override" }],
+        minPublishableSeverity: "medium",
+      },
+      createdBy: "octocat",
+    });
+    if (!("revision" in draft)) throw new Error("draft failed");
+    store.configs.activateRevision(draft.revision.id, "octocat");
+
+    const ran: { role?: string; model?: string }[] = [];
+    const github: GithubPort = githubPort({
+      getPullDiff: async () => "diff --git a/example.ts b/example.ts\n",
+      listReviews: async () => [],
+      createCommentReview: async () => ({ id: "5", url: "u" }),
+    });
+    const opencode: OpenCodePort = {
+      async run(input) {
+        const roleMatch = input.prompt.match(/Role id: (\w+)/);
+        ran.push({ role: roleMatch?.[1], model: input.model });
+        const text = roleMatch
+          ? reviewerJson(roleMatch[1], "clean")
+          : JSON.stringify({ schema_version: 1, verdict: "clean", summary: "clean", findings: [] });
+        return { stdout: text, stderr: "", exitCode: 0, text, usage: {} };
+      },
+    };
+    const created = store.enqueue({ ...jobInput("revsha"), reviewers: [] });
+    expect(created.job.profile_revision_id).toBe(draft.revision.id);
+    await createPipeline({ config, store, github, checkout: await fixtureCheckout(), opencode }).run(created.job.id);
+
+    // Only the revision's specialist ran, with the revision's model.
+    expect(ran.some((entry) => entry.role === "correctness")).toBe(false);
+    const security = ran.find((entry) => entry.role === "security");
+    expect(security?.model).toBe("test/override");
+    const runs = store.listReviewerRuns(created.job.id);
+    expect(runs.map((run) => run.role)).toEqual(["security"]);
+    expect(runs[0]?.model).toBe("test/override");
+    expect(store.getJob(created.job.id)?.profile_revision_id).toBe(draft.revision.id);
+  });
+
+  it("uses all config roles when no revision is active", async () => {
+    const config = loadConfig({
+      REVIEWER_ROUTING: "fixed",
+      REVIEWER_ROLES: "correctness,security",
+      OPENCODE_REVIEWER_MODEL: "test/model",
+      POST_EMPTY_REVIEW: "true",
+      GITHUB_APP_ID: "1",
+      GITHUB_WEBHOOK_SECRET: "s",
+      GITHUB_APP_PRIVATE_KEY: "k",
+    });
+    const store = new JobStore(openDb(":memory:"));
+    const github: GithubPort = githubPort({
+      getPullDiff: async () => "diff --git a/example.ts b/example.ts\n",
+      listReviews: async () => [],
+      createCommentReview: async () => ({ id: "5", url: "u" }),
+    });
+    const opencode: OpenCodePort = {
+      async run(input) {
+        const roleMatch = input.prompt.match(/Role id: (\w+)/);
+        const text = roleMatch
+          ? reviewerJson(roleMatch[1], "clean")
+          : JSON.stringify({ schema_version: 1, verdict: "clean", summary: "clean", findings: [] });
+        return { stdout: text, stderr: "", exitCode: 0, text, usage: {} };
+      },
+    };
+    const created = store.enqueue({ ...jobInput("norevsha"), reviewers: [] });
+    await createPipeline({ config, store, github, checkout: await fixtureCheckout(), opencode }).run(created.job.id);
+    expect(store.listReviewerRuns(created.job.id).map((run) => run.role).sort()).toEqual(["correctness", "security"]);
+  });
+});
