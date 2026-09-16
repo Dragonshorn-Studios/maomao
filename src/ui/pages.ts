@@ -811,6 +811,10 @@ function renderFindingDiff(record?: FindingRow): string {
   if (!record.diff_hunk) {
     return note ? `<p class="muted diff-note">${escapeHtml(note)}</p>` : "";
   }
+  // Two layers: the server-rendered spans are the no-JS fallback;
+  // /assets/vendor/pierre-diffs.js upgrades the container to a @pierre/diffs
+  // viewer (syntax highlighting, unified/split toggle, line annotation) using
+  // the raw hunk embedded in the non-executing script tag below.
   const lines = record.diff_hunk
     .split("\n")
     .map((line) => {
@@ -818,9 +822,13 @@ function renderFindingDiff(record?: FindingRow): string {
       return `<span class="diff-${cls}">${escapeHtml(line)}</span>`;
     })
     .join("\n");
+  const line = record.current_line ?? record.original_line;
   return `<details class="finding-diff">
       <summary>Show diff</summary>
-      <pre class="diff-panel" aria-label="Diff hunk from the reviewed revision">${lines}</pre>
+      <div class="pierre-diff" data-pierre-diff data-path="${escapeHtml(record.current_path ?? record.original_path ?? "")}" data-line="${line ?? ""}" data-severity="${escapeHtml(record.severity ?? "info")}" data-summary="${escapeHtml((record.summary ?? "").slice(0, 160))}">
+        <pre class="diff-panel" aria-label="Diff hunk from the reviewed revision">${lines}</pre>
+        <script type="text/plain" class="diff-raw">${escapeHtml(record.diff_hunk)}</script>
+      </div>
       ${note ? `<p class="muted diff-note">${escapeHtml(note)}</p>` : ""}
     </details>`;
 }

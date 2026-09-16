@@ -12,6 +12,8 @@ import { parseGithubPullUrl, PullUrlError } from "./github/pull-url.js";
 import { dispatchEnqueue, enqueuePullJob } from "./jobs/enqueue.js";
 import { subscribe } from "./events.js";
 import { redactSecrets } from "./util.js";
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import {
   renderScanConfirmPage,
   renderScanIssuePreviewPage,
@@ -22,8 +24,6 @@ import {
   renderLogin,
   renderPromptConfigPage,
   THEME_CSS,
-  DIFFS_HREF,
-  DIFFS_JS,
   TYPEAHEAD_HREF,
   TYPEAHEAD_JS,
   FAVICON_SVG,
@@ -69,6 +69,8 @@ import { exchangeOAuthCode, fetchGithubUser, oauthAuthorizeUrl, oauthEnabled } f
 
 export interface ServerContext {
   config: Config;
+  /** Directory holding the esbuild-bundled @pierre/diffs asset (tests may override). */
+  vendorAssetsDir?: string;
   store: JobStore;
   queue: JobQueue;
   startedAt: number;
@@ -415,12 +417,26 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
     }),
   );
 
-  app.get(DIFFS_HREF, (c) =>
-    c.newResponse(DIFFS_JS, 200, {
+  // The @pierre/diffs browser bundle (built by `npm run build:vendor`). Read
+  // once from disk and cached; 404 before the first build so pages fall back
+  // to the server-rendered diff markup.
+  const vendorDir = ctx.vendorAssetsDir ?? resolve(process.cwd(), "dist/assets/vendor");
+  let pierreBundle: string | null | undefined;
+  app.get("/assets/vendor/pierre-diffs.js", (c) => {
+    if (pierreBundle === undefined) {
+      try {
+        pierreBundle = readFileSync(resolve(vendorDir, "pierre-diffs.js"), "utf8");
+      } catch {
+        pierreBundle = null;
+        console.warn("assets: pierre-diffs bundle not built; run npm run build:vendor");
+      }
+    }
+    if (pierreBundle === null) return c.text("Not found", 404);
+    return c.newResponse(pierreBundle, 200, {
       "content-type": "text/javascript; charset=utf-8",
       "cache-control": "public, max-age=3600",
-    }),
-  );
+    });
+  });
 
   app.get(TYPEAHEAD_HREF, (c) =>
     c.newResponse(TYPEAHEAD_JS, 200, {
