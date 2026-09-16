@@ -365,6 +365,15 @@ OpenCode is still a powerful process. Keep Maomao on a locked-down host and do n
 - Duplicate webhook deliveries reuse the existing job; publication also looks for a `<!-- maomao-review sha=... -->` marker
 - Inline comments include `<!-- maomao-finding id=<fingerprint> sha=<reviewed-sha> -->` so later reviews can reconcile the same finding after the line moves
 
+## Repository health scans (manual, `Sniff sniff`)
+
+`/scan` (operator UI) runs a one-off **health scan** of an allowlisted repository's default branch at its exact head SHA. It is manual only — there is no scheduler — and read-only: nothing is published to GitHub and no issue is created automatically.
+
+- The default branch and head SHA are resolved and pinned before the scan is enqueued; the scan reviews that immutable SHA. Repository access uses the same installation/repository allowlists as everything else.
+- The scan reuses the existing isolated checkout, specialist, and aggregation pipeline, snapshots the active profile revision, persists validated findings locally (with anchored mini diffs), and records token/cost usage and budgets.
+- The scan button is labeled **Sniff sniff** with the accessible name "Run repository health scan".
+- **Issue creation is a separate, explicit, capability-gated action** (`GITHUB_ISSUE_CREATION_ENABLED=false` by default). When enabled, an operator selects a completed scan and Maomao creates GitHub issues for validated findings using the App installation identity (never the human OAuth token). Issues deduplicate by fingerprint with a hidden machine-readable marker, already-linked issues are skipped, retries are idempotent, and partial failures are visible and retryable. Every creation is audited credential-free.
+
 ## Specialist prompts, fixtures, and offline evaluation
 
 `/config/prompts` manages **versioned specialist prompts**: per-role revisions with an operator-editable body. Security guardrails (the hard rules and JSON schema) are composed at runtime and are never part of an editable revision — the UI shows them separately.

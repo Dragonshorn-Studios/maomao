@@ -2500,3 +2500,134 @@ describe("active prompt revision consumption", () => {
     expect(store.listReviewerRuns(created.job.id)[0]?.prompt_revision_id ?? null).toBeNull();
   });
 });
+
+describe("repository health scan", () => {
+  const scanDiff = `diff --git a/src/billing.ts b/src/billing.ts
+--- a/src/billing.ts
++++ b/src/billing.ts
+@@ -1,2 +1,3 @@
+ const total = compute();
++console.log(process.env.STRIPE_KEY);
+ charge(total);`;
+
+  function scanGithub(): GithubPort {
+    return githubPort({
+      getCommitDiff: async () => scanDiff,
+      listReviews: async () => [],
+    });
+  }
+
+  function scanOpencode(): OpenCodePort {
+    return {
+      async run(input) {
+        const roleMatch = input.prompt.match(/Role id: (\w+)/);
+        const text = roleMatch
+          ? JSON.stringify({
+              schema_version: 1,
+              reviewer: roleMatch[1],
+              verdict: "findings",
+              findings: [
+                {
+                  severity: "high",
+                  confidence: 0.9,
+                  category: "security",
+                  file: "src/billing.ts",
+                  line: 2,
+                  summary: "secret printed to stdout",
+                  reason: "environment secret logged",
+                },
+              ],
+            })
+          : JSON.stringify({
+              schema_version: 1,
+              verdict: "comment",
+              summary: "secret logging found",
+              findings: [
+                {
+                  severity: "high",
+                  confidence: 0.9,
+                  category: "security",
+                  file: "src/billing.ts",
+                  line: 2,
+                  summary: "secret printed to stdout",
+                  body: "handle with care",
+                },
+              ],
+            });
+        return { stdout: text, stderr: "", exitCode: 0, text, usage: { cost: 0.01, totalTokens: 10, complete: true } };
+      },
+    };
+  }
+
+  it("runs a read-only scan: persists findings, posts no GitHub review", async () => {
+    const config = loadConfig({
+      REVIEWER_ROUTING: "fixed",
+      REVIEWER_ROLES: "correctness",
+      OPENCODE_REVIEWER_MODEL: "test/model",
+      POST_EMPTY_REVIEW: "true",
+      GITHUB_APP_ID: "1",
+      GITHUB_WEBHOOK_SECRET: "s",
+      GITHUB_APP_PRIVATE_KEY: "k",
+    });
+    const store = new JobStore(openDb(":memory:"));
+    let reviewPosts = 0;
+    const github: GithubPort = scanGithub();
+    github.createCommentReview = async () => {
+      reviewPosts += 1;
+      return { id: "x", url: "u" };
+    };
+    const created = store.enqueue({
+      ...jobInput("scansha"),
+      reviewers: [],
+      jobType: "health_scan",
+      scanBranch: "main",
+      prNumber: 0,
+      headSha: "head111head111head111head111head11111",
+    });
+    await createPipeline({ config, store, github, checkout: await fixtureCheckout(), opencode: scanOpencode() }).run(
+      created.job.id,
+    );
+    const job = store.getJob(created.job.id);
+    expect(job?.state).toBe("completed");
+    expect(reviewPosts).toBe(0);
+    expect(job?.github_review_id).toBeNull();
+    const findings = store.listFindings(created.job.repo_full_name, 0);
+    expect(findings).toHaveLength(1);
+    expect(findings[0]?.summary).toContain("secret printed to stdout");
+    expect(findings[0]?.diff_hunk).toContain("STRIPE_KEY");
+  });
+
+  it("is idempotent per repository + fingerprint on rescan", async () => {
+    const config = loadConfig({
+      REVIEWER_ROUTING: "fixed",
+      REVIEWER_ROLES: "correctness",
+      OPENCODE_REVIEWER_MODEL: "test/model",
+      POST_EMPTY_REVIEW: "true",
+      GITHUB_APP_ID: "1",
+      GITHUB_WEBHOOK_SECRET: "s",
+      GITHUB_APP_PRIVATE_KEY: "k",
+    });
+    const store = new JobStore(openDb(":memory:"));
+    const runOnce = async (sha: string) => {
+      const created = store.enqueue({
+        ...jobInput(sha),
+        reviewers: [],
+        jobType: "health_scan",
+        prNumber: 0,
+        headSha: sha,
+      });
+      await createPipeline({ config, store, github: scanGithub(), checkout: await fixtureCheckout(), opencode: scanOpencode() }).run(
+        created.job.id,
+      );
+      return created.job.id;
+    };
+    const first = await runOnce("scan0001scan0001scan0001scan0001");
+    const second = await runOnce("scan0001scan0001scan0001scan0001");
+    expect(first).toBe(second); // same repo+SHA reuses the same job
+    expect(store.listFindings(created_repo(), 0)).toHaveLength(1);
+  });
+});
+
+function created_repo(): string {
+  return "acme/widgets";
+}

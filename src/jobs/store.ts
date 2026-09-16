@@ -34,6 +34,8 @@ export interface JobRow {
   review_event_reason: string | null;
   aggregator_fallback: number | null;
   profile_revision_id: number | null;
+  job_type: string;
+  scan_branch: string | null;
   aggregator_raw: string | null;
   aggregator_normalized: string | null;
   aggregator_model: string | null;
@@ -157,6 +159,8 @@ export interface NewJobInput {
   webhookDeliveryId?: string;
   webhookEvent?: string;
   reviewers: { role: string; title: string; model?: string }[];
+  jobType?: "pr_review" | "health_scan";
+  scanBranch?: string | null;
 }
 
 export interface EnqueueResult {
@@ -320,8 +324,8 @@ export class JobStore {
           `INSERT INTO jobs (
             repo_full_name, repo_owner, repo_name, installation_id, github_account_id, github_repository_id, pr_number,
             pr_title, pr_body, pr_html_url, pr_author, base_sha, head_sha, base_ref, head_ref,
-            webhook_delivery_id, webhook_event, profile_revision_id, state, created_at, updated_at
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?)`,
+            webhook_delivery_id, webhook_event, profile_revision_id, job_type, scan_branch, state, created_at, updated_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?)`,
         )
         .run(
           input.repoFullName,
@@ -342,6 +346,8 @@ export class JobStore {
           input.webhookDeliveryId ?? null,
           input.webhookEvent ?? null,
           input.profileRevisionId ?? this.configs.getActiveRevision("default")?.id ?? null,
+          input.jobType ?? "pr_review",
+          input.scanBranch ?? null,
           createdAt,
           createdAt,
         );
@@ -560,6 +566,38 @@ export class JobStore {
       insert.run(jobId, reviewer.role, reviewer.title, reviewer.model ?? null);
     }
     publish({ type: "job", jobId });
+  }
+
+  // ---- Health-scan issue creation ----
+
+  recordScanIssue(input: {
+    jobId: number;
+    repoFullName: string;
+    fingerprint: string;
+    issueNumber: number;
+    issueUrl: string;
+    title: string;
+  }): void {
+    this.db
+      .prepare(
+        `INSERT OR IGNORE INTO scan_issues (job_id, repo_full_name, fingerprint, issue_number, issue_url, title, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(input.jobId, input.repoFullName, input.fingerprint, input.issueNumber, input.issueUrl, input.title, nowIso());
+  }
+
+  listScanIssues(jobId: number): Array<{ id: number; job_id: number; repo_full_name: string; fingerprint: string; issue_number: number; issue_url: string; title: string; created_at: string }> {
+    return this.db
+      .prepare(`SELECT * FROM scan_issues WHERE job_id = ? ORDER BY id ASC`)
+      .all(jobId) as Array<{ id: number; job_id: number; repo_full_name: string; fingerprint: string; issue_number: number; issue_url: string; title: string; created_at: string }>;
+  }
+
+  hasScanIssue(repoFullName: string, fingerprint: string): boolean {
+    return Boolean(
+      this.db
+        .prepare(`SELECT id FROM scan_issues WHERE repo_full_name = ? AND fingerprint = ?`)
+        .get(repoFullName, fingerprint),
+    );
   }
 
   findLatestJobForPull(repoFullName: string, prNumber: number, headSha?: string): JobRow | undefined {

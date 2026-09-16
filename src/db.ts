@@ -263,6 +263,18 @@ function migrate(db: SqliteDb): void {
 
     CREATE INDEX IF NOT EXISTS idx_prompt_revisions_role ON prompt_revisions(role_id, status);
 
+    CREATE TABLE IF NOT EXISTS scan_issues (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      job_id INTEGER NOT NULL,
+      repo_full_name TEXT NOT NULL,
+      fingerprint TEXT NOT NULL,
+      issue_number INTEGER NOT NULL,
+      issue_url TEXT NOT NULL,
+      title TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      UNIQUE (repo_full_name, fingerprint)
+    );
+
     CREATE TABLE IF NOT EXISTS eval_fixtures (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       name TEXT NOT NULL,
@@ -349,6 +361,8 @@ function migrate(db: SqliteDb): void {
     ["poison_alert_policy", "TEXT"],
     ["manual_escalate_requested", "INTEGER NOT NULL DEFAULT 0"],
     ["profile_revision_id", "INTEGER"],
+    ["job_type", "TEXT NOT NULL DEFAULT 'pr_review'"],
+    ["scan_branch", "TEXT"],
   ];
   for (const [name, ddl] of jobColumns) ensureColumn(db, "jobs", name, ddl);
 

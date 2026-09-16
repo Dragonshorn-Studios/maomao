@@ -25,6 +25,8 @@ import {
 import { classifyPriorFindings, collectPriorFindings, findingsForPublish } from "../findings/reconcile.js";
 import { resolveReviewEvent } from "./verdict.js";
 import { applyReconciliationThreads, persistClassifications, persistThreadsAsFindings } from "../findings/apply.js";
+import { findingDiffContext } from "../findings/apply.js";
+import { fingerprintFinding } from "../findings/identity.js";
 import type { ReconciliationSnapshot } from "../findings/types.js";
 import { currentFindingsForRisk } from "../findings/types.js";
 import { mapLimit, nowIso, sleep, truncate } from "../util.js";
@@ -84,7 +86,12 @@ export function createPipeline(deps: PipelineDeps) {
       const controller = new AbortController();
       aborts.set(jobId, controller);
       try {
-        await runJob(deps, jobId, controller.signal);
+        const job = deps.store.getJob(jobId);
+        if (job?.job_type === "health_scan") {
+          await runScanJob(deps, jobId, controller.signal);
+        } else {
+          await runJob(deps, jobId, controller.signal);
+        }
       } finally {
         if (aborts.get(jobId) === controller) aborts.delete(jobId);
       }
@@ -319,6 +326,118 @@ async function runJob(deps: PipelineDeps, jobId: number, signal: AbortSignal): P
       aggregator_state: store.getJob(jobId)?.aggregator_state === "done" ? "done" : "failed",
     });
     store.log(jobId, `Job failed: ${message}`, "error");
+  }
+}
+
+/**
+ * On-demand repository health scan of the pinned default-branch head SHA. Read-only:
+ * checkout + specialists + aggregation, findings persisted locally. Never publishes a
+ * GitHub review and never creates issues — issue creation is a separate operator action.
+ */
+async function runScanJob(deps: PipelineDeps, jobId: number, signal: AbortSignal): Promise<void> {
+  const store = deps.store;
+  const config = deps.config;
+  const job = store.getJob(jobId);
+  if (!job) return;
+  try {
+    store.setJobState(jobId, "preparing", { started_at: nowIso() });
+    store.log(jobId, `Health scan of ${job.repo_full_name} at ${job.head_sha}`);
+    const token = deps.getInstallationToken
+      ? await deps.getInstallationToken(job.installation_id)
+      : job.installation_id === 0
+        ? undefined
+        : await deps.github.getInstallationToken(job.installation_id);
+    if (!deps.github.getCommitDiff) throw new Error("health scans require a GitHub client with commit diff support");
+    const diff = await deps.github.getCommitDiff(job.installation_id, job.repo_owner, job.repo_name, job.head_sha);
+    const workspace = await deps.checkout.prepare({
+      jobId,
+      installationId: job.installation_id,
+      owner: job.repo_owner,
+      repo: job.repo_name,
+      prNumber: 0,
+      baseSha: job.head_sha,
+      headSha: job.head_sha,
+      token,
+      secrets: githubKeySecrets(config),
+      signal,
+      fetchDiff: async () => diff,
+      metadata: {
+        repo: job.repo_full_name,
+        pr: 0,
+        title: job.pr_title,
+        baseSha: job.head_sha,
+        headSha: job.head_sha,
+      },
+    });
+    store.patchJob(jobId, { workspace_path: workspace.dir });
+    throwIfStale(store, jobId, signal);
+
+    await routeSpecialists(deps, job, diff, workspace.repoDir, [], signal);
+    store.setJobState(jobId, "reviewing");
+    const runs = store.listReviewerRuns(jobId);
+    store.log(jobId, `Running ${runs.length} specialist(s)`);
+    await mapLimit(runs, config.opencode.reviewerConcurrency, (run) => runReviewer(deps, job, run, workspace.repoDir, [], signal));
+    const parsedReviewers = runs
+      .map((run) => ({ run: store.getReviewerRun(run.id), role: run.role }))
+      .filter((entry): entry is { run: ReviewerRunRow; role: string } => entry.run?.state === "done")
+      .map((entry) => ({ ...entry, parsed: parseReviewerResult(entry.run.normalized_json ?? "") }));
+    if (parsedReviewers.length === 0) {
+      throw new Error("all specialist reviewers failed or produced invalid JSON");
+    }
+
+    store.setJobState(jobId, "aggregating", {
+      aggregator_state: "running",
+      aggregator_started_at: nowIso(),
+      aggregator_model: config.opencode.aggregatorModel || config.opencode.reviewerModel || null,
+    });
+    let aggregated = await runAggregator(deps, job, parsedReviewers.map((entry) => entry.parsed), workspace.repoDir, [workspace.diffPath], signal);
+    throwIfStale(store, jobId, signal);
+    aggregated = { ...aggregated, findings: assignFindingIds(aggregated.findings) };
+    store.patchJob(jobId, { aggregator_normalized: JSON.stringify(aggregated, null, 2) });
+
+    // Persist scan findings locally; issue creation is a separate, explicit operator action.
+    const profileRevision = job.profile_revision_id ? store.configs.getRevision(job.profile_revision_id) : undefined;
+    const threshold = severityRank(profileRevision?.definition.minPublishableSeverity ?? "info");
+    let persisted = 0;
+    for (const finding of aggregated.findings) {
+      if (severityRank(finding.severity) > threshold) continue;
+      const context = findingDiffContext(diff, finding.file, finding.line);
+      store.upsertFinding({
+        repoFullName: job.repo_full_name,
+        prNumber: 0,
+        fingerprint: fingerprintFinding({ ...finding, category: finding.category, file: finding.file }),
+        status: "open",
+        reviewedSha: job.head_sha,
+        currentSha: job.head_sha,
+        originalPath: finding.file,
+        originalLine: finding.line,
+        currentPath: finding.file,
+        currentLine: finding.line,
+        category: finding.category,
+        summary: finding.summary,
+        body: finding.body,
+        severity: finding.severity,
+        confidence: finding.confidence,
+        diffHunk: context.diffHunk,
+        diffNote: context.diffNote,
+        lastJobId: job.id,
+      });
+      persisted += 1;
+    }
+    store.setJobState(jobId, "completed", {
+      aggregator_state: "done",
+      finished_at: nowIso(),
+    });
+    store.log(jobId, `Health scan completed: ${persisted} finding(s) persisted; no GitHub review posted`);
+  } catch (error) {
+    if (store.isStale(jobId) || signal.aborted) {
+      store.log(jobId, "Scan aborted or marked stale", "warn");
+      if (!store.isStale(jobId)) store.setJobState(jobId, "stale", { finished_at: nowIso() });
+      return;
+    }
+    const message = error instanceof Error ? error.message : String(error);
+    store.setJobState(jobId, "failed", { failure_reason: message, finished_at: nowIso() });
+    store.log(jobId, `Scan failed: ${message}`, "error");
   }
 }
 

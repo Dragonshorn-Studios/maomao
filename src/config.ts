@@ -72,6 +72,8 @@ export interface Config {
   uiSessionSecret: string;
   /** Operator-approved model catalog (provider/model). Empty = allow any well-formed model. */
   modelCatalog: string[];
+  /** Explicit issue creation from health scans. Disabled by default. */
+  issueCreationEnabled: boolean;
   /** Opt-in GitHub review verdicts. Defaults keep every review COMMENT-only. */
   reviewAllowApprove: boolean;
   reviewAllowRequestChanges: boolean;
@@ -247,6 +249,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     uiLocalLogin: parseBoolean(env.UI_LOCAL_LOGIN, false),
     publicUrl: env.MAOMAO_PUBLIC_URL?.trim().replace(/\/+$/, "") || "",
     modelCatalog: parseCsv(env.MODEL_CATALOG),
+    issueCreationEnabled: parseBoolean(env.GITHUB_ISSUE_CREATION_ENABLED, false),
     reviewAllowApprove: parseBoolean(env.GITHUB_REVIEW_ALLOW_APPROVE, false),
     reviewAllowRequestChanges: parseBoolean(env.GITHUB_REVIEW_ALLOW_REQUEST_CHANGES, false),
     reviewRequestChangesMinSeverity: parseSeverity(

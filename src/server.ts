@@ -10,8 +10,10 @@ import { authorizeGithubAccount, logAuthorizationRejection, logRateLimited, reje
 import { repoRateLimitActive, RepoRateLimiter, WindowRateLimiter } from "./github/rate-limit.js";
 import { parseGithubPullUrl, PullUrlError } from "./github/pull-url.js";
 import { dispatchEnqueue, enqueuePullJob } from "./jobs/enqueue.js";
+import { findingDiffContext } from "./findings/apply.js";
 import { subscribe } from "./events.js";
-import { renderConfigPage, renderHome, renderJob, renderLogin, renderPromptConfigPage, THEME_CSS } from "./ui/index.js";
+import { escapeHtml } from "./util.js";
+import { renderConfigPage, renderHome, renderJob, renderLogin, renderPromptConfigPage, renderScanPage, THEME_CSS } from "./ui/index.js";
 import type { JobQueue } from "./jobs/queue.js";
 import {
   CSRF_COOKIE,
@@ -814,6 +816,245 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
     return c.redirect(`/config/prompts?notice=evaluated`, 302);
   });
 
+  const renderScanDenied = (c: Context<AppEnv>, ctx2: ServerContext, message: string) =>
+    c.html(
+      renderScanPage({
+        canScan: gateOn,
+        csrfToken: gateOn ? ensureCsrfToken(c, ctx2.config.uiSessionSecret) : undefined,
+        issueCreationEnabled: ctx2.config.issueCreationEnabled,
+        error: message,
+      }),
+      403,
+    );
+
+  // ---- On-demand repository health scans (/scan) ----
+  const parseRepoInput = (raw: string): { owner: string; repo: string } | undefined => {
+    const trimmed = raw.trim();
+    const short = trimmed.match(/^([\w.-]+)\/([\w.-]+)$/);
+    if (short) return { owner: short[1], repo: short[2].replace(/\.git$/, "") };
+    try {
+      const url = new URL(trimmed);
+      if (url.hostname !== "github.com") return undefined;
+      const parts = url.pathname.split("/").filter(Boolean);
+      if (parts.length < 2) return undefined;
+      return { owner: parts[0], repo: parts[1].replace(/\.git$/, "") };
+    } catch {
+      return undefined;
+    }
+  };
+
+  const scanNotice = (code: string | undefined): string | undefined => {
+    if (code === "scan-queued") return "Health scan queued for the pinned default-branch head SHA.";
+    if (code === "issues-created") return "GitHub issues created for the selected findings.";
+    if (code?.startsWith("issues-partial")) return `Some issues could not be created (${code.split(":")[1] ?? "unknown"}). Retry is safe.`;
+    return undefined;
+  };
+
+  app.get("/scan", (c) => {
+    if (!gateOn) return c.redirect("/", 302);
+    const identity = c.get("identity");
+    const profileRevision = ctx.store.configs.getActiveRevision("default");
+    return c.html(
+      renderScanPage({
+        canScan: gateOn,
+        identityLogin: identity?.login,
+        csrfToken: gateOn ? ensureCsrfToken(c, ctx.config.uiSessionSecret) : undefined,
+        issueCreationEnabled: ctx.config.issueCreationEnabled,
+        profileRevision: profileRevision ? { id: profileRevision.id, name: profileRevision.name } : null,
+      }),
+    );
+  });
+
+  app.post("/scan", async (c) => {
+    if (!gateOn) return c.redirect("/", 302);
+    const actor = configActor(c);
+    if (!actor) {
+      return c.html(
+        renderScanPage({
+          canScan: gateOn,
+          csrfToken: ensureCsrfToken(c, ctx.config.uiSessionSecret),
+          issueCreationEnabled: ctx.config.issueCreationEnabled,
+          error: "Scanning requires an operator GitHub OAuth identity.",
+        }),
+        403,
+      );
+    }
+    if (!ctx.github || !isReviewGithub(ctx.github)) {
+      return c.html(
+        renderScanPage({
+          canScan: true,
+          csrfToken: ensureCsrfToken(c, ctx.config.uiSessionSecret),
+          issueCreationEnabled: ctx.config.issueCreationEnabled,
+          error: "GitHub App client is not configured on this process.",
+        }),
+        503,
+      );
+    }
+    const body = await c.req.parseBody();
+    const parsed = parseRepoInput(typeof body.repo === "string" ? body.repo : "");
+    if (!parsed) {
+      return c.html(
+        renderScanPage({
+          canScan: true,
+          csrfToken: ensureCsrfToken(c, ctx.config.uiSessionSecret),
+          issueCreationEnabled: ctx.config.issueCreationEnabled,
+          error: "Enter a repository as owner/repo or a GitHub URL.",
+        }),
+        400,
+      );
+    }
+    try {
+      const installation = await ctx.github.getRepoInstallation(parsed.owner, parsed.repo);
+      const accountAuth = authorizeGithubAccount(ctx.config, {
+        installationId: installation.installationId,
+        accountId: installation.accountId,
+      });
+      if (!accountAuth.ok) {
+        logAuthorizationRejection({ installationId: installation.installationId, reason: accountAuth.reason });
+        return renderScanDenied(c, ctx, "Not authorized to scan this installation or repository.");
+      }
+      const repository = await ctx.github.getRepository(parsed.owner, parsed.repo, installation.installationId);
+      const repoAuth = rejectUnauthorized(ctx.config, {
+        installationId: installation.installationId,
+        accountId: installation.accountId,
+        repositoryId: repository.id,
+      });
+      if (!repoAuth.ok) {
+        return renderScanDenied(c, ctx, "Not authorized to scan this installation or repository.");
+      }
+      if (!ctx.github.getRepositoryHead || !ctx.github.getCommitDiff) {
+        return renderScanDenied(c, ctx, "This GitHub client does not support repository scans.");
+      }
+      const head = await ctx.github.getRepositoryHead(installation.installationId, parsed.owner, parsed.repo);
+      const created = ctx.store.enqueue({
+        repoFullName: `${parsed.owner}/${parsed.repo}`,
+        repoOwner: parsed.owner,
+        repoName: parsed.repo,
+        installationId: installation.installationId,
+        githubAccountId: installation.accountId,
+        githubRepositoryId: repository.id,
+        prNumber: 0,
+        prTitle: `Repository health scan (${head.defaultBranch})`,
+        prBody: `Manual health scan of the default branch (${head.defaultBranch}) at a pinned SHA.`,
+        prHtmlUrl: `https://github.com/${parsed.owner}/${parsed.repo}`,
+        prAuthor: actor.login,
+        baseSha: head.headSha,
+        headSha: head.headSha,
+        baseRef: head.defaultBranch,
+        headRef: head.defaultBranch,
+        webhookEvent: "manual.scan",
+        jobType: "health_scan",
+        scanBranch: head.defaultBranch,
+        reviewers: [],
+      });
+      ctx.store.log(created.job.id, `Health scan enqueued by ${actor.login} for ${head.defaultBranch} @ ${head.headSha}`);
+      dispatchEnqueue(ctx.queue, created);
+      return c.redirect(`/jobs/${created.job.id}?notice=scan-queued`, 302);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      return c.html(
+        renderScanPage({
+          canScan: true,
+          csrfToken: ensureCsrfToken(c, ctx.config.uiSessionSecret),
+          issueCreationEnabled: ctx.config.issueCreationEnabled,
+          error: message,
+        }),
+        400,
+      );
+    }
+  });
+
+  app.post("/scan/issues", async (c) => {
+    if (!gateOn) return c.redirect("/", 302);
+    const actor = configActor(c);
+    if (!actor) {
+      return c.html(
+        renderScanPage({
+          canScan: true,
+          csrfToken: ensureCsrfToken(c, ctx.config.uiSessionSecret),
+          issueCreationEnabled: ctx.config.issueCreationEnabled,
+          error: "Creating issues requires an operator GitHub OAuth identity.",
+        }),
+        403,
+      );
+    }
+    if (!ctx.config.issueCreationEnabled) {
+      return c.html(
+        renderScanPage({
+          canScan: true,
+          csrfToken: ensureCsrfToken(c, ctx.config.uiSessionSecret),
+          issueCreationEnabled: false,
+          error: "Issue creation is disabled (GITHUB_ISSUE_CREATION_ENABLED=false).",
+        }),
+        403,
+      );
+    }
+    if (!ctx.github || !isReviewGithub(ctx.github)) {
+      return renderScanDenied(c, ctx, "GitHub App client is not configured on this process.");
+    }
+    const body = await c.req.parseBody();
+    const jobId = Number(body.job_id);
+    const job = Number.isFinite(jobId) ? ctx.store.getJob(jobId) : undefined;
+    if (!job || job.job_type !== "health_scan" || job.state !== "completed") {
+      return renderScanDenied(c, ctx, "Issue creation requires a completed health-scan job.");
+    }
+    if (!ctx.github.createIssue || !ctx.github.listOpenIssuesByMarker) {
+      return renderScanDenied(c, ctx, "This GitHub client does not support issue creation.");
+    }
+    const findings = ctx.store.listFindings(job.repo_full_name, job.pr_number).filter((row) => row.status === "open");
+    let createdCount = 0;
+    let skipped = 0;
+    let failed = 0;
+    for (const finding of findings) {
+      const marker = `<!-- maomao-scan-issue ${finding.fingerprint} @ ${finding.reviewed_sha} -->`;
+      try {
+        const existingLocal = ctx.store.hasScanIssue(job.repo_full_name, finding.fingerprint);
+        if (existingLocal) {
+          skipped += 1;
+          continue;
+        }
+        const remote = await ctx.github.listOpenIssuesByMarker(job.installation_id, job.repo_owner, job.repo_name, marker.split(" @ ")[0]);
+        if (remote.length > 0) {
+          ctx.store.recordScanIssue({
+            jobId: job.id,
+            repoFullName: job.repo_full_name,
+            fingerprint: finding.fingerprint,
+            issueNumber: remote[0].number,
+            issueUrl: remote[0].url,
+            title: `maomao: ${finding.summary ?? finding.fingerprint}`,
+          });
+          skipped += 1;
+          continue;
+        }
+        const severity = (finding.severity ?? "info").toUpperCase();
+        const title = `[maomao] ${severity}: ${finding.summary ?? finding.fingerprint}`;
+        const evidence = finding.diff_hunk ? `\n\n\`\`\`diff\n${finding.diff_hunk}\n\`\`\`` : "";
+        const issueBody = `${marker}\n\n**${severity}** — ${escapeHtml(finding.summary ?? "")}\n\n${escapeHtml(finding.body ?? "")}\n\nFile: \`${finding.current_path ?? "unknown"}${finding.current_line ? `:${finding.current_line}` : ""}\`\nReviewed SHA: ${finding.reviewed_sha}\nDiscovered by a manual Maomao health scan (job ${job.id}).${evidence}`;
+        const issue = await ctx.github.createIssue(job.installation_id, job.repo_owner, job.repo_name, title, issueBody);
+        ctx.store.recordScanIssue({
+          jobId: job.id,
+          repoFullName: job.repo_full_name,
+          fingerprint: finding.fingerprint,
+          issueNumber: issue.number,
+          issueUrl: issue.url,
+          title,
+        });
+        createdCount += 1;
+      } catch (error) {
+        failed += 1;
+        ctx.store.log(job.id, `Issue creation failed for ${finding.fingerprint}: ${error instanceof Error ? error.message : String(error)}`, "warn");
+      }
+    }
+    ctx.store.log(
+      job.id,
+      `Issue creation by ${actor.login}: ${createdCount} created, ${skipped} skipped (already present), ${failed} failed`,
+    );
+    if (failed > 0) {
+      return c.redirect(`/jobs/${job.id}?error=issues-partial:${failed}`, 302);
+    }
+    return c.redirect(`/jobs/${job.id}?notice=issues-created`, 302);
+  });
+
   app.get("/api/jobs", (c) => {
     const jobs = ctx.store.listJobs(75).map((job) => ({
       ...job,
@@ -867,6 +1108,15 @@ function noticeText(
     const target = repo && pr != null ? ` ${repo}#${pr}` : "";
     const short = sha ? ` (${sha.slice(0, 12)})` : "";
     return `Queued a review${target}${short} for this exact head SHA.`;
+  }
+  if (code === "scan-queued") {
+    return "Health scan queued for the pinned default-branch head SHA.";
+  }
+  if (code === "issues-created") {
+    return "GitHub issues created for the validated findings (deduplicated).";
+  }
+  if (code?.startsWith("issues-partial")) {
+    return `Some issues could not be created (${code.split(":")[1] ?? "unknown"} failures). Retrying is safe: already-created issues are skipped.`;
   }
   if (code === "exists") {
     return "A job already exists for this repository, pull request, and head SHA.";

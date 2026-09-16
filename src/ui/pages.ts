@@ -1046,3 +1046,46 @@ export function renderPromptConfigPage(data: PromptConfigPageData): string {
     csrfToken: data.csrfToken,
   });
 }
+
+export interface ScanPageData {
+  canScan: boolean;
+  identityLogin?: string;
+  csrfToken?: string;
+  issueCreationEnabled: boolean;
+  profileRevision?: { id: number; name: string } | null;
+  error?: string;
+}
+
+export function renderScanPage(data: ScanPageData): string {
+  const csrf = csrfInput(data.csrfToken);
+  const body = `
+    <h1>Repository health scan</h1>
+    <p class="lede">Run a manual, read-only specialist scan of a repository's default branch and optionally create GitHub issues for validated findings. Nothing is created automatically.</p>
+    ${data.error ? `<p class="error" role="alert">${escapeHtml(data.error)}</p>` : ""}
+    ${data.canScan ? `
+    <form class="trigger" method="post" action="/scan">
+      ${csrf}
+      <label>
+        Repository (owner/repo — must be an allowlisted installation)
+        <input name="repo" placeholder="owner/repo" required/>
+      </label>
+      <button type="submit" aria-label="Run repository health scan">Sniff sniff</button>
+    </form>
+    <p class="muted">${data.profileRevision ? `Active profile revision: #${data.profileRevision.id} (${escapeHtml(data.profileRevision.name)}) — snapshotted onto the scan job.` : "No active profile revision — env configuration applies."}</p>
+    <h2>Create GitHub issues from a completed scan</h2>
+    ${
+      data.issueCreationEnabled
+        ? `<form class="trigger" method="post" action="/scan/issues">
+            ${csrf}
+            <label>Completed scan job ID <input name="job_id" required/></label>
+            <button type="submit" aria-label="Create GitHub issues for validated findings">Create issues for validated findings</button>
+          </form>
+          <p class="muted">Findings are deduplicated per repository + fingerprint; already-linked GitHub issues are skipped. Partial failures can be retried safely.</p>`
+        : `<p class="muted">Issue creation is disabled (GITHUB_ISSUE_CREATION_ENABLED=false).</p>`
+    }`
+    : `<p class="muted">Scanning requires an operator GitHub OAuth identity.</p>`}`;
+  return layout("Repository health scan", body, {
+    showLogout: data.canScan || Boolean(data.csrfToken),
+    csrfToken: data.csrfToken,
+  });
+}

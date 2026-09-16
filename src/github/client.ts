@@ -91,6 +91,25 @@ export interface GithubPort {
     comments: PullReviewComment[];
     event?: ReviewEvent;
   }): Promise<PostedReview>;
+  getRepositoryHead?(
+    installationId: number,
+    owner: string,
+    repo: string,
+  ): Promise<{ defaultBranch: string; headSha: string }>;
+  getCommitDiff?(installationId: number, owner: string, repo: string, sha: string): Promise<string>;
+  listOpenIssuesByMarker?(
+    installationId: number,
+    owner: string,
+    repo: string,
+    marker: string,
+  ): Promise<Array<{ number: number; title: string; url: string; state: string }>>;
+  createIssue?(
+    installationId: number,
+    owner: string,
+    repo: string,
+    title: string,
+    body: string,
+  ): Promise<{ number: number; url: string }>;
   listIssueComments?(
     installationId: number,
     owner: string,
@@ -282,6 +301,43 @@ export class GithubClient implements GithubPort, ManualTriggerPort {
       htmlUrl: review.html_url,
       userLogin: review.user?.login ?? undefined,
     }));
+  }
+
+  async getRepositoryHead(installationId: number, owner: string, repo: string) {
+    const octokit = this.installationOctokit(installationId);
+    const info = await octokit.rest.repos.get({ owner, repo });
+    const branch = await octokit.rest.repos.getBranch({ owner, repo, branch: info.data.default_branch });
+    return { defaultBranch: info.data.default_branch, headSha: branch.data.commit.sha };
+  }
+
+  async getCommitDiff(installationId: number, owner: string, repo: string, sha: string) {
+    const octokit = this.installationOctokit(installationId);
+    const response = await octokit.request("GET /repos/{owner}/{repo}/commits/{ref}", {
+      owner,
+      repo,
+      ref: sha,
+      headers: { accept: "application/vnd.github.diff" },
+    });
+    return String(response.data);
+  }
+
+  async listOpenIssuesByMarker(installationId: number, owner: string, repo: string, marker: string) {
+    const octokit = this.installationOctokit(installationId);
+    const issues = await octokit.paginate(octokit.rest.issues.listForRepo, {
+      owner,
+      repo,
+      state: "open",
+      per_page: 100,
+    });
+    return issues
+      .filter((issue) => !issue.pull_request && (issue.body ?? "").includes(marker))
+      .map((issue) => ({ number: issue.number, title: issue.title ?? "", url: issue.html_url, state: issue.state }));
+  }
+
+  async createIssue(installationId: number, owner: string, repo: string, title: string, body: string) {
+    const octokit = this.installationOctokit(installationId);
+    const response = await octokit.rest.issues.create({ owner, repo, title, body });
+    return { number: response.data.number, url: response.data.html_url };
   }
 
   async createCommentReview(input: {

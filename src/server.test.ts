@@ -9,7 +9,7 @@ import type { OpenCodePort } from "./opencode/parse.js";
 type OpenCodeLike = OpenCodePort;
 import { createApp } from "./server.js";
 import { SESSION_COOKIE, CSRF_COOKIE, issueCsrfToken } from "./auth.js";
-import type { ManualTriggerPort, ResolvedPull } from "./github/client.js";
+import type { GithubPort, ManualTriggerPort, ResolvedPull } from "./github/client.js";
 
 function sign(secret: string, body: string): string {
   return `sha256=${createHmac("sha256", secret).update(body).digest("hex")}`;
@@ -1125,5 +1125,90 @@ describe("prompt configuration routes", () => {
     const evaluation = store.prompts.listEvaluations()[0];
     expect(evaluation?.status).toBe("completed");
     log.mockRestore();
+  });
+});
+
+describe("health scan routes", () => {
+  const oauthEnv = {
+    UI_SESSION_SECRET: "session-secret-for-tests",
+    GITHUB_OAUTH_CLIENT_ID: "cid",
+    GITHUB_OAUTH_CLIENT_SECRET: "csecret",
+    MAOMAO_ADMIN_GITHUB_IDS: "1001",
+    MAOMAO_PUBLIC_URL: "https://maomao.example",
+  };
+
+  function scanGithub(): ManualTriggerPort & Partial<GithubPort> {
+    return {
+      getRepoInstallation: async () => ({ installationId: 42, accountId: 1001 }),
+      getRepository: async () => ({ id: 2002 }),
+      getRepositoryHead: async () => ({ defaultBranch: "main", headSha: "head111head111head111head111head11111" }),
+      getCommitDiff: async () => "diff --git a/a.ts b/a.ts\n--- a/a.ts\n+++ b/a.ts\n@@ -1,1 +1,2 @@\n x\n+console.log(secret);",
+      listReviewThreads: async () => [],
+      resolveReviewThread: async () => {},
+      unresolveReviewThread: async () => {},
+      getCollaboratorPermission: async () => "write",
+      getInstallationToken: async () => "t",
+    } as unknown as ManualTriggerPort & Partial<GithubPort>;
+  }
+
+  it("queues a scan only for operators, pinned to the default-branch head SHA", async () => {
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    const { app, store } = testApp(oauthEnv, scanGithub(), mockOauthFetch({ id: 1001, login: "octocat" }));
+
+    // Unauthenticated scan attempts are redirected to the login page by the session gate.
+    const denied = await app.request("/scan", {
+      method: "POST",
+      headers: { "content-type": "application/x-www-form-urlencoded" },
+      body: "repo=acme/widgets",
+    });
+    expect(denied.status).toBe(302);
+    expect(denied.headers.get("location")).toContain("/login");
+    expect(store.listJobs()).toEqual([]);
+
+    const start = await app.request("/login/github");
+    const state = start.headers.get("location")?.match(/state=([^&]+)/)?.[1] ?? "";
+    const callback = await app.request(`/login/github/callback?code=good-code&state=${state}`);
+    const session = cookieFrom(callback);
+    const scanPage = await app.request("/scan", { headers: { cookie: session } });
+    const { csrfCookie, csrfToken } = await csrfArtifacts(scanPage);
+
+    const queued = await app.request("/scan", {
+      method: "POST",
+      headers: { cookie: `${session}; ${csrfCookie}`, "content-type": "application/x-www-form-urlencoded" },
+      body: `repo=acme%2Fwidgets&csrf_token=${encodeURIComponent(csrfToken)}`,
+    });
+    expect(queued.status).toBe(302);
+    const job = store.listJobs()[0];
+    expect(job.job_type).toBe("health_scan");
+    expect(job.head_sha).toBe("head111head111head111head111head11111");
+    expect(job.pr_number).toBe(0);
+    log.mockRestore();
+  });
+
+  it("rejects scans of repositories outside the allowlists before any GitHub call but the installation lookup", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const github = scanGithub();
+    let headCalls = 0;
+    github.getRepositoryHead = async () => {
+      headCalls += 1;
+      return { defaultBranch: "main", headSha: "x" };
+    };
+    const { app, store } = testApp({ ...oauthEnv, ALLOWED_GITHUB_ACCOUNT_IDS: "999999" }, github, mockOauthFetch({ id: 1001, login: "octocat" }));
+    const start = await app.request("/login/github");
+    const state = start.headers.get("location")?.match(/state=([^&]+)/)?.[1] ?? "";
+    const callback = await app.request(`/login/github/callback?code=good-code&state=${state}`);
+    const session = cookieFrom(callback);
+    const scanPage = await app.request("/scan", { headers: { cookie: session } });
+    const { csrfCookie, csrfToken } = await csrfArtifacts(scanPage);
+
+    const denied = await app.request("/scan", {
+      method: "POST",
+      headers: { cookie: `${session}; ${csrfCookie}`, "content-type": "application/x-www-form-urlencoded" },
+      body: `repo=acme%2Fwidgets&csrf_token=${encodeURIComponent(csrfToken)}`,
+    });
+    expect(denied.status).toBe(403);
+    expect(headCalls).toBe(0);
+    expect(store.listJobs()).toEqual([]);
+    warn.mockRestore();
   });
 });
