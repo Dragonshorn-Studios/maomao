@@ -340,6 +340,17 @@ async function runScanJob(deps: PipelineDeps, jobId: number, signal: AbortSignal
   const job = store.getJob(jobId);
   if (!job) return;
   try {
+    // Allowlists can change after enqueue; re-check before doing any work.
+    const auth = authorizeGithubTarget(config, {
+      installationId: job.installation_id,
+      accountId: job.github_account_id ?? undefined,
+      repositoryId: job.github_repository_id ?? undefined,
+    });
+    if (!auth.ok) {
+      logAuthorizationRejection({ installationId: job.installation_id, reason: auth.reason });
+      store.setJobState(jobId, "failed", { failure_reason: `unauthorized: ${auth.reason}`, finished_at: nowIso() });
+      return;
+    }
     store.setJobState(jobId, "preparing", { started_at: nowIso() });
     store.log(jobId, `Health scan of ${job.repo_full_name} at ${job.head_sha}`);
     const token = deps.getInstallationToken
@@ -349,6 +360,9 @@ async function runScanJob(deps: PipelineDeps, jobId: number, signal: AbortSignal
         : await deps.github.getInstallationToken(job.installation_id);
     if (!deps.github.getCommitDiff) throw new Error("health scans require a GitHub client with commit diff support");
     const diff = await deps.github.getCommitDiff(job.installation_id, job.repo_owner, job.repo_name, job.head_sha);
+    if (config.maxDiffBytes > 0 && diff.length > config.maxDiffBytes) {
+      throw new Error(`commit diff exceeds MAX_DIFF_BYTES (${diff.length} > ${config.maxDiffBytes})`);
+    }
     const workspace = await deps.checkout.prepare({
       jobId,
       installationId: job.installation_id,
@@ -376,7 +390,7 @@ async function runScanJob(deps: PipelineDeps, jobId: number, signal: AbortSignal
     store.setJobState(jobId, "reviewing");
     const runs = store.listReviewerRuns(jobId);
     store.log(jobId, `Running ${runs.length} specialist(s)`);
-    await mapLimit(runs, config.opencode.reviewerConcurrency, (run) => runReviewer(deps, job, run, workspace.repoDir, [], signal));
+    await mapLimit(runs, config.opencode.reviewerConcurrency, (run) => runReviewer(deps, job, run, workspace.repoDir, [workspace.diffPath, workspace.metaPath], signal));
     const parsedReviewers = runs
       .map((run) => ({ run: store.getReviewerRun(run.id), role: run.role }))
       .filter((entry): entry is { run: ReviewerRunRow; role: string } => entry.run?.state === "done")
@@ -405,7 +419,7 @@ async function runScanJob(deps: PipelineDeps, jobId: number, signal: AbortSignal
       store.upsertFinding({
         repoFullName: job.repo_full_name,
         prNumber: 0,
-        fingerprint: fingerprintFinding({ ...finding, category: finding.category, file: finding.file }),
+        fingerprint: fingerprintFinding({ ...finding }),
         status: "open",
         reviewedSha: job.head_sha,
         currentSha: job.head_sha,
@@ -436,7 +450,20 @@ async function runScanJob(deps: PipelineDeps, jobId: number, signal: AbortSignal
       return;
     }
     const message = error instanceof Error ? error.message : String(error);
-    store.setJobState(jobId, "failed", { failure_reason: message, finished_at: nowIso() });
+    for (const run of store.listReviewerRuns(jobId)) {
+      if (run.state === "queued" || run.state === "running") {
+        store.patchReviewer(run.id, {
+          state: "failed",
+          validation_error: "job ended before this reviewer finished",
+          finished_at: nowIso(),
+        });
+      }
+    }
+    store.setJobState(jobId, "failed", {
+      failure_reason: message,
+      finished_at: nowIso(),
+      aggregator_state: store.getJob(jobId)?.aggregator_state === "done" ? "done" : "failed",
+    });
     store.log(jobId, `Scan failed: ${message}`, "error");
   }
 }

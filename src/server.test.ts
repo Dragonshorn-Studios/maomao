@@ -1212,3 +1212,131 @@ describe("health scan routes", () => {
     warn.mockRestore();
   });
 });
+
+describe("scan issue creation", () => {
+  const oauthEnv = {
+    UI_SESSION_SECRET: "session-secret-for-tests",
+    GITHUB_OAUTH_CLIENT_ID: "cid",
+    GITHUB_OAUTH_CLIENT_SECRET: "csecret",
+    MAOMAO_ADMIN_GITHUB_IDS: "1001",
+    MAOMAO_PUBLIC_URL: "https://maomao.example",
+  };
+
+  function seedCompletedScan(store: JobStore): { jobId: number; fingerprint: string } {
+    const created = store.enqueue({
+      repoFullName: "acme/widgets",
+      repoOwner: "acme",
+      repoName: "widgets",
+      installationId: 42,
+      githubAccountId: 1001,
+      githubRepositoryId: 2002,
+      prNumber: 0,
+      prTitle: "Repository health scan (main)",
+      prBody: "",
+      prHtmlUrl: "https://github.com/acme/widgets",
+      prAuthor: "dev",
+      baseSha: "s",
+      headSha: "head111head111head111head111head11111",
+      baseRef: "main",
+      headRef: "main",
+      jobType: "health_scan",
+      reviewers: [],
+    });
+    store.setJobState(created.job.id, "completed", { finished_at: new Date().toISOString() });
+    store.upsertFinding({
+      repoFullName: "acme/widgets",
+      prNumber: 0,
+      fingerprint: "fpissue000000001",
+      status: "open",
+      reviewedSha: "head111head111head111head111head11111",
+      currentPath: "a.ts",
+      currentLine: 2,
+      summary: "secret logged",
+      severity: "high",
+      body: "evidence here",
+      lastJobId: created.job.id,
+    });
+    return { jobId: created.job.id, fingerprint: "fpissue000000001" };
+  }
+
+  function issueGithub(created: Array<{ title: string; body: string }>): ManualTriggerPort & Partial<GithubPort> {
+    return {
+      getRepoInstallation: async () => ({ installationId: 42, accountId: 1001 }),
+      getRepository: async () => ({ id: 2002 }),
+      listReviewThreads: async () => [],
+      resolveReviewThread: async () => {},
+      unresolveReviewThread: async () => {},
+      getCollaboratorPermission: async () => "write",
+      listOpenIssuesByMarker: async () => [],
+      createIssue: async (_installationId: number, _owner: string, _repo: string, title: string, body: string) => {
+        created.push({ title, body });
+        return { number: 100 + created.length, url: `https://github.com/acme/widgets/issues/${100 + created.length}` };
+      },
+    } as unknown as ManualTriggerPort & Partial<GithubPort>;
+  }
+
+  async function operatorSession(app: ReturnType<typeof createApp>): Promise<string> {
+    const start = await app.request("/login/github");
+    const state = start.headers.get("location")?.match(/state=([^&]+)/)?.[1] ?? "";
+    const callback = await app.request(`/login/github/callback?code=good-code&state=${state}`);
+    return cookieFrom(callback);
+  }
+
+  it("blocks issue creation entirely while the capability is disabled", async () => {
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    const { app, store } = testApp(oauthEnv, undefined, mockOauthFetch({ id: 1001, login: "octocat" }));
+    const seeded = seedCompletedScan(store);
+    const session = await operatorSession(app);
+    const promptsPage = await app.request("/scan", { headers: { cookie: session } });
+    const { csrfCookie, csrfToken } = await csrfArtifacts(promptsPage);
+    const res = await app.request("/scan/issues", {
+      method: "POST",
+      headers: { cookie: `${session}; ${csrfCookie}`, "content-type": "application/x-www-form-urlencoded" },
+      body: `job_id=${seeded.jobId}&csrf_token=${encodeURIComponent(csrfToken)}`,
+    });
+    expect(res.status).toBe(403);
+    expect(await res.text()).toContain("GITHUB_ISSUE_CREATION_ENABLED=false");
+    log.mockRestore();
+  });
+
+  it("creates deduplicated issues with the hidden marker and records provenance", async () => {
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    const created: Array<{ title: string; body: string }> = [];
+    const { app, store } = testApp(
+      { ...oauthEnv, GITHUB_ISSUE_CREATION_ENABLED: "true" },
+      issueGithub(created),
+      mockOauthFetch({ id: 1001, login: "octocat" }),
+    );
+    const seeded = seedCompletedScan(store);
+    const session = await operatorSession(app);
+    const promptsPage = await app.request("/scan", { headers: { cookie: session } });
+    const { csrfCookie, csrfToken } = await csrfArtifacts(promptsPage);
+
+    const res = await app.request("/scan/issues", {
+      method: "POST",
+      headers: { cookie: `${session}; ${csrfCookie}`, "content-type": "application/x-www-form-urlencoded" },
+      body: `job_id=${seeded.jobId}&csrf_token=${encodeURIComponent(csrfToken)}`,
+    });
+    if (res.status !== 302) {
+      throw new Error(`unexpected status ${res.status}; alert=${(await res.text()).match(/role="alert">([^<]*)/)?.[1]}`);
+    }
+    expect(res.status).toBe(302);
+    expect(res.headers.get("location")).toContain("issues-created");
+    expect(created).toHaveLength(1);
+    expect(created[0].title).toContain("[maomao] HIGH:");
+    expect(created[0].body).toContain("maomao-scan-issue fpissue000000001");
+    expect(created[0].body).toContain("head111head111head111head111head11111");
+    const recorded = store.listScanIssues(seeded.jobId)[0];
+    expect(recorded?.issue_number).toBe(101);
+
+    // Retry skips the already-created issue entirely.
+    const retry = await app.request("/scan/issues", {
+      method: "POST",
+      headers: { cookie: `${session}; ${csrfCookie}`, "content-type": "application/x-www-form-urlencoded" },
+      body: `job_id=${seeded.jobId}&csrf_token=${encodeURIComponent(csrfToken)}`,
+    });
+    expect(retry.status).toBe(302);
+    expect(created).toHaveLength(1);
+    log.mockRestore();
+  });
+});

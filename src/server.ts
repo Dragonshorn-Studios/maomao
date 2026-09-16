@@ -6,11 +6,10 @@ import type { JobStore } from "./jobs/store.js";
 import { handleGithubWebhook } from "./github/webhooks.js";
 import type { ManualTriggerPort, GithubPort } from "./github/client.js";
 import type { OpenCodePort } from "./opencode/parse.js";
-import { authorizeGithubAccount, logAuthorizationRejection, logRateLimited, rejectUnauthorized } from "./github/authorize.js";
+import { authorizeGithubAccount, authorizeGithubTarget, logAuthorizationRejection, logRateLimited, rejectUnauthorized } from "./github/authorize.js";
 import { repoRateLimitActive, RepoRateLimiter, WindowRateLimiter } from "./github/rate-limit.js";
 import { parseGithubPullUrl, PullUrlError } from "./github/pull-url.js";
 import { dispatchEnqueue, enqueuePullJob } from "./jobs/enqueue.js";
-import { findingDiffContext } from "./findings/apply.js";
 import { subscribe } from "./events.js";
 import { escapeHtml } from "./util.js";
 import { renderConfigPage, renderHome, renderJob, renderLogin, renderPromptConfigPage, renderScanPage, THEME_CSS } from "./ui/index.js";
@@ -464,6 +463,7 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
         csrfToken: gateOn ? ensureCsrfToken(c, ctx.config.uiSessionSecret) : undefined,
         prHeadSha: latest?.head_sha ?? job.head_sha,
         notice: noticeText(c.req.query("notice"), job.repo_full_name, job.pr_number, job.head_sha),
+        error: c.req.query("error") || undefined,
         prFindings: ctx.store.listFindings(job.repo_full_name, job.pr_number),
       }),
     );
@@ -843,13 +843,6 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
     }
   };
 
-  const scanNotice = (code: string | undefined): string | undefined => {
-    if (code === "scan-queued") return "Health scan queued for the pinned default-branch head SHA.";
-    if (code === "issues-created") return "GitHub issues created for the selected findings.";
-    if (code?.startsWith("issues-partial")) return `Some issues could not be created (${code.split(":")[1] ?? "unknown"}). Retry is safe.`;
-    return undefined;
-  };
-
   app.get("/scan", (c) => {
     if (!gateOn) return c.redirect("/", 302);
     const identity = c.get("identity");
@@ -949,7 +942,7 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
       });
       ctx.store.log(created.job.id, `Health scan enqueued by ${actor.login} for ${head.defaultBranch} @ ${head.headSha}`);
       dispatchEnqueue(ctx.queue, created);
-      return c.redirect(`/jobs/${created.job.id}?notice=scan-queued`, 302);
+      return c.redirect(`/jobs/${created.job.id}?notice=${created.created ? "scan-queued" : "exists"}`, 302);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       return c.html(
@@ -989,8 +982,14 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
         403,
       );
     }
+    if (!ctx.config.issueCreationEnabled) {
+      return renderScanDenied(c, ctx, "Issue creation is disabled (GITHUB_ISSUE_CREATION_ENABLED=false).");
+    }
     if (!ctx.github || !isReviewGithub(ctx.github)) {
       return renderScanDenied(c, ctx, "GitHub App client is not configured on this process.");
+    }
+    if (!ctx.github.createIssue || !ctx.github.listOpenIssuesByMarker) {
+      return renderScanDenied(c, ctx, "This GitHub client does not support issue creation.");
     }
     const body = await c.req.parseBody();
     const jobId = Number(body.job_id);
@@ -998,22 +997,44 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
     if (!job || job.job_type !== "health_scan" || job.state !== "completed") {
       return renderScanDenied(c, ctx, "Issue creation requires a completed health-scan job.");
     }
-    if (!ctx.github.createIssue || !ctx.github.listOpenIssuesByMarker) {
-      return renderScanDenied(c, ctx, "This GitHub client does not support issue creation.");
+    // Allowlists may have changed since the scan ran; the GitHub write path re-checks them.
+    const writeAuth = authorizeGithubTarget(ctx.config, {
+      installationId: job.installation_id,
+      accountId: job.github_account_id ?? undefined,
+      repositoryId: job.github_repository_id ?? undefined,
+    });
+    if (!writeAuth.ok) {
+      logAuthorizationRejection({ installationId: job.installation_id, reason: writeAuth.reason });
+      return renderScanDenied(c, ctx, "Not authorized to create issues in this installation or repository.");
     }
-    const findings = ctx.store.listFindings(job.repo_full_name, job.pr_number).filter((row) => row.status === "open");
+    // Only findings produced by this scan, not stale rows from older scans.
+    const findings = ctx.store
+      .listFindings(job.repo_full_name, job.pr_number)
+      .filter((row) => row.status === "open" && row.last_job_id === job.id);
     let createdCount = 0;
     let skipped = 0;
     let failed = 0;
     for (const finding of findings) {
-      const marker = `<!-- maomao-scan-issue ${finding.fingerprint} @ ${finding.reviewed_sha} -->`;
+      const markerBase = `<!-- maomao-scan-issue ${finding.fingerprint}`;
+      const marker = `${markerBase} @ ${finding.reviewed_sha} -->`;
       try {
         const existingLocal = ctx.store.hasScanIssue(job.repo_full_name, finding.fingerprint);
         if (existingLocal) {
           skipped += 1;
           continue;
         }
-        const remote = await ctx.github.listOpenIssuesByMarker(job.installation_id, job.repo_owner, job.repo_name, marker.split(" @ ")[0]);
+        // Claim the fingerprint before the GitHub write: a concurrent submit loses the race.
+        ctx.store.claimScanIssue({
+          jobId: job.id,
+          repoFullName: job.repo_full_name,
+          fingerprint: finding.fingerprint,
+          title: finding.summary ?? finding.fingerprint,
+        });
+        if (ctx.store.getScanIssue(job.repo_full_name, finding.fingerprint)?.issue_number !== 0) {
+          skipped += 1;
+          continue;
+        }
+        const remote = await ctx.github.listOpenIssuesByMarker(job.installation_id, job.repo_owner, job.repo_name, `${markerBase} `);
         if (remote.length > 0) {
           ctx.store.recordScanIssue({
             jobId: job.id,
@@ -1042,6 +1063,8 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
         createdCount += 1;
       } catch (error) {
         failed += 1;
+        // Release the claim so a later retry can try this finding again.
+        ctx.store.clearScanIssue(job.repo_full_name, finding.fingerprint);
         ctx.store.log(job.id, `Issue creation failed for ${finding.fingerprint}: ${error instanceof Error ? error.message : String(error)}`, "warn");
       }
     }

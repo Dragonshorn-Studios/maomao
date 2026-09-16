@@ -570,6 +570,17 @@ export class JobStore {
 
   // ---- Health-scan issue creation ----
 
+  /** Claims a fingerprint before issue creation (issue_number 0 = pending). Ignored if already claimed. */
+  claimScanIssue(input: { jobId: number; repoFullName: string; fingerprint: string; title: string }): void {
+    this.db
+      .prepare(
+        `INSERT OR IGNORE INTO scan_issues (job_id, repo_full_name, fingerprint, issue_number, issue_url, title, created_at)
+         VALUES (?, ?, ?, 0, '', ?, ?)`,
+      )
+      .run(input.jobId, input.repoFullName, input.fingerprint, input.title, nowIso());
+  }
+
+  /** Records/updates the resulting issue for a claimed fingerprint. */
   recordScanIssue(input: {
     jobId: number;
     repoFullName: string;
@@ -580,8 +591,13 @@ export class JobStore {
   }): void {
     this.db
       .prepare(
-        `INSERT OR IGNORE INTO scan_issues (job_id, repo_full_name, fingerprint, issue_number, issue_url, title, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO scan_issues (job_id, repo_full_name, fingerprint, issue_number, issue_url, title, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(repo_full_name, fingerprint) DO UPDATE SET
+           issue_number = excluded.issue_number,
+           issue_url = excluded.issue_url,
+           title = excluded.title,
+           job_id = excluded.job_id`,
       )
       .run(input.jobId, input.repoFullName, input.fingerprint, input.issueNumber, input.issueUrl, input.title, nowIso());
   }
@@ -590,6 +606,18 @@ export class JobStore {
     return this.db
       .prepare(`SELECT * FROM scan_issues WHERE job_id = ? ORDER BY id ASC`)
       .all(jobId) as Array<{ id: number; job_id: number; repo_full_name: string; fingerprint: string; issue_number: number; issue_url: string; title: string; created_at: string }>;
+  }
+
+  getScanIssue(repoFullName: string, fingerprint: string): { issue_number: number; issue_url: string; title: string } | undefined {
+    return this.db
+      .prepare(`SELECT issue_number, issue_url, title FROM scan_issues WHERE repo_full_name = ? AND fingerprint = ?`)
+      .get(repoFullName, fingerprint) as { issue_number: number; issue_url: string; title: string } | undefined;
+  }
+
+  clearScanIssue(repoFullName: string, fingerprint: string): void {
+    this.db
+      .prepare(`DELETE FROM scan_issues WHERE repo_full_name = ? AND fingerprint = ? AND issue_number = 0`)
+      .run(repoFullName, fingerprint);
   }
 
   hasScanIssue(repoFullName: string, fingerprint: string): boolean {
