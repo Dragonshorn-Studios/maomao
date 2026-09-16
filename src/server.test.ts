@@ -2407,6 +2407,24 @@ describe("pierre diffs vendor asset", () => {
     const missing = await app.request("/assets/vendor/pierre-diffs.js");
     expect(missing.status).toBe(404);
   });
+
+  it("serves a bundle placed into the vendor directory (fixture, not cwd dist)", async () => {
+    const { mkdtempSync, writeFileSync } = await import("node:fs");
+    const { tmpdir } = await import("node:os");
+    const { join } = await import("node:path");
+    const vendorDir = mkdtempSync(join(tmpdir(), "maomao-vendor-"));
+    writeFileSync(join(vendorDir, "pierre-diffs.js"), "globalThis.__maomaoPierre = { enhance() {} };");
+    const { app } = testApp(
+      { UI_PASSWORD: "hunter2", UI_SESSION_SECRET: "session-secret-for-tests" },
+      undefined,
+      undefined,
+      { vendorAssetsDir: vendorDir },
+    );
+    const res = await app.request("/assets/vendor/pierre-diffs.js");
+    expect(res.status).toBe(200);
+    expect(res.headers.get("content-type")).toContain("text/javascript");
+    expect(await res.text()).toContain("__maomaoPierre");
+  });
 });
 
 describe("scan repository typeahead", () => {

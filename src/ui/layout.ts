@@ -4,6 +4,7 @@ import type { FindingRow } from "../findings/types.js";
 import { PRODUCT_TAGLINE, type UiFlavor } from "./copy.js";
 import { brandMark } from "./glyphs.js";
 import { THEME_HREF } from "./theme.js";
+import { PIERRE_DIFFS_HREF } from "./paths.js";
 
 export interface UiIdentity {
   login: string;
@@ -113,7 +114,7 @@ export function layout(title: string, body: string, options: PageOptions = {}): 
   <link rel="alternate icon" href="/assets/favicon.png"/>
   <link rel="apple-touch-icon" href="/assets/icon.png"/>
   <link rel="stylesheet" href="${THEME_HREF}"/>
-  <script src="/assets/vendor/pierre-diffs.js" defer></script>
+  <script src="${PIERRE_DIFFS_HREF}" defer></script>
   <script>${APPEARANCE_BOOT}</script>
 </head>
 <body>

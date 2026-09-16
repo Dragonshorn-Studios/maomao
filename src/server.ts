@@ -24,6 +24,7 @@ import {
   renderLogin,
   renderPromptConfigPage,
   THEME_CSS,
+  PIERRE_DIFFS_HREF,
   TYPEAHEAD_HREF,
   TYPEAHEAD_JS,
   FAVICON_SVG,
@@ -422,16 +423,17 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
   // to the server-rendered diff markup.
   const vendorDir = ctx.vendorAssetsDir ?? resolve(process.cwd(), "dist/assets/vendor");
   let pierreBundle: string | null | undefined;
-  app.get("/assets/vendor/pierre-diffs.js", (c) => {
+  app.get(PIERRE_DIFFS_HREF, (c) => {
+    // Only successful reads are cached: a server started before the vendor
+    // build keeps retrying, so the asset appears without a restart.
     if (pierreBundle === undefined) {
       try {
         pierreBundle = readFileSync(resolve(vendorDir, "pierre-diffs.js"), "utf8");
       } catch {
-        pierreBundle = null;
         console.warn("assets: pierre-diffs bundle not built; run npm run build:vendor");
+        return c.text("Not found", 404);
       }
     }
-    if (pierreBundle === null) return c.text("Not found", 404);
     return c.newResponse(pierreBundle, 200, {
       "content-type": "text/javascript; charset=utf-8",
       "cache-control": "public, max-age=3600",

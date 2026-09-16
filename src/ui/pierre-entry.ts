@@ -5,7 +5,7 @@
 // missing (404) the enhancement simply never runs.
 
 import { FileDiff, getSingularPatch, type FileDiffMetadata } from "@pierre/diffs";
-import { annotationForLine, synthesisePatch } from "./pierre-glue.js";
+import { annotationForLine, diffLayoutOptions, nextLayout, type DiffLayout, synthesisePatch } from "./pierre-glue.js";
 
 declare global {
   // eslint-disable-next-line no-var
@@ -13,9 +13,8 @@ declare global {
 }
 
 const LAYOUT_STORAGE_KEY = "maomao-diff-layout";
-type DiffLayout = "unified" | "split";
 
-const instances = new Set<FileDiff>();
+const instances = new Map<HTMLElement, FileDiff>();
 
 function currentLayout(): DiffLayout {
   return localStorage.getItem(LAYOUT_STORAGE_KEY) === "split" ? "split" : "unified";
@@ -47,13 +46,7 @@ function renderInto(container: HTMLElement): void {
   }
 
   const fileDiff = new FileDiff({
-    diffStyle: currentLayout(),
-    disableFileHeader: true,
-    lineDiffType: "word",
-    diffIndicators: "bars",
-    overflow: "scroll",
-    theme: { dark: "pierre-dark", light: "pierre-light" },
-    themeType: themeType(),
+    ...diffLayoutOptions(currentLayout(), themeType()),
     renderAnnotation: () => {
       const node = document.createElement("div");
       node.className = `pierre-annotation severity-${severity}`;
@@ -68,12 +61,14 @@ function renderInto(container: HTMLElement): void {
     fileContainer: container,
   });
   container.setAttribute("data-enhanced", "1");
-  instances.add(fileDiff);
+  instances.set(container, fileDiff);
 }
 
 function applyLayout(layout: DiffLayout): void {
   localStorage.setItem(LAYOUT_STORAGE_KEY, layout);
   for (const container of Array.from(document.querySelectorAll<HTMLElement>(".pierre-diff[data-enhanced]"))) {
+    // Drop the torn-down viewer so the theme observer stops mutating detached DOM.
+    instances.delete(container);
     container.removeAttribute("data-enhanced");
     for (const child of Array.from(container.children)) {
       if (!child.classList.contains("diff-raw")) child.remove();
@@ -111,7 +106,7 @@ function enhanceAll(): void {
     button.addEventListener("click", (event) => {
       event.preventDefault();
       event.stopPropagation();
-      const next: DiffLayout = currentLayout() === "split" ? "unified" : "split";
+      const next = nextLayout(currentLayout());
       applyLayout(next);
       button.textContent = next === "split" ? "Split view" : "Unified view";
       button.setAttribute("aria-label", label(next));
@@ -132,6 +127,6 @@ if (typeof document !== "undefined") {
   // Keep the library's theme type in sync with the appearance switch.
   new MutationObserver(() => {
     const type = themeType();
-    for (const instance of instances) instance.setThemeType(type);
+    for (const instance of instances.values()) instance.setThemeType(type);
   }).observe(document.documentElement, { attributes: true, attributeFilter: ["data-theme"] });
 }

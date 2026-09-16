@@ -822,7 +822,9 @@ function renderFindingDiff(record?: FindingRow): string {
       return `<span class="diff-${cls}">${escapeHtml(line)}</span>`;
     })
     .join("\n");
-  const line = record.current_line ?? record.original_line;
+  // Only new-file numbering can anchor a line annotation; original_line is
+  // old-file numbering and would mark an unrelated row.
+  const line = record.current_line;
   return `<details class="finding-diff">
       <summary>Show diff</summary>
       <div class="pierre-diff" data-pierre-diff data-path="${escapeHtml(record.current_path ?? record.original_path ?? "")}" data-line="${line ?? ""}" data-severity="${escapeHtml(record.severity ?? "info")}" data-summary="${escapeHtml((record.summary ?? "").slice(0, 160))}">

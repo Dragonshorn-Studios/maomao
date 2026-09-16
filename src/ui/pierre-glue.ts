@@ -41,10 +41,15 @@ function withCorrectedCounts(rawHunk: string): string {
   }
   // Preserve any trailing function-context after the second @@ (rare in
   // persisted hunks, but part of the unified format). Counts are always
-  // explicit so the library's parser never has to guess.
-  const context = header.match(/^@@ [^@]+@@\s*(.*)$/);
-  const suffix = context?.[1] ? ` ${context[1]}` : "";
-  return [`@@ -${oldCount},${oldCount} +${newCount},${newCount} @@${suffix}`, ...body].join("\n");
+  // explicit so the library's parser never has to guess — and the parsed
+  // start numbers are preserved, since they anchor the rendered gutters AND
+  // `annotationForLine` (which reads the raw header); discarding them
+  // desyncs annotations from the rendered rows.
+  const parsed = header.match(/^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@\s*(.*)$/);
+  const suffix = parsed?.[3] ? ` ${parsed[3]}` : "";
+  const oldStart = parsed ? Number.parseInt(parsed[1], 10) : 1;
+  const newStart = parsed ? Number.parseInt(parsed[2], 10) : 1;
+  return [`@@ -${oldStart},${oldCount} +${newStart},${newCount} @@${suffix}`, ...body].join("\n");
 }
 
 /**
@@ -89,4 +94,36 @@ export function annotationForLine(
     }
   }
   return undefined;
+}
+
+/** Diff layout the operator can toggle per card (persisted client-side). */
+export type DiffLayout = "unified" | "split";
+
+export function nextLayout(layout: DiffLayout): DiffLayout {
+  return layout === "split" ? "unified" : "split";
+}
+
+/**
+ * The @pierre/diffs option subset Maomao pins for finding hunks: word-level
+ * intra-line diffs, no file header (the card carries the path), and a theme
+ * pair that follows the appearance switch.
+ */
+export function diffLayoutOptions(layout: DiffLayout, themeType: "light" | "dark"): {
+  diffStyle: DiffLayout;
+  disableFileHeader: true;
+  lineDiffType: "word";
+  diffIndicators: "bars";
+  overflow: "scroll";
+  theme: { dark: string; light: string };
+  themeType: "light" | "dark";
+} {
+  return {
+    diffStyle: layout,
+    disableFileHeader: true,
+    lineDiffType: "word",
+    diffIndicators: "bars",
+    overflow: "scroll",
+    theme: { dark: "pierre-dark", light: "pierre-light" },
+    themeType,
+  };
 }

@@ -22,6 +22,7 @@ export {
 } from "./pages.js";
 export { THEME_CSS, THEME_HREF } from "./theme.js";
 export { TYPEAHEAD_JS, TYPEAHEAD_HREF } from "./typeahead.js";
+export { PIERRE_DIFFS_HREF } from "./paths.js";
 export {
   FAVICON_SVG,
   FAVICON_PNG_BASE64,
