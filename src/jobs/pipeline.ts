@@ -235,12 +235,15 @@ async function runJob(deps: PipelineDeps, jobId: number, signal: AbortSignal): P
     store.patchJob(jobId, { aggregator_normalized: JSON.stringify(aggregated, null, 2) });
 
     store.setJobState(jobId, "publishing", { aggregator_state: "done" });
-    const posted = await publishReview(deps, job, aggregated, parsedReviewers.length, snapshot);
+    const posted = await publishReview(deps, job, aggregated, parsedReviewers.length, snapshot, signal);
     const afterPublish = store.getJob(jobId) ?? job;
     if (posted) {
       store.patchJob(jobId, { github_review_id: posted.id, github_review_url: posted.url });
     }
-    store.log(jobId, posted ? `Published COMMENT review ${posted.id}` : "No GitHub review posted");
+    store.log(
+      jobId,
+      posted ? `Published ${store.getJob(jobId)?.review_event ?? "COMMENT"} review ${posted.id}` : "No GitHub review posted",
+    );
     if (store.isStale(jobId)) {
       throw new Error("stale");
     }
@@ -798,6 +801,7 @@ async function publishReview(
   aggregated: AggregatorResult,
   reviewerCount: number,
   snapshot: ReconciliationSnapshot,
+  signal: AbortSignal,
 ): Promise<{ id: string; url: string; postedFingerprints: string[] } | undefined> {
   if (deps.store.isStale(job.id)) return undefined;
 
@@ -805,6 +809,10 @@ async function publishReview(
   const already = findExistingReview(existing, job.head_sha);
   if (already) {
     deps.store.log(job.id, `Review already exists for ${job.head_sha}; skipping publish`);
+    deps.store.patchJob(job.id, {
+      review_event: "COMMENT",
+      review_event_reason: "existing maomao review found by marker",
+    });
     return { ...already, postedFingerprints: [] };
   }
 
@@ -814,11 +822,8 @@ async function publishReview(
     deps.store.log(job.id, `Omitting ${dismissedCount} dismissed finding(s) from this review`);
   }
   const findingsCount = publishable.length;
-  const verdict = findingsCount === 0 && aggregated.verdict === "clean" ? "clean" : aggregated.verdict;
-  if (findingsCount === 0 && verdict === "clean" && !deps.config.postEmptyReview) {
-    deps.store.log(job.id, "Clean review with no findings; POST_EMPTY_REVIEW is false, not posting");
-    return undefined;
-  }
+  // A review only counts as clean when the aggregator said so AND nothing survived filtering.
+  const clean = findingsCount === 0 && aggregated.verdict === "clean";
 
   // Only the orchestrator selects the GitHub event; specialists never do.
   const runs = deps.store.listReviewerRuns(job.id);
@@ -828,17 +833,21 @@ async function publishReview(
     allowApprove: deps.config.reviewAllowApprove,
     allowRequestChanges: deps.config.reviewAllowRequestChanges,
     minSeverity: deps.config.reviewRequestChangesMinSeverity,
-    clean: verdict === "clean",
+    clean,
     findings: publishable,
     allReviewersDone,
     aggregatorFallback,
     stale: deps.store.isStale(job.id),
   });
+
+  if (clean && !deps.config.postEmptyReview) {
+    const reason = `${decision.reason}; not posting because POST_EMPTY_REVIEW is false`;
+    deps.store.log(job.id, `Clean review with no findings; POST_EMPTY_REVIEW is false, not posting`);
+    deps.store.patchJob(job.id, { review_event: "COMMENT", review_event_reason: reason });
+    return undefined;
+  }
+
   deps.store.log(job.id, `Review event: ${decision.event} (${decision.reason})`);
-  deps.store.patchJob(job.id, {
-    review_event: decision.event,
-    review_event_reason: decision.reason,
-  });
 
   const body = buildReviewBody({
     headSha: job.head_sha,
@@ -848,6 +857,8 @@ async function publishReview(
   });
   const comments = toInlineComments(publishable, deps.config.maxInlineComments, job.head_sha);
   const postedFingerprints = inlineCommentFingerprints(comments);
+  // Re-check staleness after the decision: an APPROVE must never land on a superseded SHA.
+  throwIfStale(deps.store, job.id, signal);
   const posted = await deps.github.createCommentReview({
     installationId: job.installation_id,
     owner: job.repo_owner,
@@ -857,6 +868,12 @@ async function publishReview(
     body,
     comments,
     event: decision.event,
+  });
+  // Record the event only after GitHub accepted the review, so a recorded event
+  // always corresponds to a delivered one.
+  deps.store.patchJob(job.id, {
+    review_event: decision.event,
+    review_event_reason: decision.reason,
   });
   return { ...posted, postedFingerprints };
 }

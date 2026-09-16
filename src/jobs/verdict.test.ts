@@ -54,6 +54,13 @@ describe("review event resolution", () => {
     expect(result.reason).toContain("1 finding(s)");
   });
 
+  it("treats a finding more severe than the threshold as qualifying", () => {
+    const result = resolveReviewEvent(
+      input({ clean: false, findings: [{ severity: "blocker" }], minSeverity: "high" }),
+    );
+    expect(result.event).toBe("REQUEST_CHANGES");
+  });
+
   it("comments for findings below the threshold with no approval to give", () => {
     const result = resolveReviewEvent(input({ clean: false, findings: [{ severity: "low" }] }));
     expect(result).toEqual({ event: "COMMENT", reason: "findings below the request-changes threshold" });

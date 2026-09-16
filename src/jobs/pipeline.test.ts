@@ -2160,6 +2160,30 @@ describe("review verdict events", () => {
     expect(store.getJob(created.job.id)?.review_event).toBe("COMMENT");
   });
 
+  it("records the suppressed decision when a clean review is not posted", async () => {
+    const store = new JobStore(openDb(":memory:"));
+    const posted: { event?: string }[] = [];
+    const { config, opencode, github } = cleanReviewPipeline(store, posted);
+    const withoutPost = loadConfig({
+      REVIEWER_ROLES: "correctness,security",
+      OPENCODE_REVIEWER_MODEL: "test/model",
+      POST_EMPTY_REVIEW: "false",
+      GITHUB_REVIEW_ALLOW_APPROVE: "true",
+      GITHUB_APP_ID: "1",
+      GITHUB_WEBHOOK_SECRET: "s",
+      GITHUB_APP_PRIVATE_KEY: "k",
+    });
+    const created = store.enqueue({ ...jobInput("quietsha"), reviewers: [] });
+    await createPipeline({ config: withoutPost, store, github, checkout: await fixtureCheckout(), opencode }).run(
+      created.job.id,
+    );
+    expect(posted).toHaveLength(0);
+    const job = store.getJob(created.job.id);
+    expect(job?.state).toBe("completed");
+    expect(job?.review_event).toBe("COMMENT");
+    expect(job?.review_event_reason).toContain("POST_EMPTY_REVIEW");
+  });
+
   it("publishes REQUEST_CHANGES for findings at the configured threshold", async () => {
     const store = new JobStore(openDb(":memory:"));
     const posted: { event?: string }[] = [];

@@ -184,7 +184,7 @@ export function renderJob(
         <dt>GitHub review</dt>
         <dd>${
           job.github_review_url
-            ? `<a href="${escapeHtml(job.github_review_url)}">${escapeHtml(job.github_review_id || "view COMMENT review")}</a>`
+            ? `<a href="${escapeHtml(job.github_review_url)}">${escapeHtml(job.github_review_id || "view review")}</a>`
             : job.state === "completed"
               ? "not published"
               : "—"

@@ -246,7 +246,11 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     publicUrl: env.MAOMAO_PUBLIC_URL?.trim().replace(/\/+$/, "") || "",
     reviewAllowApprove: parseBoolean(env.GITHUB_REVIEW_ALLOW_APPROVE, false),
     reviewAllowRequestChanges: parseBoolean(env.GITHUB_REVIEW_ALLOW_REQUEST_CHANGES, false),
-    reviewRequestChangesMinSeverity: parseSeverity(env.GITHUB_REVIEW_REQUEST_CHANGES_MIN_SEVERITY, "blocker"),
+    reviewRequestChangesMinSeverity: parseSeverity(
+      env.GITHUB_REVIEW_REQUEST_CHANGES_MIN_SEVERITY,
+      "blocker",
+      "GITHUB_REVIEW_REQUEST_CHANGES_MIN_SEVERITY",
+    ),
     allowedGithubAccountIds: parseIdList(env.ALLOWED_GITHUB_ACCOUNT_IDS, "ALLOWED_GITHUB_ACCOUNT_IDS"),
     allowedGithubRepositoryIds: parseIdList(env.ALLOWED_GITHUB_REPOSITORY_IDS, "ALLOWED_GITHUB_REPOSITORY_IDS"),
     maxDiffBytes: clamp(parseInteger(env.MAX_DIFF_BYTES, 1_048_576), 0, 50 * 1024 * 1024),

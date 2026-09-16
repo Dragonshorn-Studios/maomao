@@ -291,6 +291,7 @@ function migrate(db: SqliteDb): void {
   ];
   for (const [name, ddl] of findingColumns) ensureColumn(db, "findings", name, ddl);
 }
+
 function columnNames(db: SqliteDb, table: string): Set<string> {
   const rows = db.prepare(`PRAGMA table_info(${table})`).all() as { name: string }[];
   return new Set(rows.map((row) => row.name));

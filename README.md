@@ -359,8 +359,8 @@ OpenCode is still a powerful process. Keep Maomao on a locked-down host and do n
 - Actionable findings → one `COMMENT` review, SHA-anchored (`commit_id` = job head SHA), with inline comments when GitHub accepts the locations
 - No findings → silent unless `POST_EMPTY_REVIEW=true`
 - **Opt-in verdicts** (both default to `false`):
-  - `GITHUB_REVIEW_ALLOW_APPROVE=true` — publishes `APPROVE` for clean reviews, but only when every specialist finished without errors, the aggregator did not fall back, and the job is not stale. Any degraded run silently degrades the review to `COMMENT`.
-  - `GITHUB_REVIEW_ALLOW_REQUEST_CHANGES=true` — publishes `REQUEST_CHANGES` when surviving findings meet `GITHUB_REVIEW_REQUEST_CHANGES_MIN_SEVERITY` (default `blocker`). Note that GitHub may **block merges** on `REQUEST_CHANGES` where branch protection requires reviews.
+  - `GITHUB_REVIEW_ALLOW_APPROVE=true` — publishes `APPROVE` for clean reviews, but only when every specialist finished without errors, the aggregator did not fall back, and the job is not stale. Any degraded run degrades the review to `COMMENT` (reason logged and shown on the job page). A clean review with `POST_EMPTY_REVIEW=false` posts nothing, so no APPROVE can be delivered either.
+  - `GITHUB_REVIEW_ALLOW_REQUEST_CHANGES=true` — publishes `REQUEST_CHANGES` when surviving findings meet `GITHUB_REVIEW_REQUEST_CHANGES_MIN_SEVERITY` (default `blocker`), subject to the same safety gates as APPROVE. Note that GitHub may **block merges** on `REQUEST_CHANGES` where branch protection requires reviews.
   - The resolved event and the reason are shown on the job page and logged; the default install stays `COMMENT`-only with no configuration change.
 - Duplicate webhook deliveries reuse the existing job; publication also looks for a `<!-- maomao-review sha=... -->` marker
 - Inline comments include `<!-- maomao-finding id=<fingerprint> sha=<reviewed-sha> -->` so later reviews can reconcile the same finding after the line moves
