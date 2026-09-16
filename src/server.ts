@@ -31,6 +31,7 @@ import {
 import type { JobRow } from "./jobs/store.js";
 import type { FindingRow } from "./findings/types.js";
 import { issueWorthiness, parseAggregatedFindings, type IssueWorthiness } from "./findings/issue-worthiness.js";
+import { SCAN_ISSUE_MARKER_RE, scanIssueMarkerBase } from "./findings/identity.js";
 import { githubSecrets } from "./config.js";
 import type { JobQueue } from "./jobs/queue.js";
 import {
@@ -87,13 +88,6 @@ function clientKey(c: Context<AppEnv>): string {
 
 // ---- Health-scan issue creation helpers ----
 
-const MAOMAO_ISSUE_MARKER_RE = /<\s*!--\s*maomao-scan-issue/g;
-
-/** The dedup search keys on this exact prefix; kept in one place on purpose. */
-function issueMarkerBase(fingerprint: string): string {
-  return `<!-- maomao-scan-issue ${fingerprint}`;
-}
-
 /** Checked checkboxes with name `fp[]` arrive as an array of strings (or a single value). */
 function fingerprintList(value: unknown): string[] {
   const list = Array.isArray(value) ? value : value == null ? [] : [value];
@@ -109,10 +103,14 @@ function isPermissionDenied(error: unknown): boolean {
   return status === 403 || status === 404;
 }
 
-/** GitHub also uses 403 for transient abuse/secondary rate limits — retryable, not a permission problem. */
+/**
+ * GitHub also uses 403 for transient conditions — abuse detection and both
+ * secondary and primary rate limits ("API rate limit exceeded ..."). Those are
+ * retryable, not a permission problem.
+ */
 function isTransientAbuseLimit(error: unknown): boolean {
   const message = error instanceof Error ? error.message : "";
-  return /secondary rate limit|abuse/i.test(message);
+  return /secondary rate limit|abuse|rate limit exceeded/i.test(message);
 }
 
 function duplicateSearchQuery(summary: string): string {
@@ -130,12 +128,12 @@ function duplicateSearchQuery(summary: string): string {
  * runtime secrets as defense in depth before the text lands in a public issue.
  */
 function sanitizeIssueText(text: string, config: Config): string {
-  return redactSecrets(text.replace(MAOMAO_ISSUE_MARKER_RE, "[neutralized maomao marker]"), githubSecrets(config));
+  return redactSecrets(text.replace(SCAN_ISSUE_MARKER_RE, "[neutralized maomao marker]"), githubSecrets(config));
 }
 
 function buildScanIssue(config: Config, job: JobRow, finding: FindingRow): { title: string; body: string } {
   const severity = (finding.severity ?? "info").toUpperCase();
-  const marker = `${issueMarkerBase(finding.fingerprint)} @ ${finding.reviewed_sha} -->`;
+  const marker = `${scanIssueMarkerBase(finding.fingerprint)} @ ${finding.reviewed_sha} -->`;
   const evidence = finding.diff_hunk ? `\n\n\`\`\`diff\n${sanitizeIssueText(finding.diff_hunk, config)}\n\`\`\`` : "";
   const body = `${marker}\n\n**${severity}** — ${sanitizeIssueText(finding.summary ?? "", config)}\n\n${sanitizeIssueText(finding.body ?? "", config)}\n\nFile: \`${sanitizeIssueText(finding.current_path ?? "unknown", config)}${finding.current_line ? `:${finding.current_line}` : ""}\`\nReviewed SHA: ${finding.reviewed_sha}\nDiscovered by a manual Maomao health scan (job ${job.id}).${evidence}`;
   return {
@@ -165,7 +163,7 @@ function scanOpenFindings(store: JobStore, job: JobRow): ScanIssueEntry[] {
       return {
         row,
         agreed: aggregatedFinding?.reviewers_agreed ?? [],
-        worth: issueWorthiness(row, aggregatedFinding),
+        worth: issueWorthiness(aggregatedFinding),
       };
     });
 }
@@ -976,7 +974,7 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
     const enabled =
       ctx.config.issueCreationEnabled &&
       Boolean(ctx.github && isReviewGithub(ctx.github) && ctx.github.createIssue && ctx.github.listOpenIssuesByMarker);
-    return { enabled, findings };
+    return { enabled, jobId: job.id, findings };
   };
 
   // ---- On-demand repository health scans (/scan) ----
@@ -1225,7 +1223,7 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
         rejected.push(`${entry.row.summary || entry.row.fingerprint}: ${entry.worth.reason}`);
         continue;
       }
-      const markerBase = issueMarkerBase(entry.row.fingerprint);
+      const markerBase = scanIssueMarkerBase(entry.row.fingerprint);
       const { title, body: issueBody } = buildScanIssue(ctx.config, job, entry.row);
       let skip: { reason: string; url?: string } | undefined;
       // Repo-scoped on purpose: an issue recorded by an earlier scan of the same
@@ -1316,7 +1314,7 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
     let permissionDenied = false;
     for (const entry of creatable) {
       const finding = entry.row;
-      const markerBase = issueMarkerBase(finding.fingerprint);
+      const markerBase = scanIssueMarkerBase(finding.fingerprint);
       try {
         const existingLocal = ctx.store.hasScanIssue(job.repo_full_name, finding.fingerprint);
         if (existingLocal) {
@@ -1474,7 +1472,7 @@ function noticeText(
     return "Issue creation stopped: GitHub refused the write — the App installation likely lacks the Issues: write permission. Grant it, then retry; already-created issues are skipped.";
   }
   if (code?.startsWith("issues-none")) {
-    return `No new issues needed: every selected finding is already tracked (${code.split(":")[1] ?? "0"} skipped).`;
+    return `No new issues created: ${code.split(":")[1] ?? "0"} finding(s) already tracked or publication-claimed.`;
   }
   if (code?.startsWith("issues-partial")) {
     return `Some issues could not be created (${code.split(":")[1] ?? "unknown"} failures). Retrying is safe: already-created issues are skipped.`;

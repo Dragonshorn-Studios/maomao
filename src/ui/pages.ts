@@ -1221,6 +1221,8 @@ export function renderScanPage(data: ScanPageData): string {
 
 export interface ScanIssueCreationData {
   enabled: boolean;
+  /** The completed health-scan job this form posts against. */
+  jobId: number;
   findings: Array<{
     fingerprint: string;
     summary: string;
@@ -1264,6 +1266,7 @@ function renderScanIssueCreation(data: ScanIssueCreationData, csrfToken: string 
     <p class="muted">Select concrete, validated findings to publish. Speculative observations (below the confidence and consensus bar) cannot be turned into issues.</p>
     <form class="trigger" method="post" action="/scan/issues/preview">
       ${csrfInput(csrfToken)}
+      <input type="hidden" name="job_id" value="${data.jobId}"/>
       ${rows}
       <button type="submit">Preview issues for selected findings</button>
     </form>`;

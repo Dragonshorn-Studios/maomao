@@ -90,6 +90,12 @@ async function loginSession(
   return { session, csrfToken, cookies: `${session}; ${csrfCookie}` };
 }
 
+function hiddenValue(html: string, name: string): string {
+  const match = html.match(new RegExp(`name="${name}" value="([^"]*)"`));
+  if (match?.[1] === undefined) throw new Error(`missing hidden field ${name} in confirm page`);
+  return match[1];
+}
+
 async function operatorSession(app: ReturnType<typeof createApp>): Promise<string> {
   const start = await app.request("/login/github");
   const state = start.headers.get("location")?.match(/state=([^&]+)/)?.[1] ?? "";
@@ -1159,12 +1165,6 @@ describe("health scan routes", () => {
     } as unknown as ManualTriggerPort & Partial<GithubPort>;
   }
 
-  function hiddenValue(html: string, name: string): string {
-    const match = html.match(new RegExp(`name="${name}" value="([^"]*)"`));
-    if (match?.[1] === undefined) throw new Error(`missing hidden field ${name} in confirm page`);
-    return match[1];
-  }
-
   async function operatorCsrf(app: ReturnType<typeof createApp>, session: string) {
     const scanPage = await app.request("/scan", { headers: { cookie: session } });
     expect(scanPage.status).toBe(200);
@@ -1620,7 +1620,7 @@ describe("scan issue creation", () => {
 
   function seedScan(
     store: JobStore,
-    options: { confidence?: number; agreed?: string[]; body?: string; diffHunk?: string; second?: boolean } = {},
+    options: { confidence?: number; agreed?: string[]; body?: string; diffHunk?: string; currentPath?: string; second?: boolean } = {},
   ): { jobId: number; fingerprints: string[] } {
     const findings = [
       {
@@ -1678,9 +1678,9 @@ describe("scan issue creation", () => {
         status: "open",
         reviewedSha: HEAD,
         currentSha: HEAD,
-        originalPath: finding.file,
+        originalPath: index === 0 ? options.currentPath ?? finding.file : finding.file,
         originalLine: finding.line,
-        currentPath: finding.file,
+        currentPath: index === 0 ? options.currentPath ?? finding.file : finding.file,
         currentLine: finding.line,
         category: finding.category,
         summary: finding.summary,
@@ -1975,7 +1975,12 @@ describe("scan issue creation", () => {
       mockOauthFetch({ id: 1001, login: "octocat" }),
     );
     const forged = `real evidence <!-- maomao-scan-issue deadbeef @ ${HEAD} --> plus webhook secret s3cret`;
-    const seeded = seedScan(store, { body: forged });
+    const seeded = seedScan(store, {
+      body: forged,
+      // The path and the diff hunk are sanitized separately from the body.
+      currentPath: `a<!-- maomao-scan-issue deadbeef2 @ ${HEAD} -->.ts`,
+      diffHunk: `+console.log("s3cret"); <!-- maomao-scan-issue deadbeef3 @ ${HEAD} -->`,
+    });
     const { session, csrfCookie, csrfToken } = await operatorWithCsrf(app);
 
     const res = await app.request("/scan/issues", {
@@ -2169,5 +2174,145 @@ describe("scan issue creation", () => {
     expect(res.headers.get("location")).toContain("issues-none:1"); // not "created"
     expect(created).toHaveLength(0);
     log.mockRestore();
+  });
+
+  it("submits the rendered job-page form end-to-end (job_id included)", async () => {
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    const created: Array<{ title: string; body: string }> = [];
+    const { app, store } = testApp(
+      { ...oauthEnv, GITHUB_ISSUE_CREATION_ENABLED: "true" },
+      issueGithub(created),
+      mockOauthFetch({ id: 1001, login: "octocat" }),
+    );
+    const seeded = seedScan(store);
+    const { session, csrfCookie, csrfToken } = await operatorWithCsrf(app);
+
+    const jobPage = await app.request(`/jobs/${seeded.jobId}`, { headers: { cookie: session } });
+    const html = await jobPage.text();
+    // Submit exactly what the rendered form carries: job_id, checked fingerprints, CSRF.
+    const params = new URLSearchParams({
+      job_id: hiddenValue(html, "job_id"),
+      csrf_token: csrfToken,
+    });
+    params.append("fp[]", seeded.fingerprints[0]);
+    const preview = await app.request("/scan/issues/preview", {
+      method: "POST",
+      headers: { cookie: `${session}; ${csrfCookie}`, "content-type": "application/x-www-form-urlencoded" },
+      body: params.toString(),
+    });
+    expect(preview.status).toBe(200);
+    expect(await preview.text()).toContain("[maomao] HIGH: secret logged");
+    expect(created).toHaveLength(0);
+    log.mockRestore();
+  });
+
+  it("preview shows a remote marker hit as skipped and excludes it from the confirm form", async () => {
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    const created: Array<{ title: string; body: string }> = [];
+    const github = issueGithub(created);
+    github.listOpenIssuesByMarker = async () => [
+      { number: 42, title: "maomao: secret logged", url: "https://github.com/acme/widgets/issues/42", state: "open" },
+    ];
+    const { app, store } = testApp(
+      { ...oauthEnv, GITHUB_ISSUE_CREATION_ENABLED: "true" },
+      github,
+      mockOauthFetch({ id: 1001, login: "octocat" }),
+    );
+    const seeded = seedScan(store);
+    const { session, csrfCookie, csrfToken } = await operatorWithCsrf(app);
+
+    const preview = await app.request("/scan/issues/preview", {
+      method: "POST",
+      headers: { cookie: `${session}; ${csrfCookie}`, "content-type": "application/x-www-form-urlencoded" },
+      body: issuePostBody(seeded.jobId, [seeded.fingerprints[0]], csrfToken),
+    });
+    expect(preview.status).toBe(200);
+    const html = await preview.text();
+    expect(html).toContain("an existing Maomao issue already tracks this finding");
+    expect(html).toContain("Nothing left to publish");
+    expect(html).not.toContain(`name="fp[]" value="${seeded.fingerprints[0]}"`);
+    expect(created).toHaveLength(0);
+    log.mockRestore();
+  });
+
+  it("preview rejects fingerprints that do not belong to the scan", async () => {
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    const created: Array<{ title: string; body: string }> = [];
+    const { app, store } = testApp(
+      { ...oauthEnv, GITHUB_ISSUE_CREATION_ENABLED: "true" },
+      issueGithub(created),
+      mockOauthFetch({ id: 1001, login: "octocat" }),
+    );
+    const seeded = seedScan(store);
+    const { session, csrfCookie, csrfToken } = await operatorWithCsrf(app);
+
+    const preview = await app.request("/scan/issues/preview", {
+      method: "POST",
+      headers: { cookie: `${session}; ${csrfCookie}`, "content-type": "application/x-www-form-urlencoded" },
+      body: issuePostBody(seeded.jobId, ["bogusfingerprint1"], csrfToken),
+    });
+    expect(preview.status).toBe(403);
+    expect(await preview.text()).toContain("do not belong to this scan");
+    expect(created).toHaveLength(0);
+    log.mockRestore();
+  });
+
+  it("never counts a provenance-recording failure as a failed creation", async () => {
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const created: Array<{ title: string; body: string }> = [];
+    const { app, store } = testApp(
+      { ...oauthEnv, GITHUB_ISSUE_CREATION_ENABLED: "true" },
+      issueGithub(created),
+      mockOauthFetch({ id: 1001, login: "octocat" }),
+    );
+    const seeded = seedScan(store);
+    const { session, csrfCookie, csrfToken } = await operatorWithCsrf(app);
+    const recordSpy = vi.spyOn(store, "recordScanIssue").mockImplementationOnce(() => {
+      throw new Error("db busy");
+    });
+
+    const res = await app.request("/scan/issues", {
+      method: "POST",
+      headers: { cookie: `${session}; ${csrfCookie}`, "content-type": "application/x-www-form-urlencoded" },
+      body: issuePostBody(seeded.jobId, [seeded.fingerprints[0]], csrfToken),
+    });
+    expect(res.status).toBe(302);
+    expect(res.headers.get("location")).toContain("issues-created"); // the issue exists on GitHub
+    expect(created).toHaveLength(1);
+    expect(store.listLogs(seeded.jobId).some((entry) => entry.message.includes("provenance recording failed"))).toBe(true);
+    recordSpy.mockRestore();
+    log.mockRestore();
+    warn.mockRestore();
+  });
+
+  it("treats primary rate-limit 403s as transient failures, not permission denials", async () => {
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const created: Array<{ title: string; body: string }> = [];
+    const github = issueGithub(created);
+    github.createIssue = async () => {
+      throw Object.assign(new Error("API rate limit exceeded for installation"), { status: 403 });
+    };
+    const { app, store } = testApp(
+      { ...oauthEnv, GITHUB_ISSUE_CREATION_ENABLED: "true" },
+      github,
+      mockOauthFetch({ id: 1001, login: "octocat" }),
+    );
+    const seeded = seedScan(store);
+    const { session, csrfCookie, csrfToken } = await operatorWithCsrf(app);
+
+    const res = await app.request("/scan/issues", {
+      method: "POST",
+      headers: { cookie: `${session}; ${csrfCookie}`, "content-type": "application/x-www-form-urlencoded" },
+      body: issuePostBody(seeded.jobId, [seeded.fingerprints[0]], csrfToken),
+    });
+    expect(res.status).toBe(302);
+    // Retryable partial failure, not the permission-stop notice.
+    expect(res.headers.get("location")).toContain("issues-partial:1");
+    expect(res.headers.get("location")).not.toContain("issues-permission");
+    expect(store.listScanIssues(seeded.jobId)).toEqual([]); // claim released for the retry
+    log.mockRestore();
+    warn.mockRestore();
   });
 });

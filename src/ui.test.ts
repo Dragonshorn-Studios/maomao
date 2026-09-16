@@ -733,6 +733,7 @@ describe("repository health scan UI", () => {
       csrfToken: "tok",
       scanIssueCreation: {
         enabled: true,
+        jobId: 9,
         findings: [
           {
             fingerprint: "fpworthy00000001",
@@ -759,6 +760,7 @@ describe("repository health scan UI", () => {
     expect(html).toContain('value="fpspec0000000001" disabled');
     expect(html).toContain("Not offered: confidence 40% is below the 70% publication bar");
     expect(html).toContain('action="/scan/issues/preview"');
+    expect(html).toContain('name="job_id" value="9"');
   });
 
   it("renders the issue preview with the proposed body, skips, and confirm action", () => {

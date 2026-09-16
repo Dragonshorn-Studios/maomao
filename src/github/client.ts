@@ -149,6 +149,16 @@ export interface GithubPort {
   ): Promise<RepoPermission>;
 }
 
+/**
+ * Builds the search `q` for open-issue duplicate lookups. Strips control
+ * qualifiers (":", quotes) from the caller-supplied terms so they cannot add
+ * `repo:`/`org:` filters and read issues outside this repository.
+ */
+export function buildIssueSearchQuery(owner: string, repo: string, query: string): string {
+  const safeQuery = query.replace(/[:"]/g, " ").trim();
+  return `repo:${owner}/${repo} is:issue is:open ${safeQuery}`;
+}
+
 export class GithubClient implements GithubPort, ManualTriggerPort {
   constructor(private readonly config: Config) {}
 
@@ -346,11 +356,8 @@ export class GithubClient implements GithubPort, ManualTriggerPort {
 
   async searchOpenIssues(installationId: number, owner: string, repo: string, query: string) {
     const octokit = this.installationOctokit(installationId);
-    // Strip control qualifiers (":", quotes) so a caller-supplied query cannot
-    // add `repo:`/`org:` filters and read issues outside this repository.
-    const safeQuery = query.replace(/[:"]/g, " ").trim();
     const response = await octokit.rest.search.issuesAndPullRequests({
-      q: `repo:${owner}/${repo} is:issue is:open ${safeQuery}`,
+      q: buildIssueSearchQuery(owner, repo, query),
       per_page: 5,
     });
     return response.data.items

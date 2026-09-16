@@ -1,6 +1,5 @@
-import type { AggregatorFinding } from "../schema.js";
+import { aggregatorFindingSchema, type AggregatorFinding } from "../schema.js";
 import { fingerprintFinding, type FindingIdentity } from "./identity.js";
-import type { FindingRow } from "./types.js";
 
 /**
  * Publication bar for turning a scan finding into a GitHub issue: the aggregator
@@ -14,9 +13,10 @@ export type IssueWorthiness = { worthy: true } | { worthy: false; reason: string
 
 /**
  * Maps persisted fingerprints to their aggregator records by re-hashing the
- * snapshot's findings. An unreadable or malformed snapshot yields an empty
- * map, which marks every finding unworthy — fail closed, never publish
- * without provenance.
+ * snapshot's findings (the same objects the pipeline serialized at scan time).
+ * Elements are validated against the canonical aggregator schema; an unreadable
+ * or malformed snapshot yields an empty map, which marks every finding unworthy
+ * — fail closed, never publish without provenance.
  */
 export function parseAggregatedFindings(
   aggregatorNormalized: string | null | undefined,
@@ -38,13 +38,20 @@ export function parseAggregatedFindings(
     console.warn(`issue-worthiness: ${context}: aggregator snapshot has no findings array; treating as empty`);
     return byFingerprint;
   }
-  for (const finding of findings as AggregatorFinding[]) {
-    byFingerprint.set(fingerprintFinding(finding as FindingIdentity), finding);
+  for (const element of findings) {
+    const parsedFinding = aggregatorFindingSchema.safeParse(element);
+    if (!parsedFinding.success) {
+      console.warn(
+        `issue-worthiness: ${context}: skipping malformed snapshot finding: ${parsedFinding.error.issues[0]?.path.join(".") ?? "finding"} ${parsedFinding.error.issues[0]?.message ?? "invalid"}`,
+      );
+      continue;
+    }
+    byFingerprint.set(fingerprintFinding(parsedFinding.data as FindingIdentity), parsedFinding.data);
   }
   return byFingerprint;
 }
 
-export function issueWorthiness(finding: FindingRow, aggregated: AggregatorFinding | undefined): IssueWorthiness {
+export function issueWorthiness(aggregated: AggregatorFinding | undefined): IssueWorthiness {
   if (!aggregated) return { worthy: false, reason: "missing from the aggregator snapshot" };
   const confidence = aggregated.confidence ?? 0;
   const agreed = [...new Set(aggregated.reviewers_agreed ?? [])];
