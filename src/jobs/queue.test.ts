@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { openDb } from "../db.js";
 import { JobStore } from "./store.js";
 import { JobQueue } from "./queue.js";
@@ -26,9 +26,6 @@ function seedJob(store: JobStore, prNumber = 4, headSha = "cafebabe") {
   }).job.id;
 }
 
-/** Lets the queue's promise chain (run + finally + pump) settle. */
-const flush = () => new Promise<void>((resolve) => setTimeout(resolve, 0));
-
 describe("JobQueue cancellation", () => {
   it("never runs a cancelled job that was still pending", async () => {
     const store = makeStore();
@@ -44,17 +41,20 @@ describe("JobQueue cancellation", () => {
       if (jobId === first) await firstGate;
     });
     queue.start();
-    await flush();
-    expect(ran).toEqual([first]);
-    // The second job is pending; a merge cancels it in the store and the
-    // server drops it from the queue before a worker can claim it.
+    await vi.waitFor(() => {
+      expect(ran).toEqual([first]);
+    });
+    // The second job is pending; mirroring the server wiring, cancellation
+    // persists first, then abortMany drops it from the queue before a worker
+    // can claim it.
     expect(store.cancelJobs({ jobId: second }, "pr_merged", null)).toEqual([second]);
     queue.abortMany([second]);
     releaseFirst?.();
-    await flush();
-    await flush();
+    // The first job's slot frees; the queue must have nothing left to run.
+    await vi.waitFor(() => {
+      expect(store.getJob(second)?.state).toBe("cancelled");
+    });
     expect(ran).toEqual([first]);
-    expect(store.getJob(second)?.state).toBe("cancelled");
   });
 
   it("restart recovery re-queues interrupted jobs but never a cancelled one", async () => {
@@ -70,15 +70,15 @@ describe("JobQueue cancellation", () => {
       ran.push(jobId);
     });
     queue.start();
-    await flush();
-    await flush();
+    await vi.waitFor(() => {
+      expect(ran).toEqual([interruptedJob]);
+    });
 
-    expect(ran).toEqual([interruptedJob]);
     const cancelled = store.getJob(cancelledJob);
     expect(cancelled?.state).toBe("cancelled");
     expect(cancelled?.cancelled_reason).toBe("pr_merged");
     expect(store.listLogs(cancelledJob).some((line) => line.message.includes("Re-queued"))).toBe(false);
-    // The interrupted control job was reset and (would be) re-run.
+    // The interrupted control job was reset, re-enqueued, and ran.
     expect(store.getJob(interruptedJob)?.state).toBe("queued");
   });
 });

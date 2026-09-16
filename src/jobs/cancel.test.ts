@@ -21,9 +21,9 @@ function seedStore() {
     headRef: "f",
     reviewers: [{ role: "correctness", title: "Correctness" }],
   };
-  /** Enqueue's stale-sweep normally guarantees one active job per PR, but the
-   * schema permits more (a missed synchronize delivery never sweeps), so tests
-   * force the multi-SHA state directly to cover the cancellation SQL. */
+  /** Nothing in the schema enforces one active job per PR — the enqueue-time
+   * stale sweep is the only guard — so tests force the multi-SHA state
+   * directly to cover the cancellation SQL. */
   const activate = (jobId: number) =>
     db.prepare(`UPDATE jobs SET state = 'reviewing' WHERE id = ?`).run(jobId);
   return { store, base, activate };
@@ -159,5 +159,59 @@ describe("cancellation service", () => {
       error: "cannot cancel a completed job",
     });
     expect(cancelJob(store, 4242, { reason: "manual_dequeue" })).toEqual({ ok: false, error: "job not found" });
+  });
+});
+
+describe("cancellation abort hook", () => {
+  it("invokes onCancelled with the cancelled ids before audit logging", () => {
+    const { store, base, activate } = seedStore();
+    const first = store.enqueue({ ...base, headSha: "aaa" });
+    const second = store.enqueue({ ...base, headSha: "bbb" });
+    // Re-activate the swept older SHA so both jobs are cancellable.
+    activate(first.job.id);
+    activate(second.job.id);
+    const seen: number[][] = [];
+    const result = cancelJobsForPull(store, {
+      repoFullName: base.repoFullName,
+      prNumber: base.prNumber,
+      reason: "pr_merged",
+      onCancelled: (ids) => seen.push([...ids]),
+    });
+    expect(seen).toHaveLength(1);
+    expect([...seen[0]].sort((a, b) => a - b)).toEqual([...result.cancelledJobIds].sort((a, b) => a - b));
+    expect(seen[0]).toHaveLength(2);
+    // The hook fires before logging, and logging still happens.
+    expect(store.listLogs(first.job.id).some((line) => line.message.includes("Cancelled (pr_merged)"))).toBe(true);
+  });
+
+  it("a throwing hook does not prevent the audit trail", () => {
+    const { store, base, activate } = seedStore();
+    const job = store.enqueue({ ...base, headSha: "aaa" });
+    activate(job.job.id);
+    expect(() =>
+      cancelJobsForPull(store, {
+        repoFullName: base.repoFullName,
+        prNumber: base.prNumber,
+        reason: "pr_merged",
+        onCancelled: () => {
+          throw new Error("boom");
+        },
+      }),
+    ).not.toThrow();
+    expect(store.getJob(job.job.id)?.state).toBe("cancelled");
+    expect(store.listLogs(job.job.id).some((line) => line.message.includes("Cancelled (pr_merged)"))).toBe(true);
+  });
+
+  it("cancelJob forwards the hook for the manual UI path", () => {
+    const { store, base } = seedStore();
+    const job = store.enqueue({ ...base, headSha: "aaa" });
+    const seen: number[][] = [];
+    const result = cancelJob(store, job.job.id, {
+      reason: "manual_dequeue",
+      actor: "octocat",
+      onCancelled: (ids) => seen.push([...ids]),
+    });
+    expect(result).toEqual({ ok: true, already: false });
+    expect(seen).toEqual([[job.job.id]]);
   });
 });

@@ -2,28 +2,30 @@ import type { CancelReason } from "../config.js";
 import { publish } from "../events.js";
 import type { JobStore } from "./store.js";
 
-export type { CancelReason };
-
 export interface CancelInput {
   reason: CancelReason;
   /** Operator login for manual actions; omitted for webhook-driven cancellation (persisted as null). */
   actor?: string;
   /** Extra context for the audit log line (e.g. the webhook delivery id). */
   note?: string;
+  /**
+   * Invoked with the cancelled ids immediately after the atomic UPDATE, before
+   * audit logging — wire it to `queue.abortMany` so the in-memory abort does
+   * not depend on logging or the HTTP response surviving. The cancellation
+   * itself does not: pending jobs re-check persisted state when claimed, and
+   * running jobs stop at the next pipeline checkpoint. Must be idempotent;
+   * a throw here is logged and does not prevent the audit trail.
+   */
+  onCancelled?: (jobIds: number[]) => void;
 }
 
 export interface CancelJobsForPullInput extends CancelInput {
   repoFullName: string;
   prNumber: number;
-  /**
-   * Invoked with the cancelled ids immediately after the atomic UPDATE, before
-   * audit logging — wire it to `queue.abortMany` so an in-memory abort never
-   * depends on logging or the HTTP response surviving. The cancellation itself
-   * does not: pending jobs re-check persisted state when claimed, and running
-   * jobs stop at the next pipeline checkpoint.
-   */
-  onCancelled?: (jobIds: number[]) => void;
 }
+
+/** Must be idempotent and must not throw; see CancelInput.onCancelled. */
+export type AbortJobs = (jobIds: number[]) => void;
 
 function logCancellation(store: JobStore, jobId: number, input: CancelInput): void {
   const parts = [`Cancelled (${input.reason})`];
@@ -32,13 +34,27 @@ function logCancellation(store: JobStore, jobId: number, input: CancelInput): vo
   store.log(jobId, parts.join(" "));
 }
 
+function abortJobsSafely(input: CancelInput, jobIds: number[]): void {
+  if (!input.onCancelled) return;
+  try {
+    input.onCancelled(jobIds);
+  } catch (error) {
+    // The cancellation is already durable; a failed in-memory abort must not
+    // prevent the audit trail (workers still re-check persisted state).
+    console.error(
+      `cancel: queue abort hook failed after cancelling ${jobIds.length} job(s): ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+}
+
 /**
  * Cancels every non-terminal review job for one pull request (all head SHAs)
  * with the same reason. Currently the merge webhook's path; the manual UI
- * dequeue/cancel actions in #49 use the same service via cancelJob. The state
- * transition is one atomic UPDATE (see JobStore.cancelJobs), so a worker
- * claiming the job either sees the cancelled state or the update wins the race
- * (single-process design: synchronous SQLite, one queue in memory).
+ * cancel actions planned in #49 are expected to go through cancelJob in this
+ * same service. The state transition is one atomic UPDATE (see
+ * JobStore.cancelJobs), so a worker claiming the job either sees the cancelled
+ * state or the update wins the race (single-process design: synchronous
+ * SQLite, one queue in memory).
  */
 export function cancelJobsForPull(
   store: JobStore,
@@ -49,7 +65,7 @@ export function cancelJobsForPull(
     input.reason,
     input.actor ?? null,
   );
-  input.onCancelled?.(cancelledJobIds);
+  abortJobsSafely(input, cancelledJobIds);
   for (const id of cancelledJobIds) {
     try {
       logCancellation(store, id, input);
@@ -83,7 +99,12 @@ export function cancelJob(store: JobStore, jobId: number, input: CancelInput): C
     const current = store.getJob(jobId);
     return { ok: false, error: `cannot cancel a ${current?.state ?? job.state} job` };
   }
-  logCancellation(store, jobId, input);
+  abortJobsSafely(input, cancelled);
+  try {
+    logCancellation(store, jobId, input);
+  } catch (error) {
+    console.error(`cancel: could not write audit log for job ${jobId}: ${error instanceof Error ? error.message : String(error)}`);
+  }
   publish({ type: "job", jobId });
   publish({ type: "jobs" });
   return { ok: true, already: false };

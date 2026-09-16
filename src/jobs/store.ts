@@ -33,7 +33,7 @@ export interface JobRow {
   review_event: string | null;
   review_event_reason: string | null;
   aggregator_fallback: number | null;
-  cancelled_reason: string | null;
+  cancelled_reason: CancelReason | null;
   cancelled_by: string | null;
   profile_revision_id: number | null;
   job_type: string;
@@ -416,7 +416,12 @@ export class JobStore {
     // failure (or a racing transition) must not resurrect or relabel them.
     // Same-state patches still apply — patchJob relies on this.
     if ((job.state === "stale" || job.state === "cancelled") && state !== job.state) {
-      this.log(id, `Ignored state transition ${job.state} -> ${state} on terminal job`, "warn");
+      // This runs inside error-handling paths; its own failure must not escape.
+      try {
+        this.log(id, `Ignored state transition ${job.state} -> ${state} on terminal job`, "warn");
+      } catch (error) {
+        console.error(`store: could not log refused transition for job ${id}: ${error instanceof Error ? error.message : String(error)}`);
+      }
       return;
     }
     const updatedAt = nowIso();
@@ -489,18 +494,25 @@ export class JobStore {
   }
 
   /**
-   * True once any job for this pull was cancelled because the PR merged.
-   * Merged pulls cannot be reopened, so the marker is permanent and safe to
-   * gate webhook enqueue on (out-of-order or redelivered push events).
+   * Records that a pull request merged, keyed by repo + PR number. Written on
+   * every verified merged close delivery — independent of whether any job was
+   * cancelled — so the enqueue gate holds even when nothing was running.
+   * Merged pulls cannot be reopened, so the record is permanent.
    */
+  markPullMerged(repoFullName: string, prNumber: number, deliveryId: string | null): void {
+    this.db
+      .prepare(
+        `INSERT OR IGNORE INTO merged_pulls (repo_full_name, pr_number, merged_at, delivery_id)
+         VALUES (?, ?, ?, ?)`,
+      )
+      .run(repoFullName, prNumber, nowIso(), deliveryId);
+  }
+
+  /** True once a verified webhook recorded this pull as merged. */
   hasMergedPull(repoFullName: string, prNumber: number): boolean {
     return Boolean(
       this.db
-        .prepare(
-          `SELECT id FROM jobs
-           WHERE repo_full_name = ? AND pr_number = ? AND cancelled_reason = 'pr_merged'
-           LIMIT 1`,
-        )
+        .prepare(`SELECT repo_full_name FROM merged_pulls WHERE repo_full_name = ? AND pr_number = ?`)
         .get(repoFullName, prNumber),
     );
   }

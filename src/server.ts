@@ -578,6 +578,13 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
         return home({ error: "Ignored draft pull request (set REVIEW_DRAFTS=true to review drafts)." });
       }
 
+      // A pull a verified webhook recorded as merged is a terminal review
+      // target, no matter what the URL form says (best-effort: merges Maomao
+      // never saw are not in the marker table).
+      if (ctx.store.hasMergedPull(pull.repoFullName, pull.prNumber)) {
+        return home({ error: "This pull request is already merged; not queueing a review." });
+      }
+
       const resolvedRepoId = subject.repositoryId;
       const rateOn = repoRateLimitActive(ctx.config.repoRateLimitPerWindow, ctx.config.repoRateWindowMs);
       if (rateOn) {

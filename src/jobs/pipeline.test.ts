@@ -3362,3 +3362,28 @@ describe("cancellation races", () => {
     expect(store.listLogs(created.job.id).some((line) => line.message.includes("Job cancelled before publish"))).toBe(true);
   });
 });
+
+describe("external dispatch cancellation guard", () => {
+  it("refuses to dispatch for a cancelled job and logs the skip", async () => {
+    const config = loadConfig({ REVIEWER_ROLES: "correctness" });
+    const store = new JobStore(openDb(":memory:"));
+    const created = enqueueJob(store, config);
+    store.cancelJobs({ jobId: created.job.id }, "pr_merged", null);
+    const pipeline = createPipeline({
+      config,
+      store,
+      github: githubPort(),
+      checkout: await fixtureCheckout(),
+      opencode: {
+        async run() {
+          throw new Error("opencode must not run");
+        },
+      },
+    });
+    await pipeline.dispatchExternal(created.job.id);
+    const job = store.getJob(created.job.id);
+    expect(job?.state).toBe("cancelled");
+    expect(job?.external_dispatch_status).toBe("not_requested");
+    expect(store.listLogs(created.job.id).some((line) => line.message.includes("External dispatch skipped"))).toBe(true);
+  });
+});

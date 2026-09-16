@@ -1051,3 +1051,160 @@ describe("merge-cancellation hardening", () => {
     expect(store.getJob(jobId)?.state).toBe("cancelled");
   });
 });
+
+describe("merged-pull marker with no active jobs", () => {
+  const secret = "s3cret";
+  const config = loadConfig({
+    GITHUB_WEBHOOK_SECRET: secret,
+    GITHUB_APP_ID: "1",
+    GITHUB_APP_PRIVATE_KEY: "k",
+    REVIEWER_ROLES: "correctness",
+  });
+
+  function payload(action: string, pr: Record<string, unknown>) {
+    return JSON.stringify({
+      action,
+      installation: { id: 42, account: { id: 1001 } },
+      repository: { id: 2002, full_name: "acme/widgets", name: "widgets", owner: { login: "acme", id: 1001 } },
+      pull_request: pr,
+    });
+  }
+
+  async function deliver(store: JobStore, rawBody: string, deliveryId: string) {
+    return handleGithubWebhook({
+      config,
+      store,
+      request: { event: "pull_request", deliveryId, signature: sign(secret, rawBody), rawBody },
+    });
+  }
+
+  it("marks the pull merged even when every job was already completed", async () => {
+    const store = new JobStore(openDb(":memory:"));
+    const jobId = store.enqueue({
+      repoFullName: "acme/widgets",
+      repoOwner: "acme",
+      repoName: "widgets",
+      installationId: 42,
+      prNumber: 7,
+      prTitle: "t",
+      prBody: "",
+      prHtmlUrl: "",
+      prAuthor: "a",
+      baseSha: "base111",
+      headSha: "head222",
+      baseRef: "main",
+      headRef: "f",
+      reviewers: [{ role: "correctness", title: "Correctness" }],
+    }).job.id;
+    store.setJobState(jobId, "reviewing");
+    store.setJobState(jobId, "completed");
+
+    const closeResult = await deliver(store, payload("closed", { number: 7, merged: true }), "close-done");
+    expect(closeResult.status).toBe(200);
+    expect(closeResult.body.cancelled).toBe(0);
+    expect(store.hasMergedPull("acme/widgets", 7)).toBe(true);
+
+    // A late synchronize for a SHA that never produced a job must not enqueue.
+    const late = await deliver(
+      store,
+      payload("synchronize", {
+        number: 7,
+        user: { login: "dev" },
+        base: { sha: "base111", ref: "main" },
+        head: { sha: "late-2", ref: "feature" },
+      }),
+      "late-2",
+    );
+    expect(late.body.ignored).toBe(true);
+    expect(store.findLatestJobForPull("acme/widgets", 7, "late-2")).toBeUndefined();
+  });
+
+  it("marks the pull merged when it has no maomao jobs at all", async () => {
+    const store = new JobStore(openDb(":memory:"));
+    const closeResult = await deliver(store, payload("closed", { number: 11, merged: true }), "close-empty");
+    expect(closeResult.status).toBe(200);
+    expect(closeResult.body.cancelled).toBe(0);
+    expect(store.hasMergedPull("acme/widgets", 11)).toBe(true);
+    const late = await deliver(
+      store,
+      payload("synchronize", {
+        number: 11,
+        user: { login: "dev" },
+        base: { sha: "base111", ref: "main" },
+        head: { sha: "late-3", ref: "feature" },
+      }),
+      "late-3",
+    );
+    expect(late.body.ignored).toBe(true);
+    expect(store.findLatestJobForPull("acme/widgets", 11, "late-3")).toBeUndefined();
+  });
+
+  it("does not let a manually cancelled job block later reviews (marker is merge-only)", async () => {
+    const store = new JobStore(openDb(":memory:"));
+    const jobId = store.enqueue({
+      repoFullName: "acme/widgets",
+      repoOwner: "acme",
+      repoName: "widgets",
+      installationId: 42,
+      prNumber: 12,
+      prTitle: "t",
+      prBody: "",
+      prHtmlUrl: "",
+      prAuthor: "a",
+      baseSha: "base111",
+      headSha: "head222",
+      baseRef: "main",
+      headRef: "f",
+      reviewers: [{ role: "correctness", title: "Correctness" }],
+    }).job.id;
+    store.cancelJobs({ jobId }, "manual_dequeue", "octocat");
+    expect(store.hasMergedPull("acme/widgets", 12)).toBe(false);
+  });
+
+  it("refuses an escalate command aimed at a cancelled job", async () => {
+    const store = new JobStore(openDb(":memory:"));
+    const jobId = store.enqueue({
+      repoFullName: "acme/widgets",
+      repoOwner: "acme",
+      repoName: "widgets",
+      installationId: 42,
+      prNumber: 7,
+      prTitle: "t",
+      prBody: "",
+      prHtmlUrl: "",
+      prAuthor: "a",
+      baseSha: "base111",
+      headSha: "head222",
+      baseRef: "main",
+      headRef: "f",
+      reviewers: [{ role: "correctness", title: "Correctness" }],
+    }).job.id;
+    store.cancelJobs({ jobId }, "pr_merged", null);
+
+    const escalateBody = JSON.stringify({
+      action: "created",
+      installation: { id: 42 },
+      repository: { full_name: "acme/widgets", name: "widgets", owner: { login: "acme" } },
+      issue: { number: 7, pull_request: { url: "https://github.com/acme/widgets/pull/7" } },
+      comment: {
+        id: 9001,
+        body: "@maomao escalate",
+        user: { login: "octocat", type: "User" },
+        author_association: "CONTRIBUTOR",
+      },
+    });
+    const github = {
+      getCollaboratorPermission: async () => "write",
+    } as unknown as GithubPort;
+    const result = await handleGithubWebhook({
+      config,
+      store,
+      github,
+      request: { event: "issue_comment", deliveryId: "esc-1", signature: sign(secret, escalateBody), rawBody: escalateBody },
+    });
+    expect(result.status).toBe(202);
+    expect(result.body.ignored).toBe(true);
+    expect(result.body.reason).toContain("cancelled");
+    expect(store.getJob(jobId)?.manual_escalate_requested).toBeFalsy();
+  });
+});

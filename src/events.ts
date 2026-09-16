@@ -19,7 +19,9 @@ export function publish(event: JobEvent): void {
       listener(event);
     } catch (error) {
       // One broken subscriber must not block the others, but it stays visible.
-      console.warn(`events: subscriber failed: ${error instanceof Error ? error.message : String(error)}`);
+      console.warn(
+        `events: subscriber failed during ${event.type}: ${error instanceof Error ? (error.stack ?? error.message) : String(error)}`,
+      );
     }
   }
 }
