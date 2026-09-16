@@ -28,6 +28,9 @@ export interface JobRow {
   workspace_path: string | null;
   github_review_id: string | null;
   github_review_url: string | null;
+  review_event: string | null;
+  review_event_reason: string | null;
+  aggregator_fallback: number | null;
   aggregator_raw: string | null;
   aggregator_normalized: string | null;
   aggregator_model: string | null;
@@ -202,6 +205,9 @@ const TERMINAL_SKIP_REQUEUE: JobState[] = [
 
 const JOB_PATCH_KEYS = new Set<string>([
   "failure_reason",
+  "review_event",
+  "review_event_reason",
+  "aggregator_fallback",
   "workspace_path",
   "github_review_id",
   "github_review_url",

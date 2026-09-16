@@ -184,11 +184,17 @@ export function renderJob(
         <dt>GitHub review</dt>
         <dd>${
           job.github_review_url
-            ? `<a href="${escapeHtml(job.github_review_url)}">${escapeHtml(job.github_review_id || "view COMMENT review")}</a>`
+            ? `<a href="${escapeHtml(job.github_review_url)}">${escapeHtml(job.github_review_id || "view review")}</a>`
             : job.state === "completed"
               ? "not published"
               : "—"
-        }</dd>
+        }
+          ${
+            job.review_event
+              ? `<div class="muted" title="${escapeHtml(job.review_event_reason || "")}">Event: <code class="metric">${escapeHtml(job.review_event)}</code>${job.review_event_reason ? ` — ${escapeHtml(job.review_event_reason)}` : ""}</div>`
+              : ""
+          }
+        </dd>
       </div>
     </dl>
     ${renderRouting(job)}

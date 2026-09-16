@@ -222,6 +222,9 @@ function migrate(db: SqliteDb): void {
       created_at TEXT NOT NULL
     );
   `);
+  ensureColumn(db, "jobs", "review_event", "TEXT");
+  ensureColumn(db, "jobs", "review_event_reason", "TEXT");
+  ensureColumn(db, "jobs", "aggregator_fallback", "INTEGER");
   ensureColumn(db, "jobs", "github_account_id", "INTEGER");
   ensureColumn(db, "jobs", "github_repository_id", "INTEGER");
   ensureColumn(db, "jobs", "reconciliation_json", "TEXT");
