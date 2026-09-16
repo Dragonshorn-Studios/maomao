@@ -30,7 +30,12 @@ export type JobState =
 
 export type ReviewerState = "queued" | "running" | "done" | "failed";
 
-export type PullRequestAction = "opened" | "reopened" | "synchronize" | "ready_for_review";
+/**
+ * `closed` is handled specially (merge-triggered cancellation) and is never a
+ * valid enqueue action, so it is not in DEFAULT_ACTIONS and cannot be enabled
+ * through PULL_REQUEST_ACTIONS.
+ */
+export type PullRequestAction = "opened" | "reopened" | "synchronize" | "ready_for_review" | "closed";
 
 export interface GithubConfig {
   appId: string;

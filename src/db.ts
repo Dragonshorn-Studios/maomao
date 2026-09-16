@@ -320,6 +320,8 @@ function migrate(db: SqliteDb): void {
   ensureColumn(db, "reviewer_runs", "usage_complete", "INTEGER");
   ensureColumn(db, "reviewer_runs", "usage_warning", "TEXT");
   ensureColumn(db, "reviewer_runs", "prompt_revision_id", "INTEGER");
+  ensureColumn(db, "jobs", "cancelled_reason", "TEXT");
+  ensureColumn(db, "jobs", "cancelled_by", "TEXT");
   const jobColumns: Array<[string, string]> = [
     ["routing_state", "TEXT NOT NULL DEFAULT 'queued'"],
     ["routing_mode", "TEXT"],

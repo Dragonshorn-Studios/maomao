@@ -816,3 +816,145 @@ describe("review thread override commands", () => {
     expect(store.getFinding("acme/widgets", 7, "deadbeefdeadbeef")?.status).toBe("open");
   });
 });
+
+describe("pull_request.closed merge cancellation", () => {
+  const secret = "s3cret";
+  const baseConfig = {
+    GITHUB_WEBHOOK_SECRET: secret,
+    GITHUB_APP_ID: "1",
+    GITHUB_APP_PRIVATE_KEY: "k",
+    REVIEWER_ROLES: "correctness",
+  };
+
+  async function postClosed(
+    store: JobStore,
+    overrides: {
+      merged?: boolean | null;
+      omitMerged?: boolean;
+      deliveryId?: string;
+      prNumber?: number;
+      dropRepo?: boolean;
+      env?: Record<string, string>;
+    } = {},
+  ) {
+    const pull: Record<string, unknown> = { number: overrides.prNumber ?? 7 };
+    if (!overrides.omitMerged) pull.merged = overrides.merged ?? true;
+    const payload: Record<string, unknown> = {
+      action: "closed",
+      installation: { id: 42, account: { id: 1001 } },
+      repository: {
+        id: 2002,
+        full_name: "acme/widgets",
+        name: "widgets",
+        owner: { login: "acme", id: 1001 },
+      },
+      pull_request: pull,
+    };
+    if (overrides.dropRepo) delete payload.repository;
+    const rawBody = JSON.stringify(payload);
+    return handleGithubWebhook({
+      config: loadConfig({ ...baseConfig, ...(overrides.env ?? {}) }),
+      store,
+      request: {
+        event: "pull_request",
+        deliveryId: overrides.deliveryId ?? "close-1",
+        signature: sign(secret, rawBody),
+        rawBody,
+      },
+    });
+  }
+
+  async function seedActiveJob(
+    store: JobStore,
+    state: "queued" | "reviewing" = "reviewing",
+    prNumber = 7,
+  ) {
+    const created = store.enqueue({
+      repoFullName: "acme/widgets",
+      repoOwner: "acme",
+      repoName: "widgets",
+      installationId: 42,
+      prNumber,
+      prTitle: "t",
+      prBody: "",
+      prHtmlUrl: "",
+      prAuthor: "a",
+      baseSha: "base111",
+      headSha: `head-${prNumber}`,
+      baseRef: "main",
+      headRef: "f",
+      reviewers: [{ role: "correctness", title: "Correctness" }],
+    });
+    if (state === "reviewing") store.setJobState(created.job.id, "reviewing");
+    return created.job.id;
+  }
+
+  it("cancels every non-terminal job for the merged pull with reason pr_merged", async () => {
+    const store = new JobStore(openDb(":memory:"));
+    const jobId = await seedActiveJob(store, "reviewing", 7);
+    const otherPull = await seedActiveJob(store, "queued", 9);
+
+    const result = await postClosed(store, { prNumber: 7, deliveryId: "close-1" });
+    expect(result.status).toBe(200);
+    expect(result.body.cancelled).toBe(1);
+    expect(result.body.cancelledJobIds).toEqual([jobId]);
+    const job = store.getJob(jobId);
+    expect(job?.state).toBe("cancelled");
+    expect(job?.cancelled_reason).toBe("pr_merged");
+    expect(job?.cancelled_by).toBeNull();
+    expect(store.listLogs(jobId).some((line) => line.message.includes("Cancelled (pr_merged)") && line.message.includes("close-1"))).toBe(true);
+    expect(store.getJob(otherPull)?.state).toBe("queued");
+  });
+
+  it("is idempotent for duplicate deliveries", async () => {
+    const store = new JobStore(openDb(":memory:"));
+    await seedActiveJob(store);
+    const first = await postClosed(store, { deliveryId: "close-dup" });
+    expect(first.body.cancelled).toBe(1);
+    const second = await postClosed(store, { deliveryId: "close-dup" });
+    expect(second.status).toBe(200);
+    expect(second.body.duplicate).toBe(true);
+    expect(second.body.cancelled).toBeUndefined();
+    expect(store.listJobs().filter((job) => job.state === "cancelled")).toHaveLength(1);
+  });
+
+  it("ignores a closed pull without merge and never infers one", async () => {
+    const store = new JobStore(openDb(":memory:"));
+    const jobId = await seedActiveJob(store);
+    const result = await postClosed(store, { merged: false });
+    expect(result.status).toBe(202);
+    expect(result.body.ignored).toBe(true);
+    expect(store.getJob(jobId)?.state).toBe("reviewing");
+
+    const uncertain = await postClosed(store, { omitMerged: true });
+    expect(uncertain.status).toBe(202);
+    expect(uncertain.body.ignored).toBe(true);
+    expect(store.getJob(jobId)?.state).toBe("reviewing");
+  });
+
+  it("fails safe when the payload lacks repository context", async () => {
+    const store = new JobStore(openDb(":memory:"));
+    const jobId = await seedActiveJob(store);
+    const result = await postClosed(store, { dropRepo: true });
+    expect(result.status).toBe(202);
+    expect(result.body.ignored).toBe(true);
+    expect(store.getJob(jobId)?.state).toBe("reviewing");
+  });
+
+  it("never cancels jobs for an unauthorized installation", async () => {
+    const store = new JobStore(openDb(":memory:"));
+    const jobId = await seedActiveJob(store);
+    const result = await postClosed(store, { env: { ALLOWED_GITHUB_ACCOUNT_IDS: "9999" } });
+    expect(result.status).toBe(202);
+    expect(result.body.ignored).toBe(true);
+    expect(store.getJob(jobId)?.state).toBe("reviewing");
+  });
+
+  it("reports zero cancellations for a pull with no maomao jobs", async () => {
+    const store = new JobStore(openDb(":memory:"));
+    const result = await postClosed(store);
+    expect(result.status).toBe(200);
+    expect(result.body.cancelled).toBe(0);
+    expect(result.body.cancelledJobIds).toEqual([]);
+  });
+});

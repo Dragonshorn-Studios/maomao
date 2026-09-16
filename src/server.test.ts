@@ -2599,3 +2599,66 @@ describe("scan repository typeahead", () => {
     warn.mockRestore();
   });
 });
+
+describe("webhook merge cancellation wiring", () => {
+  it("aborts queue jobs cancelled by a merged pull_request.closed delivery", async () => {
+    const webhookSecret = "s3cret";
+    const config = loadConfig({
+      GITHUB_WEBHOOK_SECRET: webhookSecret,
+      GITHUB_APP_ID: "1",
+      GITHUB_APP_PRIVATE_KEY: "k",
+      REVIEWER_ROLES: "correctness",
+    });
+    const store = new JobStore(openDb(":memory:"));
+    const enqueued: number[] = [];
+    const aborted: number[][] = [];
+    const queue = {
+      enqueue(id: number) {
+        enqueued.push(id);
+      },
+      abortMany(ids: number[]) {
+        aborted.push([...ids]);
+      },
+    } as unknown as JobQueue;
+    const app = createApp({ config, store, queue, startedAt: Date.now() });
+
+    const opened = await app.request("/webhooks/github", {
+      method: "POST",
+      headers: {
+        "x-github-event": "pull_request",
+        "x-github-delivery": "open-1",
+        "x-hub-signature-256": sign(webhookSecret, openedPayload),
+        "content-type": "application/json",
+      },
+      body: openedPayload,
+    });
+    expect(opened.status).toBe(202);
+    expect(enqueued).toHaveLength(1);
+    const jobId = enqueued[0];
+
+    const closedPayload = JSON.stringify({
+      action: "closed",
+      installation: { id: 1, account: { id: 1001 } },
+      repository: { id: 2002, full_name: "acme/widgets", name: "widgets", owner: { login: "acme", id: 1001 } },
+      pull_request: { number: 8, merged: true },
+    });
+    const closed = await app.request("/webhooks/github", {
+      method: "POST",
+      headers: {
+        "x-github-event": "pull_request",
+        "x-github-delivery": "close-1",
+        "x-hub-signature-256": sign(webhookSecret, closedPayload),
+        "content-type": "application/json",
+      },
+      body: closedPayload,
+    });
+    expect(closed.status).toBe(200);
+    const body = (await closed.json()) as { cancelled?: number; cancelledJobIds?: number[] };
+    expect(body.cancelled).toBe(1);
+    expect(body.cancelledJobIds).toEqual([jobId]);
+    expect(aborted).toEqual([[jobId]]);
+    const job = store.getJob(jobId);
+    expect(job?.state).toBe("cancelled");
+    expect(job?.cancelled_reason).toBe("pr_merged");
+  });
+});
