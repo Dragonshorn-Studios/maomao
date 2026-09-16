@@ -698,6 +698,39 @@ form.retry, form.retry-job {
   border-radius: 6px;
 }
 .diff-note { font-size: 0.8rem; }
+/* Scan-page repository typeahead (progressively enhanced by /assets/typeahead.js) */
+.typeahead-wrap { position: relative; display: block; }
+.typeahead-wrap input { width: 100%; }
+.typeahead-listbox {
+  position: absolute;
+  z-index: 10;
+  left: 0;
+  right: 0;
+  margin: 0.2rem 0 0;
+  padding: 0.2rem;
+  list-style: none;
+  background: var(--surface-2);
+  border: 1px solid var(--line-strong);
+  border-radius: 8px;
+  box-shadow: var(--shadow);
+  max-height: 16rem;
+  overflow-y: auto;
+}
+.typeahead-option {
+  padding: 0.3rem 0.55rem;
+  cursor: pointer;
+  font-family: var(--font-mono);
+  font-size: 0.85rem;
+  border-radius: 6px;
+}
+.typeahead-option.is-active,
+.typeahead-option[aria-selected="true"] { background: color-mix(in srgb, var(--herb) 26%, transparent); }
+.typeahead-empty,
+.typeahead-empty.is-active {
+  cursor: default;
+  color: var(--ink-muted);
+  background: transparent;
+}
 
 .finding.is-buried,
 .finding.is-resolved {

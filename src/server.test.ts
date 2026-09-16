@@ -2382,3 +2382,105 @@ describe("scan issue creation", () => {
     log.mockRestore();
   });
 });
+
+describe("scan repository typeahead", () => {
+  const oauthEnv = {
+    UI_SESSION_SECRET: "session-secret-for-tests",
+    GITHUB_OAUTH_CLIENT_ID: "cid",
+    GITHUB_OAUTH_CLIENT_SECRET: "csecret",
+    MAOMAO_ADMIN_GITHUB_IDS: "1001",
+    MAOMAO_PUBLIC_URL: "https://maomao.example",
+  };
+
+  function typeaheadGithub(calls: { installations: number; repositories: number }): ManualTriggerPort & Partial<GithubPort> {
+    return {
+      getRepoInstallation: async () => ({ installationId: 42, accountId: 1001 }),
+      getRepository: async () => ({ id: 2002 }),
+      listAppInstallations: async () => {
+        calls.installations += 1;
+        return [
+          { id: 42, accountId: 1001 },
+          { id: 43, accountId: 1001 },
+        ];
+      },
+      listInstallationRepositories: async (installationId: number) => {
+        calls.repositories += 1;
+        if (installationId === 43) throw new Error("installation suspended");
+        return [
+          { id: 2002, fullName: "acme/widgets" },
+          { id: 3003, fullName: "acme/other" },
+          { id: 4004, fullName: "acme/zebra" },
+        ];
+      },
+    } as unknown as ManualTriggerPort & Partial<GithubPort>;
+  }
+
+  async function operatorSession(app: ReturnType<typeof createApp>): Promise<string> {
+    const start = await app.request("/login/github");
+    const state = start.headers.get("location")?.match(/state=([^&]+)/)?.[1] ?? "";
+    const callback = await app.request(`/login/github/callback?code=good-code&state=${state}`);
+    return cookieFrom(callback);
+  }
+
+  it("is operator-only and gated like the rest of /api", async () => {
+    const { app } = testApp(oauthEnv, undefined, mockOauthFetch({ id: 1001, login: "octocat" }));
+    const anonymous = await app.request("/api/scan/repositories");
+    expect(anonymous.status).toBe(401);
+  });
+
+  it("refuses non-OAuth (password) sessions", async () => {
+    const { app } = testApp({ UI_PASSWORD: "hunter2", UI_SESSION_SECRET: "session-secret-for-tests" });
+    const { cookies } = await loginSession(app);
+    const res = await app.request("/api/scan/repositories", { headers: { cookie: cookies } });
+    expect(res.status).toBe(403);
+    expect(await res.json()).toEqual({ error: expect.stringContaining("operator GitHub OAuth identity") });
+  });
+
+  it("returns allowlisted repositories sorted by name, skipping failing installations", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const calls = { installations: 0, repositories: 0 };
+    const { app, store } = testApp(
+      { ...oauthEnv, ALLOWED_GITHUB_REPOSITORY_IDS: "2002,4004" },
+      typeaheadGithub(calls),
+      mockOauthFetch({ id: 1001, login: "octocat" }),
+    );
+    void store;
+    const session = await operatorSession(app);
+    const res = await app.request("/api/scan/repositories", { headers: { cookie: session } });
+    expect(res.status).toBe(200);
+    const body = await res.json() as { repositories: Array<{ fullName: string }> };
+    // acme/other (id 3003) is filtered by the repository allowlist; installation 43
+    // failed and was skipped without killing the rest.
+    expect(body.repositories.map((repo) => repo.fullName)).toEqual(["acme/widgets", "acme/zebra"]);
+    expect(calls.installations).toBe(1);
+    expect(calls.repositories).toBe(2);
+
+    // Cached for the TTL: no additional GitHub enumeration on the second call.
+    const again = await app.request("/api/scan/repositories", { headers: { cookie: session } });
+    expect(again.status).toBe(200);
+    expect(calls.installations).toBe(1);
+    warn.mockRestore();
+  });
+
+  it("reports 502 when enumeration fails entirely so the UI can fall back", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const github = {
+      listAppInstallations: async () => {
+        throw new Error("bad credentials");
+      },
+      listInstallationRepositories: async () => [],
+    } as unknown as ManualTriggerPort & Partial<GithubPort>;
+    const { app } = testApp(oauthEnv, github, mockOauthFetch({ id: 1001, login: "octocat" }));
+    const session = await operatorSession(app);
+    const res = await app.request("/api/scan/repositories", { headers: { cookie: session } });
+    expect(res.status).toBe(502);
+    warn.mockRestore();
+  });
+
+  it("reports 503 when the GitHub client lacks repository search support", async () => {
+    const { app } = testApp(oauthEnv, undefined, mockOauthFetch({ id: 1001, login: "octocat" }));
+    const session = await operatorSession(app);
+    const res = await app.request("/api/scan/repositories", { headers: { cookie: session } });
+    expect(res.status).toBe(503);
+  });
+});

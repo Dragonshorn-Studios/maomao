@@ -4,6 +4,7 @@ import { seedDemoJobs } from "./demo/fixtures.js";
 import { JobStore } from "./jobs/store.js";
 import { THEME_CSS } from "./ui/theme.js";
 import { DIFFS_JS } from "./ui/diffs.js";
+import { TYPEAHEAD_JS } from "./ui/typeahead.js";
 import { renderConfigPage, renderHome, renderJob, renderLogin, renderScanConfirmPage, renderScanIssuePreviewPage, renderScanPage } from "./ui/pages.js";
 import { jobStateLabel, settledFindingsCopy } from "./ui/copy.js";
 import { formatCost, formatTokens, jobMetrics } from "./ui/metrics.js";
@@ -34,6 +35,8 @@ describe("theme tokens", () => {
     expect(THEME_CSS).toContain(".word-add");
     expect(THEME_CSS).toContain(".word-del");
     expect(THEME_CSS).toContain(".diff-more");
+    expect(THEME_CSS).toContain(".typeahead-listbox");
+    expect(THEME_CSS).toContain(".typeahead-option");
     expect(THEME_CSS).toContain("@keyframes spin");
     expect(THEME_CSS).toContain(".section-head");
     expect(THEME_CSS).toMatch(/\.tick\.running[\s\S]*var\(--working\)/);
@@ -899,5 +902,58 @@ describe("diffs.js", () => {
   it("is loaded with defer from every page head", () => {
     const html = renderLogin({ nextPath: "/jobs/1", showPassword: true });
     expect(html).toContain('<script src="/assets/diffs.js" defer></script>');
+  });
+});
+
+describe("scan repository typeahead", () => {
+  const api = new Function(
+    `${TYPEAHEAD_JS}\n;return globalThis.__maomaoTypeahead;`,
+  )() as {
+    filterRepos: (repos: Array<{ fullName: string }>, query: string) => Array<{ fullName: string }>;
+  };
+  const REPOS = [
+    { fullName: "acme/widgets" },
+    { fullName: "acme/wrenches" },
+    { fullName: "beta/tools" },
+    ...Array.from({ length: 14 }, (_, i) => ({ fullName: `gamma/repo${i}` })),
+  ];
+
+  it("ranks prefix matches before substring matches and caps the list", () => {
+    const matches = api.filterRepos(REPOS, "a");
+    // Full names starting with the query beat substring-only matches.
+    expect(matches[0]?.fullName).toBe("acme/widgets");
+    expect(matches[1]?.fullName).toBe("acme/wrenches");
+    expect(matches[2]?.fullName).toBe("beta/tools");
+    expect(matches).toHaveLength(12); // capped for the dropdown
+  });
+
+  it("matches substrings and returns everything for an empty query", () => {
+    expect(api.filterRepos(REPOS, "beta")).toEqual([{ fullName: "beta/tools" }]);
+    expect(api.filterRepos(REPOS, "").length).toBe(12);
+    expect(api.filterRepos(REPOS, "nomatch-xyz")).toEqual([]);
+  });
+
+  it("serves a script with a debug hook and DOM-safe rendering", () => {
+    expect(TYPEAHEAD_JS).toContain("__maomaoTypeahead");
+    expect(TYPEAHEAD_JS).not.toContain("innerHTML");
+    expect(TYPEAHEAD_JS).not.toMatch(/https?:\/\//);
+  });
+
+  it("renders the scan form as a themed combobox loading the typeahead", () => {
+    const html = renderScanPage({
+      canScan: true,
+      identity: { login: "octocat", avatarUrl: null },
+      csrfToken: "tok",
+      issueCreationEnabled: false,
+      profileRevision: null,
+      recentScans: [],
+    });
+    expect(html).toContain('data-repo-typeahead');
+    expect(html).toContain('role="combobox"');
+    expect(html).toContain('aria-controls="repo-listbox"');
+    expect(html).toContain('aria-autocomplete="list"');
+    expect(html).toContain('role="listbox"');
+    expect(html).toContain('<script src="/assets/typeahead.js" defer></script>');
+    expect(html).toContain('aria-label="Run repository health scan"');
   });
 });

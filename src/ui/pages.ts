@@ -29,6 +29,7 @@ import {
   usageReportedCopy,
 } from "./copy.js";
 import { roleGlyph } from "./glyphs.js";
+import { TYPEAHEAD_HREF } from "./typeahead.js";
 import { csrfInput, layout, type PageOptions, type UiIdentity } from "./layout.js";
 import {
   findingLocation,
@@ -1232,10 +1233,13 @@ export function renderScanPage(data: ScanPageData): string {
     ${data.canScan ? `
     <form class="trigger" method="post" action="/scan">
       ${csrf}
-      <label>
-        Repository (owner/repo — must be an allowlisted installation)
-        <input name="repo" placeholder="owner/repo" required/>
-      </label>
+      <label for="scan-repo-input">Repository (owner/repo — must be an allowlisted installation)</label>
+      <span class="typeahead-wrap">
+        <input id="scan-repo-input" name="repo" placeholder="owner/repo — start typing to search" required autocomplete="off"
+          role="combobox" aria-expanded="false" aria-controls="repo-listbox" aria-autocomplete="list"
+          data-repo-typeahead/>
+        <ul id="repo-listbox" role="listbox" aria-label="Allowlisted repositories" class="typeahead-listbox" hidden></ul>
+      </span>
       <button type="submit" aria-label="Run repository health scan">Sniff sniff</button>
     </form>
     <p class="muted">${data.profileRevision ? `Active profile revision: #${data.profileRevision.id} (${escapeHtml(data.profileRevision.name)}) — snapshotted onto the scan job.` : "No active profile revision — env configuration applies."}</p>
@@ -1245,7 +1249,8 @@ export function renderScanPage(data: ScanPageData): string {
       data.issueCreationEnabled
         ? `<p class="muted">Open a completed scan to select findings, preview the proposed issues, and publish them. Findings are deduplicated per repository + fingerprint; already-linked GitHub issues are skipped, and partial failures can be retried safely.</p>`
         : `<p class="muted">Issue creation is disabled (GITHUB_ISSUE_CREATION_ENABLED=false).</p>`
-    }`
+    }
+    <script src="${TYPEAHEAD_HREF}" defer></script>`
     : `<p class="muted">Scanning requires an operator GitHub OAuth identity.</p>`}`;
   return layout("Repository health scan", body, {
     showLogout: data.canScan || Boolean(data.csrfToken),

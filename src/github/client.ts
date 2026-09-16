@@ -113,6 +113,10 @@ export interface GithubPort {
     repo: string,
     query: string,
   ): Promise<Array<{ number: number; title: string; url: string }>>;
+  /** App-level installation listing for the scan-page repository typeahead. */
+  listAppInstallations?(): Promise<Array<{ id: number; accountId: number }>>;
+  /** Repositories reachable through one installation (first page, capped). */
+  listInstallationRepositories?(installationId: number): Promise<Array<{ id: number; fullName: string }>>;
   createIssue?(
     installationId: number,
     owner: string,
@@ -363,6 +367,26 @@ export class GithubClient implements GithubPort, ManualTriggerPort {
     return response.data.items
       .filter((issue) => !issue.pull_request)
       .map((issue) => ({ number: issue.number, title: issue.title ?? "", url: issue.html_url }));
+  }
+
+  async listAppInstallations() {
+    const response = await this.appOctokit().rest.apps.listInstallations({ per_page: 100 });
+    return response.data
+      .filter((installation) => installation.account && "id" in installation.account)
+      .map((installation) => ({
+        id: Number(installation.id),
+        accountId: Number((installation.account as { id: number }).id),
+      }));
+  }
+
+  async listInstallationRepositories(installationId: number) {
+    const response = await this.installationOctokit(installationId).rest.apps.listReposAccessibleToInstallation({
+      per_page: 100,
+    });
+    return response.data.repositories.map((repo) => ({
+      id: Number(repo.id),
+      fullName: repo.full_name ?? `${repo.owner.login}/${repo.name}`,
+    }));
   }
 
   async createIssue(installationId: number, owner: string, repo: string, title: string, body: string) {
