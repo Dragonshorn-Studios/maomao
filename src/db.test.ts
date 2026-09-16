@@ -120,3 +120,138 @@ describe("usage schema migration", () => {
     }
   });
 });
+
+describe("health-scan issue registry", () => {
+  function newStore() {
+    return new JobStore(openDb(":memory:"));
+  }
+
+  function scanJobInput(headSha: string) {
+    return {
+      repoFullName: "acme/widgets",
+      repoOwner: "acme",
+      repoName: "widgets",
+      installationId: 42,
+      githubAccountId: 1001,
+      githubRepositoryId: 2002,
+      prNumber: 0,
+      prTitle: "Repository health scan (main)",
+      prBody: "",
+      prHtmlUrl: "https://github.com/acme/widgets",
+      prAuthor: "octocat",
+      baseSha: headSha,
+      headSha,
+      baseRef: "main",
+      headRef: "main",
+      jobType: "health_scan" as const,
+      scanBranch: "main",
+      reviewers: [],
+    };
+  }
+
+  it("claims fingerprints atomically and only releases pending claims", () => {
+    const store = new JobStore(openDb(":memory:"));
+    expect(store.claimScanIssue({ jobId: 1, repoFullName: "acme/widgets", fingerprint: "fp1", title: "t" })).toBe(true);
+    // A concurrent submit loses the race.
+    expect(store.claimScanIssue({ jobId: 2, repoFullName: "acme/widgets", fingerprint: "fp1", title: "t" })).toBe(false);
+    // Clearing releases only pending claims; a recorded issue survives.
+    store.recordScanIssue({ jobId: 1, repoFullName: "acme/widgets", fingerprint: "fp1", issueNumber: 7, issueUrl: "https://github.com/acme/widgets/issues/7", title: "t" });
+    store.clearScanIssue("acme/widgets", "fp1");
+    expect(store.getScanIssue("acme/widgets", "fp1")).toMatchObject({ issue_number: 7, issue_url: "https://github.com/acme/widgets/issues/7" });
+
+    expect(store.claimScanIssue({ jobId: 3, repoFullName: "acme/widgets", fingerprint: "fp2", title: "p" })).toBe(true);
+    store.clearScanIssue("acme/widgets", "fp2");
+    expect(store.hasScanIssue("acme/widgets", "fp2")).toBe(false);
+  });
+
+  it("upserts provenance and sweeps only orphaned pending claims", () => {
+    const store = new JobStore(openDb(":memory:"));
+    store.recordScanIssue({ jobId: 1, repoFullName: "acme/widgets", fingerprint: "fpDone", issueNumber: 3, issueUrl: "u3", title: "d" });
+    store.recordScanIssue({ jobId: 1, repoFullName: "acme/widgets", fingerprint: "fpDone", issueNumber: 4, issueUrl: "u4", title: "d2" });
+    expect(store.getScanIssue("acme/widgets", "fpDone")?.issue_number).toBe(4);
+
+    store.claimScanIssue({ jobId: 2, repoFullName: "acme/widgets", fingerprint: "fpPending", title: "p" });
+    expect(store.clearOrphanedScanIssueClaims()).toBe(1);
+    expect(store.hasScanIssue("acme/widgets", "fpPending")).toBe(false);
+    expect(store.hasScanIssue("acme/widgets", "fpDone")).toBe(true);
+    expect(store.clearOrphanedScanIssueClaims()).toBe(0);
+  });
+
+  it("listScanIssues is scoped to the job; getScanIssue is scoped to the repository", () => {
+    const store = new JobStore(openDb(":memory:"));
+    const first = store.enqueue(scanJobInput("aaaaaaaaaaaaaaaaaaaa"));
+    store.recordScanIssue({ jobId: first.job.id, repoFullName: "acme/widgets", fingerprint: "fpA", issueNumber: 5, issueUrl: "u5", title: "a" });
+    const second = store.enqueue(scanJobInput("bbbbbbbbbbbbbbbbbbbb"));
+    expect(store.listScanIssues(first.job.id)).toHaveLength(1);
+    expect(store.listScanIssues(second.job.id)).toEqual([]);
+    // The rescan's finding dedups against the repository-scoped registry.
+    expect(store.hasScanIssue("acme/widgets", "fpA")).toBe(true);
+    expect(store.getScanIssue("acme/widgets", "fpA")?.issue_number).toBe(5);
+  });
+});
+
+describe("scan job SHA staling", () => {
+  it("stales an earlier scan of the same repository when a new head SHA is enqueued", () => {
+    const store = new JobStore(openDb(":memory:"));
+    const first = store.enqueue({
+      repoFullName: "acme/widgets",
+      repoOwner: "acme",
+      repoName: "widgets",
+      installationId: 42,
+      prNumber: 0,
+      prTitle: "Repository health scan (main)",
+      prBody: "",
+      prHtmlUrl: "",
+      prAuthor: "octocat",
+      baseSha: "aaaaaaaaaaaaaaaaaaaa",
+      headSha: "aaaaaaaaaaaaaaaaaaaa",
+      baseRef: "main",
+      headRef: "main",
+      jobType: "health_scan",
+      reviewers: [],
+    });
+    const second = store.enqueue({
+      repoFullName: "acme/widgets",
+      repoOwner: "acme",
+      repoName: "widgets",
+      installationId: 42,
+      prNumber: 0,
+      prTitle: "Repository health scan (main)",
+      prBody: "",
+      prHtmlUrl: "",
+      prAuthor: "octocat",
+      baseSha: "bbbbbbbbbbbbbbbbbbbb",
+      headSha: "bbbbbbbbbbbbbbbbbbbb",
+      baseRef: "main",
+      headRef: "main",
+      jobType: "health_scan",
+      reviewers: [],
+    });
+    expect(store.getJob(first.job.id)?.state).toBe("stale");
+    expect(store.getJob(second.job.id)?.state).toBe("queued");
+  });
+});
+
+describe("setFindingStatus", () => {
+  it("rewrites only the targeted finding row", () => {
+    const store = new JobStore(openDb(":memory:"));
+    for (const fingerprint of ["fptarget00000001", "fpother000000001"]) {
+      store.upsertFinding({
+        repoFullName: "acme/widgets",
+        prNumber: 7,
+        fingerprint,
+        status: "resolved",
+        reviewedSha: "sha123",
+        currentPath: "a.ts",
+        summary: "thing",
+        lastJobId: 1,
+      });
+    }
+    store.setFindingStatus("acme/widgets", 7, "fptarget00000001", "uncertain", "GitHub resolve failed; will retry next review");
+    const targeted = store.getFinding("acme/widgets", 7, "fptarget00000001");
+    expect(targeted?.status).toBe("uncertain");
+    expect(targeted?.reconciliation_reason).toBe("GitHub resolve failed; will retry next review");
+    const untouched = store.getFinding("acme/widgets", 7, "fpother000000001");
+    expect(untouched?.status).toBe("resolved");
+  });
+});

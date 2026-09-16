@@ -287,6 +287,9 @@ export function assertRuntimeConfig(config: Config): void {
   if (config.reviewers.length === 0) {
     throw new Error("At least one reviewer role is required");
   }
+  if (config.opencode.timeoutMs <= 0) {
+    throw new Error("OPENCODE_TIMEOUT_MS must be a positive number of milliseconds");
+  }
   if (config.routing.mode === "model" && !config.routing.model && !config.opencode.reviewerModel) {
     throw new Error("REVIEWER_ROUTING=model requires OPENCODE_ROUTER_MODEL or OPENCODE_REVIEWER_MODEL");
   }

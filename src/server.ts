@@ -11,8 +11,32 @@ import { repoRateLimitActive, RepoRateLimiter, WindowRateLimiter } from "./githu
 import { parseGithubPullUrl, PullUrlError } from "./github/pull-url.js";
 import { dispatchEnqueue, enqueuePullJob } from "./jobs/enqueue.js";
 import { subscribe } from "./events.js";
-import { escapeHtml } from "./util.js";
-import { renderConfigPage, renderHome, renderJob, renderLogin, renderPromptConfigPage, renderScanPage, THEME_CSS, type PageOptions } from "./ui/index.js";
+import { redactSecrets } from "./util.js";
+import {
+  renderScanConfirmPage,
+  renderScanIssuePreviewPage,
+  renderScanPage,
+  renderConfigPage,
+  renderHome,
+  renderJob,
+  renderLogin,
+  renderPromptConfigPage,
+  THEME_CSS,
+  FAVICON_SVG,
+  FAVICON_PNG_BASE64,
+  LARGE_ICON_SVG,
+  LARGE_ICON_PNG_BASE64,
+  type PageOptions,
+  type ScanConfirmNotice,
+  type ScanIssueCreationData,
+  type ScanIssuePreviewItem,
+  type ScanPageData,
+} from "./ui/index.js";
+import type { JobRow } from "./jobs/store.js";
+import type { FindingRow } from "./findings/types.js";
+import { issueWorthiness, parseAggregatedFindings, type IssueWorthiness } from "./findings/issue-worthiness.js";
+import { SCAN_ISSUE_MARKER_RE, scanIssueMarkerBase } from "./findings/identity.js";
+import { githubSecrets } from "./config.js";
 import type { JobQueue } from "./jobs/queue.js";
 import {
   CSRF_COOKIE,
@@ -64,6 +88,108 @@ type AppEnv = { Variables: { identity?: OAuthSession } };
 function clientKey(c: Context<AppEnv>): string {
   const first = c.req.header("x-forwarded-for")?.split(",")[0]?.trim();
   return first || "local";
+}
+
+// ---- Health-scan issue creation helpers ----
+
+/** Checked checkboxes with name `fp[]` arrive as an array of strings (or a single value). */
+function fingerprintList(value: unknown): string[] {
+  const list = Array.isArray(value) ? value : value == null ? [] : [value];
+  return list
+    .filter((entry): entry is string => typeof entry === "string" && entry.trim() !== "")
+    .map((entry) => entry.trim());
+}
+
+/** GitHub refuses writes with 403 (missing permission) or 404 (repo hidden from the App). */
+function isPermissionDenied(error: unknown): boolean {
+  if (isTransientAbuseLimit(error)) return false;
+  const status = (error as { status?: unknown } | null)?.status;
+  return status === 403 || status === 404;
+}
+
+/**
+ * GitHub also uses 403 for transient conditions — abuse detection and both
+ * secondary and primary rate limits ("API rate limit exceeded ..."). Those are
+ * retryable, not a permission problem.
+ */
+function isTransientAbuseLimit(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : "";
+  return /secondary rate limit|abuse|rate limit exceeded/i.test(message);
+}
+
+function duplicateSearchQuery(summary: string): string {
+  return summary
+    .replace(/[^\w\s]/g, " ")
+    .split(/\s+/)
+    .filter(Boolean)
+    .slice(0, 6)
+    .join(" ");
+}
+
+/**
+ * Finding text comes from the scanned repository. Neutralize any fake dedup
+ * markers it may contain (so marker-based dedup cannot be spoofed) and redact
+ * runtime secrets as defense in depth before the text lands in a public issue.
+ */
+function sanitizeIssueText(text: string, config: Config): string {
+  return redactSecrets(text.replace(SCAN_ISSUE_MARKER_RE, "[neutralized maomao marker]"), githubSecrets(config));
+}
+
+function buildScanIssue(config: Config, job: JobRow, finding: FindingRow): { title: string; body: string } {
+  const severity = (finding.severity ?? "info").toUpperCase();
+  const marker = `${scanIssueMarkerBase(finding.fingerprint)} @ ${finding.reviewed_sha} -->`;
+  const evidence = finding.diff_hunk ? `\n\n\`\`\`diff\n${sanitizeIssueText(finding.diff_hunk, config)}\n\`\`\`` : "";
+  const body = `${marker}\n\n**${severity}** — ${sanitizeIssueText(finding.summary ?? "", config)}\n\n${sanitizeIssueText(finding.body ?? "", config)}\n\nFile: \`${sanitizeIssueText(finding.current_path ?? "unknown", config)}${finding.current_line ? `:${finding.current_line}` : ""}\`\nReviewed SHA: ${finding.reviewed_sha}\nDiscovered by a manual Maomao health scan (job ${job.id}).${evidence}`;
+  return {
+    title: `[maomao] ${severity}: ${sanitizeIssueText(finding.summary ?? finding.fingerprint, config)}`,
+    body,
+  };
+}
+
+interface ScanIssueEntry {
+  row: FindingRow;
+  agreed: string[];
+  worth: IssueWorthiness;
+}
+
+/**
+ * Resolves a scan's own open findings against the aggregator snapshot and the
+ * publication bar — the single source both the job-page form and the issue
+ * routes use, so they cannot drift on which findings are eligible.
+ */
+function scanOpenFindings(store: JobStore, job: JobRow): ScanIssueEntry[] {
+  const aggregated = parseAggregatedFindings(job.aggregator_normalized, `job ${job.id} (${job.repo_full_name})`);
+  return store
+    .listFindings(job.repo_full_name, job.pr_number)
+    .filter((row) => row.status === "open" && row.last_job_id === job.id)
+    .map((row) => {
+      const aggregatedFinding = aggregated.get(row.fingerprint);
+      return {
+        row,
+        agreed: aggregatedFinding?.reviewers_agreed ?? [],
+        worth: issueWorthiness(aggregatedFinding),
+      };
+    });
+}
+
+/**
+ * Resolves selected fingerprints against the job's own open findings and the
+ * publication bar. Fingerprints that do not belong to this scan are reported
+ * separately so crafted POSTs are rejected, not silently ignored.
+ */
+function scanIssueSelection(store: JobStore, job: JobRow, fingerprints: string[]): { selected: ScanIssueEntry[]; unknown: string[] } {
+  const byFingerprint = new Map(scanOpenFindings(store, job).map((entry) => [entry.row.fingerprint, entry]));
+  const selected: ScanIssueEntry[] = [];
+  const unknown: string[] = [];
+  for (const fingerprint of fingerprints) {
+    const entry = byFingerprint.get(fingerprint);
+    if (!entry) {
+      unknown.push(fingerprint);
+      continue;
+    }
+    selected.push(entry);
+  }
+  return { selected, unknown };
 }
 
 function setSessionCookie(c: Context<AppEnv>, value: string): void {
@@ -285,6 +411,33 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
     }),
   );
 
+  // Brand icons: fixed constants from src/ui/icons.ts (no filesystem, no traversal).
+  const iconAssets: Array<[string, string, string]> = [
+    // [path, content-type, source]
+    ["/assets/favicon.svg", "image/svg+xml", FAVICON_SVG],
+    ["/assets/icon.svg", "image/svg+xml", LARGE_ICON_SVG],
+  ];
+  for (const [path, contentType, body] of iconAssets) {
+    app.get(path, (c) =>
+      c.newResponse(body, 200, {
+        "content-type": `${contentType}; charset=utf-8`,
+        "cache-control": "public, max-age=86400",
+      }),
+    );
+  }
+  const pngAssets: Array<[string, string]> = [
+    ["/assets/favicon.png", FAVICON_PNG_BASE64],
+    ["/assets/icon.png", LARGE_ICON_PNG_BASE64],
+  ];
+  for (const [path, base64] of pngAssets) {
+    app.get(path, (c) =>
+      c.newResponse(new Uint8Array(Buffer.from(base64, "base64")), 200, {
+        "content-type": "image/png",
+        "cache-control": "public, max-age=86400",
+      }),
+    );
+  }
+
   app.post("/webhooks/github", async (c) => {
     const rawBody = await c.req.text();
     const result = await handleGithubWebhook({
@@ -465,6 +618,8 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
         notice: noticeText(c.req.query("notice"), job.repo_full_name, job.pr_number, job.head_sha),
         error: c.req.query("error") || undefined,
         prFindings: ctx.store.listFindings(job.repo_full_name, job.pr_number),
+        scanIssueCreation: scanIssueCreationData(job),
+        scanIssues: job.job_type === "health_scan" ? ctx.store.listScanIssues(job.id) : undefined,
       }),
     );
   });
@@ -816,16 +971,43 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
     return c.redirect(`/config/prompts?notice=evaluated`, 302);
   });
 
-  const renderScanDenied = (c: Context<AppEnv>, ctx2: ServerContext, message: string) =>
-    c.html(
-      renderScanPage({
-        canScan: gateOn,
-        csrfToken: gateOn ? ensureCsrfToken(c, ctx2.config.uiSessionSecret) : undefined,
-        issueCreationEnabled: ctx2.config.issueCreationEnabled,
-        error: message,
-      }),
-      403,
-    );
+  const scanPageData = (c: Context<AppEnv>, extra: Pick<ScanPageData, "error"> = {}): ScanPageData => {
+    const profileRevision = ctx.store.configs.getActiveRevision("default");
+    const recentScans = ctx.store
+      .listJobs(75)
+      .filter((job) => job.job_type === "health_scan" && job.state === "completed")
+      .slice(0, 8)
+      .map((job) => ({ id: job.id, repoFullName: job.repo_full_name, headSha: job.head_sha }));
+    return {
+      canScan: gateOn,
+      identity: c.get("identity"),
+      csrfToken: gateOn ? ensureCsrfToken(c, ctx.config.uiSessionSecret) : undefined,
+      issueCreationEnabled: ctx.config.issueCreationEnabled,
+      profileRevision: profileRevision ? { id: profileRevision.id, name: profileRevision.name } : null,
+      recentScans,
+      ...extra,
+    };
+  };
+  const renderScanDenied = (c: Context<AppEnv>, message: string) =>
+    c.html(renderScanPage(scanPageData(c, { error: message })), 403);
+
+  /** Selection state for the issue-creation form on a completed scan's job page. */
+  const scanIssueCreationData = (job: JobRow): ScanIssueCreationData | undefined => {
+    if (job.job_type !== "health_scan" || job.state !== "completed") return undefined;
+    const findings = scanOpenFindings(ctx.store, job).map((entry) => ({
+      fingerprint: entry.row.fingerprint,
+      summary: entry.row.summary,
+      severity: entry.row.severity ?? "info",
+      confidence: entry.row.confidence,
+      agreed: entry.agreed,
+      worthy: entry.worth.worthy,
+      unworthyReason: entry.worth.worthy ? undefined : entry.worth.reason,
+    }));
+    const enabled =
+      ctx.config.issueCreationEnabled &&
+      Boolean(ctx.github && isReviewGithub(ctx.github) && ctx.github.createIssue && ctx.github.listOpenIssuesByMarker);
+    return { enabled, jobId: job.id, findings };
+  };
 
   // ---- On-demand repository health scans (/scan) ----
   const parseRepoInput = (raw: string): { owner: string; repo: string } | undefined => {
@@ -845,17 +1027,7 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
 
   app.get("/scan", (c) => {
     if (!gateOn) return c.redirect("/", 302);
-    const identity = c.get("identity");
-    const profileRevision = ctx.store.configs.getActiveRevision("default");
-    return c.html(
-      renderScanPage({
-        canScan: gateOn,
-        identityLogin: identity?.login,
-        csrfToken: gateOn ? ensureCsrfToken(c, ctx.config.uiSessionSecret) : undefined,
-        issueCreationEnabled: ctx.config.issueCreationEnabled,
-        profileRevision: profileRevision ? { id: profileRevision.id, name: profileRevision.name } : null,
-      }),
-    );
+    return c.html(renderScanPage(scanPageData(c)));
   });
 
   app.post("/scan", async (c) => {
@@ -863,23 +1035,13 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
     const actor = configActor(c);
     if (!actor) {
       return c.html(
-        renderScanPage({
-          canScan: gateOn,
-          csrfToken: ensureCsrfToken(c, ctx.config.uiSessionSecret),
-          issueCreationEnabled: ctx.config.issueCreationEnabled,
-          error: "Scanning requires an operator GitHub OAuth identity.",
-        }),
+        renderScanPage(scanPageData(c, { error: "Scanning requires an operator GitHub OAuth identity." })),
         403,
       );
     }
     if (!ctx.github || !isReviewGithub(ctx.github)) {
       return c.html(
-        renderScanPage({
-          canScan: true,
-          csrfToken: ensureCsrfToken(c, ctx.config.uiSessionSecret),
-          issueCreationEnabled: ctx.config.issueCreationEnabled,
-          error: "GitHub App client is not configured on this process.",
-        }),
+        renderScanPage(scanPageData(c, { error: "GitHub App client is not configured on this process." })),
         503,
       );
     }
@@ -887,12 +1049,7 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
     const parsed = parseRepoInput(typeof body.repo === "string" ? body.repo : "");
     if (!parsed) {
       return c.html(
-        renderScanPage({
-          canScan: true,
-          csrfToken: ensureCsrfToken(c, ctx.config.uiSessionSecret),
-          issueCreationEnabled: ctx.config.issueCreationEnabled,
-          error: "Enter a repository as owner/repo or a GitHub URL.",
-        }),
+        renderScanPage(scanPageData(c, { error: "Enter a repository as owner/repo or a GitHub URL." })),
         400,
       );
     }
@@ -904,7 +1061,7 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
       });
       if (!accountAuth.ok) {
         logAuthorizationRejection({ installationId: installation.installationId, reason: accountAuth.reason });
-        return renderScanDenied(c, ctx, "Not authorized to scan this installation or repository.");
+        return renderScanDenied(c, "Not authorized to scan this installation or repository.");
       }
       const repository = await ctx.github.getRepository(parsed.owner, parsed.repo, installation.installationId);
       const repoAuth = rejectUnauthorized(ctx.config, {
@@ -913,12 +1070,81 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
         repositoryId: repository.id,
       });
       if (!repoAuth.ok) {
-        return renderScanDenied(c, ctx, "Not authorized to scan this installation or repository.");
+        return renderScanDenied(c, "Not authorized to scan this installation or repository.");
+      }
+      // The rate limiter and the job row both key on this id; a malformed one must not
+      // fall through and masquerade as a rate limit (or as an unkeyed job).
+      if (!Number.isSafeInteger(repository.id) || repository.id <= 0) {
+        return c.html(
+          renderScanPage(scanPageData(c, { error: "Could not resolve a valid repository id for this scan." })),
+          502,
+        );
       }
       if (!ctx.github.getRepositoryHead || !ctx.github.getCommitDiff) {
-        return renderScanDenied(c, ctx, "This GitHub client does not support repository scans.");
+        return renderScanDenied(c, "This GitHub client does not support repository scans.");
       }
       const head = await ctx.github.getRepositoryHead(installation.installationId, parsed.owner, parsed.repo);
+
+      // Same per-repository budget as manual PR reviews (and webhook reviews).
+      // Previewing a confirmation must not consume budget, so the check is a
+      // wouldAllow probe; the hit is recorded only when a job is actually created
+      // (duplicate no-ops don't count).
+      const rateOn = repoRateLimitActive(ctx.config.repoRateLimitPerWindow, ctx.config.repoRateWindowMs);
+      if (
+        rateOn &&
+        !rateLimiter.wouldAllow(repository.id, ctx.config.repoRateLimitPerWindow, ctx.config.repoRateWindowMs)
+      ) {
+        logRateLimited({ installationId: installation.installationId, repositoryId: repository.id });
+        return c.html(
+          renderScanPage(scanPageData(c, { error: "Rate limited for this repository; try again later." })),
+          429,
+        );
+      }
+
+      // Two-step start: the operator first sees the exact revision, then confirms it.
+      // An all-empty confirmation payload means the POST came from the step-1 form
+      // (repo only) — a preview, not a failed confirmation. A confirming POST is
+      // valid only for what the operator was shown: revision id, sha, and branch must
+      // all match the freshly resolved head. Any mismatch re-renders the confirmation
+      // with current values and a notice; no job is enqueued from a confirmation
+      // that fails this check.
+      const confirmedSha = typeof body.sha === "string" ? body.sha.trim() : "";
+      const confirmedBranch = typeof body.branch === "string" ? body.branch.trim() : "";
+      const confirmedRevision = typeof body.revision_id === "string" ? body.revision_id.trim() : "";
+      const activeRevision = ctx.store.configs.getActiveRevision("default");
+      const shaConfirmed = confirmedSha === head.headSha;
+      const branchConfirmed = confirmedBranch === head.defaultBranch;
+      const revisionConfirmed = confirmedRevision === (activeRevision ? String(activeRevision.id) : "");
+      if (!shaConfirmed || !branchConfirmed || !revisionConfirmed) {
+        const notice: ScanConfirmNotice | undefined =
+          confirmedSha === "" && confirmedBranch === "" && confirmedRevision === ""
+            ? undefined
+            : confirmedSha !== "" && confirmedSha !== head.headSha
+              ? { kind: "sha", fromSha: confirmedSha }
+              : confirmedBranch !== "" && confirmedBranch !== head.defaultBranch
+                ? { kind: "branch", fromBranch: confirmedBranch }
+                : !revisionConfirmed
+                  ? { kind: "revision" }
+                  : { kind: "incomplete" };
+        return c.html(
+          renderScanConfirmPage({
+            identity: c.get("identity"),
+            csrfToken: ensureCsrfToken(c, ctx.config.uiSessionSecret),
+            repo: `${parsed.owner}/${parsed.repo}`,
+            branch: head.defaultBranch,
+            sha: head.headSha,
+            profileRevision: activeRevision ? { id: activeRevision.id, name: activeRevision.name } : null,
+            severityFloor: activeRevision?.definition.minPublishableSeverity ?? "info",
+            limits: {
+              diffCapBytes: ctx.config.maxDiffBytes > 0 ? ctx.config.maxDiffBytes : null,
+              reviewerTimeoutMs: ctx.config.opencode.timeoutMs,
+              maxRetries: ctx.config.opencode.maxRetries,
+            },
+            notice,
+          }),
+        );
+      }
+
       const created = ctx.store.enqueue({
         repoFullName: `${parsed.owner}/${parsed.repo}`,
         repoOwner: parsed.owner,
@@ -938,66 +1164,65 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
         webhookEvent: "manual.scan",
         jobType: "health_scan",
         scanBranch: head.defaultBranch,
+        // Exactly the revision the operator confirmed, not whatever is active now.
+        profileRevisionId: activeRevision?.id,
         reviewers: [],
       });
+      if (created.created && rateOn) {
+        rateLimiter.record(repository.id, ctx.config.repoRateLimitPerWindow, ctx.config.repoRateWindowMs);
+      }
       ctx.store.log(created.job.id, `Health scan enqueued by ${actor.login} for ${head.defaultBranch} @ ${head.headSha}`);
       dispatchEnqueue(ctx.queue, created);
       return c.redirect(`/jobs/${created.job.id}?notice=${created.created ? "scan-queued" : "exists"}`, 302);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      return c.html(
-        renderScanPage({
-          canScan: true,
-          csrfToken: ensureCsrfToken(c, ctx.config.uiSessionSecret),
-          issueCreationEnabled: ctx.config.issueCreationEnabled,
-          error: message,
-        }),
-        400,
-      );
+      console.error(`scan: could not start scan for ${parsed.owner}/${parsed.repo}: ${message}`);
+      return c.html(renderScanPage(scanPageData(c, { error: message })), 400);
     }
   });
 
-  app.post("/scan/issues", async (c) => {
-    if (!gateOn) return c.redirect("/", 302);
+  type ScanIssuePort = ManualTriggerPort & {
+    createIssue: NonNullable<GithubPort["createIssue"]>;
+    listOpenIssuesByMarker: NonNullable<GithubPort["listOpenIssuesByMarker"]>;
+    searchOpenIssues?: NonNullable<GithubPort["searchOpenIssues"]>;
+  };
+  // Shared preconditions for previewing and publishing scan issues: operator
+  // identity, enabled capability, a capable GitHub client, a completed scan
+  // job, and allowlists re-checked at write time (they may have changed since
+  // the scan ran).
+  const scanIssueGuard = async (
+    c: Context<AppEnv>,
+  ): Promise<{ actor: { login: string }; job: JobRow; port: ScanIssuePort } | { failure: Response }> => {
     const actor = configActor(c);
     if (!actor) {
-      return c.html(
-        renderScanPage({
-          canScan: true,
-          csrfToken: ensureCsrfToken(c, ctx.config.uiSessionSecret),
-          issueCreationEnabled: ctx.config.issueCreationEnabled,
-          error: "Creating issues requires an operator GitHub OAuth identity.",
-        }),
-        403,
-      );
+      return {
+        failure: c.html(
+          renderScanPage(scanPageData(c, { error: "Creating issues requires an operator GitHub OAuth identity." })),
+          403,
+        ),
+      };
     }
     if (!ctx.config.issueCreationEnabled) {
-      return c.html(
-        renderScanPage({
-          canScan: true,
-          csrfToken: ensureCsrfToken(c, ctx.config.uiSessionSecret),
-          issueCreationEnabled: false,
-          error: "Issue creation is disabled (GITHUB_ISSUE_CREATION_ENABLED=false).",
-        }),
-        403,
-      );
-    }
-    if (!ctx.config.issueCreationEnabled) {
-      return renderScanDenied(c, ctx, "Issue creation is disabled (GITHUB_ISSUE_CREATION_ENABLED=false).");
+      return {
+        failure: c.html(
+          renderScanPage(scanPageData(c, { error: "Issue creation is disabled (GITHUB_ISSUE_CREATION_ENABLED=false)." })),
+          403,
+        ),
+      };
     }
     if (!ctx.github || !isReviewGithub(ctx.github)) {
-      return renderScanDenied(c, ctx, "GitHub App client is not configured on this process.");
+      return { failure: renderScanDenied(c, "GitHub App client is not configured on this process.") };
     }
-    if (!ctx.github.createIssue || !ctx.github.listOpenIssuesByMarker) {
-      return renderScanDenied(c, ctx, "This GitHub client does not support issue creation.");
+    const github = ctx.github;
+    if (!github.createIssue || !github.listOpenIssuesByMarker) {
+      return { failure: renderScanDenied(c, "This GitHub client does not support issue creation.") };
     }
     const body = await c.req.parseBody();
     const jobId = Number(body.job_id);
     const job = Number.isFinite(jobId) ? ctx.store.getJob(jobId) : undefined;
     if (!job || job.job_type !== "health_scan" || job.state !== "completed") {
-      return renderScanDenied(c, ctx, "Issue creation requires a completed health-scan job.");
+      return { failure: renderScanDenied(c, "Issue creation requires a completed health-scan job.") };
     }
-    // Allowlists may have changed since the scan ran; the GitHub write path re-checks them.
     const writeAuth = authorizeGithubTarget(ctx.config, {
       installationId: job.installation_id,
       accountId: job.github_account_id ?? undefined,
@@ -1005,18 +1230,123 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
     });
     if (!writeAuth.ok) {
       logAuthorizationRejection({ installationId: job.installation_id, reason: writeAuth.reason });
-      return renderScanDenied(c, ctx, "Not authorized to create issues in this installation or repository.");
+      return { failure: renderScanDenied(c, "Not authorized to create issues in this installation or repository.") };
     }
-    // Only findings produced by this scan, not stale rows from older scans.
-    const findings = ctx.store
-      .listFindings(job.repo_full_name, job.pr_number)
-      .filter((row) => row.status === "open" && row.last_job_id === job.id);
+    return { actor, job, port: github as ScanIssuePort };
+  };
+
+  app.post("/scan/issues/preview", async (c) => {
+    const guard = await scanIssueGuard(c);
+    if ("failure" in guard) return guard.failure;
+    const { job, port } = guard;
+    const body = await c.req.parseBody();
+    const fingerprints = fingerprintList(body["fp[]"]);
+    if (fingerprints.length === 0) {
+      return renderScanDenied(c, "Select at least one finding to preview.");
+    }
+    const selection = scanIssueSelection(ctx.store, job, fingerprints);
+    if (selection.unknown.length > 0) {
+      return renderScanDenied(c, `${selection.unknown.length} selected finding(s) do not belong to this scan.`);
+    }
+    const rejected: string[] = [];
+    const items: ScanIssuePreviewItem[] = [];
+    for (const entry of selection.selected) {
+      if (!entry.worth.worthy) {
+        rejected.push(`${entry.row.summary || entry.row.fingerprint}: ${entry.worth.reason}`);
+        continue;
+      }
+      const markerBase = scanIssueMarkerBase(entry.row.fingerprint);
+      const { title, body: issueBody } = buildScanIssue(ctx.config, job, entry.row);
+      let skip: { reason: string; url?: string } | undefined;
+      // Repo-scoped on purpose: an issue recorded by an earlier scan of the same
+      // repository still tracks this fingerprint. issue_number 0 = pending claim.
+      const local = ctx.store.getScanIssue(job.repo_full_name, entry.row.fingerprint);
+      if (local) {
+        skip = {
+          reason: local.issue_number === 0 ? "a publication claim for this finding is already in flight" : "a Maomao issue already tracks this finding",
+          url: local.issue_url || undefined,
+        };
+      }
+      let dedupCheckFailed = false;
+      try {
+        const remote = await port.listOpenIssuesByMarker(job.installation_id, job.repo_owner, job.repo_name, `${markerBase} `);
+        if (!skip && remote.length > 0) {
+          skip = { reason: "an existing Maomao issue already tracks this finding", url: remote[0]?.url };
+        }
+      } catch (error) {
+        dedupCheckFailed = true;
+        ctx.store.log(job.id, `Remote dedup check failed for ${entry.row.fingerprint}: ${error instanceof Error ? error.message : String(error)}`, "warn");
+      }
+      // Best-effort surfacing of likely human-authored duplicates; the operator
+      // reviews them, Maomao never modifies them, and a failed search blocks nothing.
+      let duplicates: Array<{ number: number; title: string; url: string }> = [];
+      const query = duplicateSearchQuery(entry.row.summary ?? "");
+      if (port.searchOpenIssues && !skip && query) {
+        try {
+          duplicates = await port.searchOpenIssues(job.installation_id, job.repo_owner, job.repo_name, query);
+        } catch (error) {
+          ctx.store.log(job.id, `Duplicate search failed for ${entry.row.fingerprint}: ${error instanceof Error ? error.message : String(error)}`, "warn");
+        }
+      }
+      items.push({
+        fingerprint: entry.row.fingerprint,
+        severity: entry.row.severity ?? "info",
+        title,
+        body: issueBody,
+        agreed: entry.agreed,
+        skip,
+        dedupCheckFailed,
+        duplicates: Array.isArray(duplicates) ? duplicates : [],
+      });
+    }
+    if (items.length === 0) {
+      return renderScanDenied(c, `No selected finding passes the publication bar. ${rejected.join(" ")}`);
+    }
+    return c.html(
+      renderScanIssuePreviewPage({
+        identity: c.get("identity"),
+        csrfToken: ensureCsrfToken(c, ctx.config.uiSessionSecret),
+        job: { id: job.id, repoFullName: job.repo_full_name, headSha: job.head_sha },
+        items,
+        rejected,
+      }),
+    );
+  });
+
+  app.post("/scan/issues", async (c) => {
+    const guard = await scanIssueGuard(c);
+    if ("failure" in guard) return guard.failure;
+    const { actor, job, port } = guard;
+    const body = await c.req.parseBody();
+    const fingerprints = fingerprintList(body["fp[]"]);
+    if (fingerprints.length === 0) {
+      return renderScanDenied(c, "Select at least one finding to create issues for.");
+    }
+    const selection = scanIssueSelection(ctx.store, job, fingerprints);
+    if (selection.unknown.length > 0) {
+      return renderScanDenied(c, `${selection.unknown.length} selected finding(s) do not belong to this scan.`);
+    }
+    // The publication bar is re-verified here so a crafted POST cannot publish
+    // speculative findings by skipping the preview.
+    const creatable = selection.selected.filter((entry) => entry.worth.worthy);
+    if (creatable.length === 0) {
+      return renderScanDenied(c, "No selected finding passes the publication bar (confidence and specialist consensus).");
+    }
+    const droppedReasons = selection.selected.flatMap((entry) => (entry.worth.worthy ? [] : [entry.worth.reason]));
+    if (droppedReasons.length > 0) {
+      ctx.store.log(
+        job.id,
+        `Skipped ${droppedReasons.length} selected finding(s) below the publication bar: ${droppedReasons.join("; ")}`,
+        "warn",
+      );
+    }
     let createdCount = 0;
     let skipped = 0;
     let failed = 0;
-    for (const finding of findings) {
-      const markerBase = `<!-- maomao-scan-issue ${finding.fingerprint}`;
-      const marker = `${markerBase} @ ${finding.reviewed_sha} -->`;
+    let permissionDenied = false;
+    for (const entry of creatable) {
+      const finding = entry.row;
+      const markerBase = scanIssueMarkerBase(finding.fingerprint);
       try {
         const existingLocal = ctx.store.hasScanIssue(job.repo_full_name, finding.fingerprint);
         if (existingLocal) {
@@ -1034,7 +1364,7 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
           skipped += 1;
           continue;
         }
-        const remote = await ctx.github.listOpenIssuesByMarker(job.installation_id, job.repo_owner, job.repo_name, `${markerBase} `);
+        const remote = await port.listOpenIssuesByMarker(job.installation_id, job.repo_owner, job.repo_name, `${markerBase} `);
         if (remote.length > 0) {
           ctx.store.recordScanIssue({
             jobId: job.id,
@@ -1044,36 +1374,75 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
             issueUrl: remote[0].url,
             title: `maomao: ${finding.summary ?? finding.fingerprint}`,
           });
+          ctx.store.log(
+            job.id,
+            `Linked existing issue #${remote[0].number} (${remote[0].url}) to finding ${finding.fingerprint}`,
+          );
           skipped += 1;
           continue;
         }
-        const severity = (finding.severity ?? "info").toUpperCase();
-        const title = `[maomao] ${severity}: ${finding.summary ?? finding.fingerprint}`;
-        const evidence = finding.diff_hunk ? `\n\n\`\`\`diff\n${finding.diff_hunk}\n\`\`\`` : "";
-        const issueBody = `${marker}\n\n**${severity}** — ${escapeHtml(finding.summary ?? "")}\n\n${escapeHtml(finding.body ?? "")}\n\nFile: \`${finding.current_path ?? "unknown"}${finding.current_line ? `:${finding.current_line}` : ""}\`\nReviewed SHA: ${finding.reviewed_sha}\nDiscovered by a manual Maomao health scan (job ${job.id}).${evidence}`;
-        const issue = await ctx.github.createIssue(job.installation_id, job.repo_owner, job.repo_name, title, issueBody);
-        ctx.store.recordScanIssue({
-          jobId: job.id,
-          repoFullName: job.repo_full_name,
-          fingerprint: finding.fingerprint,
-          issueNumber: issue.number,
-          issueUrl: issue.url,
-          title,
-        });
+        const { title, body: issueBody } = buildScanIssue(ctx.config, job, finding);
+        const issue = await port.createIssue(job.installation_id, job.repo_owner, job.repo_name, title, issueBody);
+        try {
+          ctx.store.recordScanIssue({
+            jobId: job.id,
+            repoFullName: job.repo_full_name,
+            fingerprint: finding.fingerprint,
+            issueNumber: issue.number,
+            issueUrl: issue.url,
+            title,
+          });
+        } catch (recordError) {
+          // The issue exists on GitHub; never report it as a failed creation.
+          ctx.store.log(
+            job.id,
+            `Issue #${issue.number} created (${issue.url}) but provenance recording failed: ${recordError instanceof Error ? recordError.message : String(recordError)} — verify before retrying.`,
+            "warn",
+          );
+        }
+        // Credential-free audit trail: actor is in the summary line below, and
+        // each created issue is tied to its finding fingerprint here.
+        ctx.store.log(job.id, `Created issue #${issue.number} (${issue.url}) for finding ${finding.fingerprint}`);
         createdCount += 1;
       } catch (error) {
         failed += 1;
-        // Release the claim so a later retry can try this finding again.
-        ctx.store.clearScanIssue(job.repo_full_name, finding.fingerprint);
+        // Release the claim so a later retry can try this finding again. Cleanup
+        // must not throw out of the handler: an orphaned pending claim would
+        // make every future attempt see this finding as already tracked.
+        try {
+          ctx.store.clearScanIssue(job.repo_full_name, finding.fingerprint);
+        } catch (cleanupError) {
+          ctx.store.log(
+            job.id,
+            `Could not release the pending claim for ${finding.fingerprint}: ${cleanupError instanceof Error ? cleanupError.message : String(cleanupError)}`,
+            "error",
+          );
+        }
+        if (isPermissionDenied(error)) {
+          permissionDenied = true;
+          ctx.store.log(
+            job.id,
+            `Issue creation stopped: GitHub refused the write (status ${String((error as { status?: unknown }).status)}): ${error instanceof Error ? error.message : String(error)} — the App installation likely lacks the "Issues: write" permission. Grant it, then retry; already-created issues are skipped.`,
+            "warn",
+          );
+          break;
+        }
         ctx.store.log(job.id, `Issue creation failed for ${finding.fingerprint}: ${error instanceof Error ? error.message : String(error)}`, "warn");
       }
     }
+    const notAttempted = permissionDenied ? creatable.length - (createdCount + skipped + failed) : 0;
     ctx.store.log(
       job.id,
-      `Issue creation by ${actor.login}: ${createdCount} created, ${skipped} skipped (already present), ${failed} failed`,
+      `Issue creation by ${actor.login}: ${createdCount} created, ${skipped} skipped (already present), ${failed} failed${notAttempted > 0 ? `, ${notAttempted} not attempted` : ""}`,
     );
+    if (permissionDenied) {
+      return c.redirect(`/jobs/${job.id}?notice=issues-permission`, 302);
+    }
     if (failed > 0) {
       return c.redirect(`/jobs/${job.id}?notice=issues-partial:${failed}`, 302);
+    }
+    if (createdCount === 0) {
+      return c.redirect(`/jobs/${job.id}?notice=issues-none:${skipped}`, 302);
     }
     return c.redirect(`/jobs/${job.id}?notice=issues-created`, 302);
   });
@@ -1136,7 +1505,13 @@ function noticeText(
     return "Health scan queued for the pinned default-branch head SHA.";
   }
   if (code === "issues-created") {
-    return "GitHub issues created for the validated findings (deduplicated).";
+    return "GitHub issues created for the selected findings (deduplicated).";
+  }
+  if (code === "issues-permission") {
+    return "Issue creation stopped: GitHub refused the write — the App installation likely lacks the Issues: write permission. Grant it, then retry; already-created issues are skipped.";
+  }
+  if (code?.startsWith("issues-none")) {
+    return `No new issues created: ${code.split(":")[1] ?? "0"} finding(s) already tracked or publication-claimed.`;
   }
   if (code?.startsWith("issues-partial")) {
     return `Some issues could not be created (${code.split(":")[1] ?? "unknown"} failures). Retrying is safe: already-created issues are skipped.`;

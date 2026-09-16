@@ -20,6 +20,12 @@ void sweepWorkspaces(config.workspaceRoot, config.workspaceRetentionHours).then(
 
 const db = openDb(config.databasePath);
 const store = new JobStore(db, config.modelCatalog);
+// A crash mid-creation can leave pending scan-issue claims (issue_number 0);
+// no loop is in flight at boot, so anything left over is orphaned.
+const orphanedClaims = store.clearOrphanedScanIssueClaims();
+if (orphanedClaims > 0) {
+  console.log(`Cleared ${orphanedClaims} orphaned scan-issue claim(s) from a previous run`);
+}
 const github = new GithubClient(config);
 const opencode = createOpenCodeRunner(config.opencode.bin);
 const pipeline = createPipeline({

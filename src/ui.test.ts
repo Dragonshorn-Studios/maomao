@@ -3,7 +3,7 @@ import { openDb } from "./db.js";
 import { seedDemoJobs } from "./demo/fixtures.js";
 import { JobStore } from "./jobs/store.js";
 import { THEME_CSS } from "./ui/theme.js";
-import { renderConfigPage, renderHome, renderJob, renderLogin } from "./ui/pages.js";
+import { renderConfigPage, renderHome, renderJob, renderLogin, renderScanConfirmPage, renderScanIssuePreviewPage, renderScanPage } from "./ui/pages.js";
 import { jobStateLabel, settledFindingsCopy } from "./ui/copy.js";
 import { formatCost, formatTokens, jobMetrics } from "./ui/metrics.js";
 
@@ -50,6 +50,9 @@ describe("monitoring pages", () => {
     expect(html).toContain('data-appearance="dark"');
     expect(html).toContain('data-appearance="system"');
     expect(html).toContain("/assets/maomao.css");
+    expect(html).toContain('rel="icon" href="/assets/favicon.svg"');
+    expect(html).toContain('rel="alternate icon" href="/assets/favicon.png"');
+    expect(html).toContain('rel="apple-touch-icon" href="/assets/icon.png"');
     expect(html).not.toContain("EventSource");
     expect(html).toContain("Skip to content");
   });
@@ -597,5 +600,240 @@ describe("cat-hunt flavor", () => {
     expect(html).toContain("Examining PR #");
     const state = jobStateLabel("reviewing");
     expect(state.text).toBe("Reviewing");
+  });
+});
+
+describe("repository health scan UI", () => {
+  const HEAD = "head111head111head111head111head11111";
+
+  function scanJobStore() {
+    const store = new JobStore(openDb(":memory:"));
+    const created = store.enqueue({
+      repoFullName: "acme/widgets",
+      repoOwner: "acme",
+      repoName: "widgets",
+      installationId: 42,
+      prNumber: 0,
+      prTitle: "Repository health scan (main)",
+      prBody: "",
+      prHtmlUrl: "https://github.com/acme/widgets",
+      prAuthor: "octocat",
+      baseSha: HEAD,
+      headSha: HEAD,
+      baseRef: "main",
+      headRef: "main",
+      jobType: "health_scan",
+      scanBranch: "main",
+      reviewers: [],
+    });
+    store.setJobState(created.job.id, "completed", { finished_at: new Date().toISOString() });
+    store.upsertFinding({
+      repoFullName: "acme/widgets",
+      prNumber: 0,
+      fingerprint: "fpscan0000000001",
+      status: "open",
+      reviewedSha: HEAD,
+      currentPath: "src/a.ts",
+      currentLine: 7,
+      category: "correctness",
+      summary: "Unhandled promise rejection",
+      body: "rejects without a handler",
+      severity: "high",
+      confidence: 0.8,
+      lastJobId: created.job.id,
+    });
+    return { store, job: store.getJob(created.job.id)! };
+  }
+
+  it("renders the confirmation page with branch, exact SHA, and effective limits", () => {
+    const html = renderScanConfirmPage({
+      identity: { login: "octocat", avatarUrl: null },
+      csrfToken: "tok",
+      repo: "acme/widgets",
+      branch: "main",
+      sha: HEAD,
+      profileRevision: { id: 3, name: "baseline" },
+      severityFloor: "medium",
+      limits: { diffCapBytes: 1048576, reviewerTimeoutMs: 600_000, maxRetries: 1 },
+    });
+    expect(html).toContain("Confirm repository health scan");
+    expect(html).toContain(HEAD);
+    expect(html).toContain(`name="sha" value="${HEAD}"`);
+    expect(html).toContain('name="branch" value="main"');
+    expect(html).toContain('name="revision_id" value="3"');
+    expect(html).toContain('aria-label="Run repository health scan"');
+    expect(html).toContain("Sniff sniff");
+    expect(html).toContain("1.0 MiB");
+    expect(html).toContain("Severity floor");
+    expect(html).toContain("medium");
+    expect(html).toContain('href="/scan"');
+    expect(html).toContain("signed in as");
+  });
+
+  it("warns and re-confirms when the confirmed SHA is no longer the branch head", () => {
+    const html = renderScanConfirmPage({
+      csrfToken: "tok",
+      repo: "acme/widgets",
+      branch: "main",
+      sha: HEAD,
+      profileRevision: null,
+      severityFloor: "info",
+      limits: { diffCapBytes: null, reviewerTimeoutMs: 60_000, maxRetries: 0 },
+      notice: { kind: "sha", fromSha: "oldsha" },
+    });
+    expect(html).toContain("moved since you confirmed");
+    expect(html).toContain("oldsha");
+    expect(html).toContain(HEAD);
+    expect(html).toContain("no cap");
+    expect(html).toContain('name="revision_id" value=""');
+  });
+
+  it("warns when the confirmed branch name is stale", () => {
+    const html = renderScanConfirmPage({
+      csrfToken: "tok",
+      repo: "acme/widgets",
+      branch: "main",
+      sha: HEAD,
+      profileRevision: null,
+      severityFloor: "info",
+      limits: { diffCapBytes: 4096, reviewerTimeoutMs: 60_000, maxRetries: 0 },
+      notice: { kind: "branch", fromBranch: "develop" },
+    });
+    expect(html).toContain("you confirmed (develop)");
+    expect(html).not.toContain("The scan reviews this exact revision");
+  });
+
+  it("renders the scan page with identity, nav link, and the branded scan action", () => {
+    const html = renderScanPage({
+      canScan: true,
+      identity: { login: "octocat", avatarUrl: null },
+      csrfToken: "tok",
+      issueCreationEnabled: false,
+      profileRevision: null,
+      recentScans: [],
+    });
+    expect(html).toContain('aria-label="Run repository health scan"');
+    expect(html).toContain("Sniff sniff");
+    expect(html).toContain("signed in as");
+    expect(html).toContain('href="/scan"');
+    expect(html).toContain("GITHUB_ISSUE_CREATION_ENABLED=false");
+  });
+
+  it("titles scan jobs by revision instead of pull number and shows finding confidence", () => {
+    const { store, job } = scanJobStore();
+    const html = renderJob(job, store.listReviewerRuns(job.id), store.listLogs(job.id), {
+      prFindings: store.listFindings("acme/widgets", 0),
+    });
+    expect(html).toContain("Health scan · acme/widgets @ head111head1");
+    expect(html).not.toContain("acme/widgets#0</h1>");
+    expect(html).toContain("Aggregator confidence: 80%");
+  });
+
+  it("offers issue creation only for findings above the publication bar", () => {
+    const { store, job } = scanJobStore();
+    const html = renderJob(job, store.listReviewerRuns(job.id), store.listLogs(job.id), {
+      prFindings: store.listFindings("acme/widgets", 0),
+      csrfToken: "tok",
+      scanIssueCreation: {
+        enabled: true,
+        jobId: 9,
+        findings: [
+          {
+            fingerprint: "fpworthy00000001",
+            summary: "Unhandled promise rejection",
+            severity: "high",
+            confidence: 0.9,
+            agreed: ["correctness", "security"],
+            worthy: true,
+          },
+          {
+            fingerprint: "fpspec0000000001",
+            summary: "Might be a race",
+            severity: "low",
+            confidence: 0.4,
+            agreed: ["correctness"],
+            worthy: false,
+            unworthyReason: "confidence 40% is below the 70% publication bar",
+          },
+        ],
+      },
+    });
+    expect(html).toContain("Create GitHub issues");
+    expect(html).toContain('type="checkbox" name="fp[]" value="fpworthy00000001" checked');
+    expect(html).toContain('value="fpspec0000000001" disabled');
+    expect(html).toContain("Not offered: confidence 40% is below the 70% publication bar");
+    expect(html).toContain('action="/scan/issues/preview"');
+    expect(html).toContain('name="job_id" value="9"');
+  });
+
+  it("hides hidden markers on finding cards and shows a provenance note instead", () => {
+    const { store, job } = scanJobStore();
+    store.upsertFinding({
+      repoFullName: "acme/widgets",
+      prNumber: 0,
+      fingerprint: "fpmarker000000001",
+      status: "open",
+      reviewedSha: HEAD,
+      currentPath: "src/dirty.ts",
+      currentLine: 9,
+      summary: `<!-- maomao-finding id=fpmarker000000001 sha=${HEAD} -->\n**info**: dirty summary`,
+      body: "dirty body <!-- maomao-finding id=x sha=y -->",
+      severity: "low",
+      confidence: 0.5,
+      lastJobId: job.id,
+    });
+    const html = renderJob(job, store.listReviewerRuns(job.id), store.listLogs(job.id), {
+      prFindings: store.listFindings("acme/widgets", 0),
+    });
+    expect(html).not.toContain("<!-- maomao-finding");
+    expect(html).not.toContain("**info**:");
+    expect(html).toContain("dirty summary");
+    expect(html).toContain("dirty body");
+    // The marker's info becomes a small note at the bottom of the card.
+    expect(html).toContain("Maomao finding");
+    expect(html).toContain("fpmarker000000001");
+    expect(html).toContain("reported at");
+    expect(html).toContain("head111head1");
+  });
+
+  it("renders the issue preview with the proposed body, skips, and confirm action", () => {
+    const html = renderScanIssuePreviewPage({
+      identity: { login: "octocat", avatarUrl: null },
+      csrfToken: "tok",
+      job: { id: 9, repoFullName: "acme/widgets", headSha: HEAD },
+      items: [
+        {
+          fingerprint: "fpworthy00000001",
+          severity: "high",
+          title: "[maomao] HIGH: Unhandled promise rejection",
+          body: `<!-- maomao-scan-issue fpworthy00000001 @ ${HEAD} -->\n\n**HIGH** — rejects without a handler`,
+          agreed: ["correctness", "security"],
+          duplicates: [{ title: "promise rejects unhandled", url: "https://github.com/acme/widgets/issues/7" }],
+        },
+        {
+          fingerprint: "fpdedup000000001",
+          severity: "medium",
+          title: "[maomao] MEDIUM: Already tracked",
+          body: `<!-- maomao-scan-issue fpdedup000000001 @ ${HEAD} -->`,
+          agreed: [],
+          skip: {
+            reason: "a Maomao issue already tracks this finding",
+            url: "https://github.com/acme/widgets/issues/42",
+          },
+          duplicates: [],
+        },
+      ],
+      rejected: ["Might be a race: confidence 40% is below the 70% publication bar"],
+    });
+    expect(html).toContain("[maomao] HIGH: Unhandled promise rejection");
+    expect(html).toContain("Issues: write");
+    expect(html).toContain("a Maomao issue already tracks this finding");
+    expect(html).toContain("https://github.com/acme/widgets/issues/42");
+    expect(html).toContain("promise rejects unhandled");
+    expect(html).toContain("Might be a race: confidence 40% is below the 70% publication bar");
+    expect(html).toContain('aria-label="Create GitHub issues for selected findings"');
+    expect(html).toContain('name="fp[]" value="fpworthy00000001"');
+    expect(html).not.toContain('name="fp[]" value="fpdedup000000001"');
+    expect(html).toContain("Create 1 issue</button>");
   });
 });

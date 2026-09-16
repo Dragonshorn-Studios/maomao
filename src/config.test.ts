@@ -25,6 +25,12 @@ describe("loadConfig", () => {
     expect(config.maxDiffBytes).toBe(1_048_576);
     expect(config.repoRateLimitPerWindow).toBe(6);
     expect(config.opencode.maxRetries).toBe(1);
+    expect(config.issueCreationEnabled).toBe(false);
+  });
+
+  it("enables scan issue creation only when explicitly configured", () => {
+    expect(loadConfig({ GITHUB_ISSUE_CREATION_ENABLED: "true" }).issueCreationEnabled).toBe(true);
+    expect(loadConfig({ GITHUB_ISSUE_CREATION_ENABLED: "false" }).issueCreationEnabled).toBe(false);
   });
 
   it("parses numeric GitHub allowlists and defense-in-depth limits", () => {
@@ -55,6 +61,12 @@ describe("loadConfig", () => {
         ALLOWED_GITHUB_REPOSITORY_IDS: "R_kgDOabc",
       }),
     ).toThrow(/REST numeric IDs/);
+  });
+
+  it("fails fast when OPENCODE_TIMEOUT_MS is not positive", () => {
+    const base = { GITHUB_APP_ID: "1", GITHUB_APP_PRIVATE_KEY: "k", GITHUB_WEBHOOK_SECRET: "s" };
+    expect(() => assertRuntimeConfig(loadConfig({ ...base, OPENCODE_TIMEOUT_MS: "0" }))).toThrow(/OPENCODE_TIMEOUT_MS/);
+    expect(() => assertRuntimeConfig(loadConfig({ ...base, OPENCODE_TIMEOUT_MS: "-5" }))).toThrow(/OPENCODE_TIMEOUT_MS/);
   });
 
   it("reads UI password aliases and rejects a half-configured gate", () => {

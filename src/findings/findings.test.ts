@@ -492,3 +492,102 @@ describe("thread findings carry anchored hunks", () => {
     expect(row?.diff_note).toBeNull();
   });
 });
+
+describe("marker hygiene and resolve retries", () => {
+  const job = {
+    id: 9,
+    repo_full_name: "acme/widgets",
+    pr_number: 3,
+    installation_id: 1,
+    head_sha: "sha123",
+    pr_html_url: "https://github.com/acme/widgets/pull/3",
+  } as unknown as JobRow;
+
+  it("isolates resolve failures per thread and reports them", async () => {
+    const resolved: string[] = [];
+    const github = {
+      resolveReviewThread: async (_installationId: number, threadId: string) => {
+        if (threadId === "PRRT_bad") throw new Error("Could not resolve to a node with the global id");
+        resolved.push(threadId);
+      },
+    };
+    const snapshot = {
+      headSha: "sha123",
+      items: [
+        {
+          fingerprint: "fpbad00000000001",
+          status: "resolved" as const,
+          confidence: 0.9,
+          reason: "gone",
+          summary: "a",
+          threadId: "PRRT_bad",
+        },
+        {
+          fingerprint: "fpgood0000000001",
+          status: "resolved" as const,
+          confidence: 0.9,
+          reason: "gone",
+          summary: "b",
+          threadId: "PRRT_good",
+        },
+      ],
+    };
+    const applied = await applyReconciliationThreads({ github: github as never, job, snapshot });
+    // The bad thread id did not abort the loop.
+    expect(resolved).toEqual(["PRRT_good"]);
+    expect(applied.resolved).toEqual(["fpgood0000000001"]);
+    expect(applied.failed).toEqual([
+      { fingerprint: "fpbad00000000001", reason: expect.stringContaining("Could not resolve") },
+    ]);
+  });
+
+  it("persists thread-derived summaries without markers or severity prefixes", () => {
+    const store = new JobStore(openDb(":memory:"));
+    const marker = findingMarker("fpdirty000000001", "sha123");
+    const threads: ReviewThread[] = [
+      {
+        id: "PRRT_dirty",
+        isResolved: false,
+        path: "src/a.ts",
+        line: 2,
+        comments: [
+          {
+            id: "c1",
+            databaseId: 7,
+            body: `${marker}\n**info**: secret logged\n\nevidence paragraph`,
+            path: "src/a.ts",
+            line: 2,
+          },
+        ],
+      },
+    ];
+    persistThreadsAsFindings({ store, job, threads, postedFingerprints: ["fpdirty000000001"], diff: undefined });
+    const row = store.listFindings("acme/widgets", 3)[0];
+    expect(row?.summary).toBe("secret logged");
+    expect(row?.summary).not.toContain("<!--");
+    expect(row?.summary).not.toContain("**info**:");
+  });
+
+  it("strips hidden markers from persisted finding bodies", () => {
+    const store = new JobStore(openDb(":memory:"));
+    persistClassifications(
+      store,
+      job,
+      [
+        {
+          fingerprint: "fpbody00000000001",
+          status: "still_valid",
+          confidence: 0.9,
+          reason: "unchanged",
+          summary: "secret logged",
+          body: "evidence <!-- maomao-finding id=x sha=y --> more",
+        },
+      ],
+      undefined,
+    );
+    const row = store.listFindings("acme/widgets", 3)[0];
+    expect(row?.body).not.toContain("<!--");
+    expect(row?.body).toContain("evidence");
+    expect(row?.body).toContain("more");
+  });
+});

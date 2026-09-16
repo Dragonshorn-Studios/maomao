@@ -8,7 +8,7 @@ import type { OpenCodePort } from "../opencode/parse.js";
 import { buildVerifierPrompt } from "../prompts.js";
 import type { AggregatorFinding } from "../schema.js";
 import { parseVerifierResult } from "../schema.js";
-import { fingerprintFinding, parseFindingMarker } from "./identity.js";
+import { fingerprintFinding, parseFindingMarker, stripHtmlComments } from "./identity.js";
 import { boundContexts, collectFindingContext } from "./context.js";
 import type { ClassifiedFinding, FindingClassification, ReconciliationSnapshot } from "./types.js";
 import { currentFindingsForRisk } from "./types.js";
@@ -308,8 +308,8 @@ async function runVerifier(
   }
 }
 
-function summarizeComment(body: string): string {
-  const withoutMarker = body.replace(/<!--[\s\S]*?-->/g, "").replace(/\*\*[^*]+\*\*:\s*/g, "").trim();
+export function summarizeComment(body: string): string {
+  const withoutMarker = stripHtmlComments(body).replace(/\*\*[^*]+\*\*:\s*/g, "").trim();
   const first = withoutMarker.split("\n").find((line) => line.trim()) ?? "prior finding";
   return first.slice(0, 240);
 }

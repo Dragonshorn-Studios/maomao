@@ -5,6 +5,11 @@ import { PRODUCT_TAGLINE, type UiFlavor } from "./copy.js";
 import { brandMark } from "./glyphs.js";
 import { THEME_HREF } from "./theme.js";
 
+export interface UiIdentity {
+  login: string;
+  avatarUrl: string | null;
+}
+
 export interface PageOptions {
   showLogout?: boolean;
   live?: boolean;
@@ -13,7 +18,7 @@ export interface PageOptions {
   reviewUrl?: string;
   prFindings?: FindingRow[];
   csrfToken?: string;
-  identity?: { login: string; avatarUrl: string | null };
+  identity?: UiIdentity;
   /** Latest reviewed head SHA for this pull request, for stale-finding detection. */
   prHeadSha?: string;
   uiFlavor?: UiFlavor;
@@ -104,6 +109,9 @@ export function layout(title: string, body: string, options: PageOptions = {}): 
   <meta name="color-scheme" content="light dark"/>
   <meta name="description" content="Self-hosted multi-agent pull request review powered by OpenCode."/>
   <title>${escapeHtml(title)}</title>
+  <link rel="icon" href="/assets/favicon.svg" type="image/svg+xml"/>
+  <link rel="alternate icon" href="/assets/favicon.png"/>
+  <link rel="apple-touch-icon" href="/assets/icon.png"/>
   <link rel="stylesheet" href="${THEME_HREF}"/>
   <script>${APPEARANCE_BOOT}</script>
 </head>
@@ -118,6 +126,7 @@ export function layout(title: string, body: string, options: PageOptions = {}): 
       <button type="button" data-appearance="dark" aria-pressed="false">Dark</button>
       <button type="button" data-appearance="system" aria-pressed="true">System</button>
     </div>
+    <a class="top-link" href="/scan">scan</a>
     <a class="top-link" href="/health">health</a>
     ${identity}
     ${logout}

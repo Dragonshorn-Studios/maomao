@@ -5,6 +5,23 @@ export const FINDING_MARKER_PREFIX = "<!-- maomao-finding";
 export const FINDING_MARKER_RE =
   /<!--\s*maomao-finding\s+id=([A-Za-z0-9_-]+)\s+sha=([A-Za-z0-9_-]+)\s*-->/;
 
+/**
+ * Hidden marker embedded in issues created from health scans. The dedup
+ * search (GithubPort.listOpenIssuesByMarker) keys on the exact prefix built
+ * here — constructor and matcher live together so they cannot drift.
+ */
+export const SCAN_ISSUE_MARKER_PREFIX = "maomao-scan-issue";
+export const SCAN_ISSUE_MARKER_RE = /<\s*!--\s*maomao-scan-issue/g;
+
+export function scanIssueMarkerBase(fingerprint: string): string {
+  return `<!-- ${SCAN_ISSUE_MARKER_PREFIX} ${fingerprint}`;
+}
+
+/** HTML comments in finding text are Maomao markers, never content. */
+export function stripHtmlComments(value: string): string {
+  return value.replace(/<!--[\s\S]*?-->/g, "").trim();
+}
+
 const STOP_WORDS = new Set([
   "the",
   "this",

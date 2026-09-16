@@ -287,6 +287,16 @@ async function runJob(deps: PipelineDeps, jobId: number, signal: AbortSignal): P
           `Resolved ${applied.resolved.length} prior thread(s) after successful review (${applied.resolved.join(", ")})`,
         );
       }
+      for (const failure of applied.failed) {
+        store.log(jobId, `Could not resolve thread for ${failure.fingerprint}: ${failure.reason}`, "warn");
+        const item = snapshot.items.find((candidate) => candidate.fingerprint === failure.fingerprint);
+        // A resolve that failed must not leave the DB claiming a state GitHub
+        // does not have: keep the finding visible so the next run retries.
+        // (dismissed is a human override; moved was already republished.)
+        if (item?.status === "resolved") {
+          store.setFindingStatus(job.repo_full_name, job.pr_number, failure.fingerprint, "uncertain", "GitHub resolve failed; will retry next review");
+        }
+      }
     } catch (error) {
       store.log(jobId, `Thread resolve deferred: ${formatError(error)}`, "warn");
     }

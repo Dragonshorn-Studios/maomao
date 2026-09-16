@@ -1,8 +1,9 @@
 import type { JobRow, JobStore, ReviewerRunRow } from "../jobs/store.js";
 import type { FindingRow } from "../findings/types.js";
-import { fingerprintFinding } from "../findings/identity.js";
+import { fingerprintFinding, stripHtmlComments } from "../findings/identity.js";
 import { POLICIES_WITH_EXTERNAL, POLICIES_WITH_INTERNAL } from "../routing/types.js";
 import type { JobState } from "../config.js";
+import type { Severity } from "../schema.js";
 import { elapsedMs, escapeHtml, formatDuration, shortSha } from "../util.js";
 import {
   diffUnavailableCopy,
@@ -28,7 +29,7 @@ import {
   usageReportedCopy,
 } from "./copy.js";
 import { roleGlyph } from "./glyphs.js";
-import { csrfInput, layout, type PageOptions } from "./layout.js";
+import { csrfInput, layout, type PageOptions, type UiIdentity } from "./layout.js";
 import {
   findingLocation,
   formatCost,
@@ -123,11 +124,32 @@ export function renderHome(jobs: JobRow[], store: JobStore, options: PageOptions
   return layout("Maomao", body, options);
 }
 
+export type JobPageOptions = PageOptions & {
+  scanIssueCreation?: ScanIssueCreationData;
+  /** Provenance rows for a health-scan job (fingerprints → GitHub issues). */
+  scanIssues?: Array<{ fingerprint: string; issue_number: number; issue_url: string; title: string }>;
+};
+
+function renderScanIssuesAudit(rows: NonNullable<JobPageOptions["scanIssues"]>): string {
+  const items = rows
+    .map(
+      (row) => `<li>${
+        row.issue_number === 0
+          ? `<span class="muted">pending claim</span>`
+          : `<a href="${escapeHtml(row.issue_url)}">#${row.issue_number}</a>`
+      } — <code>${escapeHtml(row.fingerprint)}</code> ${escapeHtml(row.title)}</li>`,
+    )
+    .join("");
+  return `<h2>GitHub issues from this scan</h2>
+    <ul class="logs" aria-label="GitHub issues created from this scan">${items}</ul>
+    <p class="muted">Fingerprints are stable per finding, so rescans and retries reuse these links instead of creating duplicates.</p>`;
+}
+
 export function renderJob(
   job: JobRow,
   runs: ReviewerRunRow[],
   logs: { created_at: string; level: string; message: string }[],
-  options: PageOptions = {},
+  options: JobPageOptions = {},
 ): string {
   const metrics = jobMetricsFromRuns(job, runs);
   const state = jobStateLabel(job.state);
@@ -135,12 +157,16 @@ export function renderJob(
   const elapsed = formatDuration(elapsedMs(job.started_at, job.finished_at) ?? elapsedMs(job.created_at));
   const stale = job.state === "stale";
   const failedToRetry = retryableFailedCount(job, runs);
+  const isScan = job.job_type === "health_scan";
+  const heading = isScan
+    ? `Health scan · ${escapeHtml(job.repo_full_name)} @ ${escapeHtml(shortSha(job.head_sha, 12))}`
+    : `${escapeHtml(job.repo_full_name)}#${job.pr_number}`;
   const body = `
     <p class="crumb"><a href="/">Jobs</a> / job ${job.id}</p>
     ${options.notice ? `<p class="notice" role="status">${escapeHtml(options.notice)}</p>` : ""}
     ${options.error ? `<p class="error" role="alert">${escapeHtml(options.error)}</p>` : ""}
     ${stale ? `<p class="warn" role="status">${escapeHtml(staleBanner())}</p>` : ""}
-    <h1>${escapeHtml(job.repo_full_name)}#${job.pr_number}</h1>
+    <h1>${heading}</h1>
     <p class="lede">${escapeHtml(job.pr_title || "")}${flavor ? ` · ${escapeHtml(flavor)}` : ""}</p>
     ${
       job.state === "completed"
@@ -224,6 +250,8 @@ export function renderJob(
       prHeadSha: options.prHeadSha,
       prHtmlUrl: job.pr_html_url,
     })}
+    ${options.scanIssueCreation ? renderScanIssueCreation(options.scanIssueCreation, options.csrfToken) : ""}
+    ${options.scanIssues?.length ? renderScanIssuesAudit(options.scanIssues) : ""}
     <h2>Logs</h2>
     <ol class="logs" aria-label="Job logs">
       ${
@@ -236,7 +264,7 @@ export function renderJob(
       }
     </ol>
   `;
-  return layout(`${job.repo_full_name}#${job.pr_number}`, body, options);
+  return layout(isScan ? `Health scan · ${job.repo_full_name}` : `${job.repo_full_name}#${job.pr_number}`, body, options);
 }
 
 function renderQueueCard(job: JobRow, metrics: JobMetrics, uiFlavor?: UiFlavor): string {
@@ -725,13 +753,29 @@ function renderFindingCard(
     ? ` <a class="loc-link" href="${escapeHtml(permalink)}" title="Open this file at the exact reviewed revision on GitHub">view at this SHA</a>`
     : "";
   const diffBlock = renderFindingDiff(record);
+  // Hidden `<!-- maomao-finding … -->` markers (and any other HTML comments) are
+  // provenance, never content — strip them (plus the `**sev**:` prefix that old
+  // thread-derived summaries carried) and surface the marker info as a small
+  // note at the bottom of the card instead.
+  const displaySummary =
+    stripHtmlComments(input.summary)
+      .replace(/\*\*[^*]+\*\*:\s*/g, "")
+      .trim() ||
+    input.summary.trim() ||
+    "Prior finding";
+  const displayReason = input.reason ? stripHtmlComments(input.reason) : "";
+  const markerNote = record
+    ? `<p class="muted finding-marker">Maomao finding <code>${escapeHtml(record.fingerprint)}</code> · reported at <code>${escapeHtml(shortSha(record.reviewed_sha, 12))}</code></p>`
+    : "";
   const body = `
         ${override ? `<p class="finding-override" role="status"><strong>${escapeHtml(override)}</strong></p>` : ""}
         ${attention ? `<p><strong>${attention}</strong></p>` : ""}
-        ${input.reason ? `<p>${escapeHtml(input.reason)}</p>` : ""}
+        ${displayReason ? `<p>${escapeHtml(displayReason)}</p>` : ""}
         ${input.suggested ? `<p class="muted">Suggested check: ${escapeHtml(input.suggested)}</p>` : ""}
         ${input.agreed?.length ? `<p class="muted">reviewers: ${escapeHtml(input.agreed.join(", "))}</p>` : ""}
-        ${diffBlock}`;
+        ${record?.confidence != null ? `<p class="muted">Aggregator confidence: ${Math.round(record.confidence * 100)}%</p>` : ""}
+        ${diffBlock}
+        ${markerNote}`;
   if (collapsed) {
     return `<details class="${classes}">
         <summary>
@@ -739,7 +783,7 @@ function renderFindingCard(
           ${staleBadge}
           <span class="sev sev-${escapeHtml(input.severity)}"><span class="mark" aria-hidden="true">${sev.mark}</span> ${sev.text}</span>
           ${loc ? `<span class="loc">${escapeHtml(loc)}</span>` : ""}
-          <span class="finding-title">${escapeHtml(input.summary)}</span>
+          <span class="finding-title">${escapeHtml(displaySummary)}</span>
         </summary>
         ${input.category ? `<p class="muted">${escapeHtml(input.category)}</p>` : ""}
         ${body}
@@ -755,7 +799,7 @@ function renderFindingCard(
           ${input.agreed?.length ? `<span class="muted">reviewers: ${escapeHtml(input.agreed.join(", "))}</span>` : ""}
         </div>
         ${loc ? `<p class="loc">${escapeHtml(loc)}${locLink}</p>` : ""}
-        <h3>${escapeHtml(input.summary)}</h3>
+        <h3>${escapeHtml(displaySummary)}</h3>
         ${body}
       </article>`;
 }
@@ -1066,18 +1110,124 @@ export function renderPromptConfigPage(data: PromptConfigPageData): string {
 
 export interface ScanPageData {
   canScan: boolean;
-  identityLogin?: string;
+  identity?: UiIdentity;
   csrfToken?: string;
   issueCreationEnabled: boolean;
-  profileRevision?: { id: number; name: string } | null;
+  profileRevision: { id: number; name: string } | null;
+  recentScans: Array<{ id: number; repoFullName: string; headSha: string }>;
   error?: string;
+}
+
+/** Why a confirming POST was rejected; the page re-renders fresh values alongside it. */
+export type ScanConfirmNotice =
+  | { kind: "sha"; fromSha: string }
+  | { kind: "branch"; fromBranch: string }
+  | { kind: "revision" }
+  | { kind: "incomplete" };
+
+export interface ScanConfirmData {
+  identity?: UiIdentity;
+  csrfToken: string;
+  repo: string;
+  branch: string;
+  sha: string;
+  profileRevision: { id: number; name: string } | null;
+  /** Minimum persisted severity from the active profile revision ("info" when no revision is active). */
+  severityFloor: Severity;
+  /** Max diff size in bytes; null when the cap is disabled (`MAX_DIFF_BYTES=0`). */
+  limits: { diffCapBytes: number | null; reviewerTimeoutMs: number; maxRetries: number };
+  notice?: ScanConfirmNotice;
+}
+
+function formatBytes(bytes: number): string {
+  if (bytes >= 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MiB`;
+  if (bytes >= 1024) return `${Math.round(bytes / 1024)} KiB`;
+  return `${bytes} B`;
+}
+
+function scanConfirmNoticeText(notice: ScanConfirmNotice): string {
+  switch (notice.kind) {
+    case "sha":
+      return `The default branch moved since you confirmed: ${notice.fromSha} is no longer the head. Review the new SHA and confirm again.`;
+    case "branch":
+      return `The default branch is different from the one you confirmed (${notice.fromBranch}). Review and confirm again.`;
+    case "revision":
+      return "The active profile revision changed since you confirmed. Review the revision below and confirm again.";
+    case "incomplete":
+      return "Confirmation incomplete — the revision shown here is the one that will be scanned. Confirm again.";
+  }
+}
+
+export function renderScanConfirmPage(data: ScanConfirmData): string {
+  const notice = data.notice
+    ? `<p class="warn" role="alert">${escapeHtml(scanConfirmNoticeText(data.notice))}</p>`
+    : "";
+  const lede = data.notice
+    ? ""
+    : `<p class="lede">The scan reviews this exact revision, read-only. Nothing is created on GitHub by scanning.</p>`;
+  const body = `
+    <h1>Confirm repository health scan</h1>
+    ${notice}
+    ${lede}
+    <dl class="meta-grid">
+      <div>
+        <dt>Repository</dt>
+        <dd><code>${escapeHtml(data.repo)}</code></dd>
+      </div>
+      <div>
+        <dt>Default branch</dt>
+        <dd><code>${escapeHtml(data.branch)}</code></dd>
+      </div>
+      <div class="sha-block">
+        <dt>Head SHA</dt>
+        <dd><code class="sha">${escapeHtml(data.sha)}</code></dd>
+      </div>
+      <div>
+        <dt>Profile revision</dt>
+        <dd>${
+          data.profileRevision
+            ? `<code>#${data.profileRevision.id}</code> · ${escapeHtml(data.profileRevision.name)} (snapshotted onto the job)`
+            : "No active revision — env configuration applies"
+        }</dd>
+      </div>
+      <div>
+        <dt>Severity floor</dt>
+        <dd><code>${escapeHtml(data.severityFloor)}</code> — lower-severity findings are not persisted</dd>
+      </div>
+      <div>
+        <dt>Limits</dt>
+        <dd class="metric">diff cap ${escapeHtml(data.limits.diffCapBytes == null ? "no cap" : formatBytes(data.limits.diffCapBytes))} · reviewer timeout ${escapeHtml(formatDuration(data.limits.reviewerTimeoutMs))} · max retries ${data.limits.maxRetries}</dd>
+      </div>
+    </dl>
+    <form class="trigger" method="post" action="/scan">
+      ${csrfInput(data.csrfToken)}
+      <input type="hidden" name="repo" value="${escapeHtml(data.repo)}"/>
+      <input type="hidden" name="branch" value="${escapeHtml(data.branch)}"/>
+      <input type="hidden" name="sha" value="${escapeHtml(data.sha)}"/>
+      <input type="hidden" name="revision_id" value="${data.profileRevision ? String(data.profileRevision.id) : ""}"/>
+      <button type="submit" aria-label="Run repository health scan">Sniff sniff</button>
+      <a href="/scan">Cancel</a>
+    </form>`;
+  return layout("Confirm repository health scan", body, {
+    showLogout: Boolean(data.csrfToken),
+    csrfToken: data.csrfToken,
+    identity: data.identity,
+  });
 }
 
 export function renderScanPage(data: ScanPageData): string {
   const csrf = csrfInput(data.csrfToken);
+  const recentScans = data.recentScans.length
+    ? `<ul class="queue">${data.recentScans
+        .map(
+          (scan) =>
+            `<li><article class="specimen"><p class="specimen-title"><a href="/jobs/${scan.id}">Job ${scan.id} · ${escapeHtml(scan.repoFullName)}</a></p><div class="meta-row"><span class="pair">SHA <strong><code class="sha">${escapeHtml(shortSha(scan.headSha, 12))}</code></strong></span></div></article></li>`,
+        )
+        .join("")}</ul>`
+    : `<p class="muted">No completed scans yet.</p>`;
   const body = `
     <h1>Repository health scan</h1>
-    <p class="lede">Run a manual, read-only specialist scan of a repository's default branch and optionally create GitHub issues for validated findings. Nothing is created automatically.</p>
+    <p class="lede">Run a manual, read-only specialist scan of a repository's default branch. Issue creation is a separate, explicit step on a completed scan's job page. Nothing is created automatically.</p>
     ${data.error ? `<p class="error" role="alert">${escapeHtml(data.error)}</p>` : ""}
     ${data.canScan ? `
     <form class="trigger" method="post" action="/scan">
@@ -1089,20 +1239,149 @@ export function renderScanPage(data: ScanPageData): string {
       <button type="submit" aria-label="Run repository health scan">Sniff sniff</button>
     </form>
     <p class="muted">${data.profileRevision ? `Active profile revision: #${data.profileRevision.id} (${escapeHtml(data.profileRevision.name)}) — snapshotted onto the scan job.` : "No active profile revision — env configuration applies."}</p>
-    <h2>Create GitHub issues from a completed scan</h2>
+    <h2>Recent completed scans</h2>
+    ${recentScans}
     ${
       data.issueCreationEnabled
-        ? `<form class="trigger" method="post" action="/scan/issues">
-            ${csrf}
-            <label>Completed scan job ID <input name="job_id" required/></label>
-            <button type="submit" aria-label="Create GitHub issues for validated findings">Create issues for validated findings</button>
-          </form>
-          <p class="muted">Findings are deduplicated per repository + fingerprint; already-linked GitHub issues are skipped. Partial failures can be retried safely.</p>`
+        ? `<p class="muted">Open a completed scan to select findings, preview the proposed issues, and publish them. Findings are deduplicated per repository + fingerprint; already-linked GitHub issues are skipped, and partial failures can be retried safely.</p>`
         : `<p class="muted">Issue creation is disabled (GITHUB_ISSUE_CREATION_ENABLED=false).</p>`
     }`
     : `<p class="muted">Scanning requires an operator GitHub OAuth identity.</p>`}`;
   return layout("Repository health scan", body, {
     showLogout: data.canScan || Boolean(data.csrfToken),
     csrfToken: data.csrfToken,
+    identity: data.identity,
+  });
+}
+
+export interface ScanIssueCreationData {
+  enabled: boolean;
+  /** The completed health-scan job this form posts against. */
+  jobId: number;
+  findings: Array<{
+    fingerprint: string;
+    summary: string;
+    severity: string;
+    confidence: number | null;
+    agreed: string[];
+    worthy: boolean;
+    unworthyReason?: string;
+  }>;
+}
+
+function renderScanIssueCreation(data: ScanIssueCreationData, csrfToken: string | undefined): string {
+  if (!data.enabled) {
+    return `<h2>Create GitHub issues</h2><p class="muted">Issue creation is disabled (GITHUB_ISSUE_CREATION_ENABLED=false).</p>`;
+  }
+  if (data.findings.length === 0) {
+    return `<h2>Create GitHub issues</h2><p class="muted">No open findings in this scan.</p>`;
+  }
+  const rows = data.findings
+    .map((finding) => {
+      const meta = [
+        finding.severity.toUpperCase(),
+        finding.confidence != null ? `${Math.round(finding.confidence * 100)}%` : null,
+        finding.agreed.length ? `reviewers: ${finding.agreed.join(", ")}` : null,
+      ]
+        .filter(Boolean)
+        .join(" · ");
+      const checkbox = finding.worthy
+        ? `<input type="checkbox" name="fp[]" value="${escapeHtml(finding.fingerprint)}" checked/>`
+        : `<input type="checkbox" name="fp[]" value="${escapeHtml(finding.fingerprint)}" disabled/>`;
+      const note = finding.worthy
+        ? ""
+        : `<div class="muted">Not offered: ${escapeHtml(finding.unworthyReason ?? "speculative")}</div>`;
+      return `<div class="finding">
+        <label>${checkbox} <span class="sev sev-${escapeHtml(finding.severity)}">${escapeHtml(meta)}</span> ${escapeHtml(finding.summary)}</label>
+        ${note}
+      </div>`;
+    })
+    .join("");
+  return `<h2>Create GitHub issues</h2>
+    <p class="muted">Select concrete, validated findings to publish. Speculative observations (below the confidence and consensus bar) cannot be turned into issues.</p>
+    <form class="trigger" method="post" action="/scan/issues/preview">
+      ${csrfInput(csrfToken)}
+      <input type="hidden" name="job_id" value="${data.jobId}"/>
+      ${rows}
+      <button type="submit">Preview issues for selected findings</button>
+    </form>`;
+}
+
+export interface ScanIssuePreviewItem {
+  fingerprint: string;
+  severity: string;
+  title: string;
+  /** The exact Markdown body that will be published (marker included, secrets redacted). */
+  body: string;
+  agreed: string[];
+  /** Present when publication will skip this finding, with the reason and existing issue link if known. */
+  skip?: { reason: string; url?: string };
+  /** Set when the remote dedup check could not run; the skip state is then unverified. */
+  dedupCheckFailed?: boolean;
+  /** Likely human-authored open issues about the same problem, for review only. */
+  duplicates: Array<{ title: string; url: string }>;
+}
+
+export interface ScanIssuePreviewData {
+  identity?: UiIdentity;
+  csrfToken: string;
+  job: { id: number; repoFullName: string; headSha: string };
+  items: ScanIssuePreviewItem[];
+  rejected: string[];
+}
+
+export function renderScanIssuePreviewPage(data: ScanIssuePreviewData): string {
+  const creatable = data.items.filter((item) => !item.skip);
+  const cards = data.items
+    .map((item) => {
+      const skip = item.skip
+        ? `<p class="muted" role="status">Will be skipped: ${escapeHtml(item.skip.reason)}${
+            item.skip.url ? ` (<a href="${escapeHtml(item.skip.url)}">#${escapeHtml(String(item.skip.url.split("/").pop() ?? ""))}</a>)` : ""
+          }</p>`
+        : "";
+      const dedupCheck = item.dedupCheckFailed && !item.skip
+        ? `<p class="warn" role="alert">Remote dedup check failed for this finding — it may already be tracked; publication may duplicate or fail.</p>`
+        : "";
+      const duplicates = item.duplicates.length
+        ? `<p class="muted">Possibly related open issues (review before publishing; Maomao will not modify them):</p><ul>${item.duplicates
+            .map((d) => `<li><a href="${escapeHtml(d.url)}">${escapeHtml(d.title)}</a></li>`)
+            .join("")}</ul>`
+        : "";
+      return `<article class="finding">
+        <div class="finding-head"><span class="sev sev-${escapeHtml(item.severity)}">${escapeHtml(item.severity.toUpperCase())}</span>${
+          item.agreed.length ? `<span class="muted">reviewers: ${escapeHtml(item.agreed.join(", "))}</span>` : ""
+        }</div>
+        <h3>${escapeHtml(item.title)}</h3>
+        <pre class="diff-panel" aria-label="Proposed issue body">${escapeHtml(item.body)}</pre>
+        ${skip}
+        ${dedupCheck}
+        ${duplicates}
+      </article>`;
+    })
+    .join("");
+  const rejected = data.rejected.length
+    ? `<p class="warn" role="alert">${data.rejected.length} selected finding(s) could not be published: ${escapeHtml(data.rejected.join("; "))}</p>`
+    : "";
+  const confirmForm =
+    creatable.length === 0
+      ? `<p class="muted">Nothing left to publish — every selected finding is already tracked. Retrying is safe.</p>`
+      : `<form class="trigger" method="post" action="/scan/issues">
+          ${csrfInput(data.csrfToken)}
+          <input type="hidden" name="job_id" value="${data.job.id}"/>
+          ${creatable.map((item) => `<input type="hidden" name="fp[]" value="${escapeHtml(item.fingerprint)}"/>`).join("")}
+          <button type="submit" aria-label="Create GitHub issues for selected findings">Create ${creatable.length} issue${creatable.length === 1 ? "" : "s"}</button>
+          <a href="/jobs/${data.job.id}">Cancel</a>
+        </form>`;
+  const body = `
+    <p class="crumb"><a href="/jobs/${data.job.id}">Job ${data.job.id}</a> / preview issues</p>
+    <h1>Preview GitHub issues</h1>
+    <p class="lede">Target: <code>${escapeHtml(data.job.repoFullName)}</code> at <code class="sha">${escapeHtml(shortSha(data.job.headSha, 12))}</code>. Publication uses the GitHub App installation identity (never the operator's OAuth token) and requires the App permission <strong>Issues: write</strong>. Selected: ${data.items.length} finding(s), ${creatable.length} to be created.</p>
+    ${rejected}
+    ${cards}
+    ${confirmForm}`;
+  return layout("Preview GitHub issues", body, {
+    showLogout: Boolean(data.csrfToken),
+    csrfToken: data.csrfToken,
+    identity: data.identity,
   });
 }
