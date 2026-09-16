@@ -1,6 +1,6 @@
 import type { JobRow, JobStore, ReviewerRunRow } from "../jobs/store.js";
 import type { FindingRow } from "../findings/types.js";
-import { fingerprintFinding } from "../findings/identity.js";
+import { fingerprintFinding, stripHtmlComments } from "../findings/identity.js";
 import { POLICIES_WITH_EXTERNAL, POLICIES_WITH_INTERNAL } from "../routing/types.js";
 import type { JobState } from "../config.js";
 import type { Severity } from "../schema.js";
@@ -753,14 +753,29 @@ function renderFindingCard(
     ? ` <a class="loc-link" href="${escapeHtml(permalink)}" title="Open this file at the exact reviewed revision on GitHub">view at this SHA</a>`
     : "";
   const diffBlock = renderFindingDiff(record);
+  // Hidden `<!-- maomao-finding … -->` markers (and any other HTML comments) are
+  // provenance, never content — strip them (plus the `**sev**:` prefix that old
+  // thread-derived summaries carried) and surface the marker info as a small
+  // note at the bottom of the card instead.
+  const displaySummary =
+    stripHtmlComments(input.summary)
+      .replace(/\*\*[^*]+\*\*:\s*/g, "")
+      .trim() ||
+    input.summary.trim() ||
+    "Prior finding";
+  const displayReason = input.reason ? stripHtmlComments(input.reason) : "";
+  const markerNote = record
+    ? `<p class="muted finding-marker">Maomao finding <code>${escapeHtml(record.fingerprint)}</code> · reported at <code>${escapeHtml(shortSha(record.reviewed_sha, 12))}</code></p>`
+    : "";
   const body = `
         ${override ? `<p class="finding-override" role="status"><strong>${escapeHtml(override)}</strong></p>` : ""}
         ${attention ? `<p><strong>${attention}</strong></p>` : ""}
-        ${input.reason ? `<p>${escapeHtml(input.reason)}</p>` : ""}
+        ${displayReason ? `<p>${escapeHtml(displayReason)}</p>` : ""}
         ${input.suggested ? `<p class="muted">Suggested check: ${escapeHtml(input.suggested)}</p>` : ""}
         ${input.agreed?.length ? `<p class="muted">reviewers: ${escapeHtml(input.agreed.join(", "))}</p>` : ""}
         ${record?.confidence != null ? `<p class="muted">Aggregator confidence: ${Math.round(record.confidence * 100)}%</p>` : ""}
-        ${diffBlock}`;
+        ${diffBlock}
+        ${markerNote}`;
   if (collapsed) {
     return `<details class="${classes}">
         <summary>
@@ -768,7 +783,7 @@ function renderFindingCard(
           ${staleBadge}
           <span class="sev sev-${escapeHtml(input.severity)}"><span class="mark" aria-hidden="true">${sev.mark}</span> ${sev.text}</span>
           ${loc ? `<span class="loc">${escapeHtml(loc)}</span>` : ""}
-          <span class="finding-title">${escapeHtml(input.summary)}</span>
+          <span class="finding-title">${escapeHtml(displaySummary)}</span>
         </summary>
         ${input.category ? `<p class="muted">${escapeHtml(input.category)}</p>` : ""}
         ${body}
@@ -784,7 +799,7 @@ function renderFindingCard(
           ${input.agreed?.length ? `<span class="muted">reviewers: ${escapeHtml(input.agreed.join(", "))}</span>` : ""}
         </div>
         ${loc ? `<p class="loc">${escapeHtml(loc)}${locLink}</p>` : ""}
-        <h3>${escapeHtml(input.summary)}</h3>
+        <h3>${escapeHtml(displaySummary)}</h3>
         ${body}
       </article>`;
 }

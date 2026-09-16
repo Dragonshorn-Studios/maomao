@@ -231,3 +231,27 @@ describe("scan job SHA staling", () => {
     expect(store.getJob(second.job.id)?.state).toBe("queued");
   });
 });
+
+describe("setFindingStatus", () => {
+  it("rewrites only the targeted finding row", () => {
+    const store = new JobStore(openDb(":memory:"));
+    for (const fingerprint of ["fptarget00000001", "fpother000000001"]) {
+      store.upsertFinding({
+        repoFullName: "acme/widgets",
+        prNumber: 7,
+        fingerprint,
+        status: "resolved",
+        reviewedSha: "sha123",
+        currentPath: "a.ts",
+        summary: "thing",
+        lastJobId: 1,
+      });
+    }
+    store.setFindingStatus("acme/widgets", 7, "fptarget00000001", "uncertain", "GitHub resolve failed; will retry next review");
+    const targeted = store.getFinding("acme/widgets", 7, "fptarget00000001");
+    expect(targeted?.status).toBe("uncertain");
+    expect(targeted?.reconciliation_reason).toBe("GitHub resolve failed; will retry next review");
+    const untouched = store.getFinding("acme/widgets", 7, "fpother000000001");
+    expect(untouched?.status).toBe("resolved");
+  });
+});

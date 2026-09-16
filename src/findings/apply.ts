@@ -2,7 +2,8 @@ import type { GithubPort, ReviewThread } from "../github/client.js";
 import { isMaomaoThread, threadRoot } from "../github/client.js";
 import type { JobRow, JobStore } from "../jobs/store.js";
 import { anchoredDiffHunk } from "./context.js";
-import { parseFindingMarker } from "./identity.js";
+import { parseFindingMarker, stripHtmlComments } from "./identity.js";
+import { summarizeComment } from "./reconcile.js";
 import type { ClassifiedFinding, FindingDiffNote, FindingStatus, ReconciliationSnapshot } from "./types.js";
 
 export function findingDiffContext(
@@ -38,10 +39,11 @@ export async function applyReconciliationThreads(input: {
   job: JobRow;
   snapshot: ReconciliationSnapshot;
   postedFingerprints?: Iterable<string>;
-}): Promise<{ resolved: string[]; skipped: string[] }> {
+}): Promise<{ resolved: string[]; skipped: string[]; failed: Array<{ fingerprint: string; reason: string }> }> {
   const posted = new Set(input.postedFingerprints ?? []);
   const resolved: string[] = [];
   const skipped: string[] = [];
+  const failed: Array<{ fingerprint: string; reason: string }> = [];
   for (const item of input.snapshot.items) {
     if (!item.threadId) {
       skipped.push(item.fingerprint);
@@ -52,13 +54,21 @@ export async function applyReconciliationThreads(input: {
       continue;
     }
     if (item.status === "resolved" || item.status === "dismissed" || item.status === "moved") {
-      await input.github.resolveReviewThread(input.job.installation_id, item.threadId);
-      resolved.push(item.fingerprint);
+      // Isolate failures: one bad thread id must not leave the other threads open.
+      try {
+        await input.github.resolveReviewThread(input.job.installation_id, item.threadId);
+        resolved.push(item.fingerprint);
+      } catch (error) {
+        failed.push({
+          fingerprint: item.fingerprint,
+          reason: error instanceof Error ? error.message : String(error),
+        });
+      }
     } else {
       skipped.push(item.fingerprint);
     }
   }
-  return { resolved, skipped };
+  return { resolved, skipped, failed };
 }
 
 export function persistClassifications(
@@ -102,7 +112,8 @@ export function persistClassifications(
       currentLine: item.currentLine ?? item.originalLine,
       category: item.category,
       summary: item.summary,
-      body: item.body,
+      // Thread-derived bodies carry the hidden comment marker; store clean text.
+      body: item.body ? stripHtmlComments(item.body) || null : null,
       severity: item.severity,
       confidence: item.confidence,
       reconciliationConfidence: item.confidence,
@@ -154,7 +165,9 @@ export function persistThreadsAsFindings(input: {
       originalLine: existing?.original_line ?? root?.line ?? thread.line,
       currentPath: threadPath,
       currentLine: threadLine,
-      summary: existing?.summary || (root?.body ?? marker.id).slice(0, 240),
+      // The raw comment body starts with the hidden marker; persist clean text
+      // so the card never renders `<!-- maomao-finding … -->` as content.
+      summary: existing?.summary || summarizeComment(root?.body ?? ""),
       diffHunk: context.diffHunk,
       diffNote: context.diffNote,
       lastJobId: input.job.id,

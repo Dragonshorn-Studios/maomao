@@ -766,6 +766,36 @@ describe("repository health scan UI", () => {
     expect(html).toContain('name="job_id" value="9"');
   });
 
+  it("hides hidden markers on finding cards and shows a provenance note instead", () => {
+    const { store, job } = scanJobStore();
+    store.upsertFinding({
+      repoFullName: "acme/widgets",
+      prNumber: 0,
+      fingerprint: "fpmarker000000001",
+      status: "open",
+      reviewedSha: HEAD,
+      currentPath: "src/dirty.ts",
+      currentLine: 9,
+      summary: `<!-- maomao-finding id=fpmarker000000001 sha=${HEAD} -->\n**info**: dirty summary`,
+      body: "dirty body <!-- maomao-finding id=x sha=y -->",
+      severity: "low",
+      confidence: 0.5,
+      lastJobId: job.id,
+    });
+    const html = renderJob(job, store.listReviewerRuns(job.id), store.listLogs(job.id), {
+      prFindings: store.listFindings("acme/widgets", 0),
+    });
+    expect(html).not.toContain("<!-- maomao-finding");
+    expect(html).not.toContain("**info**:");
+    expect(html).toContain("dirty summary");
+    expect(html).toContain("dirty body");
+    // The marker's info becomes a small note at the bottom of the card.
+    expect(html).toContain("Maomao finding");
+    expect(html).toContain("fpmarker000000001");
+    expect(html).toContain("reported at");
+    expect(html).toContain("head111head1");
+  });
+
   it("renders the issue preview with the proposed body, skips, and confirm action", () => {
     const html = renderScanIssuePreviewPage({
       identity: { login: "octocat", avatarUrl: null },

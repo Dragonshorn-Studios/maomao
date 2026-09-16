@@ -634,6 +634,25 @@ export class JobStore {
   }
 
   /**
+   * Targeted status rewrite for one finding row (e.g. downgrading a "resolved"
+   * whose GitHub thread resolve failed, so the next run retries it).
+   */
+  setFindingStatus(
+    repoFullName: string,
+    prNumber: number,
+    fingerprint: string,
+    status: FindingStatus,
+    reconciliationReason: string,
+  ): void {
+    this.db
+      .prepare(
+        `UPDATE findings SET status = ?, reconciliation_reason = ?, updated_at = ?
+         WHERE repo_full_name = ? AND pr_number = ? AND fingerprint = ?`,
+      )
+      .run(status, reconciliationReason, nowIso(), repoFullName, prNumber, fingerprint);
+  }
+
+  /**
    * Deletes pending claims (issue_number 0) left behind by a crashed creation
    * loop. Only safe at boot — while the process runs, an in-flight loop may own
    * such a row. Returns the number of claims removed.

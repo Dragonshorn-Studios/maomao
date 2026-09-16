@@ -17,6 +17,11 @@ export function scanIssueMarkerBase(fingerprint: string): string {
   return `<!-- ${SCAN_ISSUE_MARKER_PREFIX} ${fingerprint}`;
 }
 
+/** HTML comments in finding text are Maomao markers, never content. */
+export function stripHtmlComments(value: string): string {
+  return value.replace(/<!--[\s\S]*?-->/g, "").trim();
+}
+
 const STOP_WORDS = new Set([
   "the",
   "this",
