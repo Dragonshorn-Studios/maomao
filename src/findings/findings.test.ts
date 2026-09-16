@@ -795,6 +795,33 @@ describe("marker hygiene and resolve retries", () => {
     expect(row?.github_thread_id).toBe("PRRT_caught");
     expect(row?.reconciliation_reason).toBe("GitHub thread already resolved");
   });
+
+  it("does not re-attach a republished fingerprint to the already-resolved old thread", () => {
+    const store = new JobStore(openDb(":memory:"));
+    const fingerprint = "fprepub0000000001";
+    const marker = findingMarker(fingerprint, "sha123");
+    persistThreadsAsFindings({
+      store,
+      job,
+      threads: [
+        {
+          id: "PRRT_new",
+          isResolved: false,
+          comments: [{ id: "c-new", databaseId: 21, body: `${marker}\n**high**: leak`, path: "src/a.ts", line: 2 }],
+        },
+        {
+          id: "PRRT_old",
+          isResolved: true,
+          comments: [{ id: "c-old", databaseId: 20, body: `${marker}\n**high**: leak`, path: "src/a.ts", line: 2 }],
+        },
+      ],
+      postedFingerprints: [fingerprint],
+    });
+    const row = store.getFinding(job.repo_full_name, job.pr_number, fingerprint);
+    expect(row?.status).toBe("open");
+    expect(row?.github_thread_id).toBe("PRRT_new");
+    expect(row?.github_comment_id).toBe("21");
+  });
 });
 
 describe("scan issue close guards", () => {
@@ -885,6 +912,114 @@ describe("scan issue close guards", () => {
     expect(result.skipped.map((item) => item.reason).join("\n")).toContain("missing the Maomao scan marker");
     expect(result.skipped.map((item) => item.reason).join("\n")).toContain("refusing to close pull request");
     expect(result.skipped.map((item) => item.reason).join("\n")).toContain("no Maomao GitHub issue linked");
+  });
+
+  function recordIssue(store: JobStore, fingerprint: string, issueNumber: number): void {
+    store.recordScanIssue({
+      jobId: job.id,
+      repoFullName: job.repo_full_name,
+      fingerprint,
+      issueNumber,
+      issueUrl: `https://github.com/acme/widgets/issues/${issueNumber}`,
+      title: "leak",
+    });
+  }
+
+  function resolvedItem(fingerprint: string) {
+    return { fingerprint, status: "resolved" as const, confidence: 1, reason: "gone", summary: "leak" };
+  }
+
+  it("skips already-closed, missing, and capability-less issues and records thrown close errors", async () => {
+    const store = new JobStore(openDb(":memory:"));
+    recordIssue(store, "fpalready00000001", 20);
+    recordIssue(store, "fpclosednomark001", 21);
+    recordIssue(store, "fpmissing00000001", 22);
+    recordIssue(store, "fpthrown000000001", 23);
+    recordIssue(store, "fpnocap0000000001", 24);
+    const closed: number[] = [];
+    const result = await closeResolvedScanIssues({
+      store,
+      job,
+      github: {
+        getIssue: async (_id: number, _owner: string, _repo: string, number: number) => {
+          if (number === 20) {
+            return {
+              number: 20,
+              title: "leak",
+              body: `${scanIssueMarkerBase("fpalready00000001")} @ scanhead -->\n\nleak`,
+              state: "closed",
+              url: "https://github.com/acme/widgets/issues/20",
+              isPullRequest: false,
+            };
+          }
+          if (number === 21) {
+            return {
+              number: 21,
+              title: "edited",
+              body: "human edited the marker out",
+              state: "closed",
+              url: "https://github.com/acme/widgets/issues/21",
+              isPullRequest: false,
+            };
+          }
+          if (number === 22) return undefined;
+          return {
+            number: 23,
+            title: "leak",
+            body: `${scanIssueMarkerBase("fpthrown000000001")} @ scanhead -->\n\nleak`,
+            state: "open",
+            url: "https://github.com/acme/widgets/issues/23",
+            isPullRequest: false,
+          };
+        },
+        closeIssue: async (_id: number, _owner: string, _repo: string, number: number) => {
+          closed.push(number);
+          throw new Error("GitHub 502");
+        },
+      } as never,
+      items: [
+        resolvedItem("fpalready00000001"),
+        resolvedItem("fpclosednomark001"),
+        resolvedItem("fpmissing00000001"),
+        resolvedItem("fpthrown000000001"),
+      ],
+    });
+    expect(closed).toEqual([23]);
+    expect(result.closed).toEqual([]);
+    expect(result.skipped).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          fingerprint: "fpalready00000001",
+          wantedClose: false,
+          reason: expect.stringContaining("already closed"),
+        }),
+        expect.objectContaining({
+          fingerprint: "fpclosednomark001",
+          wantedClose: false,
+          reason: expect.stringContaining("already closed"),
+        }),
+        expect.objectContaining({
+          fingerprint: "fpmissing00000001",
+          wantedClose: true,
+          reason: expect.stringContaining("was not found"),
+        }),
+      ]),
+    );
+    expect(result.failed).toEqual([{ fingerprint: "fpthrown000000001", reason: "GitHub 502" }]);
+
+    const noCap = await closeResolvedScanIssues({
+      store,
+      job,
+      github: {} as never,
+      items: [resolvedItem("fpnocap0000000001")],
+    });
+    expect(noCap.skipped).toEqual([
+      expect.objectContaining({
+        fingerprint: "fpnocap0000000001",
+        wantedClose: true,
+        reason: "GitHub client cannot close issues",
+      }),
+    ]);
   });
 });
 

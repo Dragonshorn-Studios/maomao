@@ -1840,6 +1840,77 @@ describe("finding reconciliation", () => {
     expect(store.getFinding("acme/widgets", 4, fingerprint)?.status).toBe("resolved");
   });
 
+  it("re-verifies a stored resolved finding when its GitHub thread is still open", async () => {
+    const fingerprint = fingerprintFinding(finding);
+    const config = loadConfig({
+      REVIEWER_ROLES: "correctness",
+      OPENCODE_REVIEWER_MODEL: "test/model",
+      POST_EMPTY_REVIEW: "true",
+    });
+    const store = new JobStore(openDb(":memory:"));
+    const created = enqueueJob(store, config, "reopensha");
+    store.upsertFinding({
+      repoFullName: created.job.repo_full_name,
+      prNumber: created.job.pr_number,
+      fingerprint,
+      status: "resolved",
+      reviewedSha: "oldsha",
+      summary: finding.summary,
+      githubThreadId: `thread-${fingerprint}`,
+    });
+    let verified = false;
+    const resolved: string[] = [];
+    await createPipeline({
+      config,
+      store,
+      github: githubPort({
+        listReviewThreads: async () => [threadFor(fingerprint)],
+        resolveReviewThread: async (_id, threadId) => {
+          resolved.push(threadId);
+        },
+      }),
+      checkout: await fixtureCheckout(),
+      opencode: {
+        async run(input) {
+          if (input.prompt.includes("finding verifier")) {
+            verified = true;
+            return {
+              stdout: "",
+              stderr: "",
+              exitCode: 0,
+              text: JSON.stringify({
+                classifications: [
+                  { fingerprint, status: "still_valid", confidence: 0.93, reason: "the bug is still in HEAD" },
+                ],
+              }),
+              usage: {},
+            };
+          }
+          if (input.prompt.includes("Role id:")) {
+            return { stdout: "", stderr: "", exitCode: 0, text: reviewerJson("correctness"), usage: {} };
+          }
+          return {
+            stdout: "",
+            stderr: "",
+            exitCode: 0,
+            text: JSON.stringify({
+              verdict: "comment",
+              summary: "still broken",
+              findings: [finding],
+            }),
+            usage: {},
+          };
+        },
+      },
+    }).run(created.job.id);
+    expect(verified).toBe(true);
+    expect(resolved).toEqual([]);
+    expect(store.getJob(created.job.id)?.state).toBe("completed");
+    const row = store.getFinding("acme/widgets", 4, fingerprint);
+    expect(row?.status).toBe("still_valid");
+    expect(row?.reconciliation_reason).toContain("still in HEAD");
+  });
+
   it("catches a GitHub-already-resolved thread and does not call resolveReviewThread", async () => {
     const fingerprint = fingerprintFinding(finding);
     const config = loadConfig({
@@ -2974,6 +3045,221 @@ describe("repository health scan", () => {
     }).run(created.job.id);
     expect(store.getFinding("acme/widgets", 0, "fpkeep00000000001")?.status).toBe("uncertain");
     expect(store.getFinding("acme/widgets", 0, "fpkeep00000000001")?.reconciliation_reason).toContain("low confidence");
+  });
+
+  it("keeps a rediscovered scan finding open and does not close its issue", async () => {
+    const config = loadConfig({
+      REVIEWER_ROUTING: "fixed",
+      REVIEWER_ROLES: "correctness",
+      OPENCODE_REVIEWER_MODEL: "test/model",
+      POST_EMPTY_REVIEW: "true",
+      GITHUB_APP_ID: "1",
+      GITHUB_WEBHOOK_SECRET: "s",
+      GITHUB_APP_PRIVATE_KEY: "k",
+    });
+    const store = new JobStore(openDb(":memory:"));
+    const priorFinding = {
+      severity: "high" as const,
+      confidence: 0.9,
+      category: "security",
+      file: "src/billing.ts",
+      line: 2,
+      summary: "secret printed to stdout",
+      body: "handle with care",
+    };
+    const fingerprint = fingerprintFinding(priorFinding);
+    const closed: number[] = [];
+    let verifierCalls = 0;
+
+    const run = async (sha: string) => {
+      const created = store.enqueue({
+        ...jobInput(sha),
+        reviewers: [],
+        jobType: "health_scan" as const,
+        prNumber: 0,
+        headSha: sha,
+        scanBranch: "main",
+      });
+      store.recordScanIssue({
+        jobId: created.job.id,
+        repoFullName: created.job.repo_full_name,
+        fingerprint,
+        issueNumber: 55,
+        issueUrl: "https://github.com/acme/widgets/issues/55",
+        title: priorFinding.summary,
+      });
+      await createPipeline({
+        config,
+        store,
+        github: {
+          ...scanGithub(),
+          getIssue: async () => ({
+            number: 55,
+            title: priorFinding.summary,
+            body: `<!-- maomao-scan-issue ${fingerprint} @ old -->\n\nsecret`,
+            state: "open",
+            url: "https://github.com/acme/widgets/issues/55",
+            isPullRequest: false,
+          }),
+          closeIssue: async (_id, _owner, _repo, number) => {
+            closed.push(number);
+          },
+        },
+        checkout: await fixtureCheckout(),
+        opencode: {
+          async run(input) {
+            if (input.prompt.includes("finding verifier")) {
+              verifierCalls += 1;
+              return {
+                stdout: "",
+                stderr: "",
+                exitCode: 0,
+                text: JSON.stringify({
+                  classifications: [
+                    { fingerprint, status: "resolved", confidence: 0.99, reason: "should not classify a rediscovered finding" },
+                  ],
+                }),
+                usage: {},
+              };
+            }
+            const roleMatch = input.prompt.match(/Role id: (\w+)/);
+            const text = roleMatch
+              ? JSON.stringify({
+                  schema_version: 1,
+                  reviewer: roleMatch[1],
+                  verdict: "findings",
+                  findings: [
+                    {
+                      severity: priorFinding.severity,
+                      confidence: priorFinding.confidence,
+                      category: priorFinding.category,
+                      file: priorFinding.file,
+                      line: priorFinding.line,
+                      summary: priorFinding.summary,
+                      reason: priorFinding.body,
+                    },
+                  ],
+                })
+              : JSON.stringify({
+                  schema_version: 1,
+                  verdict: "comment",
+                  summary: "secret logging found",
+                  findings: [priorFinding],
+                });
+            return { stdout: text, stderr: "", exitCode: 0, text, usage: { cost: 0.01, totalTokens: 10, complete: true } };
+          },
+        },
+      }).run(created.job.id);
+      return created.job.id;
+    };
+
+    await run("scan0001scan0001scan0001scan0001");
+    const second = await run("scan0004scan0004scan0004scan0004");
+    expect(store.getJob(second)?.state).toBe("completed");
+    expect(store.getFinding("acme/widgets", 0, fingerprint)?.status).toBe("open");
+    expect(closed).toEqual([]);
+    expect(verifierCalls).toBe(0);
+  });
+
+  it("does not close scan issues when a newer scan marks the job stale during verify", async () => {
+    const config = loadConfig({
+      REVIEWER_ROUTING: "fixed",
+      REVIEWER_ROLES: "correctness",
+      OPENCODE_REVIEWER_MODEL: "test/model",
+      POST_EMPTY_REVIEW: "true",
+      GITHUB_APP_ID: "1",
+      GITHUB_WEBHOOK_SECRET: "s",
+      GITHUB_APP_PRIVATE_KEY: "k",
+    });
+    const store = new JobStore(openDb(":memory:"));
+    store.upsertFinding({
+      repoFullName: "acme/widgets",
+      prNumber: 0,
+      fingerprint: "fpstale0000000001",
+      status: "open",
+      reviewedSha: "old",
+      summary: "secret printed to stdout",
+      lastJobId: 1,
+    });
+    const created = store.enqueue({
+      ...jobInput("scan0005scan0005scan0005scan0005"),
+      reviewers: [],
+      jobType: "health_scan",
+      prNumber: 0,
+      headSha: "scan0005scan0005scan0005scan0005",
+      scanBranch: "main",
+    });
+    store.recordScanIssue({
+      jobId: created.job.id,
+      repoFullName: created.job.repo_full_name,
+      fingerprint: "fpstale0000000001",
+      issueNumber: 66,
+      issueUrl: "https://github.com/acme/widgets/issues/66",
+      title: "secret printed to stdout",
+    });
+    const closed: number[] = [];
+    await createPipeline({
+      config,
+      store,
+      github: {
+        ...scanGithub(),
+        getIssue: async () => ({
+          number: 66,
+          title: "secret printed to stdout",
+          body: "<!-- maomao-scan-issue fpstale0000000001 @ old -->\n\nsecret",
+          state: "open",
+          url: "https://github.com/acme/widgets/issues/66",
+          isPullRequest: false,
+        }),
+        closeIssue: async (_id, _owner, _repo, number) => {
+          closed.push(number);
+        },
+      },
+      checkout: await fixtureCheckout(),
+      opencode: {
+        async run(input) {
+          if (input.prompt.includes("finding verifier")) {
+            store.enqueue({
+              ...jobInput("scan0006scan0006scan0006scan0006"),
+              reviewers: [],
+              jobType: "health_scan",
+              prNumber: 0,
+              headSha: "scan0006scan0006scan0006scan0006",
+              scanBranch: "main",
+            });
+            return {
+              stdout: "",
+              stderr: "",
+              exitCode: 0,
+              text: JSON.stringify({
+                classifications: [
+                  {
+                    fingerprint: "fpstale0000000001",
+                    status: "resolved",
+                    confidence: 0.99,
+                    reason: "the log line is gone from HEAD",
+                  },
+                ],
+              }),
+              usage: {},
+            };
+          }
+          if (input.prompt.includes("Role id:")) {
+            const text = JSON.stringify({
+              schema_version: 1,
+              reviewer: "correctness",
+              verdict: "clean",
+              findings: [],
+            });
+            return { stdout: text, stderr: "", exitCode: 0, text, usage: {} };
+          }
+          const text = JSON.stringify({ schema_version: 1, verdict: "clean", summary: "clean", findings: [] });
+          return { stdout: text, stderr: "", exitCode: 0, text, usage: {} };
+        },
+      },
+    }).run(created.job.id);
+    expect(store.getJob(created.job.id)?.state).toBe("stale");
+    expect(closed).toEqual([]);
   });
 });
 

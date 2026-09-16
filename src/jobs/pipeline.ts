@@ -464,6 +464,7 @@ async function runScanJob(deps: PipelineDeps, jobId: number, signal: AbortSignal
       jobId,
       `Reconciling ${priors.length} prior scan finding(s) for ${job.repo_full_name} @ ${job.head_sha}`,
     );
+    throwIfStale(store, jobId, signal);
     const items = await classifyPriorFindings({
       config,
       opencode: deps.opencode,
@@ -482,6 +483,7 @@ async function runScanJob(deps: PipelineDeps, jobId: number, signal: AbortSignal
     }
     persistClassifications(store, job, items, diff);
     store.patchJob(jobId, { reconciliation_json: JSON.stringify({ headSha: job.head_sha, items }) });
+    throwIfStale(store, jobId, signal);
     try {
       const closed = await closeResolvedScanIssues({
         github: deps.github,

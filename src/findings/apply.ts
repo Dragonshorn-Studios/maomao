@@ -300,20 +300,20 @@ export async function closeResolvedScanIssues(input: {
         });
         continue;
       }
+      if (issue.state === "closed") {
+        skipped.push({
+          fingerprint: item.fingerprint,
+          reason: `issue #${record.issue_number} is already closed`,
+          wantedClose: false,
+        });
+        continue;
+      }
       const marker = scanIssueMarkerBase(item.fingerprint);
       if (!issue.body.includes(marker)) {
         skipped.push({
           fingerprint: item.fingerprint,
           reason: `issue #${record.issue_number} is missing the Maomao scan marker; leaving it untouched`,
           wantedClose: true,
-        });
-        continue;
-      }
-      if (issue.state === "closed") {
-        skipped.push({
-          fingerprint: item.fingerprint,
-          reason: `issue #${record.issue_number} is already closed`,
-          wantedClose: false,
         });
         continue;
       }
