@@ -256,7 +256,7 @@ status meaning:
 - uncertain: not enough evidence to close or relocate it
 
 Repository: ${input.repoFullName}
-PR: #${input.prNumber} ${input.prTitle}
+${input.prNumber === 0 ? `Health scan: ${input.prTitle}` : `PR: #${input.prNumber} ${input.prTitle}`}
 Head SHA: ${input.headSha}
 
 Prior findings:

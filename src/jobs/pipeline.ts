@@ -24,8 +24,7 @@ import {
 } from "../schema.js";
 import { classifyPriorFindings, collectPriorFindings, findingsForPublish } from "../findings/reconcile.js";
 import { resolveReviewEvent } from "./verdict.js";
-import { applyReconciliationThreads, persistClassifications, persistThreadsAsFindings } from "../findings/apply.js";
-import { findingDiffContext } from "../findings/apply.js";
+import { applyReconciliationThreads, attachStoredThreadIds, closeResolvedScanIssues, findingDiffContext, persistClassifications, persistThreadsAsFindings } from "../findings/apply.js";
 import { fingerprintFinding } from "../findings/identity.js";
 import type { ReconciliationSnapshot } from "../findings/types.js";
 import { currentFindingsForRisk } from "../findings/types.js";
@@ -274,11 +273,12 @@ async function runJob(deps: PipelineDeps, jobId: number, signal: AbortSignal): P
     } catch (error) {
       store.log(jobId, `Could not refresh finding thread ids: ${formatError(error)}`, "warn");
     }
+    const closeSnapshot = attachStoredThreadIds(store, job, snapshot);
     try {
       const applied = await applyReconciliationThreads({
         github: deps.github,
         job,
-        snapshot,
+        snapshot: closeSnapshot,
         postedFingerprints: posted?.postedFingerprints ?? [],
       });
       if (applied.resolved.length > 0) {
@@ -287,9 +287,13 @@ async function runJob(deps: PipelineDeps, jobId: number, signal: AbortSignal): P
           `Resolved ${applied.resolved.length} prior thread(s) after successful review (${applied.resolved.join(", ")})`,
         );
       }
+      for (const skip of applied.skipped) {
+        if (!skip.wantedClose) continue;
+        store.log(jobId, `Did not close thread for ${skip.fingerprint}: ${skip.reason}`, "warn");
+      }
       for (const failure of applied.failed) {
         store.log(jobId, `Could not resolve thread for ${failure.fingerprint}: ${failure.reason}`, "warn");
-        const item = snapshot.items.find((candidate) => candidate.fingerprint === failure.fingerprint);
+        const item = closeSnapshot.items.find((candidate) => candidate.fingerprint === failure.fingerprint);
         // A resolve that failed must not leave the DB claiming a state GitHub
         // does not have: keep the finding visible so the next run retries.
         // (dismissed is a human override; moved was already republished.)
@@ -422,14 +426,17 @@ async function runScanJob(deps: PipelineDeps, jobId: number, signal: AbortSignal
     // Persist scan findings locally; issue creation is a separate, explicit operator action.
     const profileRevision = job.profile_revision_id ? store.configs.getRevision(job.profile_revision_id) : undefined;
     const threshold = severityRank(profileRevision?.definition.minPublishableSeverity ?? "info");
+    const currentFingerprints = new Set<string>();
     let persisted = 0;
     for (const finding of aggregated.findings) {
       if (severityRank(finding.severity) > threshold) continue;
       const context = findingDiffContext(diff, finding.file, finding.line);
+      const fingerprint = fingerprintFinding({ ...finding });
+      currentFingerprints.add(fingerprint);
       store.upsertFinding({
         repoFullName: job.repo_full_name,
         prNumber: 0,
-        fingerprint: fingerprintFinding({ ...finding }),
+        fingerprint,
         status: "open",
         reviewedSha: job.head_sha,
         currentSha: job.head_sha,
@@ -448,6 +455,57 @@ async function runScanJob(deps: PipelineDeps, jobId: number, signal: AbortSignal
       });
       persisted += 1;
     }
+
+    const stored = store.listFindings(job.repo_full_name, 0);
+    const priors = collectPriorFindings({ threads: [], stored }).filter(
+      (prior) => !currentFingerprints.has(prior.fingerprint),
+    );
+    store.log(
+      jobId,
+      `Reconciling ${priors.length} prior scan finding(s) for ${job.repo_full_name} @ ${job.head_sha}`,
+    );
+    const items = await classifyPriorFindings({
+      config,
+      opencode: deps.opencode,
+      job,
+      repoDir: workspace.repoDir,
+      diff,
+      workspaceDir: workspace.dir,
+      priors,
+      signal,
+    });
+    for (const item of items) {
+      store.log(
+        jobId,
+        `Finding ${item.fingerprint} classified ${item.status} (confidence=${item.confidence}): ${item.reason}`,
+      );
+    }
+    persistClassifications(store, job, items, diff);
+    store.patchJob(jobId, { reconciliation_json: JSON.stringify({ headSha: job.head_sha, items }) });
+    try {
+      const closed = await closeResolvedScanIssues({
+        github: deps.github,
+        store,
+        job,
+        items,
+      });
+      if (closed.closed.length > 0) {
+        store.log(
+          jobId,
+          `Closed ${closed.closed.length} Maomao scan issue(s) for resolved findings (${closed.closed.join(", ")})`,
+        );
+      }
+      for (const skip of closed.skipped) {
+        if (!skip.wantedClose) continue;
+        store.log(jobId, `Did not close issue for ${skip.fingerprint}: ${skip.reason}`, "warn");
+      }
+      for (const failure of closed.failed) {
+        store.log(jobId, `Could not close issue for ${failure.fingerprint}: ${failure.reason}`, "warn");
+      }
+    } catch (error) {
+      store.log(jobId, `Scan issue close deferred: ${formatError(error)}`, "warn");
+    }
+
     store.setJobState(jobId, "completed", {
       aggregator_state: "done",
       finished_at: nowIso(),

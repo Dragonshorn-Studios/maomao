@@ -376,6 +376,7 @@ OpenCode is still a powerful process. Keep Maomao on a locked-down host and do n
 - The scan button is labeled **Sniff sniff** with the accessible name "Run repository health scan".
 - **Issue creation is a separate, explicit, capability-gated action** (`GITHUB_ISSUE_CREATION_ENABLED=false` by default). When enabled, the completed scan's job page lets the operator select findings, preview the exact proposed issue title and body, and publish. Only findings above the publication bar (aggregator confidence ≥ 70% and ≥ 2 agreeing specialists) can be published; speculative observations stay visible but cannot become issues. Scans also surface likely human-authored duplicate issues for review — Maomao never modifies them.
 - Published issues use the App installation identity (never the human OAuth token), carry the exact reviewed SHA and a hidden machine-readable marker, and deduplicate by stable fingerprint: already-linked issues are skipped, retries are idempotent, permission denials stop the run with an explicit notice, and partial failures are visible and safely retryable. The job page shows every resulting issue with its finding fingerprint (credential-free audit trail), and pending claims orphaned by a crash are cleared at startup.
+- A later scan of the same repository re-checks **prior** scan findings that this run did not rediscover, using the same verifier as pull-request reconciliation (absence from the new generative review is not enough). Verified-resolved findings are stored as `resolved`. Linked **Maomao-created** GitHub issues (body contains the scan-issue marker) are closed; human-authored issues and pull requests are never closed. The job log records why a close was skipped.
 
 ## Specialist prompts, fixtures, and offline evaluation
 
@@ -398,19 +399,19 @@ OpenCode is still a powerful process. Keep Maomao on a locked-down host and do n
 
 ## Finding reconciliation and `@maomao bury`
 
-When a later commit arrives, Maomao fetches its own **unresolved** review threads, applies any human overrides, and re-checks remaining findings against the **current head SHA** with a narrow verifier. Only then does it risk-route (the `poison-alert` insertion point) and run specialists.
+When a later commit arrives, Maomao fetches its own review threads (open **and** already-resolved), applies any human overrides, and re-checks remaining **unresolved** findings against the **current head SHA** with a narrow verifier. Threads GitHub already marked resolved are caught and stored as `resolved` without another verifier pass. Only then does it risk-route (the `poison-alert` insertion point) and run specialists.
 
 Classifications:
 
 | Status | Meaning | GitHub thread |
 | --- | --- | --- |
-| `resolved` | Verifier has enough evidence the problem is gone | Resolved after the job succeeds |
-| `still_valid` | Same problem still applies | Left open |
+| `resolved` | Verifier has enough evidence the problem is gone, **or** GitHub already closed the Maomao thread | Resolved after the job succeeds (or recorded if GitHub already closed it) |
+| `still_valid` | Same problem still applies | Left open; the card and job log show why |
 | `moved` | Same problem at a new path/line | New inline comment, then the old thread is resolved |
-| `uncertain` | Not enough evidence to close safely | Left open |
+| `uncertain` | Not enough evidence to close safely | Left open; the card and job log show why |
 | `dismissed` | An authorized human buried it | Resolved when the command is accepted |
 
-Model absence is non-evidence: a finding disappearing from a new generative review is **not** by itself proof it was fixed. Failed or stale jobs never close existing threads.
+Model absence is non-evidence: a finding disappearing from a new generative review is **not** by itself proof it was fixed. Failed or stale jobs never close existing threads. If Maomao intended to close a conversation and could not (missing thread id, moved without a replacement comment, GitHub mutation failed), the job log records that as a warning and the finding card shows the reconciliation reason.
 
 ### Manual overrides
 

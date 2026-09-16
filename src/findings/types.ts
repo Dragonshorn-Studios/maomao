@@ -68,6 +68,8 @@ export interface ClassifiedFinding {
   summary: string;
   body?: string;
   severity?: string;
+  /** GitHub already has this conversation resolved; do not call resolveReviewThread again. */
+  githubAlreadyResolved?: boolean;
 }
 
 export interface ReconciliationSnapshot {

@@ -1,12 +1,12 @@
 import { verify } from "@octokit/webhooks-methods";
 import type { Config, PullRequestAction } from "../config.js";
 import { canIssueOverride, parseOverrideCommand } from "../findings/commands.js";
-import { parseFindingMarker } from "../findings/identity.js";
 import {
   isMaomaoLogin,
   isMaomaoThread,
+  findingComment,
+  parseThreadFindingMarker,
   threadContainsComment,
-  threadRoot,
   type GithubPort,
   type ReviewThread,
 } from "./client.js";
@@ -417,14 +417,14 @@ async function handleReviewCommentWebhook(input: {
     return { status: 202, body: { ok: true, ignored: true, reason: "not a Maomao review thread" } };
   }
 
-  const root = threadRoot(thread);
-  const marker = root ? parseFindingMarker(root.body) : undefined;
+  const commentWithMarker = findingComment(thread);
+  const marker = parseThreadFindingMarker(thread);
   if (!marker) {
     return { status: 202, body: { ok: true, ignored: true, reason: "thread is missing a finding marker" } };
   }
 
   const reviewedSha = payload.pull_request?.head?.sha || marker.sha;
-  const summary = (root?.body ?? marker.id).replace(/<!--[\s\S]*?-->/g, "").trim().slice(0, 240) || marker.id;
+  const summary = (commentWithMarker?.body ?? marker.id).replace(/<!--[\s\S]*?-->/g, "").trim().slice(0, 240) || marker.id;
 
   if (parsed.command === "dismiss") {
     const result = input.store.dismissFinding({
@@ -435,10 +435,10 @@ async function handleReviewCommentWebhook(input: {
       command: parsed.token,
       reviewedSha,
       githubThreadId: thread.id,
-      githubCommentId: root?.databaseId != null ? String(root.databaseId) : String(comment.in_reply_to_id),
+      githubCommentId: commentWithMarker?.databaseId != null ? String(commentWithMarker.databaseId) : String(comment.in_reply_to_id),
       summary,
-      path: comment.path ?? root?.path ?? thread.path,
-      line: root?.line ?? thread.line,
+      path: comment.path ?? commentWithMarker?.path ?? thread.path,
+      line: commentWithMarker?.line ?? thread.line,
     });
     try {
       await input.github.resolveReviewThread(installationId, thread.id);
@@ -473,7 +473,7 @@ async function handleReviewCommentWebhook(input: {
     command: parsed.token,
     reviewedSha,
     githubThreadId: thread.id,
-    githubCommentId: root?.databaseId != null ? String(root.databaseId) : String(comment.in_reply_to_id),
+    githubCommentId: commentWithMarker?.databaseId != null ? String(commentWithMarker.databaseId) : String(comment.in_reply_to_id),
     summary,
   });
   try {

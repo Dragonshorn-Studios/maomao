@@ -5,7 +5,7 @@ import { JobStore } from "./jobs/store.js";
 import { THEME_CSS } from "./ui/theme.js";
 import { DIFFS_JS } from "./ui/diffs.js";
 import { renderConfigPage, renderHome, renderJob, renderLogin, renderScanConfirmPage, renderScanIssuePreviewPage, renderScanPage } from "./ui/pages.js";
-import { jobStateLabel, settledFindingsCopy } from "./ui/copy.js";
+import { jobStateLabel, settledFindingsCopy, findingOverrideNote } from "./ui/copy.js";
 import { formatCost, formatTokens, jobMetrics } from "./ui/metrics.js";
 
 function seededStore() {
@@ -182,6 +182,27 @@ describe("monitoring pages", () => {
     expect(settledFindingsCopy(1, 1)).toBe("1 buried, 1 resolved — expand a row for details");
     expect(settledFindingsCopy(2, 0)).toBe("2 buried — expand a row for details");
     expect(settledFindingsCopy(0, 3)).toBe("3 resolved — expand a row for details");
+  });
+
+  it("surfaces the reconciliation reason when a finding is left open or caught as resolved", () => {
+    expect(
+      findingOverrideNote({
+        status: "uncertain",
+        reconciliation_reason: "low confidence (0.4); leaving open",
+      }),
+    ).toBe("low confidence (0.4); leaving open");
+    expect(
+      findingOverrideNote({
+        status: "still_valid",
+        reconciliation_reason: "the leak is still on the current SHA",
+      }),
+    ).toBe("the leak is still on the current SHA");
+    expect(
+      findingOverrideNote({
+        status: "resolved",
+        reconciliation_reason: "GitHub thread already resolved",
+      }),
+    ).toBe("GitHub thread already resolved");
   });
 
   it("marks specialist findings unconfirmed until the aggregator finishes", () => {
