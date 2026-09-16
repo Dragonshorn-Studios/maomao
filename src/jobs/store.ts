@@ -4,6 +4,7 @@ import type { FindingRow, FindingStatus } from "../findings/types.js";
 import { nowIso } from "../util.js";
 import { publish } from "../events.js";
 import { ReviewConfigStore } from "../config-revisions.js";
+import { PromptRevisionStore } from "../prompt-revisions.js";
 
 export interface JobRow {
   id: number;
@@ -124,6 +125,7 @@ export interface ReviewerRunRow {
   cache_write_tokens: number | null;
   total_tokens: number | null;
   usage_complete: number | null;
+  prompt_revision_id: number | null;
   usage_warning: string | null;
 }
 
@@ -277,12 +279,15 @@ const JOB_PATCH_KEYS = new Set<string>([
 export class JobStore {
   /** Versioned review-profile configuration over the same database. */
   readonly configs: ReviewConfigStore;
+  /** Versioned specialist prompts, fixtures, and evaluations over the same database. */
+  readonly prompts: PromptRevisionStore;
 
   constructor(
     private readonly db: SqliteDb,
     modelCatalog: string[] = [],
   ) {
     this.configs = new ReviewConfigStore(db, modelCatalog);
+    this.prompts = new PromptRevisionStore(db);
   }
 
   enqueue(input: NewJobInput & { profileRevisionId?: number }): EnqueueResult {

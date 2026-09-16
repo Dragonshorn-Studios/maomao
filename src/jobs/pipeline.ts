@@ -550,6 +550,11 @@ async function runReviewer(
   const role = deps.config.reviewers.find((item) => item.id === run.role);
   // The run's stored model (profile revision / enqueue spec) wins over config defaults.
   const model = run.model || role?.model || deps.config.opencode.reviewerModel;
+  // An active prompt revision overrides the role's authored body; guardrails stay composed here.
+  const promptRevision = deps.store.prompts.getActivePrompt(run.role);
+  if (promptRevision) {
+    deps.store.patchReviewer(run.id, { prompt_revision_id: promptRevision.id });
+  }
   const retries = Math.max(0, deps.config.opencode.maxRetries);
   let lastError = "unknown error";
 
@@ -576,6 +581,7 @@ async function runReviewer(
         baseSha: job.base_sha,
         headSha: job.head_sha,
         author: job.pr_author,
+        promptBody: promptRevision?.body,
       });
       result = await deps.opencode.run({
         cwd,

@@ -5,12 +5,13 @@ import type { Config } from "./config.js";
 import type { JobStore } from "./jobs/store.js";
 import { handleGithubWebhook } from "./github/webhooks.js";
 import type { ManualTriggerPort, GithubPort } from "./github/client.js";
+import type { OpenCodePort } from "./opencode/parse.js";
 import { authorizeGithubAccount, logAuthorizationRejection, logRateLimited, rejectUnauthorized } from "./github/authorize.js";
 import { repoRateLimitActive, RepoRateLimiter, WindowRateLimiter } from "./github/rate-limit.js";
 import { parseGithubPullUrl, PullUrlError } from "./github/pull-url.js";
 import { dispatchEnqueue, enqueuePullJob } from "./jobs/enqueue.js";
 import { subscribe } from "./events.js";
-import { renderConfigPage, renderHome, renderJob, renderLogin, THEME_CSS } from "./ui/index.js";
+import { renderConfigPage, renderHome, renderJob, renderLogin, renderPromptConfigPage, THEME_CSS } from "./ui/index.js";
 import type { JobQueue } from "./jobs/queue.js";
 import {
   CSRF_COOKIE,
@@ -46,6 +47,8 @@ export interface ServerContext {
   rateLimiter?: RepoRateLimiter;
   /** Injectable transport for the GitHub OAuth operator-login endpoints (tests). */
   oauthFetch?: typeof fetch;
+  /** Offline prompt-evaluation runner (never touches GitHub). */
+  opencode?: OpenCodePort;
 }
 
 const OAUTH_STATE_TTL_MS = 10 * 60 * 1000;
@@ -603,6 +606,192 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
     const result = ctx.store.configs.importConfig({ payload, actor: actor.login });
     if ("error" in result) return renderConfigWithError(c, result.error, 400);
     return c.redirect("/config?notice=imported", 302);
+  });
+
+  // ---- Versioned specialist prompts, fixtures, and evaluation (/config/prompts) ----
+  const promptViews = () =>
+    ctx.store.prompts.listPromptRevisions().map((revision) => ({
+      id: revision.id,
+      role_id: revision.role_id,
+      status: revision.status,
+      body: revision.body,
+      note: revision.note,
+      created_by: revision.created_by,
+      editSeq: revision.edit_seq,
+      created_at: revision.created_at,
+      updated_at: revision.updated_at,
+      activated_at: revision.activated_at,
+    }));
+  const fixtureViews = () =>
+    ctx.store.prompts.listFixtures().map((fixture) => ({
+      id: fixture.id,
+      name: fixture.name,
+      prMeta: JSON.parse(fixture.pr_meta) as Record<string, unknown>,
+      diffChars: fixture.diff.length,
+      expectations: JSON.parse(fixture.expectations_json ?? "[]") as Array<{
+        severity: string;
+        category?: string;
+        pathContains?: string;
+      }>,
+      saved_by: fixture.saved_by,
+      created_at: fixture.created_at,
+    }));
+  const evaluationViews = () =>
+    ctx.store.prompts.listEvaluations().map((evaluation) => ({
+      id: evaluation.id,
+      prompt_revision_id: evaluation.prompt_revision_id,
+      fixture_id: evaluation.fixture_id,
+      model: evaluation.model,
+      status: evaluation.status,
+      findings: JSON.parse(evaluation.findings_json ?? "[]") as Array<{
+        severity?: string;
+        category?: string;
+        file?: string;
+        summary?: string;
+      }>,
+      usage: evaluation.usage_json ? (JSON.parse(evaluation.usage_json) as { cost?: number; totalTokens?: number }) : null,
+      duration_ms: evaluation.duration_ms,
+      error: evaluation.error,
+      created_at: evaluation.created_at,
+    }));
+
+  const promptWriteDenied = (c: Context<AppEnv>) =>
+    c.html(
+      renderPromptConfigPage({
+        revisions: promptViews(),
+        fixtures: fixtureViews(),
+        evaluations: evaluationViews(),
+        canWrite: false,
+        error: "Writing prompt configuration requires an operator GitHub OAuth identity.",
+      }),
+      403,
+    );
+
+  const renderPromptError = (c: Context<AppEnv>, message: string, status: 400 | 403 | 409 | 503 = 400) =>
+    c.html(
+      renderPromptConfigPage({
+        revisions: promptViews(),
+        fixtures: fixtureViews(),
+        evaluations: evaluationViews(),
+        canWrite: gateOn,
+        error: message,
+        csrfToken: gateOn ? ensureCsrfToken(c, ctx.config.uiSessionSecret) : undefined,
+      }),
+      status,
+    );
+
+  app.get("/config/prompts", (c) => {
+    if (!gateOn) return c.redirect("/", 302);
+    const notices: Record<string, string> = {
+      "draft-created": "Prompt draft created.",
+      "draft-saved": "Prompt draft saved.",
+      activated: "Prompt revision activated.",
+      "rolled-back": "Prompt revision rolled back.",
+      "fixture-saved": "Fixture saved.",
+      evaluated: "Evaluation recorded.",
+    };
+    return c.html(
+      renderPromptConfigPage({
+        revisions: promptViews(),
+        fixtures: fixtureViews(),
+        evaluations: evaluationViews(),
+        canWrite: gateOn,
+        csrfToken: gateOn ? ensureCsrfToken(c, ctx.config.uiSessionSecret) : undefined,
+        notice: notices[c.req.query("notice") ?? ""],
+      }),
+    );
+  });
+
+  app.post("/config/prompts/drafts", async (c) => {
+    if (!gateOn) return c.redirect("/", 302);
+    const actor = configActor(c);
+    if (!actor) return promptWriteDenied(c);
+    const body = await c.req.parseBody();
+    const result = ctx.store.prompts.createDraft({
+      roleId: typeof body.role_id === "string" ? body.role_id.trim() : "",
+      body: typeof body.body === "string" ? body.body : "",
+      createdBy: actor.login,
+    });
+    if ("error" in result) return renderPromptError(c, result.issues.join("; "));
+    return c.redirect("/config/prompts?notice=draft-created", 302);
+  });
+
+  app.post("/config/prompts/drafts/:id", async (c) => {
+    if (!gateOn) return c.redirect("/", 302);
+    const actor = configActor(c);
+    if (!actor) return promptWriteDenied(c);
+    const body = await c.req.parseBody();
+    const result = ctx.store.prompts.updatePromptDraft({
+      id: Number(c.req.param("id")),
+      body: typeof body.body === "string" ? body.body : "",
+      expectedEditSeq: Number(body.expected_edit_seq ?? -1),
+      updatedBy: actor.login,
+    });
+    if ("error" in result && result.error === "conflict") {
+      return renderPromptError(c, "Conflict: this draft was saved by someone else. Reload and re-apply your edit.", 409);
+    }
+    if ("error" in result) {
+      return renderPromptError(c, result.error === "invalid" ? result.issues.join("; ") : "Prompt draft not found.", 400);
+    }
+    return c.redirect("/config/prompts?notice=draft-saved", 302);
+  });
+
+  app.post("/config/prompts/:id/activate", (c) => {
+    if (!gateOn) return c.redirect("/", 302);
+    const actor = configActor(c);
+    if (!actor) return promptWriteDenied(c);
+    const result = ctx.store.prompts.activatePromptRevision(Number(c.req.param("id")), actor.login);
+    if ("error" in result) return renderPromptError(c, result.error, 400);
+    return c.redirect("/config/prompts?notice=activated", 302);
+  });
+
+  app.post("/config/prompts/:id/rollback", (c) => {
+    if (!gateOn) return c.redirect("/", 302);
+    const actor = configActor(c);
+    if (!actor) return promptWriteDenied(c);
+    const result = ctx.store.prompts.rollbackPromptRevision(Number(c.req.param("id")), actor.login);
+    if ("error" in result) return renderPromptError(c, result.error, 400);
+    return c.redirect("/config/prompts?notice=rolled-back", 302);
+  });
+
+  app.post("/config/prompts/fixtures", async (c) => {
+    if (!gateOn) return c.redirect("/", 302);
+    const actor = configActor(c);
+    if (!actor) return promptWriteDenied(c);
+    const body = await c.req.parseBody();
+    let prMeta: Record<string, unknown> = {};
+    try {
+      prMeta = JSON.parse(typeof body.pr_meta === "string" && body.pr_meta ? body.pr_meta : "{}");
+    } catch {
+      return renderPromptError(c, "Fixture PR metadata must be valid JSON.", 400);
+    }
+    const result = ctx.store.prompts.saveFixture({
+      name: typeof body.name === "string" ? body.name : "",
+      prMeta,
+      diff: typeof body.diff === "string" ? body.diff : "",
+      savedBy: actor.login,
+      acknowledged: body.acknowledged === "on" || body.acknowledged === "true",
+    });
+    if ("error" in result) return renderPromptError(c, result.issues.join("; "), 400);
+    return c.redirect("/config/prompts?notice=fixture-saved", 302);
+  });
+
+  app.post("/config/prompts/evaluate", async (c) => {
+    if (!gateOn) return c.redirect("/", 302);
+    const actor = configActor(c);
+    if (!actor) return promptWriteDenied(c);
+    if (!ctx.opencode) return renderPromptError(c, "Prompt evaluation is unavailable on this process (no OpenCode runner).", 503);
+    const body = await c.req.parseBody();
+    const result = await ctx.store.prompts.evaluatePrompt({
+      promptRevisionId: Number(body.prompt_revision_id),
+      fixtureId: Number(body.fixture_id),
+      model: typeof body.model === "string" && body.model ? body.model : ctx.config.opencode.reviewerModel,
+      maxCostUsd: body.max_cost_usd ? Number(body.max_cost_usd) : undefined,
+      opencode: ctx.opencode,
+      extraArgs: ctx.config.opencode.extraArgs,
+    });
+    if ("error" in result) return renderPromptError(c, result.error, 400);
+    return c.redirect(`/config/prompts?notice=evaluated`, 302);
   });
 
   app.get("/api/jobs", (c) => {

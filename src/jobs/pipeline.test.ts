@@ -2419,3 +2419,84 @@ describe("profile revision consumption", () => {
     expect(store.listReviewerRuns(created.job.id).map((run) => run.role).sort()).toEqual(["correctness", "security"]);
   });
 });
+
+describe("active prompt revision consumption", () => {
+  it("composes the active prompt body with guardrails and stamps the run", async () => {
+    const config = loadConfig({
+      REVIEWER_ROUTING: "fixed",
+      REVIEWER_ROLES: "correctness",
+      OPENCODE_REVIEWER_MODEL: "test/model",
+      POST_EMPTY_REVIEW: "true",
+      GITHUB_APP_ID: "1",
+      GITHUB_WEBHOOK_SECRET: "s",
+      GITHUB_APP_PRIVATE_KEY: "k",
+    });
+    const store = new JobStore(openDb(":memory:"));
+    const draft = store.prompts.createDraft({
+      roleId: "correctness",
+      body: "Role id: correctness\nFocus: leaked secrets in logs and debug output.",
+      createdBy: "octocat",
+    });
+    if (!("revision" in draft)) throw new Error("draft failed");
+    store.prompts.activatePromptRevision(draft.revision.id, "octocat");
+
+    const promptsSeen: string[] = [];
+    const github: GithubPort = githubPort({
+      getPullDiff: async () => "diff --git a/example.ts b/example.ts\n",
+      listReviews: async () => [],
+      createCommentReview: async () => ({ id: "8", url: "u" }),
+    });
+    const opencode: OpenCodePort = {
+      async run(input) {
+        const roleMatch = input.prompt.match(/Role id: (\w+)/);
+        if (roleMatch) promptsSeen.push(input.prompt);
+        const text = roleMatch
+          ? reviewerJson(roleMatch[1], "clean")
+          : JSON.stringify({ schema_version: 1, verdict: "clean", summary: "clean", findings: [] });
+        return { stdout: text, stderr: "", exitCode: 0, text, usage: {} };
+      },
+    };
+    const created = store.enqueue({ ...jobInput("promptsha"), reviewers: [] });
+    await createPipeline({ config, store, github, checkout: await fixtureCheckout(), opencode }).run(created.job.id);
+
+    expect(promptsSeen).toHaveLength(1);
+    // Guardrails composed at runtime, operator body from the active revision.
+    expect(promptsSeen[0]).toContain("Do not modify files");
+    expect(promptsSeen[0]).toContain("leaked secrets in logs and debug output");
+    const run = store.listReviewerRuns(created.job.id)[0];
+    expect(run.prompt_revision_id).toBe(draft.revision.id);
+  });
+
+  it("uses the authored role prompt when no prompt revision is active", async () => {
+    const config = loadConfig({
+      REVIEWER_ROUTING: "fixed",
+      REVIEWER_ROLES: "correctness",
+      OPENCODE_REVIEWER_MODEL: "test/model",
+      POST_EMPTY_REVIEW: "true",
+      GITHUB_APP_ID: "1",
+      GITHUB_WEBHOOK_SECRET: "s",
+      GITHUB_APP_PRIVATE_KEY: "k",
+    });
+    const store = new JobStore(openDb(":memory:"));
+    const promptsSeen: string[] = [];
+    const github: GithubPort = githubPort({
+      getPullDiff: async () => "diff --git a/example.ts b/example.ts\n",
+      listReviews: async () => [],
+      createCommentReview: async () => ({ id: "8", url: "u" }),
+    });
+    const opencode: OpenCodePort = {
+      async run(input) {
+        promptsSeen.push(input.prompt);
+        const roleMatch = input.prompt.match(/Role id: (\w+)/);
+        const text = roleMatch
+          ? reviewerJson(roleMatch[1], "clean")
+          : JSON.stringify({ schema_version: 1, verdict: "clean", summary: "clean", findings: [] });
+        return { stdout: text, stderr: "", exitCode: 0, text, usage: {} };
+      },
+    };
+    const created = store.enqueue({ ...jobInput("nopromptsha"), reviewers: [] });
+    await createPipeline({ config, store, github, checkout: await fixtureCheckout(), opencode }).run(created.job.id);
+    expect(promptsSeen[0]).toContain("Focus: bugs");
+    expect(store.listReviewerRuns(created.job.id)[0]?.prompt_revision_id ?? null).toBeNull();
+  });
+});

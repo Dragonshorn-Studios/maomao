@@ -246,6 +246,45 @@ function migrate(db: SqliteDb): void {
       detail TEXT,
       created_at TEXT NOT NULL
     );
+
+    CREATE TABLE IF NOT EXISTS prompt_revisions (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      role_id TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'draft',
+      body TEXT NOT NULL,
+      note TEXT,
+      created_by TEXT NOT NULL,
+      edit_seq INTEGER NOT NULL DEFAULT 0,
+      validation_issues TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      activated_at TEXT
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_prompt_revisions_role ON prompt_revisions(role_id, status);
+
+    CREATE TABLE IF NOT EXISTS eval_fixtures (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      name TEXT NOT NULL,
+      pr_meta TEXT NOT NULL DEFAULT '{}',
+      diff TEXT NOT NULL,
+      expectations_json TEXT,
+      saved_by TEXT NOT NULL,
+      created_at TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS prompt_evaluations (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      prompt_revision_id INTEGER NOT NULL,
+      fixture_id INTEGER NOT NULL,
+      model TEXT NOT NULL,
+      status TEXT NOT NULL,
+      findings_json TEXT,
+      usage_json TEXT,
+      duration_ms INTEGER,
+      error TEXT,
+      created_at TEXT NOT NULL
+    );
   `);
   ensureColumn(db, "jobs", "review_event", "TEXT");
   ensureColumn(db, "jobs", "review_event_reason", "TEXT");
@@ -267,6 +306,7 @@ function migrate(db: SqliteDb): void {
   ensureColumn(db, "reviewer_runs", "total_tokens", "INTEGER");
   ensureColumn(db, "reviewer_runs", "usage_complete", "INTEGER");
   ensureColumn(db, "reviewer_runs", "usage_warning", "TEXT");
+  ensureColumn(db, "reviewer_runs", "prompt_revision_id", "INTEGER");
   const jobColumns: Array<[string, string]> = [
     ["routing_state", "TEXT NOT NULL DEFAULT 'queued'"],
     ["routing_mode", "TEXT"],

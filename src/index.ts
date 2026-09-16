@@ -21,17 +21,18 @@ void sweepWorkspaces(config.workspaceRoot, config.workspaceRetentionHours).then(
 const db = openDb(config.databasePath);
 const store = new JobStore(db, config.modelCatalog);
 const github = new GithubClient(config);
+const opencode = createOpenCodeRunner(config.opencode.bin);
 const pipeline = createPipeline({
   config,
   store,
   github,
   checkout: createCheckout(config.workspaceRoot),
-  opencode: createOpenCodeRunner(config.opencode.bin),
+  opencode,
 });
 const queue = new JobQueue(store, config.jobConcurrency, (jobId) => pipeline.run(jobId));
 queue.start();
 
-const app = createApp({ config, store, queue, github, startedAt: Date.now() });
+const app = createApp({ config, store, queue, github, opencode, startedAt: Date.now() });
 
 serve({ fetch: app.fetch, hostname: config.host, port: config.port }, (info) => {
   console.log(`Maomao listening on http://${info.address}:${info.port}`);

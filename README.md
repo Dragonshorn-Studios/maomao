@@ -365,6 +365,14 @@ OpenCode is still a powerful process. Keep Maomao on a locked-down host and do n
 - Duplicate webhook deliveries reuse the existing job; publication also looks for a `<!-- maomao-review sha=... -->` marker
 - Inline comments include `<!-- maomao-finding id=<fingerprint> sha=<reviewed-sha> -->` so later reviews can reconcile the same finding after the line moves
 
+## Specialist prompts, fixtures, and offline evaluation
+
+`/config/prompts` manages **versioned specialist prompts**: per-role revisions with an operator-editable body. Security guardrails (the hard rules and JSON schema) are composed at runtime and are never part of an editable revision — the UI shows them separately.
+
+- Drafts → explicit activation → retired history; rollback re-activates a retired revision. Activation never affects running or historical jobs: each reviewer run stamps the prompt revision it used (`prompt_revision_id`).
+- **Fixtures** are explicitly saved, sanitized inputs (PR metadata plus a bounded diff, with optional severity/category expectations) and require a provenance acknowledgement — they are never auto-captured from reviewed code.
+- **Evaluation** runs a draft prompt against a fixture fully offline: no GitHub writes, no repository credentials, schema-validated findings, recorded usage/duration/model/revision, and an explicit cost cap. Failures (timeouts, invalid output, budget breach) count as evaluation failures, never as passing reviews. Results compare draft against the active prompt with matched/missed/unexpected signals; evaluation never auto-activates.
+
 ## Review configuration (versioned profiles)
 
 `/config` (in the monitoring UI) manages **versioned review profiles**: named revisions that pin which specialists run, their order, per-role models, the router model, a minimum publishable severity, and optional total cost/token budgets.

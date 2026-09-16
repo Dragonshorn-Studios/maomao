@@ -889,3 +889,160 @@ export function renderConfigPage(data: ConfigPageData): string {
     csrfToken: data.csrfToken,
   });
 }
+
+export interface PromptRevisionView {
+  id: number;
+  role_id: string;
+  status: string;
+  body: string;
+  note: string | null;
+  created_by: string;
+  editSeq: number;
+  created_at: string;
+  updated_at: string;
+  activated_at: string | null;
+}
+
+export interface PromptFixtureView {
+  id: number;
+  name: string;
+  prMeta: Record<string, unknown>;
+  diffChars: number;
+  expectations: Array<{ severity: string; category?: string; pathContains?: string }>;
+  saved_by: string;
+  created_at: string;
+}
+
+export interface PromptEvaluationView {
+  id: number;
+  prompt_revision_id: number;
+  fixture_id: number;
+  model: string;
+  status: string;
+  findings: Array<{ severity?: string; category?: string; file?: string; summary?: string }>;
+  usage: { cost?: number; totalTokens?: number } | null;
+  duration_ms: number | null;
+  error: string | null;
+  created_at: string;
+}
+
+export interface PromptConfigPageData {
+  revisions: PromptRevisionView[];
+  fixtures: PromptFixtureView[];
+  evaluations: PromptEvaluationView[];
+  canWrite: boolean;
+  csrfToken?: string;
+  notice?: string;
+  error?: string;
+}
+
+function promptRevisionCard(revision: PromptRevisionView, data: PromptConfigPageData): string {
+  const csrf = csrfInput(data.csrfToken);
+  const actions: string[] = [];
+  if (data.canWrite && revision.status === "draft") {
+    actions.push(`<form method="post" action="/config/prompts/${revision.id}/activate" class="inline-form">
+      ${csrf}
+      <button type="submit">Activate</button>
+    </form>`);
+  }
+  if (data.canWrite && revision.status === "retired") {
+    actions.push(`<form method="post" action="/config/prompts/${revision.id}/rollback" class="inline-form">
+      ${csrf}
+      <button type="submit">Roll back to this revision</button>
+    </form>`);
+  }
+  return `<article class="card config-revision">
+    <header>
+      <span class="role"><strong>#${revision.id}</strong> ${escapeHtml(revision.role_id)} · ${escapeHtml(revision.status)}</span>
+      <span class="muted">by ${escapeHtml(revision.created_by)} · updated ${escapeHtml(revision.updated_at)}</span>
+    </header>
+    ${revision.note ? `<p class="muted">${escapeHtml(revision.note)}</p>` : ""}
+    <details>
+      <summary>Editable instructions (guardrails are composed at runtime and are not editable)</summary>
+      <pre class="log-panel">${escapeHtml(revision.body)}</pre>
+    </details>
+    ${revision.status === "draft" && data.canWrite ? `<details>
+      <summary>Edit draft</summary>
+      <form method="post" action="/config/prompts/drafts/${revision.id}">
+        ${csrf}
+        <input type="hidden" name="expected_edit_seq" value="${revision.editSeq}"/>
+        <textarea name="body" rows="10" cols="72">${escapeHtml(revision.body)}</textarea>
+        <button type="submit">Save draft</button>
+      </form>
+    </details>` : ""}
+    <div class="config-actions">${actions.join("")}</div>
+  </article>`;
+}
+
+export function renderPromptConfigPage(data: PromptConfigPageData): string {
+  const csrf = csrfInput(data.csrfToken);
+  const createForm = data.canWrite
+    ? `<details class="config-create">
+        <summary>Create a prompt draft</summary>
+        <form method="post" action="/config/prompts/drafts">
+          ${csrf}
+          <label>Role <input name="role_id" required/></label>
+          <textarea name="body" rows="10" cols="72" placeholder="Editable instructions only — guardrails are composed at runtime"></textarea>
+          <button type="submit">Create draft</button>
+        </form>
+      </details>`
+    : `<p class="muted">Writing prompt configuration requires an operator OAuth identity.</p>`;
+  const fixtureForm = data.canWrite
+    ? `<details class="config-import">
+        <summary>Save an evaluation fixture (explicit sanitize/provenance acknowledgement required)</summary>
+        <form method="post" action="/config/prompts/fixtures">
+          ${csrf}
+          <label>Name <input name="name" required/></label>
+          <label>PR metadata (JSON) <input name="pr_meta" value="{}"/></label>
+          <textarea name="diff" rows="8" cols="72" placeholder="Sanitized unified diff"></textarea>
+          <label><input type="checkbox" name="acknowledged"/> I confirm this fixture is sanitized and safe to store</label>
+          <button type="submit">Save fixture</button>
+        </form>
+      </details>`
+    : "";
+  const evalForm = data.canWrite
+    ? `<details class="config-import">
+        <summary>Evaluate a draft prompt against a fixture (offline, never publishes)</summary>
+        <form method="post" action="/config/prompts/evaluate">
+          ${csrf}
+          <label>Prompt revision <input name="prompt_revision_id" required/></label>
+          <label>Fixture <input name="fixture_id" required/></label>
+          <label>Model <input name="model"/></label>
+          <label>Max cost (USD) <input name="max_cost_usd"/></label>
+          <button type="submit">Evaluate</button>
+        </form>
+      </details>`
+    : "";
+  const revisionCards = data.revisions.map((revision) => promptRevisionCard(revision, data)).join("");
+  const fixtureRows = data.fixtures
+    .map(
+      (fixture) =>
+        `<tr><td>${fixture.id}</td><td>${escapeHtml(fixture.name)}</td><td>${fixture.diffChars}</td><td>${fixture.expectations.length}</td><td>${escapeHtml(fixture.saved_by)}</td></tr>`,
+    )
+    .join("");
+  const evaluationRows = data.evaluations
+    .map((evaluation) => {
+      const detail = evaluation.status === "failed" ? escapeHtml(evaluation.error ?? "failed") : `${evaluation.findings.length} finding(s)`;
+      return `<tr><td>${evaluation.id}</td><td>#${evaluation.prompt_revision_id}</td><td>#${evaluation.fixture_id}</td><td>${escapeHtml(evaluation.model)}</td><td>${escapeHtml(evaluation.status)}</td><td>${detail}</td></tr>`;
+    })
+    .join("");
+  const body = `
+    <h1>Specialist prompts</h1>
+    <p class="lede">Versioned prompt revisions with offline fixture evaluation. Security guardrails are composed at runtime and are not editable. Evaluation never publishes to GitHub or activates a prompt.</p>
+    <p><a href="/config">Back to review configuration</a></p>
+    ${data.notice ? `<p class="notice" role="status">${escapeHtml(data.notice)}</p>` : ""}
+    ${data.error ? `<p class="error" role="alert">${escapeHtml(data.error)}</p>` : ""}
+    <h2>Revisions</h2>
+    ${createForm}
+    ${revisionCards || `<p class="muted">No prompt revisions — env-authored role prompts apply.</p>`}
+    <h2>Evaluation fixtures</h2>
+    ${fixtureForm}
+    ${data.fixtures.length > 0 ? `<table class="config-audit"><thead><tr><th>ID</th><th>Name</th><th>Diff chars</th><th>Expectations</th><th>Saved by</th></tr></thead><tbody>${fixtureRows}</tbody></table>` : `<p class="muted">No fixtures saved.</p>`}
+    <h2>Evaluations</h2>
+    ${evalForm}
+    ${data.evaluations.length > 0 ? `<table class="config-audit"><thead><tr><th>ID</th><th>Prompt</th><th>Fixture</th><th>Model</th><th>Status</th><th>Result</th></tr></thead><tbody>${evaluationRows}</tbody></table>` : `<p class="muted">No evaluations recorded.</p>`}`;
+  return layout("Specialist prompts", body, {
+    showLogout: data.canWrite || Boolean(data.csrfToken),
+    csrfToken: data.csrfToken,
+  });
+}

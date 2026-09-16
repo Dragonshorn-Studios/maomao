@@ -4,6 +4,9 @@ import { loadConfig } from "./config.js";
 import { openDb } from "./db.js";
 import { JobStore } from "./jobs/store.js";
 import type { JobQueue } from "./jobs/queue.js";
+import type { OpenCodePort } from "./opencode/parse.js";
+
+type OpenCodeLike = OpenCodePort;
 import { createApp } from "./server.js";
 import { SESSION_COOKIE, CSRF_COOKIE, issueCsrfToken } from "./auth.js";
 import type { ManualTriggerPort, ResolvedPull } from "./github/client.js";
@@ -1002,6 +1005,125 @@ describe("review configuration routes", () => {
     };
     expect(exportData.schema_version).toBe(1);
     expect(JSON.stringify(exportData)).not.toContain("secret");
+    log.mockRestore();
+  });
+});
+
+describe("prompt configuration routes", () => {
+  const oauthEnv = {
+    UI_SESSION_SECRET: "session-secret-for-tests",
+    GITHUB_OAUTH_CLIENT_ID: "cid",
+    GITHUB_OAUTH_CLIENT_SECRET: "csecret",
+    MAOMAO_ADMIN_GITHUB_IDS: "1001",
+    MAOMAO_PUBLIC_URL: "https://maomao.example",
+  };
+
+  it("denies prompt writes to password-only sessions (no operator identity)", async () => {
+    const { app, store } = testApp({ UI_PASSWORD: "hunter2", UI_SESSION_SECRET: "session-secret-for-tests" });
+
+    const page = await app.request("/login");
+    const { csrfCookie, csrfToken } = await csrfArtifacts(page);
+    const login = await app.request("/login", {
+      method: "POST",
+      headers: { cookie: csrfCookie, "content-type": "application/x-www-form-urlencoded" },
+      body: `password=hunter2&next=%2F&csrf_token=${encodeURIComponent(csrfToken)}`,
+    });
+    const session = cookieFrom(login);
+    const promptsPage = await app.request("/config/prompts", { headers: { cookie: session } });
+    const pageArtifacts = await csrfArtifacts(promptsPage);
+
+    const denied = await app.request("/config/prompts/drafts", {
+      method: "POST",
+      headers: { cookie: `${session}; ${pageArtifacts.csrfCookie}`, "content-type": "application/x-www-form-urlencoded" },
+      body: `role_id=correctness&body=${encodeURIComponent("Focus: leaked secrets.")}&csrf_token=${encodeURIComponent(pageArtifacts.csrfToken)}`,
+    });
+    expect(denied.status).toBe(403);
+    expect(await denied.text()).toContain("operator GitHub OAuth identity");
+    expect(store.prompts.listPromptRevisions()).toEqual([]);
+  });
+
+  it("requires an operator identity for prompt writes and records the actor", async () => {
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    const { app, store } = testApp(oauthEnv, undefined, mockOauthFetch({ id: 1001, login: "octocat" }));
+
+    const start = await app.request("/login/github");
+    const state = start.headers.get("location")?.match(/state=([^&]+)/)?.[1] ?? "";
+    const callback = await app.request(`/login/github/callback?code=good-code&state=${state}`);
+    const session = cookieFrom(callback);
+    const promptsPage = await app.request("/config/prompts", { headers: { cookie: session } });
+    const pageArtifacts = await csrfArtifacts(promptsPage);
+
+    const created = await app.request("/config/prompts/drafts", {
+      method: "POST",
+      headers: { cookie: `${session}; ${pageArtifacts.csrfCookie}`, "content-type": "application/x-www-form-urlencoded" },
+      body: `role_id=correctness&body=${encodeURIComponent("Focus: leaked secrets.")}&csrf_token=${encodeURIComponent(pageArtifacts.csrfToken)}`,
+    });
+    expect(created.status).toBe(302);
+    const revision = store.prompts.listPromptRevisions()[0];
+    expect(revision?.created_by).toBe("octocat");
+    log.mockRestore();
+  });
+
+  it("evaluates a draft prompt against a fixture without any GitHub writes", async () => {
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    const { app, store } = testApp(oauthEnv, undefined, mockOauthFetch({ id: 1001, login: "octocat" }));
+
+    const start = await app.request("/login/github");
+    const state = start.headers.get("location")?.match(/state=([^&]+)/)?.[1] ?? "";
+    const callback = await app.request(`/login/github/callback?code=good-code&state=${state}`);
+    const session = cookieFrom(callback);
+    const promptsPage = await app.request("/config/prompts", { headers: { cookie: session } });
+    const { csrfCookie, csrfToken } = await csrfArtifacts(promptsPage);
+
+    const draft = store.prompts.createDraft({ roleId: "correctness", body: "Focus: leaked secrets.", createdBy: "octocat" });
+    if (!("revision" in draft)) throw new Error("draft failed");
+    const fixture = store.prompts.saveFixture({
+      name: "leak",
+      prMeta: { repo: "acme/widgets" },
+      diff: "diff --git a/a.ts b/a.ts\n--- a/a.ts\n+++ b/a.ts\n@@ -1,1 +1,2 @@\n x\n+console.log(secret);",
+      expectations: [{ severity: "high" }],
+      savedBy: "octocat",
+      acknowledged: true,
+    });
+    if (!("fixture" in fixture)) throw new Error("fixture failed");
+
+    const opencode: OpenCodeLike = {
+      async run(input) {
+        const text = JSON.stringify({
+          schema_version: 1,
+          reviewer: "correctness",
+          verdict: "findings",
+          findings: [
+            { severity: "high", confidence: 0.9, category: "correctness", file: "a.ts", line: 2, summary: "secret logged", reason: "evidence" },
+          ],
+        });
+        void input;
+        return { stdout: text, stderr: "", exitCode: 0, text, usage: { cost: 0.01, totalTokens: 10, complete: true } };
+      },
+    };
+    const evalApp = createApp({
+      config: loadConfig(oauthEnv),
+      store,
+      queue: { enqueue() {}, abortMany() {} } as unknown as JobQueue,
+      startedAt: Date.now(),
+      oauthFetch: mockOauthFetch({ id: 1001, login: "octocat" }),
+      opencode: opencode as unknown as OpenCodePort,
+    });
+    const evalStart = await evalApp.request("/login/github");
+    const evalState = evalStart.headers.get("location")?.match(/state=([^&]+)/)?.[1] ?? "";
+    const evalCallback = await evalApp.request(`/login/github/callback?code=good-code&state=${evalState}`);
+    const evalSession = cookieFrom(evalCallback);
+    const evalPage = await evalApp.request("/config/prompts", { headers: { cookie: evalSession } });
+    const evalArtifacts = await csrfArtifacts(evalPage);
+
+    const evaluate = await evalApp.request("/config/prompts/evaluate", {
+      method: "POST",
+      headers: { cookie: `${evalSession}; ${evalArtifacts.csrfCookie}`, "content-type": "application/x-www-form-urlencoded" },
+      body: `prompt_revision_id=${draft.revision.id}&fixture_id=${fixture.fixture.id}&model=test/model&csrf_token=${encodeURIComponent(evalArtifacts.csrfToken)}`,
+    });
+    expect(evaluate.status).toBe(302);
+    const evaluation = store.prompts.listEvaluations()[0];
+    expect(evaluation?.status).toBe("completed");
     log.mockRestore();
   });
 });
