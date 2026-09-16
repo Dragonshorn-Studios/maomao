@@ -3,6 +3,7 @@ import { openDb } from "./db.js";
 import { seedDemoJobs } from "./demo/fixtures.js";
 import { JobStore } from "./jobs/store.js";
 import { THEME_CSS } from "./ui/theme.js";
+import { DIFFS_JS } from "./ui/diffs.js";
 import { renderConfigPage, renderHome, renderJob, renderLogin, renderScanConfirmPage, renderScanIssuePreviewPage, renderScanPage } from "./ui/pages.js";
 import { jobStateLabel, settledFindingsCopy } from "./ui/copy.js";
 import { formatCost, formatTokens, jobMetrics } from "./ui/metrics.js";
@@ -28,6 +29,11 @@ describe("theme tokens", () => {
     expect(THEME_CSS).toContain(".finding.is-unconfirmed");
     expect(THEME_CSS).toContain("details.finding");
     expect(THEME_CSS).toContain(".settled-findings-label");
+    expect(THEME_CSS).toContain(".diff-panel .diff-add");
+    expect(THEME_CSS).toContain(".diff-gutter");
+    expect(THEME_CSS).toContain(".word-add");
+    expect(THEME_CSS).toContain(".word-del");
+    expect(THEME_CSS).toContain(".diff-more");
     expect(THEME_CSS).toContain("@keyframes spin");
     expect(THEME_CSS).toContain(".section-head");
     expect(THEME_CSS).toMatch(/\.tick\.running[\s\S]*var\(--working\)/);
@@ -835,5 +841,63 @@ describe("repository health scan UI", () => {
     expect(html).toContain('name="fp[]" value="fpworthy00000001"');
     expect(html).not.toContain('name="fp[]" value="fpdedup000000001"');
     expect(html).toContain("Create 1 issue</button>");
+  });
+});
+
+describe("diffs.js", () => {
+  const api = new Function(
+    `${DIFFS_JS}\n;return globalThis.__maomaoDiffs;`,
+  )() as {
+    wordDiff: (a: string, b: string) => { oldTokens: { text: string; changed: boolean }[]; newTokens: { text: string; changed: boolean }[] };
+    computeGutters: (lines: { type: string; text: string }[]) => { old: number | null; new: number | null }[];
+  };
+
+  it("marks only the changed words between paired lines", () => {
+    const result = api.wordDiff("const total = compute(1);", "const total = compute(2);");
+    const changed = (tokens: { text: string; changed: boolean }[]) =>
+      tokens.filter((token) => token.changed).map((token) => token.text).join("");
+    expect(changed(result.oldTokens)).toBe("1");
+    expect(changed(result.newTokens)).toBe("2");
+    // Shared context stays unmarked.
+    expect(result.oldTokens.some((token) => !token.changed && token.text === "compute")).toBe(true);
+  });
+
+  it("tracks old/new line numbers across hunk headers and line types", () => {
+    const gutters = api.computeGutters([
+      { type: "ctx", text: "@@ -4,3 +4,4 @@" },
+      { type: "ctx", text: " unchanged" },
+      { type: "del", text: "-removed" },
+      { type: "add", text: "+added" },
+      { type: "add", text: "+added2" },
+      { type: "ctx", text: " tail" },
+    ]);
+    expect(gutters.slice(1)).toEqual([
+      { old: 4, new: 4 },
+      { old: 5, new: null },
+      { old: null, new: 5 },
+      { old: null, new: 6 },
+      { old: 6, new: 7 },
+    ]);
+  });
+
+  it("leaves gutters empty when the hunk header has no numbers", () => {
+    const gutters = api.computeGutters([
+      { type: "ctx", text: "@@ first hunk (no line recorded)" },
+      { type: "add", text: "+x" },
+    ]);
+    expect(gutters[0]).toEqual({ old: null, new: null });
+    expect(gutters[1]).toEqual({ old: null, new: null });
+  });
+
+  it("serves a self-contained script with a debug hook and no network calls", () => {
+    expect(DIFFS_JS).toContain("__maomaoDiffs");
+    expect(DIFFS_JS).not.toMatch(/fetch\(|XMLHttpRequest|https?:\/\//);
+    expect(DIFFS_JS).not.toContain("innerHTML");
+    expect(DIFFS_JS).toContain("data-diffs-enhanced");
+  });
+
+  it("is loaded with defer from every page head", () => {
+    const html = renderLogin({ nextPath: "/jobs/1", showPassword: true });
+    expect(html).toContain('<script src="/assets/diffs.js" defer></script>');
   });
 });

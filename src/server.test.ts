@@ -173,6 +173,10 @@ describe("HTTP app", () => {
     expect((await app.request("/login")).status).toBe(200);
     expect((await app.request("/assets/maomao.css")).status).toBe(200);
     expect(await (await app.request("/assets/maomao.css")).text()).toContain("--jade:");
+    const diffsJs = await app.request("/assets/diffs.js");
+    expect(diffsJs.status).toBe(200);
+    expect(diffsJs.headers.get("content-type")).toContain("text/javascript");
+    expect(await diffsJs.text()).toContain("__maomaoDiffs");
     expect((await app.request("/assets/other.css")).status).toBe(302);
     expect((await app.request("/assets/other.css")).headers.get("location")).toContain("/login");
 
