@@ -1,12 +1,12 @@
+import type { CancelReason } from "../config.js";
 import { publish } from "../events.js";
 import type { JobStore } from "./store.js";
 
-/** Why a job reached the terminal `cancelled` state. Persisted on the job row. */
-export type CancelReason = "pr_merged" | "manual_dequeue" | "manual_cancel";
+export type { CancelReason };
 
 export interface CancelInput {
   reason: CancelReason;
-  /** Operator login for manual actions; null for webhook-driven cancellation. */
+  /** Operator login for manual actions; omitted for webhook-driven cancellation (persisted as null). */
   actor?: string;
   /** Extra context for the audit log line (e.g. the webhook delivery id). */
   note?: string;
@@ -15,6 +15,14 @@ export interface CancelInput {
 export interface CancelJobsForPullInput extends CancelInput {
   repoFullName: string;
   prNumber: number;
+  /**
+   * Invoked with the cancelled ids immediately after the atomic UPDATE, before
+   * audit logging — wire it to `queue.abortMany` so an in-memory abort never
+   * depends on logging or the HTTP response surviving. The cancellation itself
+   * does not: pending jobs re-check persisted state when claimed, and running
+   * jobs stop at the next pipeline checkpoint.
+   */
+  onCancelled?: (jobIds: number[]) => void;
 }
 
 function logCancellation(store: JobStore, jobId: number, input: CancelInput): void {
@@ -26,12 +34,11 @@ function logCancellation(store: JobStore, jobId: number, input: CancelInput): vo
 
 /**
  * Cancels every non-terminal review job for one pull request (all head SHAs)
- * with the same reason. This is the single cancellation path shared by the
- * merge webhook and the manual UI actions. The state transition itself is one
- * atomic UPDATE (see JobStore.cancelJobs), so a worker claiming the job either
- * sees the cancelled state or the update wins the race. Callers must follow up
- * with `queue.abortMany(ids)` to drop pending jobs from the in-memory queue and
- * cooperatively abort running ones.
+ * with the same reason. Currently the merge webhook's path; the manual UI
+ * dequeue/cancel actions in #49 use the same service via cancelJob. The state
+ * transition is one atomic UPDATE (see JobStore.cancelJobs), so a worker
+ * claiming the job either sees the cancelled state or the update wins the race
+ * (single-process design: synchronous SQLite, one queue in memory).
  */
 export function cancelJobsForPull(
   store: JobStore,
@@ -42,8 +49,15 @@ export function cancelJobsForPull(
     input.reason,
     input.actor ?? null,
   );
+  input.onCancelled?.(cancelledJobIds);
   for (const id of cancelledJobIds) {
-    logCancellation(store, id, input);
+    try {
+      logCancellation(store, id, input);
+    } catch (error) {
+      // The cancellation is already durable; a failed audit line must not hide
+      // the ids from the remaining loop iterations or the caller.
+      console.error(`cancel: could not write audit log for job ${id}: ${error instanceof Error ? error.message : String(error)}`);
+    }
     publish({ type: "job", jobId: id });
   }
   if (cancelledJobIds.length > 0) publish({ type: "jobs" });
@@ -65,7 +79,9 @@ export function cancelJob(store: JobStore, jobId: number, input: CancelInput): C
   if (job.state === "cancelled") return { ok: true, already: true };
   const cancelled = store.cancelJobs({ jobId }, input.reason, input.actor ?? null);
   if (cancelled.length === 0) {
-    return { ok: false, error: `cannot cancel a ${job.state} job` };
+    // Re-read so the error names the state that actually won the race.
+    const current = store.getJob(jobId);
+    return { ok: false, error: `cannot cancel a ${current?.state ?? job.state} job` };
   }
   logCancellation(store, jobId, input);
   publish({ type: "job", jobId });

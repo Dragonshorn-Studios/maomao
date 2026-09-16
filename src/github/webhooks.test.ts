@@ -958,3 +958,96 @@ describe("pull_request.closed merge cancellation", () => {
     expect(result.body.cancelledJobIds).toEqual([]);
   });
 });
+
+describe("merge-cancellation hardening", () => {
+  const secret = "s3cret";
+
+  function activeJob(store: JobStore, headSha = "head222", prNumber = 7) {
+    const created = store.enqueue({
+      repoFullName: "acme/widgets",
+      repoOwner: "acme",
+      repoName: "widgets",
+      installationId: 42,
+      prNumber,
+      prTitle: "t",
+      prBody: "",
+      prHtmlUrl: "",
+      prAuthor: "a",
+      baseSha: "base111",
+      headSha,
+      baseRef: "main",
+      headRef: "f",
+      reviewers: [{ role: "correctness", title: "Correctness" }],
+    });
+    return created.job.id;
+  }
+
+  it("rejects an invalid signature on closed deliveries before touching queue state", async () => {
+    const store = new JobStore(openDb(":memory:"));
+    const jobId = activeJob(store);
+    const rawBody = JSON.stringify({
+      action: "closed",
+      installation: { id: 42 },
+      repository: { id: 2002, full_name: "acme/widgets", name: "widgets", owner: { login: "acme" } },
+      pull_request: { number: 7, merged: true },
+    });
+    const result = await handleGithubWebhook({
+      config: loadConfig({ GITHUB_WEBHOOK_SECRET: secret, REVIEWER_ROLES: "correctness" }),
+      store,
+      request: {
+        event: "pull_request",
+        deliveryId: "bad-sig",
+        signature: "sha256=deadbeef",
+        rawBody,
+      },
+    });
+    expect(result.status).toBe(401);
+    expect(store.getJob(jobId)?.state).toBe("queued");
+  });
+
+  it("refuses to enqueue new work for a pull whose merge already cancelled a job", async () => {
+    const store = new JobStore(openDb(":memory:"));
+    const jobId = activeJob(store);
+    const config = loadConfig({
+      GITHUB_WEBHOOK_SECRET: secret,
+      GITHUB_APP_ID: "1",
+      GITHUB_APP_PRIVATE_KEY: "k",
+      REVIEWER_ROLES: "correctness",
+    });
+    const closedBody = JSON.stringify({
+      action: "closed",
+      installation: { id: 42, account: { id: 1001 } },
+      repository: { id: 2002, full_name: "acme/widgets", name: "widgets", owner: { login: "acme", id: 1001 } },
+      pull_request: { number: 7, merged: true },
+    });
+    const closed = await handleGithubWebhook({
+      config,
+      store,
+      request: { event: "pull_request", deliveryId: "close-1", signature: sign(secret, closedBody), rawBody: closedBody },
+    });
+    expect(closed.body.cancelled).toBe(1);
+    expect(store.hasMergedPull("acme/widgets", 7)).toBe(true);
+
+    // A delayed synchronize (push raced the merge button) arrives after the close.
+    const latePushBody = JSON.stringify({
+      action: "synchronize",
+      installation: { id: 42, account: { id: 1001 } },
+      repository: { id: 2002, full_name: "acme/widgets", name: "widgets", owner: { login: "acme", id: 1001 } },
+      pull_request: {
+        number: 7,
+        user: { login: "dev" },
+        base: { sha: "base111", ref: "main" },
+        head: { sha: "late-push", ref: "feature" },
+      },
+    });
+    const late = await handleGithubWebhook({
+      config,
+      store,
+      request: { event: "pull_request", deliveryId: "late-push", signature: sign(secret, latePushBody), rawBody: latePushBody },
+    });
+    expect(late.status).toBe(202);
+    expect(late.body.ignored).toBe(true);
+    expect(store.findLatestJobForPull("acme/widgets", 7, "late-push")).toBeUndefined();
+    expect(store.getJob(jobId)?.state).toBe("cancelled");
+  });
+});

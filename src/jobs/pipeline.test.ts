@@ -1020,6 +1020,21 @@ describe("retryFailedReviewers", () => {
     store.setJobState(created.job.id, "stale");
     expect(store.retryFailedReviewers(created.job.id).ok).toBe(false);
   });
+
+  it("refuses to retry a merge-cancelled job", () => {
+    const store = new JobStore(openDb(":memory:"));
+    const created = store.enqueue(base);
+    const run = store.listReviewerRuns(created.job.id)[0];
+    store.patchReviewer(run.id, { state: "failed", validation_error: "empty" });
+    // Cancellation only reaches active states (failed jobs stay historical),
+    // so cancel from queued and confirm the retry guard still holds.
+    store.cancelJobs({ jobId: created.job.id }, "pr_merged", null);
+    const result = store.retryFailedReviewers(created.job.id);
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error).toBe("cannot retry a cancelled job");
+    expect(store.getJob(created.job.id)?.state).toBe("cancelled");
+    expect(store.getReviewerRun(run.id)?.state).toBe("failed");
+  });
 });
 
 const AUTH_DIFF = `diff --git a/src/auth/session.ts b/src/auth/session.ts
@@ -3271,22 +3286,7 @@ describe("cancellation races", () => {
   it("runs no work for a job already cancelled before claiming", async () => {
     const config = loadConfig({ REVIEWER_ROLES: "correctness" });
     const store = new JobStore(openDb(":memory:"));
-    const created = store.enqueue({
-      repoFullName: "acme/widgets",
-      repoOwner: "acme",
-      repoName: "widgets",
-      installationId: 9,
-      prNumber: 4,
-      prTitle: "t",
-      prBody: "",
-      prHtmlUrl: "",
-      prAuthor: "dev",
-      baseSha: "base",
-      headSha: "cafebabe",
-      baseRef: "main",
-      headRef: "feat",
-      reviewers: [{ role: "correctness", title: "Correctness" }],
-    });
+    const created = enqueueJob(store, config);
     const cancelled = store.cancelJobs({ jobId: created.job.id }, "pr_merged", null);
     expect(cancelled).toEqual([created.job.id]);
     let preparations = 0;
@@ -3321,22 +3321,7 @@ describe("cancellation races", () => {
   it("a job cancelled mid-review never publishes and stays cancelled", async () => {
     const config = loadConfig({ REVIEWER_ROLES: "correctness", POST_EMPTY_REVIEW: "true" });
     const store = new JobStore(openDb(":memory:"));
-    const created = store.enqueue({
-      repoFullName: "acme/widgets",
-      repoOwner: "acme",
-      repoName: "widgets",
-      installationId: 9,
-      prNumber: 4,
-      prTitle: "t",
-      prBody: "",
-      prHtmlUrl: "",
-      prAuthor: "dev",
-      baseSha: "base",
-      headSha: "cafebabe",
-      baseRef: "main",
-      headRef: "feat",
-      reviewers: [{ role: "correctness", title: "Correctness" }],
-    });
+    const created = enqueueJob(store, config);
     const posted: number[] = [];
     let releaseReviewers: (() => void) | undefined;
     const reviewerGate = new Promise<void>((resolve) => {

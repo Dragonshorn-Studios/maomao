@@ -487,15 +487,15 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
         rawBody,
       },
       rateLimiter,
+      // Dropped from the in-memory queue inside the handler, before any
+      // post-cancellation logging could fail; abortMany is idempotent.
+      abortJobs: (ids) => ctx.queue.abortMany(ids),
     });
     if (result.enqueue) {
       dispatchEnqueue(ctx.queue, result.enqueue);
     }
     if (result.dispatchJobId) {
       ctx.queue.enqueue(result.dispatchJobId);
-    }
-    if (result.cancelledJobIds?.length) {
-      ctx.queue.abortMany(result.cancelledJobIds);
     }
     return c.json(result.body, result.status as 200);
   });

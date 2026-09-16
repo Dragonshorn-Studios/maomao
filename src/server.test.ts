@@ -2602,25 +2602,17 @@ describe("scan repository typeahead", () => {
 
 describe("webhook merge cancellation wiring", () => {
   it("aborts queue jobs cancelled by a merged pull_request.closed delivery", async () => {
-    const webhookSecret = "s3cret";
-    const config = loadConfig({
-      GITHUB_WEBHOOK_SECRET: webhookSecret,
-      GITHUB_APP_ID: "1",
-      GITHUB_APP_PRIVATE_KEY: "k",
-      REVIEWER_ROLES: "correctness",
-    });
-    const store = new JobStore(openDb(":memory:"));
-    const enqueued: number[] = [];
     const aborted: number[][] = [];
-    const queue = {
-      enqueue(id: number) {
-        enqueued.push(id);
-      },
-      abortMany(ids: number[]) {
-        aborted.push([...ids]);
-      },
-    } as unknown as JobQueue;
-    const app = createApp({ config, store, queue, startedAt: Date.now() });
+    const { app, store, enqueued, webhookSecret } = testApp({}, undefined, undefined, {
+      queue: {
+        enqueue(id: number) {
+          enqueued.push(id);
+        },
+        abortMany(ids: number[]) {
+          aborted.push([...ids]);
+        },
+      } as unknown as JobQueue,
+    });
 
     const opened = await app.request("/webhooks/github", {
       method: "POST",

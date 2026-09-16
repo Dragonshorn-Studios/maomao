@@ -107,7 +107,10 @@ async function runJob(deps: PipelineDeps, jobId: number, signal: AbortSignal): P
   const { store, config } = deps;
   const job = store.getJob(jobId);
   if (!job) return;
-  if (["stale", "cancelled"].includes(job.state)) return;
+  if (["stale", "cancelled"].includes(job.state)) {
+    store.log(jobId, `Skipped run: job is ${job.state}`, "warn");
+    return;
+  }
   if (job.state === "completed") {
     if (job.manual_escalate_requested && jobHasPendingDispatch(store, job)) {
       await dispatchExternalEscalation(deps, job, undefined);
@@ -305,6 +308,7 @@ async function runJob(deps: PipelineDeps, jobId: number, signal: AbortSignal): P
       store.log(jobId, `Thread resolve deferred: ${formatError(error)}`, "warn");
     }
 
+    throwIfStale(store, jobId, signal);
     await dispatchExternalEscalation(deps, store.getJob(jobId) ?? afterPublish, aggregated);
     store.setJobState(jobId, "completed", {
       github_review_id: posted?.id ?? store.getJob(jobId)?.github_review_id ?? null,
@@ -313,13 +317,21 @@ async function runJob(deps: PipelineDeps, jobId: number, signal: AbortSignal): P
     });
   } catch (error) {
     if (store.isStale(jobId) || signal.aborted) {
-      const cancelled = store.getJob(jobId)?.state === "cancelled";
+      const afterAbort = store.getJob(jobId);
+      const cancelled = afterAbort?.state === "cancelled";
+      // A review POST already in flight can complete despite cancellation, so
+      // the row — not the happy path's local variables — is the source of truth.
+      const reviewPosted = Boolean(afterAbort?.github_review_id);
       store.log(
         jobId,
-        cancelled ? "Job cancelled before publish; no review posted" : "Job aborted or marked stale; skipping publish",
+        cancelled
+          ? reviewPosted
+            ? "Job cancelled after a review was posted; the posted review is stale"
+            : "Job cancelled before publish; no review posted"
+          : "Job aborted or marked stale; skipping publish",
         "warn",
       );
-      const runningInternal = store.getJob(jobId)?.internal_escalation_state === "running";
+      const runningInternal = afterAbort?.internal_escalation_state === "running";
       if (runningInternal) {
         store.patchJob(jobId, {
           internal_escalation_state: "failed",
@@ -1134,6 +1146,12 @@ async function dispatchExternalEscalation(
 ): Promise<void> {
   const config = deps.config.poisonAlert;
   const latest = deps.store.getJob(job.id) ?? job;
+  // External pages must never fire for a job that was cancelled or superseded
+  // while the pipeline was between checkpoints (completed jobs still dispatch).
+  if (latest.state === "stale" || latest.state === "cancelled") {
+    deps.store.log(latest.id, `External dispatch skipped: job is ${latest.state}`, "warn");
+    return;
+  }
   const findings = aggregated?.findings ?? parseStoredFindings(latest.aggregator_normalized);
   const withIds = assignFindingIds(findings);
   const alertCleared = latest.internal_escalation_alert_cleared === 1;

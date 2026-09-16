@@ -30,6 +30,9 @@ export type JobState =
 
 export type ReviewerState = "queued" | "running" | "done" | "failed";
 
+/** Why a job reached the terminal `cancelled` state; persisted in jobs.cancelled_reason. */
+export type CancelReason = "pr_merged" | "manual_dequeue" | "manual_cancel";
+
 /**
  * `closed` is handled specially (merge-triggered cancellation) and is never a
  * valid enqueue action, so it is not in DEFAULT_ACTIONS and cannot be enabled
