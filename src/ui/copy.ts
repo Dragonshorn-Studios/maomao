@@ -188,7 +188,7 @@ export function externalDispatchBadge(
 export function findingStatusLabel(status: string): { text: string; hint: string } {
   switch (status) {
     case "resolved":
-      return { text: "Resolved", hint: "Verifier confirmed the problem is gone" };
+      return { text: "Resolved", hint: "The problem is gone, or GitHub already closed this conversation" };
     case "dismissed":
       return { text: "Dismissed", hint: "Acknowledged and intentionally ignored" };
     case "still_valid":
@@ -214,14 +214,19 @@ export function findingOverrideNote(finding: {
   dismissed_by?: string | null;
   dismiss_command?: string | null;
   reopened_by?: string | null;
+  reconciliation_reason?: string | null;
 }): string | undefined {
   if (finding.status === "dismissed") {
     const who = finding.dismissed_by ? ` by ${finding.dismissed_by}` : "";
     const via = findingCommandLabel(finding.dismiss_command);
     return `Buried${who}${via ? ` via ${via}` : ""}. Intentionally ignored, not marked fixed.`;
   }
+  const reason = finding.reconciliation_reason?.trim();
   if (finding.status === "resolved") {
-    return "Verifier confirmed the problem is gone.";
+    return reason || "Verifier confirmed the problem is gone.";
+  }
+  if (finding.status === "uncertain" || finding.status === "still_valid" || finding.status === "moved") {
+    if (reason) return reason;
   }
   if (finding.reopened_by) {
     return `Reopened by ${finding.reopened_by}.`;

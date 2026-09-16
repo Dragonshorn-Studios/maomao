@@ -1,14 +1,14 @@
 import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { Config } from "../config.js";
-import type { GithubPort, ReviewThread } from "../github/client.js";
-import { isMaomaoThread, threadRoot } from "../github/client.js";
+import type { ReviewThread } from "../github/client.js";
+import { findingComment, isMaomaoThread, parseThreadFindingMarker } from "../github/client.js";
 import type { JobRow, JobStore } from "../jobs/store.js";
 import type { OpenCodePort } from "../opencode/parse.js";
 import { buildVerifierPrompt } from "../prompts.js";
 import type { AggregatorFinding } from "../schema.js";
 import { parseVerifierResult } from "../schema.js";
-import { fingerprintFinding, parseFindingMarker, stripHtmlComments } from "./identity.js";
+import { fingerprintFinding, stripHtmlComments } from "./identity.js";
 import { boundContexts, collectFindingContext } from "./context.js";
 import type { ClassifiedFinding, FindingClassification, ReconciliationSnapshot } from "./types.js";
 import { currentFindingsForRisk } from "./types.js";
@@ -26,6 +26,7 @@ export interface PriorFinding {
   reviewedSha?: string;
   dismissed: boolean;
   settledResolved: boolean;
+  githubAlreadyResolved?: boolean;
 }
 
 export function collectPriorFindings(input: {
@@ -48,29 +49,35 @@ export function collectPriorFindings(input: {
       reviewedSha: row.reviewed_sha,
       dismissed: row.status === "dismissed",
       settledResolved: row.status === "resolved",
+      githubAlreadyResolved: false,
     });
   }
 
   for (const thread of input.threads) {
-    if (thread.isResolved || !isMaomaoThread(thread)) continue;
-    const root = threadRoot(thread);
-    const marker = root ? parseFindingMarker(root.body) : undefined;
+    if (!isMaomaoThread(thread)) continue;
+    const comment = findingComment(thread);
+    const marker = parseThreadFindingMarker(thread);
     if (!marker) continue;
     const existing = byFingerprint.get(marker.id);
-    const summary = existing?.summary || summarizeComment(root?.body ?? "");
+    const dismissed = existing?.dismissed === true;
+    const summary = existing?.summary || summarizeComment(comment?.body ?? "");
+    // An open Maomao thread always re-checks, even if SQLite already says resolved
+    // (GitHub resolve may have failed last time). A GitHub-resolved thread is
+    // caught here so the DB/UI match GitHub without another verifier pass.
     byFingerprint.set(marker.id, {
       fingerprint: marker.id,
       threadId: thread.id,
-      commentId: root?.databaseId != null ? String(root.databaseId) : existing?.commentId,
-      path: root?.path ?? thread.path ?? existing?.path,
-      line: root?.line ?? thread.line ?? existing?.line ?? undefined,
+      commentId: comment?.databaseId != null ? String(comment.databaseId) : existing?.commentId,
+      path: comment?.path ?? thread.path ?? existing?.path,
+      line: comment?.line ?? thread.line ?? existing?.line ?? undefined,
       summary,
-      body: existing?.body ?? root?.body,
+      body: existing?.body ?? comment?.body,
       category: existing?.category,
       severity: existing?.severity,
       reviewedSha: marker.sha || existing?.reviewedSha,
-      dismissed: existing?.dismissed === true,
-      settledResolved: false,
+      dismissed,
+      settledResolved: dismissed ? false : thread.isResolved,
+      githubAlreadyResolved: dismissed ? false : thread.isResolved,
     });
   }
 
@@ -134,7 +141,12 @@ export async function classifyPriorFindings(input: {
         fingerprint: prior.fingerprint,
         status: "resolved",
         confidence: 1,
-        reason: "already resolved; no open thread to re-check",
+        reason: prior.githubAlreadyResolved
+          ? "GitHub thread already resolved"
+          : "already resolved; no open thread to re-check",
+        threadId: prior.threadId,
+        commentId: prior.commentId,
+        githubAlreadyResolved: true,
         originalPath: prior.path,
         originalLine: prior.line,
         category: prior.category,

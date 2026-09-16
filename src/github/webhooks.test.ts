@@ -714,6 +714,37 @@ describe("review thread override commands", () => {
     expect(store.getFinding("acme/widgets", 7, "deadbeefdeadbeef")?.status).toBe("dismissed");
   });
 
+  it("finds the Maomao marker when it is not the first comment in the thread", async () => {
+    const resolved: string[] = [];
+    const { result, store } = await post(reviewCommentBody(), {
+      deliveryId: "marker-later",
+      github: githubForCommands({
+        resolved,
+        threads: [
+          {
+            id: "PRRT_1",
+            isResolved: false,
+            comments: [
+              { id: "reply", databaseId: 99, body: "looks fine", path: "src/a.ts", line: 4, authorLogin: "octocat" },
+              {
+                id: "n1",
+                databaseId: 11,
+                body: "<!-- maomao-finding id=deadbeefdeadbeef sha=abc -->\n**high**: leak",
+                path: "src/a.ts",
+                line: 4,
+                authorLogin: "maomao[bot]",
+              },
+            ],
+          },
+        ],
+      }),
+    });
+    expect(result.status).toBe(200);
+    expect(result.body.command).toBe("dismiss");
+    expect(resolved).toEqual(["PRRT_1"]);
+    expect(store.getFinding("acme/widgets", 7, "deadbeefdeadbeef")?.status).toBe("dismissed");
+  });
+
   it("is idempotent for duplicate deliveries and repeated commands", async () => {
     const resolved: string[] = [];
     const github = githubForCommands({ resolved });

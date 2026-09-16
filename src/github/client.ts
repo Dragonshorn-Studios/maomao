@@ -124,6 +124,13 @@ export interface GithubPort {
     title: string,
     body: string,
   ): Promise<{ number: number; url: string }>;
+  getIssue?(
+    installationId: number,
+    owner: string,
+    repo: string,
+    issueNumber: number,
+  ): Promise<{ number: number; title: string; body: string; state: string; url: string; isPullRequest: boolean } | undefined>;
+  closeIssue?(installationId: number, owner: string, repo: string, issueNumber: number): Promise<void>;
   listIssueComments?(
     installationId: number,
     owner: string,
@@ -396,6 +403,35 @@ export class GithubClient implements GithubPort, ManualTriggerPort {
     return { number: response.data.number, url: response.data.html_url };
   }
 
+  async getIssue(installationId: number, owner: string, repo: string, issueNumber: number) {
+    const octokit = this.installationOctokit(installationId);
+    try {
+      const response = await octokit.rest.issues.get({ owner, repo, issue_number: issueNumber });
+      return {
+        number: response.data.number,
+        title: response.data.title ?? "",
+        body: response.data.body ?? "",
+        state: String(response.data.state ?? "open"),
+        url: response.data.html_url,
+        isPullRequest: Boolean(response.data.pull_request),
+      };
+    } catch (error) {
+      const status = error && typeof error === "object" && "status" in error ? Number(error.status) : 0;
+      if (status === 404) return undefined;
+      throw error;
+    }
+  }
+
+  async closeIssue(installationId: number, owner: string, repo: string, issueNumber: number) {
+    const octokit = this.installationOctokit(installationId);
+    try {
+      await octokit.rest.issues.update({ owner, repo, issue_number: issueNumber, state: "closed" });
+    } catch (error) {
+      if (isAlreadyClosedError(error)) return;
+      throw error;
+    }
+  }
+
   async createCommentReview(input: {
     installationId: number;
     owner: string;
@@ -638,6 +674,19 @@ export function threadRoot(thread: ReviewThread): ReviewThreadComment | undefine
   return thread.comments[0];
 }
 
+/** The comment that carries the Maomao finding marker, even if it is not comments[0]. */
+export function findingComment(thread: ReviewThread): ReviewThreadComment | undefined {
+  return thread.comments.find((comment) => Boolean(parseFindingMarker(comment.body))) ?? thread.comments[0];
+}
+
+export function parseThreadFindingMarker(thread: ReviewThread): { id: string; sha: string } | undefined {
+  for (const comment of thread.comments) {
+    const marker = parseFindingMarker(comment.body);
+    if (marker) return marker;
+  }
+  return undefined;
+}
+
 export function isMaomaoThread(thread: ReviewThread): boolean {
   return thread.comments.some((comment) => Boolean(parseFindingMarker(comment.body)));
 }
@@ -667,7 +716,7 @@ query($owner: String!, $repo: String!, $number: Int!, $cursor: String) {
           isResolved
           path
           line
-          comments(first: 50) {
+          comments(first: 100) {
             nodes {
               id
               databaseId
@@ -741,4 +790,9 @@ function isAlreadyResolvedError(error: unknown): boolean {
 function isAlreadyUnresolvedError(error: unknown): boolean {
   const message = error instanceof Error ? error.message : String(error);
   return /not resolved|already unresolved|is not resolved/i.test(message);
+}
+
+function isAlreadyClosedError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return /already closed|is closed/i.test(message);
 }

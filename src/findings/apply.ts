@@ -1,8 +1,8 @@
 import type { GithubPort, ReviewThread } from "../github/client.js";
-import { isMaomaoThread, threadRoot } from "../github/client.js";
+import { findingComment, isMaomaoThread, parseThreadFindingMarker } from "../github/client.js";
 import type { JobRow, JobStore } from "../jobs/store.js";
 import { anchoredDiffHunk } from "./context.js";
-import { parseFindingMarker, stripHtmlComments } from "./identity.js";
+import { scanIssueMarkerBase, stripHtmlComments } from "./identity.js";
 import { summarizeComment } from "./reconcile.js";
 import type { ClassifiedFinding, FindingDiffNote, FindingStatus, ReconciliationSnapshot } from "./types.js";
 
@@ -34,23 +34,49 @@ export function findingDiffContext(
   return { diffHunk: null, diffNote: result.reason };
 }
 
+export interface ThreadCloseSkip {
+  fingerprint: string;
+  reason: string;
+  /** True when we intended to close a GitHub conversation and could not. */
+  wantedClose: boolean;
+}
+
 export async function applyReconciliationThreads(input: {
   github: GithubPort;
   job: JobRow;
   snapshot: ReconciliationSnapshot;
   postedFingerprints?: Iterable<string>;
-}): Promise<{ resolved: string[]; skipped: string[]; failed: Array<{ fingerprint: string; reason: string }> }> {
+}): Promise<{ resolved: string[]; skipped: ThreadCloseSkip[]; failed: Array<{ fingerprint: string; reason: string }> }> {
   const posted = new Set(input.postedFingerprints ?? []);
   const resolved: string[] = [];
-  const skipped: string[] = [];
+  const skipped: ThreadCloseSkip[] = [];
   const failed: Array<{ fingerprint: string; reason: string }> = [];
   for (const item of input.snapshot.items) {
+    if (item.githubAlreadyResolved) {
+      skipped.push({
+        fingerprint: item.fingerprint,
+        reason: item.reason || "GitHub thread already resolved",
+        wantedClose: false,
+      });
+      continue;
+    }
     if (!item.threadId) {
-      skipped.push(item.fingerprint);
+      const wantedClose = item.status === "resolved" || item.status === "dismissed" || item.status === "moved";
+      skipped.push({
+        fingerprint: item.fingerprint,
+        reason: wantedClose
+          ? `classified ${item.status} but no GitHub thread id; cannot close the review conversation`
+          : item.reason || `classified ${item.status}; no GitHub thread to update`,
+        wantedClose,
+      });
       continue;
     }
     if (item.status === "moved" && !posted.has(item.fingerprint)) {
-      skipped.push(item.fingerprint);
+      skipped.push({
+        fingerprint: item.fingerprint,
+        reason: "moved, but no replacement comment was posted; leaving the original thread open",
+        wantedClose: true,
+      });
       continue;
     }
     if (item.status === "resolved" || item.status === "dismissed" || item.status === "moved") {
@@ -65,10 +91,35 @@ export async function applyReconciliationThreads(input: {
         });
       }
     } else {
-      skipped.push(item.fingerprint);
+      skipped.push({
+        fingerprint: item.fingerprint,
+        reason: item.reason || `classified ${item.status}; leaving the thread open`,
+        wantedClose: false,
+      });
     }
   }
   return { resolved, skipped, failed };
+}
+
+/** Fill missing snapshot thread ids from SQLite after persistThreadsAsFindings. */
+export function attachStoredThreadIds(
+  store: JobStore,
+  job: JobRow,
+  snapshot: ReconciliationSnapshot,
+): ReconciliationSnapshot {
+  return {
+    ...snapshot,
+    items: snapshot.items.map((item) => {
+      if (item.threadId) return item;
+      const row = store.getFinding(job.repo_full_name, job.pr_number, item.fingerprint);
+      if (!row?.github_thread_id) return item;
+      return {
+        ...item,
+        threadId: row.github_thread_id,
+        commentId: item.commentId ?? row.github_comment_id ?? undefined,
+      };
+    }),
+  };
 }
 
 export function persistClassifications(
@@ -135,22 +186,35 @@ export function persistThreadsAsFindings(input: {
   const published = new Set(input.postedFingerprints);
   for (const thread of input.threads) {
     if (!isMaomaoThread(thread)) continue;
-    const root = threadRoot(thread);
-    const marker = root ? parseFindingMarker(root.body) : undefined;
-    if (!marker) continue;
+    const comment = findingComment(thread);
+    const marker = parseThreadFindingMarker(thread);
+    if (!marker || !comment) continue;
     const existing = input.store.getFinding(input.job.repo_full_name, input.job.pr_number, marker.id);
-    if (existing?.status === "dismissed" || existing?.status === "resolved") {
-      if (published.has(marker.id) && existing.status === "resolved") {
-        // A moved finding was republished; attach the new thread.
-      } else if (existing.status === "dismissed") {
-        continue;
-      } else if (existing.status === "resolved" && !published.has(marker.id)) {
-        continue;
-      }
+    if (existing?.status === "dismissed") continue;
+    // Republished fingerprint: ignore the already-resolved conversation so the
+    // new open thread can attach. The obsolete thread stays resolved on GitHub.
+    if (thread.isResolved && published.has(marker.id)) continue;
+
+    let status: FindingStatus;
+    let reconciliationReason: string | undefined;
+    if (thread.isResolved) {
+      status = "resolved";
+      if (existing?.status !== "resolved") reconciliationReason = "GitHub thread already resolved";
+    } else if (existing?.status === "moved" && published.has(marker.id)) {
+      status = "moved";
+    } else if (existing?.status === "still_valid") {
+      status = "still_valid";
+    } else if (existing?.status === "uncertain") {
+      status = "uncertain";
+    } else if (existing?.status === "resolved" && !published.has(marker.id)) {
+      status = "resolved";
+    } else if (published.has(marker.id)) {
+      status = "open";
+    } else {
+      status = existing?.status ?? "open";
     }
-    const status = existing?.status === "moved" && published.has(marker.id) ? "moved" : existing?.status === "still_valid" ? "still_valid" : existing?.status === "uncertain" ? "uncertain" : published.has(marker.id) ? "open" : (existing?.status ?? "open");
-    const threadPath = root?.path ?? thread.path ?? existing?.current_path;
-    const threadLine = root?.line ?? thread.line ?? existing?.current_line;
+    const threadPath = comment.path ?? thread.path ?? existing?.current_path;
+    const threadLine = comment.line ?? thread.line ?? existing?.current_line;
     const context = findingDiffContext(input.diff, threadPath, threadLine);
     input.store.upsertFinding({
       repoFullName: input.job.repo_full_name,
@@ -160,17 +224,112 @@ export function persistThreadsAsFindings(input: {
       reviewedSha: marker.sha || input.job.head_sha,
       currentSha: input.job.head_sha,
       githubThreadId: thread.id,
-      githubCommentId: root?.databaseId != null ? String(root.databaseId) : existing?.github_comment_id,
-      originalPath: existing?.original_path ?? root?.path ?? thread.path,
-      originalLine: existing?.original_line ?? root?.line ?? thread.line,
+      githubCommentId: comment.databaseId != null ? String(comment.databaseId) : existing?.github_comment_id,
+      originalPath: existing?.original_path ?? comment.path ?? thread.path,
+      originalLine: existing?.original_line ?? comment.line ?? thread.line,
       currentPath: threadPath,
       currentLine: threadLine,
-      // The raw comment body starts with the hidden marker; persist clean text
-      // so the card never renders `<!-- maomao-finding … -->` as content.
-      summary: existing?.summary || summarizeComment(root?.body ?? ""),
+      summary: existing?.summary || summarizeComment(comment.body),
+      reconciliationReason,
       diffHunk: context.diffHunk,
       diffNote: context.diffNote,
       lastJobId: input.job.id,
     });
   }
+}
+
+export async function closeResolvedScanIssues(input: {
+  github: GithubPort;
+  store: JobStore;
+  job: JobRow;
+  items: ClassifiedFinding[];
+}): Promise<{
+  closed: string[];
+  skipped: ThreadCloseSkip[];
+  failed: Array<{ fingerprint: string; reason: string }>;
+}> {
+  const closed: string[] = [];
+  const skipped: ThreadCloseSkip[] = [];
+  const failed: Array<{ fingerprint: string; reason: string }> = [];
+  for (const item of input.items) {
+    if (item.status !== "resolved") {
+      skipped.push({
+        fingerprint: item.fingerprint,
+        reason: item.reason || `classified ${item.status}`,
+        wantedClose: false,
+      });
+      continue;
+    }
+    const record = input.store.getScanIssue(input.job.repo_full_name, item.fingerprint);
+    if (!record || record.issue_number <= 0) {
+      skipped.push({
+        fingerprint: item.fingerprint,
+        reason: "no Maomao GitHub issue linked to this finding",
+        wantedClose: false,
+      });
+      continue;
+    }
+    if (!input.github.getIssue || !input.github.closeIssue) {
+      skipped.push({
+        fingerprint: item.fingerprint,
+        reason: "GitHub client cannot close issues",
+        wantedClose: true,
+      });
+      continue;
+    }
+    try {
+      const issue = await input.github.getIssue(
+        input.job.installation_id,
+        input.job.repo_owner,
+        input.job.repo_name,
+        record.issue_number,
+      );
+      if (!issue) {
+        skipped.push({
+          fingerprint: item.fingerprint,
+          reason: `GitHub issue #${record.issue_number} was not found`,
+          wantedClose: true,
+        });
+        continue;
+      }
+      if (issue.isPullRequest) {
+        skipped.push({
+          fingerprint: item.fingerprint,
+          reason: `refusing to close pull request #${record.issue_number}`,
+          wantedClose: true,
+        });
+        continue;
+      }
+      if (issue.state === "closed") {
+        skipped.push({
+          fingerprint: item.fingerprint,
+          reason: `issue #${record.issue_number} is already closed`,
+          wantedClose: false,
+        });
+        continue;
+      }
+      const marker = scanIssueMarkerBase(item.fingerprint);
+      if (!issue.body.includes(marker)) {
+        skipped.push({
+          fingerprint: item.fingerprint,
+          reason: `issue #${record.issue_number} is missing the Maomao scan marker; leaving it untouched`,
+          wantedClose: true,
+        });
+        continue;
+      }
+      await input.github.closeIssue(
+        input.job.installation_id,
+        input.job.repo_owner,
+        input.job.repo_name,
+        record.issue_number,
+      );
+      closed.push(item.fingerprint);
+    } catch (error) {
+      failed.push({
+        fingerprint: item.fingerprint,
+        reason: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+  return { closed, skipped, failed };
 }
