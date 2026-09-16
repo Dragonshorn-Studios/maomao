@@ -1916,7 +1916,7 @@ describe("scan issue creation", () => {
       body: issuePostBody(seeded.jobId, [seeded.fingerprints[0]], csrfToken),
     });
     expect(res.status).toBe(302);
-    expect(res.headers.get("location")).toContain("issues-created"); // zero failures
+    expect(res.headers.get("location")).toContain("issues-none:1"); // nothing created, nothing failed
     expect(created).toHaveLength(0);
     const recorded = store.listScanIssues(seeded.jobId)[0];
     expect(recorded?.issue_number).toBe(42);
@@ -1989,6 +1989,185 @@ describe("scan issue creation", () => {
     expect(created[0].body).toContain("[redacted]");
     // Exactly one live marker remains: the one Maomao itself wrote.
     expect(created[0].body.match(/<\s*!--\s*maomao-scan-issue/g)).toEqual([`<!-- maomao-scan-issue`]);
+    log.mockRestore();
+  });
+
+  it("re-checks the allowlists at issue-creation time after a post-scan revocation", async () => {
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const created: Array<{ title: string; body: string }> = [];
+    const { app, store } = testApp(
+      { ...oauthEnv, GITHUB_ISSUE_CREATION_ENABLED: "true", ALLOWED_GITHUB_ACCOUNT_IDS: "999999" },
+      issueGithub(created),
+      mockOauthFetch({ id: 1001, login: "octocat" }),
+    );
+    const seeded = seedScan(store);
+    const { session, csrfCookie, csrfToken } = await operatorWithCsrf(app);
+
+    for (const path of ["/scan/issues/preview", "/scan/issues"]) {
+      const res = await app.request(path, {
+        method: "POST",
+        headers: { cookie: `${session}; ${csrfCookie}`, "content-type": "application/x-www-form-urlencoded" },
+        body: issuePostBody(seeded.jobId, [seeded.fingerprints[0]], csrfToken),
+      });
+      expect(res.status).toBe(403);
+      expect(await res.text()).toContain("Not authorized to create issues");
+    }
+    expect(created).toHaveLength(0);
+    expect(store.listScanIssues(seeded.jobId)).toEqual([]);
+    log.mockRestore();
+    warn.mockRestore();
+  });
+
+  it("guards the preview route: unauthenticated, CSRF-less, and empty selections are rejected", async () => {
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const created: Array<{ title: string; body: string }> = [];
+    const { app, store } = testApp(
+      { ...oauthEnv, GITHUB_ISSUE_CREATION_ENABLED: "true" },
+      issueGithub(created),
+      mockOauthFetch({ id: 1001, login: "octocat" }),
+    );
+    const seeded = seedScan(store);
+    const { session, csrfCookie, csrfToken } = await operatorWithCsrf(app);
+
+    const anonymous = await app.request("/scan/issues/preview", {
+      method: "POST",
+      headers: { "content-type": "application/x-www-form-urlencoded" },
+      body: `job_id=${seeded.jobId}&fp[]=${seeded.fingerprints[0]}`,
+    });
+    expect(anonymous.status).toBe(302);
+    expect(anonymous.headers.get("location")).toContain("/login");
+
+    const csrfLess = await app.request("/scan/issues/preview", {
+      method: "POST",
+      headers: { cookie: session, "content-type": "application/x-www-form-urlencoded" },
+      body: `job_id=${seeded.jobId}&fp[]=${seeded.fingerprints[0]}`,
+    });
+    expect(csrfLess.status).toBe(403);
+
+    const empty = await app.request("/scan/issues/preview", {
+      method: "POST",
+      headers: { cookie: `${session}; ${csrfCookie}`, "content-type": "application/x-www-form-urlencoded" },
+      body: `job_id=${seeded.jobId}&csrf_token=${encodeURIComponent(csrfToken)}`,
+    });
+    expect(empty.status).toBe(403);
+    expect(await empty.text()).toContain("Select at least one finding to preview");
+    expect(created).toHaveLength(0);
+    log.mockRestore();
+    warn.mockRestore();
+  });
+
+  it("still renders the preview when the best-effort GitHub checks fail", async () => {
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const created: Array<{ title: string; body: string }> = [];
+    const github = issueGithub(created);
+    github.listOpenIssuesByMarker = async () => {
+      throw new Error("installation suspended");
+    };
+    github.searchOpenIssues = async () => {
+      throw new Error("secondary rate limit");
+    };
+    const { app, store } = testApp(
+      { ...oauthEnv, GITHUB_ISSUE_CREATION_ENABLED: "true" },
+      github,
+      mockOauthFetch({ id: 1001, login: "octocat" }),
+    );
+    const seeded = seedScan(store);
+    const { session, csrfCookie, csrfToken } = await operatorWithCsrf(app);
+
+    const preview = await app.request("/scan/issues/preview", {
+      method: "POST",
+      headers: { cookie: `${session}; ${csrfCookie}`, "content-type": "application/x-www-form-urlencoded" },
+      body: issuePostBody(seeded.jobId, [seeded.fingerprints[0]], csrfToken),
+    });
+    expect(preview.status).toBe(200);
+    const html = await preview.text();
+    expect(html).toContain("[maomao] HIGH: secret logged");
+    expect(html).toContain("Remote dedup check failed");
+    // The failures are visible in the job log, not just swallowed.
+    expect(store.listLogs(seeded.jobId).some((entry) => entry.message.includes("Remote dedup check failed"))).toBe(true);
+    log.mockRestore();
+    warn.mockRestore();
+  });
+
+  it("renders the finding-selection form on a completed scan's job page", async () => {
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    const { app, store } = testApp(
+      { ...oauthEnv, GITHUB_ISSUE_CREATION_ENABLED: "true" },
+      issueGithub([]),
+      mockOauthFetch({ id: 1001, login: "octocat" }),
+    );
+    const seeded = seedScan(store, { confidence: 0.4, agreed: ["correctness"], second: true });
+    const session = await operatorSession(app);
+
+    const jobPage = await app.request(`/jobs/${seeded.jobId}`, { headers: { cookie: session } });
+    expect(jobPage.status).toBe(200);
+    const html = await jobPage.text();
+    expect(html).toContain('action="/scan/issues/preview"');
+    // The speculative first finding is visible but not offerable; the second is preselected.
+    expect(html).toContain(`value="${seeded.fingerprints[0]}" disabled`);
+    expect(html).toContain(`value="${seeded.fingerprints[1]}" checked`);
+    expect(html).toContain("Not offered:");
+    log.mockRestore();
+  });
+
+  it("logs dropped findings when a crafted POST mixes worthy and unworthy selections", async () => {
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const created: Array<{ title: string; body: string }> = [];
+    const { app, store } = testApp(
+      { ...oauthEnv, GITHUB_ISSUE_CREATION_ENABLED: "true" },
+      issueGithub(created),
+      mockOauthFetch({ id: 1001, login: "octocat" }),
+    );
+    const seeded = seedScan(store, { confidence: 0.4, agreed: ["correctness"], second: true });
+    const { session, csrfCookie, csrfToken } = await operatorWithCsrf(app);
+
+    const res = await app.request("/scan/issues", {
+      method: "POST",
+      headers: { cookie: `${session}; ${csrfCookie}`, "content-type": "application/x-www-form-urlencoded" },
+      body: issuePostBody(seeded.jobId, seeded.fingerprints, csrfToken),
+    });
+    expect(res.status).toBe(302);
+    expect(res.headers.get("location")).toContain("issues-created");
+    expect(created).toHaveLength(1); // only the worthy one
+    const dropLog = store.listLogs(seeded.jobId).find((entry) => entry.message.includes("below the publication bar"));
+    expect(dropLog).toBeDefined();
+    log.mockRestore();
+    warn.mockRestore();
+  });
+
+  it("treats an in-flight pending claim as skipped without fake success", async () => {
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    const created: Array<{ title: string; body: string }> = [];
+    const { app, store } = testApp(
+      { ...oauthEnv, GITHUB_ISSUE_CREATION_ENABLED: "true" },
+      issueGithub(created),
+      mockOauthFetch({ id: 1001, login: "octocat" }),
+    );
+    const seeded = seedScan(store);
+    // Simulate a claim left behind by a crashed run: pending, issue_number 0.
+    expect(store.claimScanIssue({ jobId: seeded.jobId, repoFullName: "acme/widgets", fingerprint: seeded.fingerprints[0], title: "pending" })).toBe(true);
+    const { session, csrfCookie, csrfToken } = await operatorWithCsrf(app);
+
+    const preview = await app.request("/scan/issues/preview", {
+      method: "POST",
+      headers: { cookie: `${session}; ${csrfCookie}`, "content-type": "application/x-www-form-urlencoded" },
+      body: issuePostBody(seeded.jobId, [seeded.fingerprints[0]], csrfToken),
+    });
+    expect(preview.status).toBe(200);
+    expect(await preview.text()).toContain("claim for this finding is already in flight");
+
+    const res = await app.request("/scan/issues", {
+      method: "POST",
+      headers: { cookie: `${session}; ${csrfCookie}`, "content-type": "application/x-www-form-urlencoded" },
+      body: issuePostBody(seeded.jobId, [seeded.fingerprints[0]], csrfToken),
+    });
+    expect(res.status).toBe(302);
+    expect(res.headers.get("location")).toContain("issues-none:1"); // not "created"
+    expect(created).toHaveLength(0);
     log.mockRestore();
   });
 });

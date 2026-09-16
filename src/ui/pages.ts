@@ -1276,9 +1276,10 @@ export interface ScanIssuePreviewItem {
   /** The exact Markdown body that will be published (marker included, secrets redacted). */
   body: string;
   agreed: string[];
-  /** Present when publication will skip this finding, with the reason. */
-  skip?: string;
-  skipUrl?: string;
+  /** Present when publication will skip this finding, with the reason and existing issue link if known. */
+  skip?: { reason: string; url?: string };
+  /** Set when the remote dedup check could not run; the skip state is then unverified. */
+  dedupCheckFailed?: boolean;
   /** Likely human-authored open issues about the same problem, for review only. */
   duplicates: Array<{ title: string; url: string }>;
 }
@@ -1296,9 +1297,12 @@ export function renderScanIssuePreviewPage(data: ScanIssuePreviewData): string {
   const cards = data.items
     .map((item) => {
       const skip = item.skip
-        ? `<p class="muted" role="status">Will be skipped: ${escapeHtml(item.skip)}${
-            item.skipUrl ? ` (<a href="${escapeHtml(item.skipUrl)}">#${escapeHtml(String(item.skipUrl.split("/").pop() ?? ""))}</a>)` : ""
+        ? `<p class="muted" role="status">Will be skipped: ${escapeHtml(item.skip.reason)}${
+            item.skip.url ? ` (<a href="${escapeHtml(item.skip.url)}">#${escapeHtml(String(item.skip.url.split("/").pop() ?? ""))}</a>)` : ""
           }</p>`
+        : "";
+      const dedupCheck = item.dedupCheckFailed && !item.skip
+        ? `<p class="warn" role="alert">Remote dedup check failed for this finding — it may already be tracked; publication may duplicate or fail.</p>`
         : "";
       const duplicates = item.duplicates.length
         ? `<p class="muted">Possibly related open issues (review before publishing; Maomao will not modify them):</p><ul>${item.duplicates
@@ -1312,6 +1316,7 @@ export function renderScanIssuePreviewPage(data: ScanIssuePreviewData): string {
         <h3>${escapeHtml(item.title)}</h3>
         <pre class="diff-panel" aria-label="Proposed issue body">${escapeHtml(item.body)}</pre>
         ${skip}
+        ${dedupCheck}
         ${duplicates}
       </article>`;
     })

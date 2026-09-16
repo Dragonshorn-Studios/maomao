@@ -346,8 +346,11 @@ export class GithubClient implements GithubPort, ManualTriggerPort {
 
   async searchOpenIssues(installationId: number, owner: string, repo: string, query: string) {
     const octokit = this.installationOctokit(installationId);
+    // Strip control qualifiers (":", quotes) so a caller-supplied query cannot
+    // add `repo:`/`org:` filters and read issues outside this repository.
+    const safeQuery = query.replace(/[:"]/g, " ").trim();
     const response = await octokit.rest.search.issuesAndPullRequests({
-      q: `repo:${owner}/${repo} is:issue is:open ${query}`,
+      q: `repo:${owner}/${repo} is:issue is:open ${safeQuery}`,
       per_page: 5,
     });
     return response.data.items

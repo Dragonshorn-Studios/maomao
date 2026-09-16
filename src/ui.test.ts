@@ -781,8 +781,10 @@ describe("repository health scan UI", () => {
           title: "[maomao] MEDIUM: Already tracked",
           body: `<!-- maomao-scan-issue fpdedup000000001 @ ${HEAD} -->`,
           agreed: [],
-          skip: "a Maomao issue already tracks this finding",
-          skipUrl: "https://github.com/acme/widgets/issues/42",
+          skip: {
+            reason: "a Maomao issue already tracks this finding",
+            url: "https://github.com/acme/widgets/issues/42",
+          },
           duplicates: [],
         },
       ],
