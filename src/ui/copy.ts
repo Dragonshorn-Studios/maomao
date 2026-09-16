@@ -107,6 +107,15 @@ export function cancelledBannerCopy(job: {
     };
   }
   if (job.cancelled_reason === "pr_merged") {
+    if (job.github_review_id) {
+      // The review POST was already in flight when the merge landed.
+      return {
+        text: "Cancelled — PR merged after the review was posted; the posted review may be stale.",
+        link: job.github_review_url
+          ? { href: job.github_review_url, label: "View the posted review" }
+          : undefined,
+      };
+    }
     return {
       text: "Cancelled — PR merged. The merge superseded this job before it could finish.",
       link: job.pr_html_url ? { href: job.pr_html_url, label: "View the merged pull request" } : undefined,

@@ -1210,3 +1210,38 @@ describe("cancelled banner honesty", () => {
     expect(anonHtml).toContain("Review cancelled by an operator");
   });
 });
+
+describe("cancelled demo fixtures", () => {
+  it("seeds one pr_merged and one manual_dequeue cancelled job without disturbing other fixtures", () => {
+    const store = seededStore();
+
+    const merged = store.listJobs(20).find((row) => row.repo_full_name === "acme/ledger" && row.pr_number === 77)!;
+    expect(merged.state).toBe("cancelled");
+    expect(merged.cancelled_reason).toBe("pr_merged");
+    expect(merged.cancelled_by).toBeNull();
+    const mergedHtml = renderJob(merged, store.listReviewerRuns(merged.id), store.listLogs(merged.id), {});
+    expect(mergedHtml).toContain("Cancelled — PR merged");
+    expect(mergedHtml).toContain("View the merged pull request");
+    expect(mergedHtml).toContain("webhook delivery demo-fixture");
+    expect(mergedHtml).not.toContain(`/jobs/${merged.id}/dequeue`);
+    expect(mergedHtml).not.toContain(`/jobs/${merged.id}/cancel`);
+    expect(store.hasMergedPull("acme/ledger", 77)).toBe(true);
+
+    const dequeued = store.listJobs(20).find((row) => row.repo_full_name === "novacorp/api" && row.pr_number === 92)!;
+    expect(dequeued.state).toBe("cancelled");
+    expect(dequeued.cancelled_reason).toBe("manual_dequeue");
+    expect(dequeued.cancelled_by).toBe("hubot");
+    const dequeuedHtml = renderJob(dequeued, store.listReviewerRuns(dequeued.id), store.listLogs(dequeued.id), {});
+    expect(dequeuedHtml).toContain("Dequeued by hubot");
+    expect(dequeuedHtml).not.toContain(`/jobs/${dequeued.id}/dequeue`);
+    expect(dequeuedHtml).not.toContain(`/jobs/${dequeued.id}/cancel`);
+    expect(store.hasMergedPull("novacorp/api", 92)).toBe(false);
+
+    // Seed-order / stale-sweep collision guard (the pr-91 class): pin neighbours.
+    expect(store.listJobs(20).find((row) => row.pr_number === 91)?.state).toBe("failed");
+    expect(store.listJobs(20).find((row) => row.pr_number === 90)?.state).toBe("queued");
+    expect(store.listJobs(20).find((row) => row.pr_number === 418 && row.state === "stale")).toBeTruthy();
+    // Headroom: every seeded fixture fits the listJobs(20) window the pages use.
+    expect(store.listJobs(20)).toHaveLength(store.listJobs(100).length);
+  });
+});

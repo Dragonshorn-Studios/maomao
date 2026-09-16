@@ -487,8 +487,13 @@ function seedAggregating(store: JobStore): void {
 
 /** Merge-cancelled and manually dequeued fixtures: exercises the cancelled
  * banner and the absence of dequeue/cancel controls on terminal jobs. */
+/** Merge-cancelled and manually dequeued fixtures: exercise the cancelled
+ * banner and the absence of dequeue/cancel controls on terminal jobs, seeded
+ * through the production cancellation service (marker before cancel, exactly
+ * like the webhook handler). A failed seed must crash the demo loudly rather
+ * than silently omitting the cancelled jobs. */
 function seedCancelled(store: JobStore): void {
-  const merged = store.enqueue(
+  const { job: merged } = store.enqueue(
     baseJob({
       prNumber: 77,
       prTitle: "Drop the deprecated v1 export",
@@ -496,15 +501,21 @@ function seedCancelled(store: JobStore): void {
       headRef: "drop-v1",
     }),
   );
-  store.markPullMerged(merged.job.repo_full_name, merged.job.pr_number, "demo-fixture");
-  cancelJobsForPull(store, {
-    repoFullName: merged.job.repo_full_name,
-    prNumber: merged.job.pr_number,
+  const deliveryId = "demo-fixture";
+  // The merge marker must exist before the cancel so the enqueue gate is set
+  // for this pull (same order as handlePullClosed).
+  store.markPullMerged(merged.repo_full_name, merged.pr_number, deliveryId);
+  const { cancelledJobIds } = cancelJobsForPull(store, {
+    repoFullName: merged.repo_full_name,
+    prNumber: merged.pr_number,
     reason: "pr_merged",
-    note: "webhook delivery demo-fixture",
+    note: `webhook delivery ${deliveryId}`,
   });
+  if (cancelledJobIds.length !== 1) {
+    throw new Error(`demo fixture: expected to merge-cancel job ${merged.id}, cancelled ${cancelledJobIds.length}`);
+  }
 
-  const dequeued = store.enqueue(
+  const { job: dequeued } = store.enqueue(
     baseJob({
       repoFullName: "novacorp/api",
       repoOwner: "novacorp",
@@ -516,7 +527,10 @@ function seedCancelled(store: JobStore): void {
       headRef: "changelog-backfill",
     }),
   );
-  cancelJob(store, dequeued.job.id, { reason: "manual_dequeue", actor: "octocat" });
+  const dequeue = cancelJob(store, dequeued.id, { reason: "manual_dequeue", actor: "hubot" });
+  if (!dequeue.ok) {
+    throw new Error(`demo fixture: could not dequeue job ${dequeued.id}: ${dequeue.error}`);
+  }
 }
 
 function seedQueued(store: JobStore): void {
