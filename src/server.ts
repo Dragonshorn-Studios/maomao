@@ -1018,7 +1018,7 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
       .slice(0, 8)
       .map((job) => ({ id: job.id, repoFullName: job.repo_full_name, headSha: job.head_sha }));
     return {
-      canScan: gateOn,
+      canScan: Boolean(c.get("identity")),
       identity: c.get("identity"),
       csrfToken: gateOn ? ensureCsrfToken(c, ctx.config.uiSessionSecret) : undefined,
       issueCreationEnabled: ctx.config.issueCreationEnabled,

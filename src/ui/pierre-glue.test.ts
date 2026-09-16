@@ -87,3 +87,13 @@ describe("diffLayoutOptions", () => {
     expect(nextLayout("unified")).toBe("split");
   });
 });
+
+describe("pierre-entry mount contract", () => {
+  it("mounts FileDiff via containerWrapper so diffs-container can adopt its stylesheet", async () => {
+    const { readFile } = await import("node:fs/promises");
+    const source = await readFile(new URL("./pierre-entry.ts", import.meta.url), "utf8");
+    expect(source).toContain("containerWrapper: container");
+    expect(source).not.toMatch(/fileContainer:\s*container/);
+    expect(source).toContain("diffs-container");
+  });
+});

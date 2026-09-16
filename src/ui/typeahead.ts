@@ -125,7 +125,7 @@ export const TYPEAHEAD_JS = String.raw`(function () {
     if (!input || !input.id) return;
     var listbox = document.getElementById(input.getAttribute("aria-controls") || "");
     if (!listbox) return;
-    fetch("/api/scan/repositories", { headers: { accept: "application/json" } })
+    fetch("/api/scan/repositories", { credentials: "same-origin", headers: { accept: "application/json" } })
       .then(function (response) {
         return response.ok ? response.json() : null;
       })

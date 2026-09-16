@@ -11,7 +11,7 @@
     "build": "npm run build:vendor && tsc -p tsconfig.build.json",
     "start": "node dist/index.js",
     "dev": "npm run build:vendor && tsx watch src/index.ts",
-    "demo": "tsx src/demo/serve.ts",
+    "demo": "npm run build:vendor && tsx src/demo/serve.ts",
     "test": "npm run build:vendor && vitest run",
     "test:watch": "vitest",
     "typecheck": "tsc -p tsconfig.json --noEmit",

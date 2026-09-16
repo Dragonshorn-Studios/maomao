@@ -2480,6 +2480,17 @@ describe("scan repository typeahead", () => {
     expect(await res.json()).toEqual({ error: expect.stringContaining("operator GitHub OAuth identity") });
   });
 
+  it("does not render a dead combobox for password-only sessions", async () => {
+    const { app } = testApp({ UI_PASSWORD: "hunter2", UI_SESSION_SECRET: "session-secret-for-tests" });
+    const { cookies } = await loginSession(app);
+    const page = await app.request("/scan", { headers: { cookie: cookies } });
+    expect(page.status).toBe(200);
+    const html = await page.text();
+    expect(html).toContain("Scanning requires an operator GitHub OAuth identity");
+    expect(html).not.toContain("data-repo-typeahead");
+    expect(html).not.toContain("/assets/typeahead.js");
+  });
+
   it("returns allowlisted repositories sorted by name, skipping failing installations", async () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     const calls = { installations: 0, repositories: 0 };

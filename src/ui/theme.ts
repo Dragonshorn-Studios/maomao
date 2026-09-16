@@ -340,6 +340,7 @@ button, input, textarea {
   padding: 0.85rem 1rem;
 }
 .trigger label { flex: 1; min-width: 16rem; color: var(--ink-muted); font-size: 0.85rem; }
+.trigger .typeahead-wrap { position: relative; display: block; z-index: 5; }
 
 .queue {
   list-style: none;
@@ -677,6 +678,12 @@ html[data-theme="dark"] .pierre-diff {
 .pierre-annotation.severity-medium { border-left-color: var(--amber); }
 .pierre-annotation.severity-low,
 .pierre-annotation.severity-info { border-left-color: var(--herb); }
+details.finding-diff > summary {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  cursor: pointer;
+}
 .diff-layout-toggle {
   margin-left: auto;
   font-size: 0.72rem;
@@ -686,6 +693,10 @@ html[data-theme="dark"] .pierre-diff {
   background: transparent;
   border: 1px solid var(--line-strong);
   border-radius: 6px;
+}
+.pierre-diff diffs-container {
+  display: block;
+  min-height: 4rem;
 }
 /* Scan-page repository typeahead (progressively enhanced by /assets/typeahead.js) */
 .typeahead-wrap { position: relative; display: block; }
