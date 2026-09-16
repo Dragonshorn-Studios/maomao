@@ -1,5 +1,6 @@
 import type { GithubPort, ReviewThread } from "../github/client.js";
 import { findingComment, isMaomaoThread, parseThreadFindingMarker } from "../github/client.js";
+import { describeGithubError, isMissingGithubNodeError } from "../github/errors.js";
 import type { JobRow, JobStore } from "../jobs/store.js";
 import { anchoredDiffHunk } from "./context.js";
 import { scanIssueMarkerBase, stripHtmlComments } from "./identity.js";
@@ -85,9 +86,17 @@ export async function applyReconciliationThreads(input: {
         await input.github.resolveReviewThread(input.job.installation_id, item.threadId);
         resolved.push(item.fingerprint);
       } catch (error) {
+        if (isMissingGithubNodeError(error)) {
+          skipped.push({
+            fingerprint: item.fingerprint,
+            reason: `GitHub thread ${item.threadId} no longer exists; nothing left to resolve`,
+            wantedClose: true,
+          });
+          continue;
+        }
         failed.push({
           fingerprint: item.fingerprint,
-          reason: error instanceof Error ? error.message : String(error),
+          reason: describeGithubError(error),
         });
       }
     } else {
@@ -327,7 +336,7 @@ export async function closeResolvedScanIssues(input: {
     } catch (error) {
       failed.push({
         fingerprint: item.fingerprint,
-        reason: error instanceof Error ? error.message : String(error),
+        reason: describeGithubError(error),
       });
     }
   }

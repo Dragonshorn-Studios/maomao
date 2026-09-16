@@ -14,6 +14,7 @@ import type { EnqueueResult, JobStore } from "../jobs/store.js";
 import { enqueuePullJob } from "../jobs/enqueue.js";
 import { cancelJobsForPull } from "../jobs/cancel.js";
 import { logAuthorizationRejection, logRateLimited, positiveGithubId, rejectUnauthorized } from "./authorize.js";
+import { describeGithubError } from "./errors.js";
 import { repoRateLimitActive, type RepoRateLimiter } from "./rate-limit.js";
 import {
   commentLooksLikeMaomaoEscalation,
@@ -514,7 +515,7 @@ async function handleReviewCommentWebhook(input: {
         fingerprint: marker.id,
         changed: result.changed,
         threadResolved: false,
-        warning: error instanceof Error ? error.message : String(error),
+        warning: describeGithubError(error),
       });
     }
     return finishCommand(input, commentId, parsed.token, {
@@ -549,7 +550,7 @@ async function handleReviewCommentWebhook(input: {
       fingerprint: marker.id,
       changed: result.changed,
       threadUnresolved: false,
-      warning: error instanceof Error ? error.message : String(error),
+      warning: describeGithubError(error),
     });
   }
   return finishCommand(input, commentId, parsed.token, {

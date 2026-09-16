@@ -600,7 +600,7 @@ describe("marker hygiene and resolve retries", () => {
     const resolved: string[] = [];
     const github = {
       resolveReviewThread: async (_installationId: number, threadId: string) => {
-        if (threadId === "PRRT_bad") throw new Error("Could not resolve to a node with the global id");
+        if (threadId === "PRRT_bad") throw new Error("Resource not accessible by integration");
         resolved.push(threadId);
       },
     };
@@ -630,7 +630,45 @@ describe("marker hygiene and resolve retries", () => {
     expect(resolved).toEqual(["PRRT_good"]);
     expect(applied.resolved).toEqual(["fpgood0000000001"]);
     expect(applied.failed).toEqual([
-      { fingerprint: "fpbad00000000001", reason: expect.stringContaining("Could not resolve") },
+      { fingerprint: "fpbad00000000001", reason: expect.stringContaining("GitHub App lacks permission") },
+    ]);
+  });
+
+  it("treats a vanished GitHub thread as nothing left to resolve instead of a retryable failure", async () => {
+    const github = {
+      resolveReviewThread: async () => {
+        throw Object.assign(new Error("Request failed due to following response errors:\n - hidden"), {
+          errors: [
+            {
+              type: "NOT_FOUND",
+              message: "Could not resolve to a node with the global id of 'PRRT_gone'",
+            },
+          ],
+        });
+      },
+    };
+    const snapshot = {
+      headSha: "sha123",
+      items: [
+        {
+          fingerprint: "fpgone00000000001",
+          status: "resolved" as const,
+          confidence: 0.9,
+          reason: "gone",
+          summary: "a",
+          threadId: "PRRT_gone",
+        },
+      ],
+    };
+    const applied = await applyReconciliationThreads({ github: github as never, job, snapshot });
+    expect(applied.resolved).toEqual([]);
+    expect(applied.failed).toEqual([]);
+    expect(applied.skipped).toEqual([
+      {
+        fingerprint: "fpgone00000000001",
+        wantedClose: true,
+        reason: "GitHub thread PRRT_gone no longer exists; nothing left to resolve",
+      },
     ]);
   });
 
