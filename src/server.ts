@@ -12,7 +12,7 @@ import { parseGithubPullUrl, PullUrlError } from "./github/pull-url.js";
 import { dispatchEnqueue, enqueuePullJob } from "./jobs/enqueue.js";
 import { subscribe } from "./events.js";
 import { escapeHtml } from "./util.js";
-import { renderConfigPage, renderHome, renderJob, renderLogin, renderPromptConfigPage, renderScanPage, THEME_CSS, type PageOptions } from "./ui/index.js";
+import { renderConfigPage, renderHome, renderJob, renderLogin, renderPromptConfigPage, renderScanConfirmPage, renderScanPage, THEME_CSS, type PageOptions } from "./ui/index.js";
 import type { JobQueue } from "./jobs/queue.js";
 import {
   CSRF_COOKIE,
@@ -816,16 +816,19 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
     return c.redirect(`/config/prompts?notice=evaluated`, 302);
   });
 
-  const renderScanDenied = (c: Context<AppEnv>, ctx2: ServerContext, message: string) =>
-    c.html(
-      renderScanPage({
-        canScan: gateOn,
-        csrfToken: gateOn ? ensureCsrfToken(c, ctx2.config.uiSessionSecret) : undefined,
-        issueCreationEnabled: ctx2.config.issueCreationEnabled,
-        error: message,
-      }),
-      403,
-    );
+  const scanPageData = (c: Context<AppEnv>, extra: { error?: string; issueCreationEnabled?: boolean } = {}) => {
+    const profileRevision = ctx.store.configs.getActiveRevision("default");
+    return {
+      canScan: gateOn,
+      identity: c.get("identity"),
+      csrfToken: gateOn ? ensureCsrfToken(c, ctx.config.uiSessionSecret) : undefined,
+      issueCreationEnabled: ctx.config.issueCreationEnabled,
+      profileRevision: profileRevision ? { id: profileRevision.id, name: profileRevision.name } : null,
+      ...extra,
+    };
+  };
+  const renderScanDenied = (c: Context<AppEnv>, message: string) =>
+    c.html(renderScanPage(scanPageData(c, { error: message })), 403);
 
   // ---- On-demand repository health scans (/scan) ----
   const parseRepoInput = (raw: string): { owner: string; repo: string } | undefined => {
@@ -845,17 +848,7 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
 
   app.get("/scan", (c) => {
     if (!gateOn) return c.redirect("/", 302);
-    const identity = c.get("identity");
-    const profileRevision = ctx.store.configs.getActiveRevision("default");
-    return c.html(
-      renderScanPage({
-        canScan: gateOn,
-        identityLogin: identity?.login,
-        csrfToken: gateOn ? ensureCsrfToken(c, ctx.config.uiSessionSecret) : undefined,
-        issueCreationEnabled: ctx.config.issueCreationEnabled,
-        profileRevision: profileRevision ? { id: profileRevision.id, name: profileRevision.name } : null,
-      }),
-    );
+    return c.html(renderScanPage(scanPageData(c)));
   });
 
   app.post("/scan", async (c) => {
@@ -863,23 +856,13 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
     const actor = configActor(c);
     if (!actor) {
       return c.html(
-        renderScanPage({
-          canScan: gateOn,
-          csrfToken: ensureCsrfToken(c, ctx.config.uiSessionSecret),
-          issueCreationEnabled: ctx.config.issueCreationEnabled,
-          error: "Scanning requires an operator GitHub OAuth identity.",
-        }),
+        renderScanPage(scanPageData(c, { error: "Scanning requires an operator GitHub OAuth identity." })),
         403,
       );
     }
     if (!ctx.github || !isReviewGithub(ctx.github)) {
       return c.html(
-        renderScanPage({
-          canScan: true,
-          csrfToken: ensureCsrfToken(c, ctx.config.uiSessionSecret),
-          issueCreationEnabled: ctx.config.issueCreationEnabled,
-          error: "GitHub App client is not configured on this process.",
-        }),
+        renderScanPage(scanPageData(c, { error: "GitHub App client is not configured on this process." })),
         503,
       );
     }
@@ -887,12 +870,7 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
     const parsed = parseRepoInput(typeof body.repo === "string" ? body.repo : "");
     if (!parsed) {
       return c.html(
-        renderScanPage({
-          canScan: true,
-          csrfToken: ensureCsrfToken(c, ctx.config.uiSessionSecret),
-          issueCreationEnabled: ctx.config.issueCreationEnabled,
-          error: "Enter a repository as owner/repo or a GitHub URL.",
-        }),
+        renderScanPage(scanPageData(c, { error: "Enter a repository as owner/repo or a GitHub URL." })),
         400,
       );
     }
@@ -904,7 +882,7 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
       });
       if (!accountAuth.ok) {
         logAuthorizationRejection({ installationId: installation.installationId, reason: accountAuth.reason });
-        return renderScanDenied(c, ctx, "Not authorized to scan this installation or repository.");
+        return renderScanDenied(c, "Not authorized to scan this installation or repository.");
       }
       const repository = await ctx.github.getRepository(parsed.owner, parsed.repo, installation.installationId);
       const repoAuth = rejectUnauthorized(ctx.config, {
@@ -913,12 +891,57 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
         repositoryId: repository.id,
       });
       if (!repoAuth.ok) {
-        return renderScanDenied(c, ctx, "Not authorized to scan this installation or repository.");
+        return renderScanDenied(c, "Not authorized to scan this installation or repository.");
       }
       if (!ctx.github.getRepositoryHead || !ctx.github.getCommitDiff) {
-        return renderScanDenied(c, ctx, "This GitHub client does not support repository scans.");
+        return renderScanDenied(c, "This GitHub client does not support repository scans.");
       }
       const head = await ctx.github.getRepositoryHead(installation.installationId, parsed.owner, parsed.repo);
+
+      // Same per-repository budget as manual PR reviews: checked before the operator
+      // commits to a scan, recorded only when a job is actually created.
+      const rateOn = repoRateLimitActive(ctx.config.repoRateLimitPerWindow, ctx.config.repoRateWindowMs);
+      if (
+        rateOn &&
+        !rateLimiter.wouldAllow(repository.id, ctx.config.repoRateLimitPerWindow, ctx.config.repoRateWindowMs)
+      ) {
+        logRateLimited({ installationId: installation.installationId, repositoryId: repository.id });
+        return c.html(
+          renderScanPage(scanPageData(c, { error: "Rate limited for this repository; try again later." })),
+          429,
+        );
+      }
+
+      // Two-step start: the operator first sees the exact revision, then confirms it.
+      // The confirming POST is only valid for the SHA (and branch name) it was shown;
+      // anything else re-renders the confirmation with fresh values. No job is
+      // enqueued from a confirmation that fails this check.
+      const confirmedSha = typeof body.sha === "string" ? body.sha.trim() : "";
+      const confirmedBranch = typeof body.branch === "string" ? body.branch.trim() : "";
+      const staleConfirmation =
+        (confirmedSha !== "" && confirmedSha !== head.headSha) ||
+        (confirmedBranch !== "" && confirmedBranch !== head.defaultBranch);
+      if (confirmedSha === "" || staleConfirmation) {
+        const profileRevision = ctx.store.configs.getActiveRevision("default");
+        return c.html(
+          renderScanConfirmPage({
+            identity: c.get("identity"),
+            csrfToken: ensureCsrfToken(c, ctx.config.uiSessionSecret),
+            repo: `${parsed.owner}/${parsed.repo}`,
+            branch: head.defaultBranch,
+            sha: head.headSha,
+            profileRevision: profileRevision ? { id: profileRevision.id, name: profileRevision.name } : null,
+            severityFloor: profileRevision?.definition.minPublishableSeverity ?? "info",
+            limits: {
+              diffCapBytes: ctx.config.maxDiffBytes,
+              reviewerTimeoutMs: ctx.config.opencode.timeoutMs,
+              maxRetries: ctx.config.opencode.maxRetries,
+            },
+            movedFromSha: staleConfirmation && confirmedSha !== head.headSha ? confirmedSha : undefined,
+          }),
+        );
+      }
+
       const created = ctx.store.enqueue({
         repoFullName: `${parsed.owner}/${parsed.repo}`,
         repoOwner: parsed.owner,
@@ -940,20 +963,15 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
         scanBranch: head.defaultBranch,
         reviewers: [],
       });
+      if (created.created && rateOn) {
+        rateLimiter.record(repository.id, ctx.config.repoRateLimitPerWindow, ctx.config.repoRateWindowMs);
+      }
       ctx.store.log(created.job.id, `Health scan enqueued by ${actor.login} for ${head.defaultBranch} @ ${head.headSha}`);
       dispatchEnqueue(ctx.queue, created);
       return c.redirect(`/jobs/${created.job.id}?notice=${created.created ? "scan-queued" : "exists"}`, 302);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      return c.html(
-        renderScanPage({
-          canScan: true,
-          csrfToken: ensureCsrfToken(c, ctx.config.uiSessionSecret),
-          issueCreationEnabled: ctx.config.issueCreationEnabled,
-          error: message,
-        }),
-        400,
-      );
+      return c.html(renderScanPage(scanPageData(c, { error: message })), 400);
     }
   });
 
@@ -962,40 +980,27 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
     const actor = configActor(c);
     if (!actor) {
       return c.html(
-        renderScanPage({
-          canScan: true,
-          csrfToken: ensureCsrfToken(c, ctx.config.uiSessionSecret),
-          issueCreationEnabled: ctx.config.issueCreationEnabled,
-          error: "Creating issues requires an operator GitHub OAuth identity.",
-        }),
+        renderScanPage(scanPageData(c, { error: "Creating issues requires an operator GitHub OAuth identity." })),
         403,
       );
     }
     if (!ctx.config.issueCreationEnabled) {
       return c.html(
-        renderScanPage({
-          canScan: true,
-          csrfToken: ensureCsrfToken(c, ctx.config.uiSessionSecret),
-          issueCreationEnabled: false,
-          error: "Issue creation is disabled (GITHUB_ISSUE_CREATION_ENABLED=false).",
-        }),
+        renderScanPage(scanPageData(c, { issueCreationEnabled: false, error: "Issue creation is disabled (GITHUB_ISSUE_CREATION_ENABLED=false)." })),
         403,
       );
     }
-    if (!ctx.config.issueCreationEnabled) {
-      return renderScanDenied(c, ctx, "Issue creation is disabled (GITHUB_ISSUE_CREATION_ENABLED=false).");
-    }
     if (!ctx.github || !isReviewGithub(ctx.github)) {
-      return renderScanDenied(c, ctx, "GitHub App client is not configured on this process.");
+      return renderScanDenied(c, "GitHub App client is not configured on this process.");
     }
     if (!ctx.github.createIssue || !ctx.github.listOpenIssuesByMarker) {
-      return renderScanDenied(c, ctx, "This GitHub client does not support issue creation.");
+      return renderScanDenied(c, "This GitHub client does not support issue creation.");
     }
     const body = await c.req.parseBody();
     const jobId = Number(body.job_id);
     const job = Number.isFinite(jobId) ? ctx.store.getJob(jobId) : undefined;
     if (!job || job.job_type !== "health_scan" || job.state !== "completed") {
-      return renderScanDenied(c, ctx, "Issue creation requires a completed health-scan job.");
+      return renderScanDenied(c, "Issue creation requires a completed health-scan job.");
     }
     // Allowlists may have changed since the scan ran; the GitHub write path re-checks them.
     const writeAuth = authorizeGithubTarget(ctx.config, {
@@ -1005,7 +1010,7 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
     });
     if (!writeAuth.ok) {
       logAuthorizationRejection({ installationId: job.installation_id, reason: writeAuth.reason });
-      return renderScanDenied(c, ctx, "Not authorized to create issues in this installation or repository.");
+      return renderScanDenied(c, "Not authorized to create issues in this installation or repository.");
     }
     // Only findings produced by this scan, not stale rows from older scans.
     const findings = ctx.store

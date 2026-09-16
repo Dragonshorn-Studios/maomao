@@ -135,12 +135,16 @@ export function renderJob(
   const elapsed = formatDuration(elapsedMs(job.started_at, job.finished_at) ?? elapsedMs(job.created_at));
   const stale = job.state === "stale";
   const failedToRetry = retryableFailedCount(job, runs);
+  const isScan = job.job_type === "health_scan";
+  const heading = isScan
+    ? `Health scan · ${escapeHtml(job.repo_full_name)} @ ${escapeHtml(shortSha(job.head_sha, 12))}`
+    : `${escapeHtml(job.repo_full_name)}#${job.pr_number}`;
   const body = `
     <p class="crumb"><a href="/">Jobs</a> / job ${job.id}</p>
     ${options.notice ? `<p class="notice" role="status">${escapeHtml(options.notice)}</p>` : ""}
     ${options.error ? `<p class="error" role="alert">${escapeHtml(options.error)}</p>` : ""}
     ${stale ? `<p class="warn" role="status">${escapeHtml(staleBanner())}</p>` : ""}
-    <h1>${escapeHtml(job.repo_full_name)}#${job.pr_number}</h1>
+    <h1>${heading}</h1>
     <p class="lede">${escapeHtml(job.pr_title || "")}${flavor ? ` · ${escapeHtml(flavor)}` : ""}</p>
     ${
       job.state === "completed"
@@ -236,7 +240,7 @@ export function renderJob(
       }
     </ol>
   `;
-  return layout(`${job.repo_full_name}#${job.pr_number}`, body, options);
+  return layout(isScan ? `Health scan · ${job.repo_full_name}` : `${job.repo_full_name}#${job.pr_number}`, body, options);
 }
 
 function renderQueueCard(job: JobRow, metrics: JobMetrics, uiFlavor?: UiFlavor): string {
@@ -731,6 +735,7 @@ function renderFindingCard(
         ${input.reason ? `<p>${escapeHtml(input.reason)}</p>` : ""}
         ${input.suggested ? `<p class="muted">Suggested check: ${escapeHtml(input.suggested)}</p>` : ""}
         ${input.agreed?.length ? `<p class="muted">reviewers: ${escapeHtml(input.agreed.join(", "))}</p>` : ""}
+        ${record?.confidence != null ? `<p class="muted">Aggregator confidence: ${Math.round(record.confidence * 100)}%</p>` : ""}
         ${diffBlock}`;
   if (collapsed) {
     return `<details class="${classes}">
@@ -1066,11 +1071,85 @@ export function renderPromptConfigPage(data: PromptConfigPageData): string {
 
 export interface ScanPageData {
   canScan: boolean;
-  identityLogin?: string;
+  identity?: { login: string; avatarUrl: string | null };
   csrfToken?: string;
   issueCreationEnabled: boolean;
   profileRevision?: { id: number; name: string } | null;
   error?: string;
+}
+
+export interface ScanConfirmData {
+  identity?: { login: string; avatarUrl: string | null };
+  csrfToken?: string;
+  repo: string;
+  branch: string;
+  sha: string;
+  profileRevision?: { id: number; name: string } | null;
+  /** Minimum persisted severity from the active profile revision ("info" when no revision is active). */
+  severityFloor: string;
+  limits: { diffCapBytes: number; reviewerTimeoutMs: number; maxRetries: number };
+  /** Set when the operator confirmed an SHA that is no longer the default branch head. */
+  movedFromSha?: string;
+}
+
+function formatBytes(bytes: number): string {
+  if (bytes >= 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MiB`;
+  if (bytes >= 1024) return `${Math.round(bytes / 1024)} KiB`;
+  return `${bytes} B`;
+}
+
+export function renderScanConfirmPage(data: ScanConfirmData): string {
+  const moved = Boolean(data.movedFromSha);
+  const body = `
+    <h1>Confirm repository health scan</h1>
+    ${
+      moved
+        ? `<p class="warn" role="alert">The default branch moved since you confirmed: ${escapeHtml(data.movedFromSha!)} is no longer the head. Review the new SHA below and confirm again.</p>`
+        : `<p class="lede">The scan reviews this exact revision, read-only. Nothing is created on GitHub by scanning.</p>`
+    }
+    <dl class="meta-grid">
+      <div>
+        <dt>Repository</dt>
+        <dd><code>${escapeHtml(data.repo)}</code></dd>
+      </div>
+      <div>
+        <dt>Default branch</dt>
+        <dd><code>${escapeHtml(data.branch)}</code></dd>
+      </div>
+      <div class="sha-block">
+        <dt>Head SHA</dt>
+        <dd><code class="sha">${escapeHtml(data.sha)}</code></dd>
+      </div>
+      <div>
+        <dt>Profile revision</dt>
+        <dd>${
+          data.profileRevision
+            ? `<code>#${data.profileRevision.id}</code> · ${escapeHtml(data.profileRevision.name)} (snapshotted onto the job)`
+            : "No active revision — env configuration applies"
+        }</dd>
+      </div>
+      <div>
+        <dt>Severity floor</dt>
+        <dd><code>${escapeHtml(data.severityFloor)}</code> — lower-severity findings are not persisted</dd>
+      </div>
+      <div>
+        <dt>Limits</dt>
+        <dd class="metric">diff cap ${escapeHtml(formatBytes(data.limits.diffCapBytes))} · reviewer timeout ${escapeHtml(formatDuration(data.limits.reviewerTimeoutMs))} · max retries ${data.limits.maxRetries}</dd>
+      </div>
+    </dl>
+    <form class="trigger" method="post" action="/scan">
+      ${csrfInput(data.csrfToken)}
+      <input type="hidden" name="repo" value="${escapeHtml(data.repo)}"/>
+      <input type="hidden" name="branch" value="${escapeHtml(data.branch)}"/>
+      <input type="hidden" name="sha" value="${escapeHtml(data.sha)}"/>
+      <button type="submit" aria-label="Run repository health scan">Sniff sniff</button>
+      <a href="/scan">Cancel</a>
+    </form>`;
+  return layout("Confirm repository health scan", body, {
+    showLogout: Boolean(data.csrfToken),
+    csrfToken: data.csrfToken,
+    identity: data.identity,
+  });
 }
 
 export function renderScanPage(data: ScanPageData): string {
@@ -1104,5 +1183,6 @@ export function renderScanPage(data: ScanPageData): string {
   return layout("Repository health scan", body, {
     showLogout: data.canScan || Boolean(data.csrfToken),
     csrfToken: data.csrfToken,
+    identity: data.identity,
   });
 }

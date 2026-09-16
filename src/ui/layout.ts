@@ -118,6 +118,7 @@ export function layout(title: string, body: string, options: PageOptions = {}): 
       <button type="button" data-appearance="dark" aria-pressed="false">Dark</button>
       <button type="button" data-appearance="system" aria-pressed="true">System</button>
     </div>
+    <a class="top-link" href="/scan">scan</a>
     <a class="top-link" href="/health">health</a>
     ${identity}
     ${logout}

@@ -3,7 +3,7 @@ import { openDb } from "./db.js";
 import { seedDemoJobs } from "./demo/fixtures.js";
 import { JobStore } from "./jobs/store.js";
 import { THEME_CSS } from "./ui/theme.js";
-import { renderConfigPage, renderHome, renderJob, renderLogin } from "./ui/pages.js";
+import { renderConfigPage, renderHome, renderJob, renderLogin, renderScanConfirmPage, renderScanPage } from "./ui/pages.js";
 import { jobStateLabel, settledFindingsCopy } from "./ui/copy.js";
 import { formatCost, formatTokens, jobMetrics } from "./ui/metrics.js";
 
@@ -597,5 +597,111 @@ describe("cat-hunt flavor", () => {
     expect(html).toContain("Examining PR #");
     const state = jobStateLabel("reviewing");
     expect(state.text).toBe("Reviewing");
+  });
+});
+
+describe("repository health scan UI", () => {
+  const HEAD = "head111head111head111head111head11111";
+
+  function scanJobStore() {
+    const store = new JobStore(openDb(":memory:"));
+    const created = store.enqueue({
+      repoFullName: "acme/widgets",
+      repoOwner: "acme",
+      repoName: "widgets",
+      installationId: 42,
+      prNumber: 0,
+      prTitle: "Repository health scan (main)",
+      prBody: "",
+      prHtmlUrl: "https://github.com/acme/widgets",
+      prAuthor: "octocat",
+      baseSha: HEAD,
+      headSha: HEAD,
+      baseRef: "main",
+      headRef: "main",
+      jobType: "health_scan",
+      scanBranch: "main",
+      reviewers: [],
+    });
+    store.setJobState(created.job.id, "completed", { finished_at: new Date().toISOString() });
+    store.upsertFinding({
+      repoFullName: "acme/widgets",
+      prNumber: 0,
+      fingerprint: "fpscan0000000001",
+      status: "open",
+      reviewedSha: HEAD,
+      currentPath: "src/a.ts",
+      currentLine: 7,
+      category: "correctness",
+      summary: "Unhandled promise rejection",
+      body: "rejects without a handler",
+      severity: "high",
+      confidence: 0.8,
+      lastJobId: created.job.id,
+    });
+    return { store, job: store.getJob(created.job.id)! };
+  }
+
+  it("renders the confirmation page with branch, exact SHA, and effective limits", () => {
+    const html = renderScanConfirmPage({
+      identity: { login: "octocat", avatarUrl: null },
+      csrfToken: "tok",
+      repo: "acme/widgets",
+      branch: "main",
+      sha: HEAD,
+      profileRevision: { id: 3, name: "baseline" },
+      severityFloor: "medium",
+      limits: { diffCapBytes: 1048576, reviewerTimeoutMs: 600_000, maxRetries: 1 },
+    });
+    expect(html).toContain("Confirm repository health scan");
+    expect(html).toContain(HEAD);
+    expect(html).toContain('name="branch" value="main"');
+    expect(html).toContain('name="sha"');
+    expect(html).toContain('aria-label="Run repository health scan"');
+    expect(html).toContain("Sniff sniff");
+    expect(html).toContain("1.0 MiB");
+    expect(html).toContain("Severity floor");
+    expect(html).toContain("medium");
+    expect(html).toContain('href="/scan"');
+    expect(html).toContain("signed in as");
+  });
+
+  it("warns and re-confirms when the confirmed SHA is no longer the branch head", () => {
+    const html = renderScanConfirmPage({
+      csrfToken: "tok",
+      repo: "acme/widgets",
+      branch: "main",
+      sha: HEAD,
+      severityFloor: "info",
+      limits: { diffCapBytes: 1024, reviewerTimeoutMs: 60_000, maxRetries: 0 },
+      movedFromSha: "oldsha",
+    });
+    expect(html).toContain("moved since you confirmed");
+    expect(html).toContain("oldsha");
+    expect(html).toContain(HEAD);
+  });
+
+  it("renders the scan page with identity, nav link, and the branded scan action", () => {
+    const html = renderScanPage({
+      canScan: true,
+      identity: { login: "octocat", avatarUrl: null },
+      csrfToken: "tok",
+      issueCreationEnabled: false,
+    });
+    expect(html).toContain('aria-label="Run repository health scan"');
+    expect(html).toContain("Sniff sniff");
+    expect(html).toContain("signed in as");
+    expect(html).toContain('href="/scan"');
+    expect(html).toContain("GITHUB_ISSUE_CREATION_ENABLED=false");
+  });
+
+  it("titles scan jobs by revision instead of pull number and shows finding confidence", () => {
+    const { store, job } = scanJobStore();
+    const html = renderJob(job, store.listReviewerRuns(job.id), store.listLogs(job.id), {
+      prFindings: store.listFindings("acme/widgets", 0),
+    });
+    expect(html).toContain("Health scan · acme/widgets @ head111head1");
+    expect(html).not.toContain("acme/widgets#0</h1>");
+    expect(html).toContain("Aggregator confidence: 80%");
   });
 });
