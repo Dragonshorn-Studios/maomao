@@ -4,7 +4,7 @@ import { seedDemoJobs } from "./demo/fixtures.js";
 import { JobStore } from "./jobs/store.js";
 import { THEME_CSS } from "./ui/theme.js";
 import { renderConfigPage, renderHome, renderJob, renderLogin } from "./ui/pages.js";
-import { settledFindingsCopy } from "./ui/copy.js";
+import { jobStateLabel, settledFindingsCopy } from "./ui/copy.js";
 import { formatCost, formatTokens, jobMetrics } from "./ui/metrics.js";
 
 function seededStore() {
@@ -544,5 +544,58 @@ describe("config page", () => {
     expect(readonly).not.toContain("Activate");
     expect(readonly).not.toContain('name="csrf_token"');
     expect(readonly).toContain("requires an operator OAuth identity");
+  });
+});
+
+describe("cat-hunt flavor", () => {
+  it("adds the hunt summary and per-reviewer flavor without hiding technical data", () => {
+    const store = seededStore();
+    const job = store.listJobs(50).find((row) => row.pr_number === 412)!;
+    const html = renderJob(job, store.listReviewerRuns(job.id), store.listLogs(job.id), { uiFlavor: "apothecary" });
+    // Technical names and metrics stay first.
+    expect(html).toContain("acme/ledger#412");
+    expect(html).toContain("Correctness / regression hunter");
+    expect(html).toContain("6 cats returned from the diff · 3 findings");
+    // Per-reviewer flavor: done with findings vs done clean.
+    expect(html).toContain("Returned with 1 finding(s)");
+    expect(html).toContain("Returned without a catch");
+    // Hunter tooltip on the correctness role.
+    expect(html).toContain("Catches bugs attempting to reach production.");
+  });
+
+  it("keeps running reviewers hunting and plain mode flavor-free", () => {
+    const store = seededStore();
+    const running = store.listJobs(50).find((row) => row.state === "reviewing")!;
+    const hunting = renderJob(running, store.listReviewerRuns(running.id), store.listLogs(running.id), {
+      uiFlavor: "apothecary",
+    });
+    expect(hunting).toContain("Hunting through the diff…");
+    const plain = renderJob(running, store.listReviewerRuns(running.id), store.listLogs(running.id), {
+      uiFlavor: "plain",
+    });
+    expect(plain).not.toContain("Hunting through the diff…");
+    expect(plain).not.toContain("cats returned");
+    expect(plain).toContain("Reviewers");
+  });
+
+  it("keeps failed runs technical with no hunt copy", () => {
+    const store = seededStore();
+    const job = store.listJobs(50).find((row) => row.pr_number === 412)!;
+    const run = store.listReviewerRuns(job.id)[0];
+    store.patchReviewer(run.id, { state: "failed", validation_error: "runner crashed" });
+    const updated = store.getJob(job.id)!;
+    const failedHtml = renderJob(updated, store.listReviewerRuns(job.id), store.listLogs(job.id), {
+      uiFlavor: "apothecary",
+    });
+    expect(failedHtml).toContain("runner crashed");
+    expect(failedHtml).not.toContain("Hunting through the diff…");
+  });
+
+  it("keeps queue card flavor and job-state labels technical", () => {
+    const store = seededStore();
+    const html = renderHome(store.listJobs(50), store, { uiFlavor: "apothecary" });
+    expect(html).toContain("Examining PR #");
+    const state = jobStateLabel("reviewing");
+    expect(state.text).toBe("Reviewing");
   });
 });

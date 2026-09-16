@@ -268,6 +268,8 @@ npm start
 
 The monitoring UI is a small server-rendered apothecary-notebook console (muted jade, parchment, ink). Visual tokens live in `src/ui/theme.ts` and are served at `/assets/maomao.css` — separate from job orchestration. Appearance is `light`, `dark`, or `system`, persisted in `localStorage`. Fonts are system stacks only.
 
+**Flavor copy.** Completed jobs can show a cat-hunt summary ("6 cats returned from the diff · 3 findings"), running reviewers are "Hunting through the diff…", and the correctness role carries a short hunter hint. Set `UI_FLAVOR=plain` to drop all flavor lines — technical names, states, metrics, and accessibility labels are identical in both modes.
+
 `/` lists recent jobs as specimen cards: repo, PR, SHA, state, elapsed time, `n / m` reviewers, aggregator, model/provider, token/cost totals, and findings by severity.
 
 `/jobs/:id` shows the immutable reviewed SHA, base/head refs, per-reviewer cards (role, state, duration, model, provider, token breakdown, cost, raw vs normalized output), aggregator diagnosis, findings, and a monospace log panel. Each finding card can show a small diff hunk anchored in the reviewed SHA's diff (or an explicit note when none is available) plus a GitHub permalink at that SHA; findings reviewed against an older head SHA are badged "Older SHA". Pages refresh over SSE. Token and cost figures are OpenCode/provider-reported usage, not an invoice.

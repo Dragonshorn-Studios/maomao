@@ -85,13 +85,46 @@ export function staleBanner(): string {
   return "This job reviewed an older commit. A newer head SHA exists for this pull request; do not treat this result as current.";
 }
 
-export function flavorForJob(state: string, prNumber: number): string | undefined {
+export type UiFlavor = "apothecary" | "plain";
+
+export function flavorForJob(state: string, prNumber: number, flavor: UiFlavor = "apothecary"): string | undefined {
+  if (flavor === "plain") {
+    if (state === "sniffing") return "Laboratory re-check in progress";
+    return undefined;
+  }
   if (state === "reviewing" || state === "preparing") return `Examining PR #${prNumber}…`;
   if (state === "routing") return `Choosing specialists for PR #${prNumber}…`;
   if (state === "reconciling") return `Reconciling prior findings for PR #${prNumber}`;
   if (state === "aggregating") return "Aggregation in progress";
   if (state === "sniffing") return `Laboratory re-check for PR #${prNumber}`;
   if (state === "queued") return `PR #${prNumber} is queued for examination`;
+  return undefined;
+}
+
+/** Cat-hunt secondary copy for a specialist reviewer card; technical labels stay intact. */
+export function reviewerFlavor(
+  state: string,
+  findingCount: number,
+  flavor: UiFlavor = "apothecary",
+): string | undefined {
+  if (flavor === "plain") return undefined;
+  if (state === "running" || state === "queued") return "Hunting through the diff…";
+  if (state === "done") {
+    return findingCount > 0 ? `Returned with ${findingCount} finding(s)` : "Returned without a catch";
+  }
+  return undefined;
+}
+
+/** One-line summary for a completed job in cat-hunt flavor. */
+export function huntersReturnedCopy(reviewers: number, findings: number, flavor: UiFlavor = "apothecary"): string {
+  if (flavor === "plain") return `${reviewers} reviewers returned from the diff · ${findings} findings`;
+  return `${reviewers} cats returned from the diff · ${findings} findings`;
+}
+
+/** Tooltip copy for specialist roles with hunting lore; undefined keeps the plain title. */
+export function roleFlavorHint(roleId: string, flavor: UiFlavor = "apothecary"): string | undefined {
+  if (flavor === "plain") return undefined;
+  if (roleId === "correctness") return "Catches bugs attempting to reach production.";
   return undefined;
 }
 

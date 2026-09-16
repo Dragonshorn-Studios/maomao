@@ -570,14 +570,19 @@ export class JobStore {
 
   // ---- Health-scan issue creation ----
 
-  /** Claims a fingerprint before issue creation (issue_number 0 = pending). Ignored if already claimed. */
-  claimScanIssue(input: { jobId: number; repoFullName: string; fingerprint: string; title: string }): void {
-    this.db
+  /**
+   * Claims a fingerprint before issue creation (issue_number 0 = pending).
+   * Returns true only when this call won the claim: concurrent submits lose the race,
+   * and a pending row left by a crashed run is retried by clearing it on failure.
+   */
+  claimScanIssue(input: { jobId: number; repoFullName: string; fingerprint: string; title: string }): boolean {
+    const result = this.db
       .prepare(
         `INSERT OR IGNORE INTO scan_issues (job_id, repo_full_name, fingerprint, issue_number, issue_url, title, created_at)
          VALUES (?, ?, ?, 0, '', ?, ?)`,
       )
       .run(input.jobId, input.repoFullName, input.fingerprint, input.title, nowIso());
+    return ((result as { changes?: number }).changes ?? 0) === 1;
   }
 
   /** Records/updates the resulting issue for a claimed fingerprint. */

@@ -12,7 +12,7 @@ import { parseGithubPullUrl, PullUrlError } from "./github/pull-url.js";
 import { dispatchEnqueue, enqueuePullJob } from "./jobs/enqueue.js";
 import { subscribe } from "./events.js";
 import { escapeHtml } from "./util.js";
-import { renderConfigPage, renderHome, renderJob, renderLogin, renderPromptConfigPage, renderScanPage, THEME_CSS } from "./ui/index.js";
+import { renderConfigPage, renderHome, renderJob, renderLogin, renderPromptConfigPage, renderScanPage, THEME_CSS, type PageOptions } from "./ui/index.js";
 import type { JobQueue } from "./jobs/queue.js";
 import {
   CSRF_COOKIE,
@@ -82,7 +82,7 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
   const passwordGateOn = uiGateEnabled(ctx.config.uiPassword, ctx.config.uiSessionSecret);
   const gateOn = oauthOn || passwordGateOn;
   const passwordLoginOn = passwordGateOn && (!oauthOn || ctx.config.uiLocalLogin);
-  const pageOpts = { showLogout: gateOn };
+  const pageOpts = { showLogout: gateOn, uiFlavor: ctx.config.uiFlavor };
   const loginPageOpts = { showGithub: oauthOn, showPassword: passwordLoginOn };
   const renderLoginDenied = (c: Context<AppEnv>) => {
     deleteCookie(c, SESSION_COOKIE, { path: "/" });
@@ -1023,14 +1023,14 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
           skipped += 1;
           continue;
         }
-        // Claim the fingerprint before the GitHub write: a concurrent submit loses the race.
-        ctx.store.claimScanIssue({
+        // Atomic claim: a concurrent submit loses the race and counts as skipped.
+        const claimed = ctx.store.claimScanIssue({
           jobId: job.id,
           repoFullName: job.repo_full_name,
           fingerprint: finding.fingerprint,
           title: finding.summary ?? finding.fingerprint,
         });
-        if (ctx.store.getScanIssue(job.repo_full_name, finding.fingerprint)?.issue_number !== 0) {
+        if (!claimed) {
           skipped += 1;
           continue;
         }
@@ -1073,7 +1073,7 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
       `Issue creation by ${actor.login}: ${createdCount} created, ${skipped} skipped (already present), ${failed} failed`,
     );
     if (failed > 0) {
-      return c.redirect(`/jobs/${job.id}?error=issues-partial:${failed}`, 302);
+      return c.redirect(`/jobs/${job.id}?notice=issues-partial:${failed}`, 302);
     }
     return c.redirect(`/jobs/${job.id}?notice=issues-created`, 302);
   });
@@ -1165,13 +1165,7 @@ function ensureCsrfToken(c: Context, secret: string): string {
   return token;
 }
 
-function retryJob(
-  c: Context<AppEnv>,
-  ctx: ServerContext,
-  pageOpts: { showLogout: boolean },
-  jobId: number,
-  runId?: number,
-) {
+function retryJob(c: Context<AppEnv>, ctx: ServerContext, pageOpts: PageOptions, jobId: number, runId?: number) {
   const job = ctx.store.getJob(jobId);
   if (!job) return c.text("Not found", 404);
   const result = ctx.store.retryFailedReviewers(jobId, runId);

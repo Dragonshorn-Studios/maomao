@@ -12,6 +12,7 @@ import {
   type RoutingMode,
 } from "./routing/types.js";
 import type { Severity } from "./schema.js";
+import type { UiFlavor } from "./ui/copy.js";
 
 export type JobState =
   | "queued"
@@ -74,6 +75,8 @@ export interface Config {
   modelCatalog: string[];
   /** Explicit issue creation from health scans. Disabled by default. */
   issueCreationEnabled: boolean;
+  /** UI flavor copy: "apothecary" (branded default) or "plain" (no flavor). */
+  uiFlavor: UiFlavor;
   /** Opt-in GitHub review verdicts. Defaults keep every review COMMENT-only. */
   reviewAllowApprove: boolean;
   reviewAllowRequestChanges: boolean;
@@ -154,6 +157,13 @@ function parsePolicy(raw: string | undefined): PoisonAlertPolicy {
   const value = (raw?.trim().toLowerCase() || "internal_and_external") as PoisonAlertPolicy;
   if ((POISON_ALERT_POLICIES as readonly string[]).includes(value)) return value;
   throw new Error(`POISON_ALERT_POLICY must be one of ${POISON_ALERT_POLICIES.join(", ")}`);
+}
+
+function parseUiFlavor(raw: string | undefined): UiFlavor {
+  const value = raw?.trim().toLowerCase() ?? "";
+  if (value === "") return "apothecary";
+  if (value === "apothecary" || value === "plain") return value;
+  throw new Error("UI_FLAVOR must be apothecary or plain");
 }
 
 function parseSeverity(raw: string | undefined, fallback: Severity, source = "severity list"): Severity {
@@ -250,6 +260,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     publicUrl: env.MAOMAO_PUBLIC_URL?.trim().replace(/\/+$/, "") || "",
     modelCatalog: parseCsv(env.MODEL_CATALOG),
     issueCreationEnabled: parseBoolean(env.GITHUB_ISSUE_CREATION_ENABLED, false),
+    uiFlavor: parseUiFlavor(env.UI_FLAVOR),
     reviewAllowApprove: parseBoolean(env.GITHUB_REVIEW_ALLOW_APPROVE, false),
     reviewAllowRequestChanges: parseBoolean(env.GITHUB_REVIEW_ALLOW_REQUEST_CHANGES, false),
     reviewRequestChangesMinSeverity: parseSeverity(
