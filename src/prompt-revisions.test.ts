@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { openDb } from "./db.js";
-import { composeReviewerPrompt, evaluationSignals, PromptRevisionStore } from "./prompt-revisions.js";
-import { REVIEWER_GUARDRAILS, promptBodyFromRolePrompt } from "./prompts.js";
+import { evaluationSignals, PromptRevisionStore } from "./prompt-revisions.js";
+import { composeReviewerPrompt, REVIEWER_GUARDRAILS, promptBodyFromRolePrompt } from "./prompts.js";
 
 function store() {
   return new PromptRevisionStore(openDb(":memory:"));
@@ -128,6 +128,7 @@ describe("fixtures and evaluation", () => {
       },
     };
     const result = await prompts.evaluatePrompt({
+      actor: "octocat",
       promptRevisionId: draft.revision.id,
       fixtureId: fixture.fixture.id,
       model: "test/model",
@@ -155,6 +156,7 @@ describe("fixtures and evaluation", () => {
     if (!("fixture" in fixture)) throw new Error("fixture failed");
 
     const failing = await prompts.evaluatePrompt({
+      actor: "octocat",
       promptRevisionId: draft.revision.id,
       fixtureId: fixture.fixture.id,
       model: "test/model",
@@ -163,6 +165,7 @@ describe("fixtures and evaluation", () => {
     expect("evaluation" in failing && failing.evaluation.status).toBe("failed");
 
     const budget = await prompts.evaluatePrompt({
+      actor: "octocat",
       promptRevisionId: draft.revision.id,
       fixtureId: fixture.fixture.id,
       model: "test/model",
@@ -176,6 +179,7 @@ describe("fixtures and evaluation", () => {
     expect("evaluation" in budget && budget.evaluation.error).toContain("budget");
 
     const invalid = await prompts.evaluatePrompt({
+      actor: "octocat",
       promptRevisionId: draft.revision.id,
       fixtureId: fixture.fixture.id,
       model: "test/model",

@@ -124,6 +124,13 @@ export function promptBodyFromRolePrompt(prompt: string): string {
   return prompt.startsWith(REVIEWER_GUARDRAILS) ? prompt.slice(REVIEWER_GUARDRAILS.length).trim() : prompt;
 }
 
+/** Composes the runtime prompt: non-editable guardrails first, operator body second. */
+export function composeReviewerPrompt(body: string): string {
+  return `${REVIEWER_GUARDRAILS}
+
+${body}`;
+}
+
 export function buildReviewerPrompt(input: {
   role: ReviewerRole;
   repoFullName: string;
@@ -138,9 +145,7 @@ export function buildReviewerPrompt(input: {
 }): string {
   // The body is always the editable part; guardrails are composed here, never stored in it.
   const body = input.promptBody?.trim() ? input.promptBody.trim() : promptBodyFromRolePrompt(input.role.prompt);
-  return `${REVIEWER_GUARDRAILS}
-
-${body}
+  return `${composeReviewerPrompt(body)}
 
 Repository: ${input.repoFullName}
 PR: #${input.prNumber} ${input.prTitle}

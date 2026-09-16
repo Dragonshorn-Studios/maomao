@@ -782,15 +782,35 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
     if (!actor) return promptWriteDenied(c);
     if (!ctx.opencode) return renderPromptError(c, "Prompt evaluation is unavailable on this process (no OpenCode runner).", 503);
     const body = await c.req.parseBody();
+    const promptRevisionId = Number(body.prompt_revision_id);
+    const fixtureId = Number(body.fixture_id);
+    const maxCostUsd = typeof body.max_cost_usd === "string" && body.max_cost_usd ? Number(body.max_cost_usd) : undefined;
+    if (!Number.isFinite(promptRevisionId) || !Number.isFinite(fixtureId)) {
+      return renderPromptError(c, "Prompt revision and fixture must be numeric ids.", 400);
+    }
+    if (maxCostUsd !== undefined && !Number.isFinite(maxCostUsd)) {
+      return renderPromptError(c, "Max cost must be a number.", 400);
+    }
+    let expectations: Array<{ severity: string; category?: string; pathContains?: string }> = [];
+    try {
+      expectations = JSON.parse(typeof body.expectations === "string" && body.expectations ? body.expectations : "[]");
+    } catch {
+      return renderPromptError(c, "Expectations must be valid JSON.", 400);
+    }
+    void expectations; // stored on the fixture; evaluation compares against fixture.expectations
     const result = await ctx.store.prompts.evaluatePrompt({
-      promptRevisionId: Number(body.prompt_revision_id),
-      fixtureId: Number(body.fixture_id),
+      promptRevisionId,
+      fixtureId,
       model: typeof body.model === "string" && body.model ? body.model : ctx.config.opencode.reviewerModel,
-      maxCostUsd: body.max_cost_usd ? Number(body.max_cost_usd) : undefined,
+      maxCostUsd,
+      actor: actor.login,
       opencode: ctx.opencode,
       extraArgs: ctx.config.opencode.extraArgs,
     });
     if ("error" in result) return renderPromptError(c, result.error, 400);
+    if (result.evaluation.status === "failed") {
+      return renderPromptError(c, `Evaluation failed: ${result.evaluation.error ?? "unknown error"}`, 400);
+    }
     return c.redirect(`/config/prompts?notice=evaluated`, 302);
   });
 

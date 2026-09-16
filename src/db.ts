@@ -281,6 +281,7 @@ function migrate(db: SqliteDb): void {
       status TEXT NOT NULL,
       findings_json TEXT,
       usage_json TEXT,
+      signals_json TEXT,
       duration_ms INTEGER,
       error TEXT,
       created_at TEXT NOT NULL

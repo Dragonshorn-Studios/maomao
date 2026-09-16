@@ -1,12 +1,12 @@
-import { mkdtemp, writeFile } from "node:fs/promises";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { SqliteDb } from "./db.js";
-import { nowIso } from "./util.js";
+import { nowIso, truncate } from "./util.js";
 import { parseReviewerResult } from "./schema.js";
-import { promptBodyFromRolePrompt, REVIEWER_GUARDRAILS } from "./prompts.js";
+import { composeReviewerPrompt, promptBodyFromRolePrompt } from "./prompts.js";
+import { KNOWN_REVIEWER_ROLES } from "./prompts.js";
 import type { OpenCodePort, OpenCodeRunResult } from "./opencode/parse.js";
-import type { ProfileRevisionRow } from "./config-revisions.js";
 
 export type PromptRevisionStatus = "draft" | "active" | "retired";
 
@@ -25,11 +25,18 @@ export interface PromptRevisionRow {
   activated_at: string | null;
 }
 
+export interface EvalFixtureExpectation {
+  severity: string;
+  category?: string;
+  pathContains?: string;
+}
+
 export interface EvalFixtureRow {
   id: number;
   name: string;
   pr_meta: string;
   diff: string;
+  expectations: EvalFixtureExpectation[];
   expectations_json: string | null;
   saved_by: string;
   created_at: string;
@@ -52,12 +59,20 @@ export const EVAL_MAX_DIFF_CHARS = 50_000;
 export const EVAL_MAX_BUDGET_USD = 5;
 const PROMPT_BODY_MAX_CHARS = 20_000;
 
-/** Composes the runtime prompt: non-editable guardrails first, operator body second. */
-export function composeReviewerPrompt(body: string): string {
-  return `${REVIEWER_GUARDRAILS}\n\n${body}`;
+function validateRoleId(roleId: string): string[] {
+  if (!KNOWN_REVIEWER_ROLES.some((role) => role.id === roleId)) {
+    return [`unknown specialist role: ${roleId || "(empty)"}`];
+  }
+  return [];
 }
 
-export { promptBodyFromRolePrompt };
+function validateBody(body: string): string[] {
+  const issues: string[] = [];
+  const trimmed = body?.trim() ?? "";
+  if (!trimmed) issues.push("prompt body must not be empty");
+  if (trimmed.length > PROMPT_BODY_MAX_CHARS) issues.push(`prompt body exceeds ${PROMPT_BODY_MAX_CHARS} characters`);
+  return issues;
+}
 
 export class PromptRevisionStore {
   constructor(private readonly db: SqliteDb) {}
@@ -68,11 +83,9 @@ export class PromptRevisionStore {
     note?: string;
     createdBy: string;
   }): { revision: PromptRevisionRow } | { error: "invalid"; issues: string[] } {
-    const issues: string[] = [];
-    const body = input.body?.trim() ?? "";
-    if (!body) issues.push("prompt body must not be empty");
-    if (body.length > PROMPT_BODY_MAX_CHARS) issues.push(`prompt body exceeds ${PROMPT_BODY_MAX_CHARS} characters`);
+    const issues = [...validateRoleId(input.roleId), ...validateBody(input.body)];
     if (issues.length > 0) return { error: "invalid", issues };
+    const body = input.body.trim();
     const now = nowIso();
     const result = this.db
       .prepare(
@@ -90,13 +103,16 @@ export class PromptRevisionStore {
     body: string;
     expectedEditSeq: number;
     updatedBy: string;
-  }): { revision: PromptRevisionRow } | { error: "invalid"; issues: string[] } | { error: "conflict" } | { error: "not_found" } {
+  }):
+    | { revision: PromptRevisionRow }
+    | { error: "invalid"; issues: string[] }
+    | { error: "conflict" }
+    | { error: "not_found" }
+    | { error: "not_draft" } {
     const existing = this.getPromptRevision(input.id);
-    if (!existing || existing.status !== "draft") return { error: "not_found" };
-    const issues: string[] = [];
-    const body = input.body?.trim() ?? "";
-    if (!body) issues.push("prompt body must not be empty");
-    if (body.length > PROMPT_BODY_MAX_CHARS) issues.push(`prompt body exceeds ${PROMPT_BODY_MAX_CHARS} characters`);
+    if (!existing) return { error: "not_found" };
+    if (existing.status !== "draft") return { error: "not_draft" };
+    const issues = validateBody(input.body);
     if (issues.length > 0) return { error: "invalid", issues };
     const now = nowIso();
     const result = this.db
@@ -104,7 +120,7 @@ export class PromptRevisionStore {
         `UPDATE prompt_revisions SET body = ?, updated_at = ?, edit_seq = edit_seq + 1
          WHERE id = ? AND status = 'draft' AND edit_seq = ?`,
       )
-      .run(body, now, input.id, input.expectedEditSeq);
+      .run(input.body.trim(), now, input.id, input.expectedEditSeq);
     if (((result as { changes?: number }).changes ?? 0) === 0) return { error: "conflict" };
     this.audit("draft_updated", input.updatedBy, input.id, "prompt draft updated");
     return { revision: this.getPromptRevision(input.id)! };
@@ -121,7 +137,7 @@ export class PromptRevisionStore {
     this.db.transaction(() => {
       if (superseded) {
         this.db.prepare(`UPDATE prompt_revisions SET status = 'retired' WHERE id = ?`).run(Number(superseded.id));
-        this.audit("retired", actor, Number(superseded.id), `${revision.role_id} superseded by #${id}`);
+        this.audit("retired", actor, Number(superseded.id), `${revision.role_id} superseded by #${revision.id}`);
       }
       this.db
         .prepare(`UPDATE prompt_revisions SET status = 'active', activated_at = ?, updated_at = ? WHERE id = ?`)
@@ -198,6 +214,7 @@ export class PromptRevisionStore {
         nowIso(),
       );
     const id = Number((result as { lastInsertRowid: unknown }).lastInsertRowid);
+    this.audit("fixture_saved", input.savedBy, null, input.name.trim());
     return { fixture: this.getFixture(id)! };
   }
 
@@ -229,15 +246,22 @@ export class PromptRevisionStore {
     return row ? rowToEvaluation(row) : undefined;
   }
 
-  /** Offline, read-only evaluation: runs a draft prompt against a saved fixture. Never touches GitHub. */
+  /**
+   * Runs offline (the only GitHub boundary it touches is none: no GitHub port is reachable
+   * here) and records completed AND failed attempts. Never publishes, never auto-activates.
+   */
   async evaluatePrompt(input: {
     promptRevisionId: number;
     fixtureId: number;
     model: string;
     maxCostUsd?: number;
+    actor: string;
     opencode: OpenCodePort;
     extraArgs?: string[];
   }): Promise<{ evaluation: PromptEvaluationRow } | { error: string }> {
+    if (!Number.isFinite(input.maxCostUsd ?? 0)) {
+      return { error: "maxCostUsd must be a finite number" };
+    }
     if (input.maxCostUsd != null && input.maxCostUsd > EVAL_MAX_BUDGET_USD) {
       return { error: `evaluation budget exceeds the ${EVAL_MAX_BUDGET_USD} USD cap` };
     }
@@ -246,9 +270,21 @@ export class PromptRevisionStore {
     const fixture = this.getFixture(input.fixtureId);
     if (!fixture) return { error: "fixture not found" };
 
-    const workspace = await mkdtemp(join(tmpdir(), "maomao-eval-"));
-    await writeFile(join(workspace, "pr.diff"), fixture.diff, "utf8");
-    const prMeta = JSON.parse(fixture.pr_meta) as { repo?: string; prNumber?: number; title?: string; author?: string };
+    const started = Date.now();
+    const runFailure = (message: string) => this.recordFailure(input, message, started);
+    let workspace: string;
+    try {
+      workspace = await mkdtemp(join(tmpdir(), "maomao-eval-"));
+      await writeFile(join(workspace, "pr.diff"), fixture.diff, "utf8");
+    } catch (error) {
+      return runFailure(`could not prepare the evaluation workspace: ${error instanceof Error ? error.message : String(error)}`);
+    }
+    let prMeta: { repo?: string; prNumber?: number; title?: string; author?: string };
+    try {
+      prMeta = JSON.parse(fixture.pr_meta) as typeof prMeta;
+    } catch {
+      return runFailure("fixture metadata is corrupt (invalid JSON)");
+    }
     const prompt = `${composeReviewerPrompt(revision.body)}
 
 Repository: ${prMeta.repo ?? "fixture/unknown"}
@@ -259,69 +295,79 @@ Head SHA: fixture
 
 The unified diff of the fixture is available as pr.diff in the working directory.`;
 
-    const started = Date.now();
-    let result: OpenCodeRunResult;
     try {
-      result = await input.opencode.run({
+      const result = await input.opencode.run({
         cwd: workspace,
         model: input.model,
         prompt,
         timeoutMs: 10 * 60 * 1000,
         extraArgs: input.extraArgs ?? [],
-        bin: "opencode",
         title: `maomao-prompt-eval-${revision.id}`,
       });
+      if (result.exitCode !== 0) {
+        return runFailure(`runner exited ${result.exitCode}: ${truncate(result.stderr || "no stderr", 500)}`);
+      }
+      const usage = result.usage;
+      const cost = usage?.cost ?? 0;
+      if (input.maxCostUsd != null && cost > input.maxCostUsd) {
+        return runFailure(`evaluation exceeded budget cap (${cost} > ${input.maxCostUsd})`);
+      }
+      let parsed: ReturnType<typeof parseReviewerResult>;
+      try {
+        parsed = parseReviewerResult(result.text || result.stdout);
+      } catch (error) {
+        return runFailure(
+          `evaluation output failed schema validation: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+      const usageWarning =
+        !usage || !usage.complete ? "usage incomplete: cost/token figures are a lower bound" : null;
+      const signals = evaluationSignals(parsed.findings ?? [], fixture.expectations);
+      const now = nowIso();
+      const insert = this.db
+        .prepare(
+          `INSERT INTO prompt_evaluations (prompt_revision_id, fixture_id, model, status, findings_json, usage_json, signals_json, duration_ms, error, created_at)
+           VALUES (?, ?, ?, 'completed', ?, ?, ?, ?, NULL, ?)`,
+        )
+        .run(
+          input.promptRevisionId,
+          input.fixtureId,
+          input.model,
+          JSON.stringify(parsed.findings ?? []),
+          JSON.stringify({
+            cost,
+            totalTokens: usage?.totalTokens ?? 0,
+            complete: usage?.complete ?? false,
+            warning: usageWarning,
+          }),
+          JSON.stringify(signals),
+          Date.now() - started,
+          now,
+        );
+      const evaluation = this.getEvaluation(Number((insert as { lastInsertRowid: unknown }).lastInsertRowid))!;
+      this.audit("evaluated", input.actor, input.promptRevisionId, `evaluation #${evaluation.id} vs fixture #${input.fixtureId}: ${signals.matched} matched, ${signals.missed} missed, ${signals.unexpected} unexpected`);
+      return { evaluation };
     } catch (error) {
-      return this.recordFailure(input, error instanceof Error ? error.message : String(error), started);
+      return runFailure(`evaluation runner failed: ${error instanceof Error ? error.message : String(error)}`);
+    } finally {
+      await rm(workspace, { recursive: true, force: true }).catch(() => {});
     }
-    const usage = result.usage ?? { cost: 0, totalTokens: 0, complete: false };
-    const cost = usage.cost ?? 0;
-    if (input.maxCostUsd != null && cost > input.maxCostUsd) {
-      return this.recordFailure(input, `evaluation exceeded budget cap (${cost} > ${input.maxCostUsd})`, started);
-    }
-    let parsed: ReturnType<typeof parseReviewerResult>;
-    try {
-      parsed = parseReviewerResult(result.text || result.stdout);
-    } catch (error) {
-      return this.recordFailure(
-        input,
-        `evaluation output failed schema validation: ${error instanceof Error ? error.message : String(error)}`,
-        started,
-      );
-    }
-    const now = nowIso();
-    const insert = this.db
-      .prepare(
-        `INSERT INTO prompt_evaluations (prompt_revision_id, fixture_id, model, status, findings_json, usage_json, duration_ms, error, created_at)
-         VALUES (?, ?, ?, 'completed', ?, ?, ?, NULL, ?)`,
-      )
-      .run(
-        input.promptRevisionId,
-        input.fixtureId,
-        input.model,
-        JSON.stringify(parsed.findings ?? []),
-        JSON.stringify({ cost, totalTokens: usage.totalTokens ?? 0, complete: usage.complete ?? false }),
-        Date.now() - started,
-        now,
-      );
-    const evaluation = this.getEvaluation(Number((insert as { lastInsertRowid: unknown }).lastInsertRowid))!;
-    this.audit("evaluated", "system", input.promptRevisionId, `evaluation #${evaluation.id} vs fixture #${input.fixtureId}`);
-    return { evaluation };
   }
 
   private recordFailure(
-    input: { promptRevisionId: number; fixtureId: number; model: string },
+    input: { promptRevisionId: number; fixtureId: number; model: string; actor?: string },
     message: string,
     started: number,
   ): { evaluation: PromptEvaluationRow } {
     const now = nowIso();
     const insert = this.db
       .prepare(
-        `INSERT INTO prompt_evaluations (prompt_revision_id, fixture_id, model, status, findings_json, usage_json, duration_ms, error, created_at)
-         VALUES (?, ?, ?, 'failed', NULL, NULL, ?, ?, ?)`,
+        `INSERT INTO prompt_evaluations (prompt_revision_id, fixture_id, model, status, findings_json, usage_json, signals_json, duration_ms, error, created_at)
+         VALUES (?, ?, ?, 'failed', NULL, NULL, NULL, ?, ?, ?)`,
       )
       .run(input.promptRevisionId, input.fixtureId, input.model, Date.now() - started, message, now);
     const evaluation = this.getEvaluation(Number((insert as { lastInsertRowid: unknown }).lastInsertRowid))!;
+    this.audit("evaluated", input.actor ?? "unknown", input.promptRevisionId, `evaluation #${evaluation.id} FAILED: ${truncate(message, 200)}`);
     return { evaluation };
   }
 
@@ -376,11 +422,18 @@ function rowToPromptRevision(row: Record<string, unknown>): PromptRevisionRow {
 }
 
 function rowToFixture(row: Record<string, unknown>): EvalFixtureRow {
+  let expectations: EvalFixtureExpectation[] = [];
+  try {
+    expectations = JSON.parse(String(row.expectations_json ?? "[]")) as EvalFixtureExpectation[];
+  } catch {
+    expectations = [];
+  }
   return {
     id: Number(row.id),
     name: String(row.name),
     pr_meta: String(row.pr_meta),
     diff: String(row.diff),
+    expectations,
     expectations_json: (row.expectations_json as string | null) ?? null,
     saved_by: String(row.saved_by),
     created_at: String(row.created_at),
@@ -402,4 +455,3 @@ function rowToEvaluation(row: Record<string, unknown>): PromptEvaluationRow {
   };
 }
 
-export type { ProfileRevisionRow };
