@@ -21,3 +21,9 @@ export {
   type ScanConfirmNotice,
 } from "./pages.js";
 export { THEME_CSS, THEME_HREF } from "./theme.js";
+export {
+  FAVICON_SVG,
+  FAVICON_PNG_BASE64,
+  LARGE_ICON_SVG,
+  LARGE_ICON_PNG_BASE64,
+} from "./icons.js";

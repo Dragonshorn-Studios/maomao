@@ -266,7 +266,7 @@ npm start
 
 ## Monitoring UI
 
-The monitoring UI is a small server-rendered apothecary-notebook console (muted jade, parchment, ink). Visual tokens live in `src/ui/theme.ts` and are served at `/assets/maomao.css` — separate from job orchestration. Appearance is `light`, `dark`, or `system`, persisted in `localStorage`. Fonts are system stacks only.
+The monitoring UI is a small server-rendered apothecary-notebook console (muted jade, parchment, ink). Visual tokens live in `src/ui/theme.ts` and are served at `/assets/maomao.css` — separate from job orchestration. Brand favicons/icons are embedded in `src/ui/icons.ts` and served from `/assets/favicon.svg`, `/assets/favicon.png`, `/assets/icon.svg`, and `/assets/icon.png`. Appearance is `light`, `dark`, or `system`, persisted in `localStorage`. Fonts are system stacks only.
 
 **Flavor copy.** Completed jobs can show a cat-hunt summary ("6 cats returned from the diff · 3 findings"), running reviewers are "Hunting through the diff…", and the correctness role carries a short hunter hint. Set `UI_FLAVOR=plain` to drop all flavor lines — technical names, states, metrics, and accessibility labels are identical in both modes.
 

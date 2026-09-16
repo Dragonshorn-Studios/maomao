@@ -109,6 +109,9 @@ export function layout(title: string, body: string, options: PageOptions = {}): 
   <meta name="color-scheme" content="light dark"/>
   <meta name="description" content="Self-hosted multi-agent pull request review powered by OpenCode."/>
   <title>${escapeHtml(title)}</title>
+  <link rel="icon" href="/assets/favicon.svg" type="image/svg+xml"/>
+  <link rel="alternate icon" href="/assets/favicon.png"/>
+  <link rel="apple-touch-icon" href="/assets/icon.png"/>
   <link rel="stylesheet" href="${THEME_HREF}"/>
   <script>${APPEARANCE_BOOT}</script>
 </head>

@@ -22,6 +22,10 @@ import {
   renderLogin,
   renderPromptConfigPage,
   THEME_CSS,
+  FAVICON_SVG,
+  FAVICON_PNG_BASE64,
+  LARGE_ICON_SVG,
+  LARGE_ICON_PNG_BASE64,
   type PageOptions,
   type ScanConfirmNotice,
   type ScanIssueCreationData,
@@ -406,6 +410,33 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
       "cache-control": "public, max-age=3600",
     }),
   );
+
+  // Brand icons: fixed constants from src/ui/icons.ts (no filesystem, no traversal).
+  const iconAssets: Array<[string, string, string]> = [
+    // [path, content-type, source]
+    ["/assets/favicon.svg", "image/svg+xml", FAVICON_SVG],
+    ["/assets/icon.svg", "image/svg+xml", LARGE_ICON_SVG],
+  ];
+  for (const [path, contentType, body] of iconAssets) {
+    app.get(path, (c) =>
+      c.newResponse(body, 200, {
+        "content-type": `${contentType}; charset=utf-8`,
+        "cache-control": "public, max-age=86400",
+      }),
+    );
+  }
+  const pngAssets: Array<[string, string]> = [
+    ["/assets/favicon.png", FAVICON_PNG_BASE64],
+    ["/assets/icon.png", LARGE_ICON_PNG_BASE64],
+  ];
+  for (const [path, base64] of pngAssets) {
+    app.get(path, (c) =>
+      c.newResponse(new Uint8Array(Buffer.from(base64, "base64")), 200, {
+        "content-type": "image/png",
+        "cache-control": "public, max-age=86400",
+      }),
+    );
+  }
 
   app.post("/webhooks/github", async (c) => {
     const rawBody = await c.req.text();

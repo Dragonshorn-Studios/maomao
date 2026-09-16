@@ -50,6 +50,9 @@ describe("monitoring pages", () => {
     expect(html).toContain('data-appearance="dark"');
     expect(html).toContain('data-appearance="system"');
     expect(html).toContain("/assets/maomao.css");
+    expect(html).toContain('rel="icon" href="/assets/favicon.svg"');
+    expect(html).toContain('rel="alternate icon" href="/assets/favicon.png"');
+    expect(html).toContain('rel="apple-touch-icon" href="/assets/icon.png"');
     expect(html).not.toContain("EventSource");
     expect(html).toContain("Skip to content");
   });

@@ -51,7 +51,12 @@ export function isPublicPath(path: string): boolean {
     path === "/logout" ||
     path === "/login/github" ||
     path === "/login/github/callback" ||
-    path === "/assets/maomao.css"
+    // Stylesheet and brand icons: fixed constants served by src/server.ts.
+    path === "/assets/maomao.css" ||
+    path === "/assets/favicon.svg" ||
+    path === "/assets/favicon.png" ||
+    path === "/assets/icon.svg" ||
+    path === "/assets/icon.png"
   );
 }
 

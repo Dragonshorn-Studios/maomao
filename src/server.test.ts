@@ -176,6 +176,19 @@ describe("HTTP app", () => {
     expect((await app.request("/assets/other.css")).status).toBe(302);
     expect((await app.request("/assets/other.css")).headers.get("location")).toContain("/login");
 
+    // Brand icons are public with stable content types; PNG bytes survive the base64 round-trip.
+    const faviconSvg = await app.request("/assets/favicon.svg");
+    expect(faviconSvg.status).toBe(200);
+    expect(faviconSvg.headers.get("content-type")).toContain("image/svg+xml");
+    expect(await faviconSvg.text()).toContain("<svg");
+    const faviconPng = await app.request("/assets/favicon.png");
+    expect(faviconPng.status).toBe(200);
+    expect(faviconPng.headers.get("content-type")).toBe("image/png");
+    const pngHead = Buffer.from(await faviconPng.arrayBuffer()).subarray(0, 4);
+    expect(pngHead.equals(Buffer.from([0x89, 0x50, 0x4e, 0x47]))).toBe(true);
+    expect((await app.request("/assets/icon.png")).headers.get("content-type")).toBe("image/png");
+    expect((await app.request("/assets/icon.svg")).status).toBe(200);
+
     const webhook = await app.request("/webhooks/github", {
       method: "POST",
       headers: {
