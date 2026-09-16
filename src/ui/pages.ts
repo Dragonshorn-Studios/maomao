@@ -124,11 +124,13 @@ export function renderHome(jobs: JobRow[], store: JobStore, options: PageOptions
   return layout("Maomao", body, options);
 }
 
+export type JobPageOptions = PageOptions & { scanIssueCreation?: ScanIssueCreationData };
+
 export function renderJob(
   job: JobRow,
   runs: ReviewerRunRow[],
   logs: { created_at: string; level: string; message: string }[],
-  options: PageOptions = {},
+  options: JobPageOptions = {},
 ): string {
   const metrics = jobMetricsFromRuns(job, runs);
   const state = jobStateLabel(job.state);
@@ -229,6 +231,7 @@ export function renderJob(
       prHeadSha: options.prHeadSha,
       prHtmlUrl: job.pr_html_url,
     })}
+    ${options.scanIssueCreation ? renderScanIssueCreation(options.scanIssueCreation, options.csrfToken) : ""}
     <h2>Logs</h2>
     <ol class="logs" aria-label="Job logs">
       ${
@@ -1076,6 +1079,7 @@ export interface ScanPageData {
   csrfToken?: string;
   issueCreationEnabled: boolean;
   profileRevision: { id: number; name: string } | null;
+  recentScans: Array<{ id: number; repoFullName: string; headSha: string }>;
   error?: string;
 }
 
@@ -1178,9 +1182,17 @@ export function renderScanConfirmPage(data: ScanConfirmData): string {
 
 export function renderScanPage(data: ScanPageData): string {
   const csrf = csrfInput(data.csrfToken);
+  const recentScans = data.recentScans.length
+    ? `<ul class="queue">${data.recentScans
+        .map(
+          (scan) =>
+            `<li><article class="specimen"><p class="specimen-title"><a href="/jobs/${scan.id}">Job ${scan.id} · ${escapeHtml(scan.repoFullName)}</a></p><div class="meta-row"><span class="pair">SHA <strong><code class="sha">${escapeHtml(shortSha(scan.headSha, 12))}</code></strong></span></div></article></li>`,
+        )
+        .join("")}</ul>`
+    : `<p class="muted">No completed scans yet.</p>`;
   const body = `
     <h1>Repository health scan</h1>
-    <p class="lede">Run a manual, read-only specialist scan of a repository's default branch and optionally create GitHub issues for validated findings. Nothing is created automatically.</p>
+    <p class="lede">Run a manual, read-only specialist scan of a repository's default branch. Issue creation is a separate, explicit step on a completed scan's job page. Nothing is created automatically.</p>
     ${data.error ? `<p class="error" role="alert">${escapeHtml(data.error)}</p>` : ""}
     ${data.canScan ? `
     <form class="trigger" method="post" action="/scan">
@@ -1192,20 +1204,140 @@ export function renderScanPage(data: ScanPageData): string {
       <button type="submit" aria-label="Run repository health scan">Sniff sniff</button>
     </form>
     <p class="muted">${data.profileRevision ? `Active profile revision: #${data.profileRevision.id} (${escapeHtml(data.profileRevision.name)}) — snapshotted onto the scan job.` : "No active profile revision — env configuration applies."}</p>
-    <h2>Create GitHub issues from a completed scan</h2>
+    <h2>Recent completed scans</h2>
+    ${recentScans}
     ${
       data.issueCreationEnabled
-        ? `<form class="trigger" method="post" action="/scan/issues">
-            ${csrf}
-            <label>Completed scan job ID <input name="job_id" required/></label>
-            <button type="submit" aria-label="Create GitHub issues for validated findings">Create issues for validated findings</button>
-          </form>
-          <p class="muted">Findings are deduplicated per repository + fingerprint; already-linked GitHub issues are skipped. Partial failures can be retried safely.</p>`
+        ? `<p class="muted">Open a completed scan to select findings, preview the proposed issues, and publish them. Findings are deduplicated per repository + fingerprint; already-linked GitHub issues are skipped, and partial failures can be retried safely.</p>`
         : `<p class="muted">Issue creation is disabled (GITHUB_ISSUE_CREATION_ENABLED=false).</p>`
     }`
     : `<p class="muted">Scanning requires an operator GitHub OAuth identity.</p>`}`;
   return layout("Repository health scan", body, {
     showLogout: data.canScan || Boolean(data.csrfToken),
+    csrfToken: data.csrfToken,
+    identity: data.identity,
+  });
+}
+
+export interface ScanIssueCreationData {
+  enabled: boolean;
+  findings: Array<{
+    fingerprint: string;
+    summary: string;
+    severity: string;
+    confidence: number | null;
+    agreed: string[];
+    worthy: boolean;
+    unworthyReason?: string;
+  }>;
+}
+
+function renderScanIssueCreation(data: ScanIssueCreationData, csrfToken: string | undefined): string {
+  if (!data.enabled) {
+    return `<h2>Create GitHub issues</h2><p class="muted">Issue creation is disabled (GITHUB_ISSUE_CREATION_ENABLED=false).</p>`;
+  }
+  if (data.findings.length === 0) {
+    return `<h2>Create GitHub issues</h2><p class="muted">No open findings in this scan.</p>`;
+  }
+  const rows = data.findings
+    .map((finding) => {
+      const meta = [
+        finding.severity.toUpperCase(),
+        finding.confidence != null ? `${Math.round(finding.confidence * 100)}%` : null,
+        finding.agreed.length ? `reviewers: ${finding.agreed.join(", ")}` : null,
+      ]
+        .filter(Boolean)
+        .join(" · ");
+      const checkbox = finding.worthy
+        ? `<input type="checkbox" name="fp[]" value="${escapeHtml(finding.fingerprint)}" checked/>`
+        : `<input type="checkbox" name="fp[]" value="${escapeHtml(finding.fingerprint)}" disabled/>`;
+      const note = finding.worthy
+        ? ""
+        : `<div class="muted">Not offered: ${escapeHtml(finding.unworthyReason ?? "speculative")}</div>`;
+      return `<div class="finding">
+        <label>${checkbox} <span class="sev sev-${escapeHtml(finding.severity)}">${escapeHtml(meta)}</span> ${escapeHtml(finding.summary)}</label>
+        ${note}
+      </div>`;
+    })
+    .join("");
+  return `<h2>Create GitHub issues</h2>
+    <p class="muted">Select concrete, validated findings to publish. Speculative observations (below the confidence and consensus bar) cannot be turned into issues.</p>
+    <form class="trigger" method="post" action="/scan/issues/preview">
+      ${csrfInput(csrfToken)}
+      ${rows}
+      <button type="submit">Preview issues for selected findings</button>
+    </form>`;
+}
+
+export interface ScanIssuePreviewItem {
+  fingerprint: string;
+  severity: string;
+  title: string;
+  /** The exact Markdown body that will be published (marker included, secrets redacted). */
+  body: string;
+  agreed: string[];
+  /** Present when publication will skip this finding, with the reason. */
+  skip?: string;
+  skipUrl?: string;
+  /** Likely human-authored open issues about the same problem, for review only. */
+  duplicates: Array<{ title: string; url: string }>;
+}
+
+export interface ScanIssuePreviewData {
+  identity?: UiIdentity;
+  csrfToken: string;
+  job: { id: number; repoFullName: string; headSha: string };
+  items: ScanIssuePreviewItem[];
+  rejected: string[];
+}
+
+export function renderScanIssuePreviewPage(data: ScanIssuePreviewData): string {
+  const creatable = data.items.filter((item) => !item.skip);
+  const cards = data.items
+    .map((item) => {
+      const skip = item.skip
+        ? `<p class="muted" role="status">Will be skipped: ${escapeHtml(item.skip)}${
+            item.skipUrl ? ` (<a href="${escapeHtml(item.skipUrl)}">#${escapeHtml(String(item.skipUrl.split("/").pop() ?? ""))}</a>)` : ""
+          }</p>`
+        : "";
+      const duplicates = item.duplicates.length
+        ? `<p class="muted">Possibly related open issues (review before publishing; Maomao will not modify them):</p><ul>${item.duplicates
+            .map((d) => `<li><a href="${escapeHtml(d.url)}">${escapeHtml(d.title)}</a></li>`)
+            .join("")}</ul>`
+        : "";
+      return `<article class="finding">
+        <div class="finding-head"><span class="sev sev-${escapeHtml(item.severity)}">${escapeHtml(item.severity.toUpperCase())}</span>${
+          item.agreed.length ? `<span class="muted">reviewers: ${escapeHtml(item.agreed.join(", "))}</span>` : ""
+        }</div>
+        <h3>${escapeHtml(item.title)}</h3>
+        <pre class="diff-panel" aria-label="Proposed issue body">${escapeHtml(item.body)}</pre>
+        ${skip}
+        ${duplicates}
+      </article>`;
+    })
+    .join("");
+  const rejected = data.rejected.length
+    ? `<p class="warn" role="alert">${data.rejected.length} selected finding(s) could not be published: ${escapeHtml(data.rejected.join("; "))}</p>`
+    : "";
+  const confirmForm =
+    creatable.length === 0
+      ? `<p class="muted">Nothing left to publish — every selected finding is already tracked. Retrying is safe.</p>`
+      : `<form class="trigger" method="post" action="/scan/issues">
+          ${csrfInput(data.csrfToken)}
+          <input type="hidden" name="job_id" value="${data.job.id}"/>
+          ${creatable.map((item) => `<input type="hidden" name="fp[]" value="${escapeHtml(item.fingerprint)}"/>`).join("")}
+          <button type="submit" aria-label="Create GitHub issues for selected findings">Create ${creatable.length} issue${creatable.length === 1 ? "" : "s"}</button>
+          <a href="/jobs/${data.job.id}">Cancel</a>
+        </form>`;
+  const body = `
+    <p class="crumb"><a href="/jobs/${data.job.id}">Job ${data.job.id}</a> / preview issues</p>
+    <h1>Preview GitHub issues</h1>
+    <p class="lede">Target: <code>${escapeHtml(data.job.repoFullName)}</code> at <code class="sha">${escapeHtml(shortSha(data.job.headSha, 12))}</code>. Publication uses the GitHub App installation identity (never the operator's OAuth token) and requires the App permission <strong>Issues: write</strong>. Selected: ${data.items.length} finding(s), ${creatable.length} to be created.</p>
+    ${rejected}
+    ${cards}
+    ${confirmForm}`;
+  return layout("Preview GitHub issues", body, {
+    showLogout: Boolean(data.csrfToken),
     csrfToken: data.csrfToken,
     identity: data.identity,
   });

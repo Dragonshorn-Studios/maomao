@@ -3,7 +3,7 @@ import { openDb } from "./db.js";
 import { seedDemoJobs } from "./demo/fixtures.js";
 import { JobStore } from "./jobs/store.js";
 import { THEME_CSS } from "./ui/theme.js";
-import { renderConfigPage, renderHome, renderJob, renderLogin, renderScanConfirmPage, renderScanPage } from "./ui/pages.js";
+import { renderConfigPage, renderHome, renderJob, renderLogin, renderScanConfirmPage, renderScanIssuePreviewPage, renderScanPage } from "./ui/pages.js";
 import { jobStateLabel, settledFindingsCopy } from "./ui/copy.js";
 import { formatCost, formatTokens, jobMetrics } from "./ui/metrics.js";
 
@@ -707,6 +707,7 @@ describe("repository health scan UI", () => {
       csrfToken: "tok",
       issueCreationEnabled: false,
       profileRevision: null,
+      recentScans: [],
     });
     expect(html).toContain('aria-label="Run repository health scan"');
     expect(html).toContain("Sniff sniff");
@@ -723,5 +724,79 @@ describe("repository health scan UI", () => {
     expect(html).toContain("Health scan · acme/widgets @ head111head1");
     expect(html).not.toContain("acme/widgets#0</h1>");
     expect(html).toContain("Aggregator confidence: 80%");
+  });
+
+  it("offers issue creation only for findings above the publication bar", () => {
+    const { store, job } = scanJobStore();
+    const html = renderJob(job, store.listReviewerRuns(job.id), store.listLogs(job.id), {
+      prFindings: store.listFindings("acme/widgets", 0),
+      csrfToken: "tok",
+      scanIssueCreation: {
+        enabled: true,
+        findings: [
+          {
+            fingerprint: "fpworthy00000001",
+            summary: "Unhandled promise rejection",
+            severity: "high",
+            confidence: 0.9,
+            agreed: ["correctness", "security"],
+            worthy: true,
+          },
+          {
+            fingerprint: "fpspec0000000001",
+            summary: "Might be a race",
+            severity: "low",
+            confidence: 0.4,
+            agreed: ["correctness"],
+            worthy: false,
+            unworthyReason: "confidence 40% is below the 70% publication bar",
+          },
+        ],
+      },
+    });
+    expect(html).toContain("Create GitHub issues");
+    expect(html).toContain('type="checkbox" name="fp[]" value="fpworthy00000001" checked');
+    expect(html).toContain('value="fpspec0000000001" disabled');
+    expect(html).toContain("Not offered: confidence 40% is below the 70% publication bar");
+    expect(html).toContain('action="/scan/issues/preview"');
+  });
+
+  it("renders the issue preview with the proposed body, skips, and confirm action", () => {
+    const html = renderScanIssuePreviewPage({
+      identity: { login: "octocat", avatarUrl: null },
+      csrfToken: "tok",
+      job: { id: 9, repoFullName: "acme/widgets", headSha: HEAD },
+      items: [
+        {
+          fingerprint: "fpworthy00000001",
+          severity: "high",
+          title: "[maomao] HIGH: Unhandled promise rejection",
+          body: `<!-- maomao-scan-issue fpworthy00000001 @ ${HEAD} -->\n\n**HIGH** — rejects without a handler`,
+          agreed: ["correctness", "security"],
+          duplicates: [{ title: "promise rejects unhandled", url: "https://github.com/acme/widgets/issues/7" }],
+        },
+        {
+          fingerprint: "fpdedup000000001",
+          severity: "medium",
+          title: "[maomao] MEDIUM: Already tracked",
+          body: `<!-- maomao-scan-issue fpdedup000000001 @ ${HEAD} -->`,
+          agreed: [],
+          skip: "a Maomao issue already tracks this finding",
+          skipUrl: "https://github.com/acme/widgets/issues/42",
+          duplicates: [],
+        },
+      ],
+      rejected: ["Might be a race: confidence 40% is below the 70% publication bar"],
+    });
+    expect(html).toContain("[maomao] HIGH: Unhandled promise rejection");
+    expect(html).toContain("Issues: write");
+    expect(html).toContain("a Maomao issue already tracks this finding");
+    expect(html).toContain("https://github.com/acme/widgets/issues/42");
+    expect(html).toContain("promise rejects unhandled");
+    expect(html).toContain("Might be a race: confidence 40% is below the 70% publication bar");
+    expect(html).toContain('aria-label="Create GitHub issues for selected findings"');
+    expect(html).toContain('name="fp[]" value="fpworthy00000001"');
+    expect(html).not.toContain('name="fp[]" value="fpdedup000000001"');
+    expect(html).toContain("Create 1 issue</button>");
   });
 });

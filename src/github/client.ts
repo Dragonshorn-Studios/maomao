@@ -103,6 +103,16 @@ export interface GithubPort {
     repo: string,
     marker: string,
   ): Promise<Array<{ number: number; title: string; url: string; state: string }>>;
+  /**
+   * Read-only keyword search over a repository's open issues, used to surface
+   * likely human-authored duplicates for operator review. Never modifies anything.
+   */
+  searchOpenIssues?(
+    installationId: number,
+    owner: string,
+    repo: string,
+    query: string,
+  ): Promise<Array<{ number: number; title: string; url: string }>>;
   createIssue?(
     installationId: number,
     owner: string,
@@ -332,6 +342,17 @@ export class GithubClient implements GithubPort, ManualTriggerPort {
     return issues
       .filter((issue) => !issue.pull_request && (issue.body ?? "").includes(marker))
       .map((issue) => ({ number: issue.number, title: issue.title ?? "", url: issue.html_url, state: issue.state }));
+  }
+
+  async searchOpenIssues(installationId: number, owner: string, repo: string, query: string) {
+    const octokit = this.installationOctokit(installationId);
+    const response = await octokit.rest.search.issuesAndPullRequests({
+      q: `repo:${owner}/${repo} is:issue is:open ${query}`,
+      per_page: 5,
+    });
+    return response.data.items
+      .filter((issue) => !issue.pull_request)
+      .map((issue) => ({ number: issue.number, title: issue.title ?? "", url: issue.html_url }));
   }
 
   async createIssue(installationId: number, owner: string, repo: string, title: string, body: string) {
