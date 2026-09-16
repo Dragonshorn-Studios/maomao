@@ -646,10 +646,11 @@ form.retry, form.retry-job {
   overflow-y: auto;
   position: relative;
 }
-/* Server-rendered line spans (no-JS fallback) and the enhanced rows share tokens. */
-.diff-panel .diff-add { color: var(--jade); display: block; }
-.diff-panel .diff-del { color: var(--cinnabar); display: block; }
-.diff-panel .diff-ctx { color: var(--ink-muted); display: block; }
+/* Server-rendered line spans (no-JS fallback) share the panel pre's newlines —
+   they must stay inline or every line renders double-spaced. */
+.diff-panel .diff-add { color: var(--jade); }
+.diff-panel .diff-del { color: var(--cinnabar); }
+.diff-panel .diff-ctx { color: var(--ink-muted); }
 .diff-table { display: block; }
 .diff-row {
   display: grid;
