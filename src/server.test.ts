@@ -16,7 +16,12 @@ function sign(secret: string, body: string): string {
   return `sha256=${createHmac("sha256", secret).update(body).digest("hex")}`;
 }
 
-function testApp(env: Record<string, string> = {}, github?: ManualTriggerPort, oauthFetch?: typeof fetch) {
+function testApp(
+  env: Record<string, string> = {},
+  github?: ManualTriggerPort,
+  oauthFetch?: typeof fetch,
+  contextExtras: Partial<Parameters<typeof createApp>[0]> = {},
+) {
   const webhookSecret = "s3cret";
   const config = loadConfig({
     GITHUB_WEBHOOK_SECRET: webhookSecret,
@@ -33,7 +38,7 @@ function testApp(env: Record<string, string> = {}, github?: ManualTriggerPort, o
     },
     abortMany() {},
   } as unknown as JobQueue;
-  const app = createApp({ config, store, queue, github, startedAt: Date.now(), oauthFetch });
+  const app = createApp({ config, store, queue, github, startedAt: Date.now(), oauthFetch, ...contextExtras });
   return { app, store, enqueued, webhookSecret };
 }
 
@@ -173,14 +178,14 @@ describe("HTTP app", () => {
     expect((await app.request("/login")).status).toBe(200);
     expect((await app.request("/assets/maomao.css")).status).toBe(200);
     expect(await (await app.request("/assets/maomao.css")).text()).toContain("--jade:");
-    const diffsJs = await app.request("/assets/diffs.js");
-    expect(diffsJs.status).toBe(200);
-    expect(diffsJs.headers.get("content-type")).toContain("text/javascript");
-    expect(await diffsJs.text()).toContain("__maomaoDiffs");
     const typeaheadJs = await app.request("/assets/typeahead.js");
     expect(typeaheadJs.status).toBe(200);
     expect(typeaheadJs.headers.get("content-type")).toContain("text/javascript");
     expect(await typeaheadJs.text()).toContain("__maomaoTypeahead");
+    const pierreJs = await app.request("/assets/vendor/pierre-diffs.js");
+    expect(pierreJs.status).toBe(200);
+    expect(pierreJs.headers.get("content-type")).toContain("text/javascript");
+    expect(await pierreJs.text()).toContain("__maomaoPierre");
     expect((await app.request("/assets/other.css")).status).toBe(302);
     expect((await app.request("/assets/other.css")).headers.get("location")).toContain("/login");
 
@@ -2384,6 +2389,41 @@ describe("scan issue creation", () => {
     expect(page.status).toBe(200);
     expect(await page.text()).toContain("Issues: write permission");
     log.mockRestore();
+  });
+});
+
+describe("pierre diffs vendor asset", () => {
+  it("404s when the bundle has not been built, leaving the no-JS fallback", async () => {
+    const { mkdtempSync } = await import("node:fs");
+    const { tmpdir } = await import("node:os");
+    const { join } = await import("node:path");
+    const emptyDir = mkdtempSync(join(tmpdir(), "maomao-vendor-"));
+    const { app } = testApp(
+      { UI_PASSWORD: "hunter2", UI_SESSION_SECRET: "session-secret-for-tests" },
+      undefined,
+      undefined,
+      { vendorAssetsDir: emptyDir },
+    );
+    const missing = await app.request("/assets/vendor/pierre-diffs.js");
+    expect(missing.status).toBe(404);
+  });
+
+  it("serves a bundle placed into the vendor directory (fixture, not cwd dist)", async () => {
+    const { mkdtempSync, writeFileSync } = await import("node:fs");
+    const { tmpdir } = await import("node:os");
+    const { join } = await import("node:path");
+    const vendorDir = mkdtempSync(join(tmpdir(), "maomao-vendor-"));
+    writeFileSync(join(vendorDir, "pierre-diffs.js"), "globalThis.__maomaoPierre = { enhance() {} };");
+    const { app } = testApp(
+      { UI_PASSWORD: "hunter2", UI_SESSION_SECRET: "session-secret-for-tests" },
+      undefined,
+      undefined,
+      { vendorAssetsDir: vendorDir },
+    );
+    const res = await app.request("/assets/vendor/pierre-diffs.js");
+    expect(res.status).toBe(200);
+    expect(res.headers.get("content-type")).toContain("text/javascript");
+    expect(await res.text()).toContain("__maomaoPierre");
   });
 });
 
