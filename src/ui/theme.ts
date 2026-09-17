@@ -527,6 +527,7 @@ form.retry, form.retry-job, form.dequeue {
   align-items: center;
   gap: 0.45rem;
 }
+/* a.cancel-review is an anchor styled as a button — see the anchor resets below. */
 .retry button, .retry-job button, .dequeue button, a.cancel-review {
   background: var(--paper);
   color: var(--ink);

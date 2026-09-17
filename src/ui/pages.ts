@@ -284,11 +284,6 @@ function renderCancelledBanner(job: JobRow): string {
   return `<p class="warn" role="status">${escapeHtml(banner.text)}${link}</p>`;
 }
 
-/**
- * Server-rendered controls: Dequeue for queued work, a confirmation-gated
- * Cancel review for live work, nothing for terminal jobs. The forms must work
- * without JS; layout.ts disables the submit button while a form is in flight.
- */
 /** Single home for the dequeue form markup (job page + queue card).
  * The `dequeue` class carries the small-outline button styling (theme.ts). */
 function dequeueForm(jobId: number, csrfToken?: string, hint?: string): string {
@@ -297,6 +292,13 @@ function dequeueForm(jobId: number, csrfToken?: string, hint?: string): string {
       <button type="submit">Dequeue</button>
       ${hint ? `<span class="muted">${escapeHtml(hint)}</span>` : ""}
     </form>`;
+}
+
+/** Single home for the cancel entry point. Deliberately an anchor, not a
+ * form: it leads to the confirmation page, so the destructive POST stays
+ * gated behind it. The `cancel-review` class carries the button styling. */
+function cancelReviewLink(jobId: number): string {
+  return `<a class="cancel-review" href="/jobs/${jobId}/cancel">Cancel review</a>`;
 }
 
 function renderJobActions(job: JobRow, csrfToken?: string): string {
@@ -309,7 +311,7 @@ function renderJobActions(job: JobRow, csrfToken?: string): string {
     return dequeueForm(job.id, csrfToken, hint);
   }
   if (LIVE_JOB_STATES.includes(job.state)) {
-    return `<p><a class="cancel-review" href="/jobs/${job.id}/cancel">Cancel review</a> <span class="muted">Stops this review; it will not be completed. Logs and partial output stay on the job page.</span></p>`;
+    return `<p>${cancelReviewLink(job.id)} <span class="muted">Opens a confirmation; confirming stops this review — it will not be completed. Logs and partial output stay on the job page.</span></p>`;
   }
   return "";
 }
@@ -323,7 +325,7 @@ function renderQueueCard(job: JobRow, metrics: JobMetrics, uiFlavor?: UiFlavor, 
   if (job.state === "queued") {
     cardAction = dequeueForm(job.id, csrfToken);
   } else if (isLive) {
-    cardAction = `<a class="cancel-review" href="/jobs/${job.id}/cancel">Cancel review</a>`;
+    cardAction = cancelReviewLink(job.id);
   }
   return `<li>
     <article class="specimen${isLive ? " is-live" : ""}">
