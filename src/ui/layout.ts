@@ -84,6 +84,26 @@ export function layout(title: string, body: string, options: PageOptions = {}): 
   const script = live
     ? `<script>
     if (!new URLSearchParams(location.search).has("static")) {
+      // Guard against double submits: on any POST form submission, disable its
+      // first submit button while the request navigates (responses are full
+      // page loads, so it is never re-enabled here). Forms still work without
+      // JS. Keep submit buttons nameless: a disabled submitter's name/value
+      // would be dropped from the payload.
+      document.addEventListener("submit", (event) => {
+        const form = event.target;
+        if (form.method !== "post") return;
+        const button = form.querySelector('button[type="submit"]');
+        if (button) button.disabled = true;
+      });
+      // Back/forward cache restores the old DOM with the disabled attribute;
+      // re-enable so a restored page is not a dead end.
+      window.addEventListener("pageshow", (event) => {
+        if (event.persisted) {
+          document.querySelectorAll('form button[type="submit"][disabled]').forEach((button) => {
+            button.disabled = false;
+          });
+        }
+      });
       const events = new EventSource("/events");
       events.addEventListener("message", () => {});
       events.onmessage = (event) => {

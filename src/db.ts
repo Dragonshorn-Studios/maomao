@@ -214,6 +214,14 @@ function migrate(db: SqliteDb): void {
       created_at TEXT NOT NULL
     );
 
+    CREATE TABLE IF NOT EXISTS merged_pulls (
+      repo_full_name TEXT NOT NULL,
+      pr_number INTEGER NOT NULL,
+      merged_at TEXT NOT NULL,
+      delivery_id TEXT,
+      PRIMARY KEY (repo_full_name, pr_number)
+    );
+
     CREATE TABLE IF NOT EXISTS processed_review_commands (
       comment_id TEXT PRIMARY KEY,
       delivery_id TEXT,

@@ -272,7 +272,7 @@ The monitoring UI is a small server-rendered apothecary-notebook console (muted 
 
 `/` lists recent jobs as specimen cards: repo, PR, SHA, state, elapsed time, `n / m` reviewers, aggregator, model/provider, token/cost totals, and findings by severity.
 
-`/jobs/:id` shows the immutable reviewed SHA, base/head refs, per-reviewer cards (role, state, duration, model, provider, token breakdown, cost, raw vs normalized output), aggregator diagnosis, findings, and a monospace log panel. Each finding card can show a small diff hunk anchored in the reviewed SHA's diff (or an explicit note when none is available) plus a GitHub permalink at that SHA; findings reviewed against an older head SHA are badged "Older SHA". Pages refresh over SSE. Token and cost figures are OpenCode/provider-reported usage, not an invoice.
+`/jobs/:id` shows the immutable reviewed SHA, base/head refs, per-reviewer cards (role, state, duration, model, provider, token breakdown, cost, raw vs normalized output), aggregator diagnosis, findings, and a monospace log panel. Queued jobs expose a **Dequeue** control and running jobs a confirmed **Cancel review…**; cancelled jobs show a reason-aware banner (never failure-flavoured). Each finding card can show a small diff hunk anchored in the reviewed SHA's diff (or an explicit note when none is available) plus a GitHub permalink at that SHA; findings reviewed against an older head SHA are badged "Older SHA". Pages refresh over SSE. Token and cost figures are OpenCode/provider-reported usage, not an invoice.
 
 To preview the UI with fixture jobs (no GitHub App or OpenCode required):
 
@@ -366,6 +366,15 @@ OpenCode is still a powerful process. Keep Maomao on a locked-down host and do n
   - The resolved event and the reason are shown on the job page and logged; the default install stays `COMMENT`-only with no configuration change.
 - Duplicate webhook deliveries reuse the existing job; publication also looks for a `<!-- maomao-review sha=... -->` marker
 - Inline comments include `<!-- maomao-finding id=<fingerprint> sha=<reviewed-sha> -->` so later reviews can reconcile the same finding after the line moves
+
+## Merge cancellation, dequeue, and cancel
+
+Merged pull requests are terminal review targets: once the merge is recorded, Maomao never starts a review for one. (A review POST already in flight when the merge lands may still complete — see Audit trail.)
+
+- **On merge.** A verified `pull_request.closed` webhook with GitHub's authoritative `merged: true` moves every non-terminal job for that pull request (all head SHAs) to `cancelled` with reason `pr_merged` in a single atomic UPDATE, then drops them from the in-memory queue and stops running pipelines at their next checkpoint. A worker that loses the race to the merge event exits before starting further reviewers and never starts a publish. Merges are recorded per pull, so duplicate or out-of-order deliveries are idempotent: a delayed push arriving after the merge cannot enqueue fresh work (best-effort by construction: the marker holds only merges Maomao received a verified delivery for, keyed by repo full name + PR number, so a rename in between slips past; the manual URL form refuses recorded merged pulls too). Closed-without-merge, uncertain or incomplete payloads, and unauthorized installations cancel nothing.
+- **In the UI.** Queued jobs (on the job page and on the `/` cards) show **Dequeue**: one click, atomic, idempotent under repeated clicks; the job records `manual_dequeue`, the operator login (OAuth identity), and a timestamp (it is implemented as a cancellation, so `finished_at` is that timestamp). Running jobs show **Cancel review…**, which opens a confirmation page because the review will not be completed; confirming cancels with reason `manual_cancel` and stops the pipeline cooperatively. Under a password gate (no OAuth identity) actions are attributed to "an operator" rather than a fabricated login.
+- **Audit trail.** Cancellation is a terminal state, never a hard delete: reviewed SHA, prior progress, logs, cancellation reason, and actor are preserved, and the job page shows the reason ("Cancelled — PR merged" with a link to the merged pull request, "Dequeued by …", "Review cancelled by …"). One honest edge: a cancel landing while a review POST was already in flight cannot recall it — for a manual cancel the banner then says the posted review may be stale and links to it; for a merge cancel the same fact appears in the job log and the GitHub review link. Manual actions never touch GitHub: dequeue/cancel does not close or comment on the pull request.
+- **Note.** `PULL_REQUEST_ACTIONS` keeps controlling which actions enqueue reviews (default `opened`/`reopened`/`synchronize`/`ready_for_review`); merge handling of `closed` is always on and cannot be configured away.
 
 ## Repository health scans (manual, `Sniff sniff`)
 

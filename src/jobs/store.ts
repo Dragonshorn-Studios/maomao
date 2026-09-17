@@ -1,5 +1,6 @@
 import type { SqliteDb } from "../db.js";
-import type { JobState, ReviewerState } from "../config.js";
+import type { CancelReason, JobState, ReviewerState } from "../config.js";
+import { LIVE_JOB_STATES } from "../config.js";
 import type { FindingRow, FindingStatus } from "../findings/types.js";
 import { nowIso } from "../util.js";
 import { publish } from "../events.js";
@@ -33,10 +34,10 @@ export interface JobRow {
   review_event: string | null;
   review_event_reason: string | null;
   aggregator_fallback: number | null;
-  cancelled_reason: string | null;
+  cancelled_reason: CancelReason | null;
   cancelled_by: string | null;
   profile_revision_id: number | null;
-  job_type: string;
+  job_type: "pr_review" | "health_scan";
   scan_branch: string | null;
   aggregator_raw: string | null;
   aggregator_normalized: string | null;
@@ -190,16 +191,14 @@ export interface EscalationDispatchRow {
   updated_at: string;
 }
 
-export const ACTIVE_JOB_STATES: JobState[] = [
-  "queued",
-  "preparing",
-  "reconciling",
-  "routing",
-  "reviewing",
-  "aggregating",
-  "sniffing",
-  "publishing",
-];
+// Non-terminal = claimed-to-be-running states plus queued. Derived, never
+// hand-copied: crash recovery, reset, retry guards, and cancellation all scope
+// to exactly these states via ACTIVE_STATES_SQL.
+const ACTIVE_JOB_STATES: readonly JobState[] = ["queued", ...LIVE_JOB_STATES];
+
+// Single source of truth for "non-terminal": crash recovery, reset, retry guards,
+// and cancellation all scope to exactly these states.
+const ACTIVE_STATES_SQL = ACTIVE_JOB_STATES.map((state) => `'${state}'`).join(", ");
 
 const TERMINAL_SKIP_REQUEUE: JobState[] = [
   "completed",
@@ -218,8 +217,6 @@ const JOB_PATCH_KEYS = new Set<string>([
   "review_event",
   "review_event_reason",
   "aggregator_fallback",
-  "cancelled_reason",
-  "cancelled_by",
   "workspace_path",
   "github_review_id",
   "github_review_url",
@@ -385,9 +382,8 @@ export class JobStore {
 
   listInterruptedJobs(): JobRow[] {
     // Derive the IN-list from ACTIVE_JOB_STATES so a new job state cannot drift out of crash recovery.
-    const states = ACTIVE_JOB_STATES.map((state) => `'${state}'`).join(", ");
     return this.db
-      .prepare(`SELECT * FROM jobs WHERE state IN (${states})`)
+      .prepare(`SELECT * FROM jobs WHERE state IN (${ACTIVE_STATES_SQL})`)
       .all() as JobRow[];
   }
 
@@ -413,7 +409,16 @@ export class JobStore {
     if (!job) return;
     // `stale` and `cancelled` are one-way terminal states: a late pipeline
     // failure (or a racing transition) must not resurrect or relabel them.
-    if ((job.state === "stale" || job.state === "cancelled") && state !== job.state) return;
+    // Same-state patches still apply — patchJob relies on this.
+    if ((job.state === "stale" || job.state === "cancelled") && state !== job.state) {
+      // This runs inside error-handling paths; its own failure must not escape.
+      try {
+        this.log(id, `Ignored state transition ${job.state} -> ${state} on terminal job`, "warn");
+      } catch (error) {
+        console.error(`store: could not log refused transition for job ${id}: ${error instanceof Error ? error.message : String(error)}`);
+      }
+      return;
+    }
     const updatedAt = nowIso();
     const startedAt = extra.started_at ?? job.started_at ?? (state !== "queued" ? updatedAt : null);
     const finishedAt =
@@ -449,31 +454,27 @@ export class JobStore {
   }
 
   /**
-   * Atomically moves every matching non-terminal job to `cancelled` in one
-   * transaction and returns the ids that actually transitioned. Idempotent by
-   * construction: terminal jobs (completed, failed, stale, already cancelled)
-   * never match, so a duplicate merge webhook is a no-op.
+   * Atomically moves every matching non-terminal job to `cancelled` in a
+   * single UPDATE (implicit transaction) and returns the ids that actually
+   * transitioned. Idempotent by construction: terminal jobs (completed,
+   * failed, stale, already cancelled) never match, so a duplicate merge
+   * webhook is a no-op. The where-union makes an unfiltered database-wide
+   * cancellation unrepresentable.
    */
   cancelJobs(
-    where: { jobId?: number; repoFullName?: string; prNumber?: number },
-    reason: string,
+    where: { jobId: number } | { repoFullName: string; prNumber: number },
+    reason: CancelReason,
     actor: string | null,
   ): number[] {
     const now = nowIso();
-    const states = ACTIVE_JOB_STATES.map((state) => `'${state}'`).join(", ");
-    const clauses = [`state IN (${states})`];
+    const clauses = [`state IN (${ACTIVE_STATES_SQL})`];
     const values: unknown[] = [reason, actor, now, now];
-    if (where.jobId != null) {
+    if ("jobId" in where) {
       clauses.push("id = ?");
       values.push(where.jobId);
-    }
-    if (where.repoFullName != null) {
-      clauses.push("repo_full_name = ?");
-      values.push(where.repoFullName);
-    }
-    if (where.prNumber != null) {
-      clauses.push("pr_number = ?");
-      values.push(where.prNumber);
+    } else {
+      clauses.push("repo_full_name = ?", "pr_number = ?");
+      values.push(where.repoFullName, where.prNumber);
     }
     const rows = this.db
       .prepare(
@@ -487,14 +488,37 @@ export class JobStore {
     return rows.map((row) => row.id);
   }
 
+  /**
+   * Records that a pull request merged, keyed by repo + PR number. Written on
+   * every verified merged close delivery — independent of whether any job was
+   * cancelled — so the enqueue gate holds even when nothing was running.
+   * Merged pulls cannot be reopened, so the record is permanent.
+   */
+  markPullMerged(repoFullName: string, prNumber: number, deliveryId: string | null): void {
+    this.db
+      .prepare(
+        `INSERT OR IGNORE INTO merged_pulls (repo_full_name, pr_number, merged_at, delivery_id)
+         VALUES (?, ?, ?, ?)`,
+      )
+      .run(repoFullName, prNumber, nowIso(), deliveryId);
+  }
+
+  /** True once a verified webhook recorded this pull as merged. */
+  hasMergedPull(repoFullName: string, prNumber: number): boolean {
+    return Boolean(
+      this.db
+        .prepare(`SELECT repo_full_name FROM merged_pulls WHERE repo_full_name = ? AND pr_number = ?`)
+        .get(repoFullName, prNumber),
+    );
+  }
+
   resetInterrupted(id: number): void {
     const updatedAt = nowIso();
-    const states = [...ACTIVE_JOB_STATES.map((state) => `'${state}'`)].join(", ");
     this.db
       .prepare(
         `UPDATE jobs SET state = 'queued', failure_reason = NULL, started_at = NULL, finished_at = NULL,
          aggregator_state = 'queued', aggregator_started_at = NULL, aggregator_finished_at = NULL, updated_at = ?
-         WHERE id = ? AND state IN (${states})`,
+         WHERE id = ? AND state IN (${ACTIVE_STATES_SQL})`,
       )
       .run(updatedAt, id);
     this.db

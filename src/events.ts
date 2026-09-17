@@ -17,8 +17,11 @@ export function publish(event: JobEvent): void {
   for (const listener of listeners) {
     try {
       listener(event);
-    } catch {
-      // ignore broken UI subscribers
+    } catch (error) {
+      // One broken subscriber must not block the others, but it stays visible.
+      console.warn(
+        `events: subscriber failed during ${event.type}: ${error instanceof Error ? (error.stack ?? error.message) : String(error)}`,
+      );
     }
   }
 }

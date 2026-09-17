@@ -1101,3 +1101,166 @@ describe("scan typeahead combobox (fake DOM)", () => {
     expect(empty.input.listenerNames()).toEqual([]);
   });
 });
+
+describe("dequeue and cancel controls", () => {
+  function jobStore() {
+    return new JobStore(openDb(":memory:"));
+  }
+
+  function seed(jobStore: JobStore, prNumber: number, headSha: string) {
+    return jobStore.enqueue({
+      repoFullName: "acme/widgets",
+      repoOwner: "acme",
+      repoName: "widgets",
+      installationId: 1,
+      prNumber,
+      prTitle: "Add a feature",
+      prBody: "",
+      prHtmlUrl: "https://github.com/acme/widgets/pull/9",
+      prAuthor: "dev",
+      baseSha: "b",
+      headSha,
+      baseRef: "main",
+      headRef: "f",
+      reviewers: [{ role: "correctness", title: "Correctness" }],
+    }).job.id;
+  }
+
+  it("shows Dequeue on queued cards, Cancel review on live cards, nothing on terminal cards", () => {
+    const store = jobStore();
+    const queued = seed(store, 1, "q");
+    const reviewing = seed(store, 2, "r");
+    store.setJobState(reviewing, "reviewing");
+    const completed = seed(store, 3, "c");
+    store.setJobState(completed, "completed");
+    const html = renderHome(store.listJobs(20), store, { csrfToken: "tok-123" });
+
+    expect(html).toContain(`/jobs/${queued}/dequeue`);
+    expect(html).toContain(`/jobs/${reviewing}/cancel`);
+    // Terminal jobs must not expose an active control.
+    expect(html).not.toContain(`/jobs/${completed}/dequeue`);
+    expect(html).not.toContain(`/jobs/${completed}/cancel`);
+    expect(html).toContain('value="tok-123"');
+  });
+
+  it("shows job-level actions on the job page for queued and live jobs only", () => {
+    const store = jobStore();
+    const queued = seed(store, 1, "q");
+    const html = renderJob(store.getJob(queued)!, store.listReviewerRuns(queued), store.listLogs(queued), {
+      csrfToken: "tok-123",
+    });
+    expect(html).toContain(`/jobs/${queued}/dequeue`);
+    expect(html).toContain("Removes this review from the queue");
+
+    const reviewing = seed(store, 2, "r");
+    store.setJobState(reviewing, "reviewing");
+    const liveHtml = renderJob(store.getJob(reviewing)!, store.listReviewerRuns(reviewing), store.listLogs(reviewing), {});
+    expect(liveHtml).toContain(`/jobs/${reviewing}/cancel`);
+    expect(liveHtml).toContain("Cancel review");
+  });
+
+  it("renders a reason-aware cancelled banner that never reads as a failure", () => {
+    const store = jobStore();
+    const merged = seed(store, 1, "m");
+    store.cancelJobs({ jobId: merged }, "pr_merged", null);
+    const html = renderJob(store.getJob(merged)!, store.listReviewerRuns(merged), store.listLogs(merged), {});
+    expect(html).toContain("Cancelled — PR merged");
+    expect(html).toContain("View the merged pull request");
+    expect(html).not.toContain("role=\"alert\"");
+    expect(html).not.toContain("/dequeue");
+    expect(html).not.toContain("/cancel");
+
+    const dequeued = seed(store, 2, "d");
+    store.cancelJobs({ jobId: dequeued }, "manual_dequeue", "octocat");
+    const dequeuedHtml = renderJob(store.getJob(dequeued)!, store.listReviewerRuns(dequeued), store.listLogs(dequeued), {});
+    expect(dequeuedHtml).toContain("Dequeued by octocat");
+  });
+});
+
+describe("cancelled banner honesty", () => {
+  function jobStore() {
+    return new JobStore(openDb(":memory:"));
+  }
+
+  function seed(jobStore: JobStore, prNumber: number, headSha: string) {
+    return jobStore.enqueue({
+      repoFullName: "acme/widgets",
+      repoOwner: "acme",
+      repoName: "widgets",
+      installationId: 1,
+      prNumber,
+      prTitle: "Add a feature",
+      prBody: "",
+      prHtmlUrl: "https://github.com/acme/widgets/pull/9",
+      prAuthor: "dev",
+      baseSha: "b",
+      headSha,
+      baseRef: "main",
+      headRef: "f",
+      reviewers: [{ role: "correctness", title: "Correctness" }],
+    }).job.id;
+  }
+
+  it("does not claim nothing was published when a review was already posted", () => {
+    const store = jobStore();
+    const id = seed(store, 4, "p");
+    store.setJobState(id, "publishing");
+    store.patchJob(id, { github_review_id: "123", github_review_url: "https://github.com/acme/widgets/pull/9#review-123" });
+    store.cancelJobs({ jobId: id }, "manual_cancel", "octocat");
+    const html = renderJob(store.getJob(id)!, store.listReviewerRuns(id), store.listLogs(id), {});
+    expect(html).toContain("the posted review may be stale");
+    expect(html).toContain("View the posted review");
+    expect(html).not.toContain("nothing was published");
+  });
+
+  it("renders manual_cancel copy with the actor, and an honest fallback without one", () => {
+    const store = jobStore();
+    const cancelled = seed(store, 5, "m5");
+    store.setJobState(cancelled, "reviewing");
+    store.cancelJobs({ jobId: cancelled }, "manual_cancel", "octocat");
+    const html = renderJob(store.getJob(cancelled)!, store.listReviewerRuns(cancelled), store.listLogs(cancelled), {});
+    expect(html).toContain("Review cancelled by octocat");
+    expect(html).toContain("the review was not completed");
+
+    const anonymous = seed(store, 6, "m6");
+    store.setJobState(anonymous, "reviewing");
+    store.cancelJobs({ jobId: anonymous }, "manual_cancel", null);
+    const anonHtml = renderJob(store.getJob(anonymous)!, store.listReviewerRuns(anonymous), store.listLogs(anonymous), {});
+    expect(anonHtml).toContain("Review cancelled by an operator");
+  });
+});
+
+describe("cancelled demo fixtures", () => {
+  it("seeds one pr_merged and one manual_dequeue cancelled job without disturbing other fixtures", () => {
+    const store = seededStore();
+
+    const merged = store.listJobs(20).find((row) => row.repo_full_name === "acme/ledger" && row.pr_number === 77)!;
+    expect(merged.state).toBe("cancelled");
+    expect(merged.cancelled_reason).toBe("pr_merged");
+    expect(merged.cancelled_by).toBeNull();
+    const mergedHtml = renderJob(merged, store.listReviewerRuns(merged.id), store.listLogs(merged.id), {});
+    expect(mergedHtml).toContain("Cancelled — PR merged");
+    expect(mergedHtml).toContain("View the merged pull request");
+    expect(mergedHtml).toContain("webhook delivery demo-fixture");
+    expect(mergedHtml).not.toContain(`/jobs/${merged.id}/dequeue`);
+    expect(mergedHtml).not.toContain(`/jobs/${merged.id}/cancel`);
+    expect(store.hasMergedPull("acme/ledger", 77)).toBe(true);
+
+    const dequeued = store.listJobs(20).find((row) => row.repo_full_name === "novacorp/api" && row.pr_number === 92)!;
+    expect(dequeued.state).toBe("cancelled");
+    expect(dequeued.cancelled_reason).toBe("manual_dequeue");
+    expect(dequeued.cancelled_by).toBe("hubot");
+    const dequeuedHtml = renderJob(dequeued, store.listReviewerRuns(dequeued.id), store.listLogs(dequeued.id), {});
+    expect(dequeuedHtml).toContain("Dequeued by hubot");
+    expect(dequeuedHtml).not.toContain(`/jobs/${dequeued.id}/dequeue`);
+    expect(dequeuedHtml).not.toContain(`/jobs/${dequeued.id}/cancel`);
+    expect(store.hasMergedPull("novacorp/api", 92)).toBe(false);
+
+    // Seed-order / stale-sweep collision guard (the pr-91 class): pin neighbours.
+    expect(store.listJobs(20).find((row) => row.pr_number === 91)?.state).toBe("failed");
+    expect(store.listJobs(20).find((row) => row.pr_number === 90)?.state).toBe("queued");
+    expect(store.listJobs(20).find((row) => row.pr_number === 418 && row.state === "stale")).toBeTruthy();
+    // Headroom: every seeded fixture fits the listJobs(20) window the pages use.
+    expect(store.listJobs(20)).toHaveLength(store.listJobs(100).length);
+  });
+});

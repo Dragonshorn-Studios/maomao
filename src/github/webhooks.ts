@@ -34,8 +34,6 @@ export type WebhookHandleResult = {
   body: Record<string, unknown>;
   enqueue?: EnqueueResult;
   dispatchJobId?: number;
-  /** Jobs moved to `cancelled` by this delivery; the server must drop them from the queue. */
-  cancelledJobIds?: number[];
 };
 
 export interface IssueCommentWebhookPayload {
@@ -185,14 +183,18 @@ function ignored(reason: string): WebhookHandleResult {
 /**
  * `pull_request.closed` with the authoritative `merged: true` flag: cancel every
  * non-terminal review job for that repository + PR (all head SHAs) through the
- * centralized cancellation service. Fails safe — an incomplete payload or an
- * uncertain merge state cancels nothing.
+ * centralized cancellation service, and record the merge itself so later push
+ * deliveries cannot enqueue work for the merged pull. Fails safe — an
+ * incomplete payload or an uncertain merge state cancels nothing. Matches on
+ * repo full name; a rename between enqueue and merge cancels nothing wrong,
+ * but surviving jobs may still post to the merged pull.
  */
 function handlePullClosed(
   input: {
     config: Config;
     store: JobStore;
     request: WebhookRequest;
+    abortJobs?: (jobIds: number[]) => void;
   },
   payload: PullRequestWebhookPayload,
 ): WebhookHandleResult {
@@ -205,6 +207,13 @@ function handlePullClosed(
   const repoFullName = payload.repository?.full_name;
   const prNumber = payload.pull_request?.number;
   if (!installationId || !repoOwner || !repoName || !repoFullName || !prNumber) {
+    if (payload.pull_request?.merged === true) {
+      // A merged pull we could not bind to an installation/repo left jobs
+      // running with a 2xx answer; that must be visible somewhere.
+      console.warn(
+        `webhook: merged pull_request.closed payload missing context; nothing cancelled (delivery ${input.request.deliveryId || "unknown"})`,
+      );
+    }
     return ignored("closed payload missing installation, repository, or pull request context");
   }
   // Never infer a merge from the PR merely being closed.
@@ -223,17 +232,25 @@ function handlePullClosed(
     return { status: 200, body: { ok: true, duplicate: true, reason: "duplicate delivery" } };
   }
   const deliveryId = input.request.deliveryId;
+  // Record the merge before cancelling: the marker must exist even when no
+  // job was active at merge time (the common case), because the enqueue gate
+  // reads it and merged pulls cannot be reopened.
+  input.store.markPullMerged(repoFullName, prNumber, deliveryId || null);
   const { cancelledJobIds } = cancelJobsForPull(input.store, {
     repoFullName,
     prNumber,
     reason: "pr_merged",
     note: deliveryId ? `webhook delivery ${deliveryId}` : undefined,
+    // Abort in-memory work before anything below can fail: cancellation is
+    // idempotent, so a redelivery after a mid-handler crash retries safely.
+    onCancelled: input.abortJobs,
   });
+  // Claim only after cancelling: a crash in between must let the redelivery
+  // retry, not report duplicate.
   input.store.claimWebhookDelivery(deliveryId, input.request.event, "pr_merged_cancel");
   return {
     status: 200,
     body: { ok: true, cancelled: cancelledJobIds.length, cancelledJobIds, repoFullName, prNumber },
-    cancelledJobIds,
   };
 }
 
@@ -243,6 +260,8 @@ export async function handleGithubWebhook(input: {
   request: WebhookRequest;
   rateLimiter?: RepoRateLimiter;
   github?: GithubPort;
+  /** Queue hook so cancelled jobs are dropped from memory before the claim/audit steps. */
+  abortJobs?: (jobIds: number[]) => void;
 }): Promise<WebhookHandleResult> {
   const valid = await verifyGithubSignature(
     input.config.github.webhookSecret,
@@ -294,6 +313,18 @@ export async function handleGithubWebhook(input: {
     });
     if (!auth.ok) {
       return ignored(auth.reason);
+    }
+
+    // GitHub does not guarantee delivery order: a delayed or redelivered push
+    // event arriving after the merge must not enqueue fresh work for a merged
+    // pull. The marker is written by every verified merged close (even with
+    // zero active jobs) and merged pulls cannot be reopened, so the gate is
+    // permanent. Keyed by repo full name, so a rename slips past it.
+    if (input.store.hasMergedPull(parsed.repoFullName, parsed.prNumber)) {
+      console.warn(
+        `webhook: ignoring ${input.request.event}.${payload.action} for merged ${parsed.repoFullName}#${parsed.prNumber} (delivery ${input.request.deliveryId || "unknown"})`,
+      );
+      return ignored("pull request already merged; not enqueueing");
     }
 
     const rateOn = repoRateLimitActive(input.config.repoRateLimitPerWindow, input.config.repoRateWindowMs);
@@ -403,6 +434,14 @@ async function handleIssueComment(input: {
   const job = input.store.findLatestJobForPull(repoFullName, prNumber);
   if (!job) {
     return { status: 202, body: { ok: true, ignored: true, reason: "no maomao job for this pull request" } };
+  }
+  if (job.state === "cancelled" || job.state === "stale") {
+    // The job can never dispatch; accepting would swallow the operator's
+    // intent with a success response and no GitHub-visible trace.
+    return {
+      status: 202,
+      body: { ok: true, ignored: true, reason: `job for this pull request is ${job.state}; not escalating` },
+    };
   }
   input.store.patchJob(job.id, { manual_escalate_requested: 1 });
   input.store.log(job.id, `Authorized escalate command from ${actorLogin}`);

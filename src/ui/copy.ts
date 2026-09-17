@@ -1,4 +1,4 @@
-import type { JobState, ReviewerState } from "../config.js";
+import type { CancelReason, JobState, ReviewerState } from "../config.js";
 import type { Severity } from "../schema.js";
 
 export const PRODUCT_TAGLINE = "PR examination console";
@@ -83,6 +83,62 @@ export function usageReportedCopy(): string {
 
 export function staleBanner(): string {
   return "This job reviewed an older commit. A newer head SHA exists for this pull request; do not treat this result as current.";
+}
+
+/**
+ * Reason-aware copy for the terminal `cancelled` state. Deliberately not
+ * failure-flavoured: cancellation is an outcome, not an error. Claims stay
+ * honest: a cancel lands at the next checkpoint, so a review POST already in
+ * flight can still complete (the pipeline logs "cancelled after a review was
+ * posted") — never promise "nothing was published".
+ */
+export function cancelledBannerCopy(job: {
+  cancelled_reason: CancelReason | null;
+  cancelled_by: string | null;
+  pr_html_url: string;
+  job_type: string;
+  github_review_id: string | null;
+  github_review_url: string | null;
+}): { text: string; link?: { href: string; label: string } } {
+  if (job.cancelled_reason === "manual_dequeue") {
+    const who = job.cancelled_by ?? "an operator";
+    return {
+      text: `Dequeued by ${who}. Removed from the queue before work started; history and logs are preserved.`,
+    };
+  }
+  if (job.cancelled_reason === "pr_merged") {
+    if (job.github_review_id) {
+      // The review POST was already in flight when the merge landed.
+      return {
+        text: "Cancelled — PR merged after the review was posted; the posted review may be stale.",
+        link: job.github_review_url
+          ? { href: job.github_review_url, label: "View the posted review" }
+          : undefined,
+      };
+    }
+    return {
+      text: "Cancelled — PR merged. The merge superseded this job before it could finish.",
+      link: job.pr_html_url ? { href: job.pr_html_url, label: "View the merged pull request" } : undefined,
+    };
+  }
+  if (job.cancelled_reason === "manual_cancel") {
+    if (job.github_review_id) {
+      return {
+        text: "Review cancelled after the review was posted; the posted review may be stale and no longer reflects this job.",
+        link: job.github_review_url
+          ? { href: job.github_review_url, label: "View the posted review" }
+          : undefined,
+      };
+    }
+    const who = job.cancelled_by ?? "an operator";
+    return {
+      text: `Review cancelled by ${who}. Work stopped at the next checkpoint; the review was not completed.`,
+    };
+  }
+  if (job.job_type === "health_scan") {
+    return { text: "Scan cancelled. Findings already saved, if any, remain listed on this page." };
+  }
+  return { text: "Cancelled." };
 }
 
 export type UiFlavor = "apothecary" | "plain";
