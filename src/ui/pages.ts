@@ -289,9 +289,10 @@ function renderCancelledBanner(job: JobRow): string {
  * Cancel review for live work, nothing for terminal jobs. The forms must work
  * without JS; layout.ts disables the submit button while a form is in flight.
  */
-/** Single home for the dequeue form markup (job page + queue card). */
+/** Single home for the dequeue form markup (job page + queue card).
+ * The `dequeue` class carries the small-outline button styling (theme.ts). */
 function dequeueForm(jobId: number, csrfToken?: string, hint?: string): string {
-  return `<form class="inline-form" method="post" action="/jobs/${jobId}/dequeue">
+  return `<form class="dequeue" method="post" action="/jobs/${jobId}/dequeue">
       ${csrfInput(csrfToken)}
       <button type="submit">Dequeue</button>
       ${hint ? `<span class="muted">${escapeHtml(hint)}</span>` : ""}
@@ -308,7 +309,7 @@ function renderJobActions(job: JobRow, csrfToken?: string): string {
     return dequeueForm(job.id, csrfToken, hint);
   }
   if (LIVE_JOB_STATES.includes(job.state)) {
-    return `<p><a href="/jobs/${job.id}/cancel">Cancel review…</a> <span class="muted">Stops this review; it will not be completed. Logs and partial output stay on the job page.</span></p>`;
+    return `<p><a class="cancel-review" href="/jobs/${job.id}/cancel">Cancel review…</a> <span class="muted">Stops this review; it will not be completed. Logs and partial output stay on the job page.</span></p>`;
   }
   return "";
 }
@@ -322,7 +323,7 @@ function renderQueueCard(job: JobRow, metrics: JobMetrics, uiFlavor?: UiFlavor, 
   if (job.state === "queued") {
     cardAction = dequeueForm(job.id, csrfToken);
   } else if (isLive) {
-    cardAction = `<a href="/jobs/${job.id}/cancel">Cancel review…</a>`;
+    cardAction = `<a class="cancel-review" href="/jobs/${job.id}/cancel">Cancel review…</a>`;
   }
   return `<li>
     <article class="specimen${isLive ? " is-live" : ""}">

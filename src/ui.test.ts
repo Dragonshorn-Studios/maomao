@@ -38,6 +38,11 @@ describe("theme tokens", () => {
     expect(THEME_CSS).toContain(".typeahead-listbox");
     expect(THEME_CSS).toContain(".typeahead-option");
     expect(THEME_CSS).toContain("@keyframes spin");
+    // The Dequeue and Cancel review controls wear the same small-outline style as Retry.
+    expect(THEME_CSS).toContain("form.retry, form.retry-job, form.dequeue {");
+    expect(THEME_CSS).toContain(".retry button, .retry-job button, .dequeue button, a.cancel-review {");
+    expect(THEME_CSS).toContain(".dequeue button:hover");
+    expect(THEME_CSS).toContain("a.cancel-review { text-decoration: none; display: inline-block; }");
     expect(THEME_CSS).toContain(".section-head");
     expect(THEME_CSS).toMatch(/\.tick\.running[\s\S]*var\(--working\)/);
     expect(THEME_CSS).toMatch(/\.state-reviewing[\s\S]*var\(--working-soft\)/);
