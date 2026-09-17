@@ -461,10 +461,11 @@ if [[ "$REUSE_ENV" != "1" ]]; then
 
 Create a GitHub App first if you have not (least privilege):
   Metadata: Read
-  Contents: Read
+  Contents: Read (Read & write if Maomao should collapse resolved review threads)
   Pull requests: Read & write
   Subscribe to Pull request events
 See README "Configure a GitHub App". This installer does not create the App.
+After changing App permissions, accept them on each installation.
 
 EOF
 

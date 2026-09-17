@@ -151,11 +151,11 @@ Create a GitHub App for your user or org. Maomao needs **least privilege**:
 | Permission | Access | Why |
 | --- | --- | --- |
 | Metadata | Read | Identify the installation / repository |
-| Contents | **Read** | Fetch the PR head into a workspace |
+| Contents | **Read**, or **Read & write** to collapse resolved review threads | Fetch the PR head. GitHub's `resolveReviewThread` mutation is gated on Contents write (repo write / merge-level), **not** on Pull requests write. Maomao never pushes, edits files, or merges — grant write only if you want conversations auto-resolved. |
 | Pull requests | Read & write | Read the diff; post a `COMMENT` review |
 | Issues | Write (optional) | Poison-alert mention/command comments on the PR conversation, and creating issues from health scans (`GITHUB_ISSUE_CREATION_ENABLED=true`) |
 
-Do **not** grant Contents write, Actions write, Administration, Secrets, merge, or branch push. The strongest action Maomao can take is posting a pull request review.
+Do **not** grant Actions write, Administration, Secrets, merge, or branch push. After you change App permissions, open each installation and **accept the new permissions** — tokens keep the old scopes until you do, and resolve still fails with `Resource not accessible by integration`.
 
 Subscribe the app to **Pull request**, **Pull request review comment**, and **Issue comment** (for `@maomao escalate` in `manual` poison-alert policy). Set the webhook URL to:
 
