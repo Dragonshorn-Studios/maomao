@@ -309,7 +309,7 @@ function renderJobActions(job: JobRow, csrfToken?: string): string {
     return dequeueForm(job.id, csrfToken, hint);
   }
   if (LIVE_JOB_STATES.includes(job.state)) {
-    return `<p><a class="cancel-review" href="/jobs/${job.id}/cancel">Cancel review…</a> <span class="muted">Stops this review; it will not be completed. Logs and partial output stay on the job page.</span></p>`;
+    return `<p><a class="cancel-review" href="/jobs/${job.id}/cancel">Cancel review</a> <span class="muted">Stops this review; it will not be completed. Logs and partial output stay on the job page.</span></p>`;
   }
   return "";
 }
@@ -323,7 +323,7 @@ function renderQueueCard(job: JobRow, metrics: JobMetrics, uiFlavor?: UiFlavor, 
   if (job.state === "queued") {
     cardAction = dequeueForm(job.id, csrfToken);
   } else if (isLive) {
-    cardAction = `<a class="cancel-review" href="/jobs/${job.id}/cancel">Cancel review…</a>`;
+    cardAction = `<a class="cancel-review" href="/jobs/${job.id}/cancel">Cancel review</a>`;
   }
   return `<li>
     <article class="specimen${isLive ? " is-live" : ""}">
