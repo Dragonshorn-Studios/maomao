@@ -3224,3 +3224,163 @@ describe("effective configuration summary", () => {
     expect(html).toContain("Effective configuration");
   });
 });
+
+describe("structured profile editor", () => {
+  const oauthEnv = {
+    UI_SESSION_SECRET: "session-secret-for-tests",
+    GITHUB_OAUTH_CLIENT_ID: "cid",
+    GITHUB_OAUTH_CLIENT_SECRET: "csecret",
+    MAOMAO_ADMIN_GITHUB_IDS: "1001",
+    MAOMAO_PUBLIC_URL: "https://maomao.example",
+  };
+
+  async function operatorCsrf(app: ReturnType<typeof createApp>) {
+    const session = await operatorSession(app);
+    const page = await app.request("/config", { headers: { cookie: session } });
+    const { csrfCookie, csrfToken } = await csrfArtifacts(page);
+    return { cookie: `${session}; ${csrfCookie}`, csrfToken, session };
+  }
+
+  function structuredBody(fields: Record<string, string>): string {
+    return new URLSearchParams({ editor: "structured", action: "save", ...fields }).toString();
+  }
+
+  it("creates a draft through the structured form and stores the validated definition", async () => {
+    const { app, store } = testApp(oauthEnv, undefined, mockOauthFetch({ id: 1001, login: "octocat" }));
+    const { cookie, csrfToken } = await operatorCsrf(app);
+    const response = await app.request("/config/drafts", {
+      method: "POST",
+      headers: { cookie, "content-type": "application/x-www-form-urlencoded" },
+      body: structuredBody({
+        csrf_token: csrfToken,
+        name: "structured-made",
+        note: "from the editor",
+        reviewer_count: "2",
+        reviewer_role_0: "correctness",
+        reviewer_model_0: "test/model",
+        reviewer_timeout_0: "120",
+        reviewer_role_1: "security",
+        min_severity: "low",
+        router_model: "test/router",
+        max_cost_usd: "1.5",
+        max_tokens: "500000",
+      }),
+    });
+    expect(response.status).toBe(302);
+    expect(response.headers.get("location")).toContain("notice=draft-created");
+    const revision = store.configs.listRevisions().find((row) => row.name === "structured-made");
+    expect(revision?.definition).toEqual({
+      name: "structured-made",
+      reviewers: [
+        { role: "correctness", model: "test/model", timeoutMs: 120000 },
+        { role: "security" },
+      ],
+      minPublishableSeverity: "low",
+      routerModel: "test/router",
+      maxTotalCostUsd: 1.5,
+      maxTotalTokens: 500000,
+    });
+    expect(revision?.note).toBe("from the editor");
+  });
+
+  it("re-renders the form with field errors and the submitted values retained", async () => {
+    const { app } = testApp(oauthEnv, undefined, mockOauthFetch({ id: 1001, login: "octocat" }));
+    const { cookie, csrfToken } = await operatorCsrf(app);
+    const response = await app.request("/config/drafts", {
+      method: "POST",
+      headers: { cookie, "content-type": "application/x-www-form-urlencoded" },
+      body: structuredBody({
+        csrf_token: csrfToken,
+        name: "Bad Name",
+        reviewer_count: "1",
+        reviewer_role_0: "correctness",
+        reviewer_model_0: "no slash model",
+      }),
+    });
+    expect(response.status).toBe(400);
+    const html = await response.text();
+    expect(html).toContain("Some fields need attention");
+    expect(html).toContain("lowercase");
+    expect(html).toContain("provider/model");
+    // Submitted values retained.
+    expect(html).toContain('value="Bad Name"');
+    expect(html).toContain('value="no slash model"');
+    // A11y wiring: the failing control points at its error.
+    expect(html).toContain('aria-invalid="true"');
+  });
+
+  it("applies structural actions without saving", async () => {
+    const { app, store } = testApp(oauthEnv, undefined, mockOauthFetch({ id: 1001, login: "octocat" }));
+    const { cookie, csrfToken } = await operatorCsrf(app);
+    const before = store.configs.listRevisions().length;
+    const response = await app.request("/config/drafts", {
+      method: "POST",
+      headers: { cookie, "content-type": "application/x-www-form-urlencoded" },
+      body: structuredBody({
+        csrf_token: csrfToken,
+        name: "never-saved",
+        reviewer_count: "2",
+        reviewer_role_0: "correctness",
+        reviewer_role_1: "security",
+        action: "remove:0",
+      }),
+    });
+    expect(response.status).toBe(200);
+    const html = await response.text();
+    expect(html).toContain("Reviewer 1");
+    // Row 0 (correctness) was removed; security remains as the row's selection.
+    expect(html).toContain('value="security" selected');
+    expect(html).not.toContain('value="correctness" selected');
+    expect(store.configs.listRevisions().length).toBe(before);
+  });
+
+  it("edits an existing draft with optimistic concurrency, JSON submissions still working", async () => {
+    const { app, store } = testApp(oauthEnv, undefined, mockOauthFetch({ id: 1001, login: "octocat" }));
+    const { cookie, csrfToken } = await operatorCsrf(app);
+    const created = store.configs.createDraft({
+      definition: { name: "default", reviewers: [{ role: "correctness" }], minPublishableSeverity: "info" },
+      createdBy: "octocat",
+    });
+    if ("error" in created) throw new Error("draft failed");
+    const draftId = created.revision.id;
+    const editSeq = created.revision.editSeq;
+
+    const response = await app.request(`/config/drafts/${draftId}`, {
+      method: "POST",
+      headers: { cookie, "content-type": "application/x-www-form-urlencoded" },
+      body: structuredBody({
+        csrf_token: csrfToken,
+        expected_edit_seq: String(editSeq),
+        name: "default",
+        reviewer_count: "2",
+        reviewer_role_0: "correctness",
+        reviewer_role_1: "security",
+        min_severity: "low",
+      }),
+    });
+    expect(response.status).toBe(302);
+    expect(response.headers.get("location")).toContain("notice=draft-saved");
+    expect(store.configs.getRevision(draftId)?.definition.reviewers.map((r) => r.role)).toEqual(["correctness", "security"]);
+
+    // Stale edit_seq → 409 conflict, and the raw-JSON path still works.
+    const stale = await app.request(`/config/drafts/${draftId}`, {
+      method: "POST",
+      headers: { cookie, "content-type": "application/x-www-form-urlencoded" },
+      body: `csrf_token=${encodeURIComponent(csrfToken)}&expected_edit_seq=${editSeq}&definition=${encodeURIComponent(
+        JSON.stringify({ name: "default", reviewers: [{ role: "tests" }], minPublishableSeverity: "info" }),
+      )}`,
+    });
+    expect(stale.status).toBe(409);
+    expect(store.configs.getRevision(draftId)?.definition.reviewers.map((r) => r.role)).toEqual(["correctness", "security"]);
+  });
+
+  it("renders the structured create form on GET /config when the gate allows writes", async () => {
+    const { app } = testApp(oauthEnv, undefined, mockOauthFetch({ id: 1001, login: "octocat" }));
+    const session = await operatorSession(app);
+    const html = await (await app.request("/config", { headers: { cookie: session } })).text();
+    expect(html).toContain('name="editor" value="structured"');
+    expect(html).toContain("Minimum publishable severity");
+    expect(html).toContain("not enforced at runtime");
+    expect(html).toContain("Create a draft");
+  });
+});

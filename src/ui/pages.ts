@@ -3,6 +3,7 @@ import type { FindingRow } from "../findings/types.js";
 import { fingerprintFinding, stripHtmlComments } from "../findings/identity.js";
 import { POLICIES_WITH_EXTERNAL, POLICIES_WITH_INTERNAL } from "../routing/types.js";
 import { LIVE_JOB_STATES } from "../config.js";
+import type { ProfileFieldErrors, ProfileFormValues } from "../config-form.js";
 import type { EffectiveConfigEntry } from "../config-effective.js";
 import type { Severity } from "../schema.js";
 import { elapsedMs, escapeHtml, formatDuration, shortSha } from "../util.js";
@@ -936,6 +937,13 @@ export interface ConfigPageData {
   notice?: string;
   error?: string;
   effectiveConfig?: EffectiveConfigEntry[];
+  /** Structured-editor inputs; required for the create/edit forms when canWrite. */
+  profileEditor?: {
+    knownRoles: Array<{ id: string; title: string }>;
+    modelCatalog: string[];
+    /** A failed save re-renders submitted values with field errors in place. */
+    form?: { values: ProfileFormValues; errors?: ProfileFieldErrors; revision?: { id: number; editSeq: number } };
+  };
 }
 
 /** Env-derived values are operator-controlled but unbounded: clamp length and
@@ -944,6 +952,47 @@ export interface ConfigPageData {
 function clampConfigValue(value: string): string {
   const clean = value.replace(/[\u0000-\u001F\u007F]/g, " ");
   return clean.length > 300 ? `${clean.slice(0, 300)}… (+${clean.length - 300} chars)` : clean;
+}
+
+function emptyProfileFormValues(): ProfileFormValues {
+  return {
+    name: "default",
+    note: "",
+    reviewers: [{ role: "correctness", model: "", timeoutSeconds: "" }],
+    routerModel: "",
+    minSeverity: "info",
+    maxCostUsd: "",
+    maxTokens: "",
+  };
+}
+
+/** Prefills editor values from a stored definition (timeout ms → seconds). */
+export function profileFormValuesFromDefinition(
+  definition: unknown,
+  note: string | null,
+): ProfileFormValues {
+  const def = (definition ?? {}) as {
+    name?: string;
+    reviewers?: Array<{ role?: string; model?: string; timeoutMs?: number }>;
+    routerModel?: string;
+    minPublishableSeverity?: string;
+    maxTotalCostUsd?: number;
+    maxTotalTokens?: number;
+  };
+  return {
+    name: def.name ?? "",
+    note: note ?? "",
+    reviewers:
+      def.reviewers?.map((reviewer) => ({
+        role: reviewer.role ?? "",
+        model: reviewer.model ?? "",
+        timeoutSeconds: reviewer.timeoutMs != null ? String(Math.round(reviewer.timeoutMs / 1000)) : "",
+      })) ?? [],
+    routerModel: def.routerModel ?? "",
+    minSeverity: def.minPublishableSeverity ?? "info",
+    maxCostUsd: def.maxTotalCostUsd != null ? String(def.maxTotalCostUsd) : "",
+    maxTokens: def.maxTotalTokens != null ? String(def.maxTotalTokens) : "",
+  };
 }
 
 /** Renders the /config "Effective configuration" section: entries grouped by
@@ -1020,31 +1069,161 @@ function revisionCard(revision: ConfigRevisionView, data: ConfigPageData): strin
   </article>`;
 }
 
+export interface ProfileFormOptions {
+  csrfToken: string;
+  /** Present when editing an existing draft; absent when creating. */
+  revision?: { id: number; editSeq: number };
+  knownRoles: Array<{ id: string; title: string }>;
+  modelCatalog: string[];
+}
+
+const SEVERITIES: readonly Severity[] = ["blocker", "high", "medium", "low", "info"];
+
+function fieldError(errors: ProfileFieldErrors | undefined, key: string): string {
+  const message = errors?.[key];
+  if (!message) return "";
+  return `<p class="error" role="alert" aria-live="polite">${escapeHtml(message)}</p>`;
+}
+
+/**
+ * The structured profile editor: labeled controls for the full versioned
+ * profile schema, replacing raw JSON as the primary create/edit path. Fully
+ * server-rendered — add/remove/reorder are submit buttons the route applies
+ * and re-renders, so nothing requires JavaScript. Invalid zod fields are
+ * shown next to their control with the submitted values retained.
+ */
+export function renderProfileForm(
+  values: ProfileFormValues,
+  errors: ProfileFieldErrors | undefined,
+  options: ProfileFormOptions,
+): string {
+  const err = (key: string) => fieldError(errors, key);
+  const invalidAttr = (key: string) => (errors?.[key] ? 'aria-invalid="true"' : "");
+  const describedBy = (key: string) => (errors?.[key] ? `aria-describedby="${key}-error"` : "");
+
+  const roleOptions = (selected: string) =>
+    [`<option value="">— pick a role —</option>`]
+      .concat(
+        options.knownRoles.map(
+          (role) =>
+            `<option value="${escapeHtml(role.id)}"${role.id === selected ? " selected" : ""}>${escapeHtml(role.title || role.id)}</option>`,
+        ),
+      )
+      .join("");
+
+  const reviewerRows = values.reviewers
+    .map((row, index) => {
+      const key = (leaf: string) => `reviewer_${leaf}_${index}`;
+      const rowError =
+        errors?.[`reviewer_role_${index}`] ??
+        errors?.[`reviewer_model_${index}`] ??
+        errors?.[`reviewer_timeout_${index}`];
+      return `<fieldset class="profile-reviewer">
+        <legend>Reviewer ${index + 1}</legend>
+        ${rowError ? `<p class="error" role="alert">${escapeHtml(rowError)}</p>` : ""}
+        <label>Role
+          <select name="${key("role")}" ${invalidAttr(key("role"))} ${describedBy(key("role"))}>${roleOptions(row.role)}</select>
+        </label>
+        <label>Model override (optional; provider/model)
+          <input list="profile-model-catalog" name="${key("model")}" value="${escapeHtml(row.model)}" placeholder="provider/model"/>
+        </label>
+        <label>Timeout in seconds (optional — <span title="Stored in the profile schema but not yet consumed by the pipeline">not enforced at runtime</span>)
+          <input type="number" min="1" name="${key("timeout")}" value="${escapeHtml(row.timeoutSeconds)}"/>
+        </label>
+        <div class="config-actions">
+          <button type="submit" name="action" value="up:${index}" aria-label="Move reviewer ${index + 1} up">↑</button>
+          <button type="submit" name="action" value="down:${index}" aria-label="Move reviewer ${index + 1} down">↓</button>
+          <button type="submit" name="action" value="remove:${index}" aria-label="Remove reviewer ${index + 1}">Remove</button>
+        </div>
+      </fieldset>`;
+    })
+    .join("");
+
+  const modelDatalist =
+    options.modelCatalog.length > 0
+      ? `<datalist id="profile-model-catalog">${options.modelCatalog
+          .map((model) => `<option value="${escapeHtml(model)}"></option>`)
+          .join("")}</datalist>`
+      : "";
+
+  const target = options.revision
+    ? `/config/drafts/${options.revision.id}`
+    : "/config/drafts";
+  const editSeq = options.revision
+    ? `<input type="hidden" name="expected_edit_seq" value="${options.revision.editSeq}"/>`
+    : "";
+
+  return `<section class="profile-editor">
+    <h3>${options.revision ? `Edit draft #${options.revision.id}` : "Create a draft"}</h3>
+    ${errors?.form ? `<p class="error" role="alert">${escapeHtml(errors.form)}</p>` : ""}
+    <form method="post" action="${target}">
+      ${csrfInput(options.csrfToken)}
+      ${editSeq}
+      <input type="hidden" name="editor" value="structured"/>
+      <input type="hidden" name="reviewer_count" value="${values.reviewers.length}"/>
+      <fieldset>
+        <legend>Profile</legend>
+        <label>Name (lowercase letters, digits, dashes)
+          <input name="name" value="${escapeHtml(values.name)}" pattern="[a-z0-9][a-z0-9-]{0,48}" required
+            ${invalidAttr("name")} ${describedBy("name")}/>
+        </label>
+        ${err("name")}
+        <label>Revision note (optional)
+          <input name="note" value="${escapeHtml(values.note)}"/>
+        </label>
+      </fieldset>
+      <fieldset>
+        <legend>Reviewers (in order; roles not listed are disabled)</legend>
+        ${reviewerRows}
+        <button type="submit" name="action" value="add">Add reviewer</button>
+        ${modelDatalist}
+      </fieldset>
+      <fieldset>
+        <legend>Publishing</legend>
+        <label>Minimum publishable severity
+          <select name="min_severity">
+            ${SEVERITIES.map((severity) => `<option value="${severity}"${severity === values.minSeverity ? " selected" : ""}>${severity}</option>`).join("")}
+          </select>
+        </label>
+        <label>Router model override (optional; provider/model)
+          <input name="router_model" value="${escapeHtml(values.routerModel)}" list="profile-model-catalog" ${invalidAttr("router_model")} ${describedBy("router_model")}/>
+        </label>
+        ${err("router_model")}
+        <label>Total cost ceiling in USD (optional — <span title="Stored in the profile schema but not yet consumed by the pipeline">not enforced at runtime</span>)
+          <input type="number" step="0.01" min="0" name="max_cost_usd" value="${escapeHtml(values.maxCostUsd)}" ${invalidAttr("max_cost_usd")} ${describedBy("max_cost_usd")}/>
+        </label>
+        ${err("max_cost_usd")}
+        <label>Total token ceiling (optional — <span title="Stored in the profile schema but not yet consumed by the pipeline">not enforced at runtime</span>)
+          <input type="number" min="0" name="max_tokens" value="${escapeHtml(values.maxTokens)}" ${invalidAttr("max_tokens")} ${describedBy("max_tokens")}/>
+        </label>
+        ${err("max_tokens")}
+      </fieldset>
+      <button type="submit" name="action" value="save">Save draft</button>
+      <a href="/config">Cancel</a>
+    </form>
+  </section>`;
+}
+
 export function renderConfigPage(data: ConfigPageData): string {
   const active = data.revisions.filter((revision) => revision.status === "active");
   const drafts = data.revisions.filter((revision) => revision.status === "draft");
   const retired = data.revisions.filter((revision) => revision.status === "retired");
   const csrf = csrfInput(data.csrfToken);
-  const createForm = data.canWrite
-    ? `<details class="config-create">
-        <summary>Create a new draft</summary>
-        <form method="post" action="/config/drafts">
-          ${csrf}
-          <textarea name="definition" rows="12" cols="72">${escapeHtml(
-            JSON.stringify(
-              {
-                name: "default",
-                reviewers: [{ role: "correctness" }],
-                minPublishableSeverity: "info",
-              },
-              null,
-              2,
-            ),
-          )}</textarea>
-          <button type="submit">Create draft</button>
-        </form>
-      </details>`
-    : `<p class="muted">Writing configuration requires an operator OAuth identity.</p>`;
+  const createForm =
+    data.canWrite && data.profileEditor
+      ? data.profileEditor.form && !data.profileEditor.form.revision
+        ? // A failed create save re-renders the submitted values with errors.
+          renderProfileForm(data.profileEditor.form.values, data.profileEditor.form.errors, {
+            csrfToken: data.csrfToken ?? "",
+            knownRoles: data.profileEditor.knownRoles,
+            modelCatalog: data.profileEditor.modelCatalog,
+          })
+        : renderProfileForm(emptyProfileFormValues(), undefined, {
+            csrfToken: data.csrfToken ?? "",
+            knownRoles: data.profileEditor.knownRoles,
+            modelCatalog: data.profileEditor.modelCatalog,
+          })
+      : `<p class="muted">Writing configuration requires an operator OAuth identity.</p>`;
   const importForm = data.canWrite
     ? `<details class="config-import">
         <summary>Import exported configuration</summary>
@@ -1072,7 +1251,24 @@ export function renderConfigPage(data: ConfigPageData): string {
     ${active.map((revision) => revisionCard(revision, data)).join("") || `<p class="muted">No active revision — env configuration applies.</p>`}
     <h2>Drafts</h2>
     ${createForm}
-    ${drafts.map((revision) => revisionCard(revision, data)).join("") || `<p class="muted">No open drafts.</p>`}
+    ${drafts
+      .map((revision) => {
+        const editor =
+          data.canWrite && data.profileEditor
+            ? renderProfileForm(
+                profileFormValuesFromDefinition(revision.definition, revision.note),
+                data.profileEditor.form?.revision?.id === revision.id ? data.profileEditor.form.errors : undefined,
+                {
+                  csrfToken: data.csrfToken ?? "",
+                  revision: { id: revision.id, editSeq: revision.editSeq },
+                  knownRoles: data.profileEditor.knownRoles,
+                  modelCatalog: data.profileEditor.modelCatalog,
+                },
+              )
+            : "";
+        return `${editor}${revisionCard(revision, data)}`;
+      })
+      .join("") || `<p class="muted">No open drafts.</p>`}
     <h2>Retired</h2>
     ${retired.map((revision) => revisionCard(revision, data)).join("") || `<p class="muted">No retired revisions.</p>`}
     ${importForm}

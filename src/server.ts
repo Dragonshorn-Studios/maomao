@@ -13,6 +13,8 @@ import { dispatchEnqueue, enqueuePullJob } from "./jobs/enqueue.js";
 import { cancelJob } from "./jobs/cancel.js";
 import { LIVE_JOB_STATES } from "./config.js";
 import { effectiveConfigEntries } from "./config-effective.js";
+import { decodeProfileAction, decodeProfileForm, applyProfileAction, profileFormToDefinition } from "./config-form.js";
+import { KNOWN_REVIEWER_ROLES } from "./prompts.js";
 import { subscribe } from "./events.js";
 import { redactSecrets } from "./util.js";
 import { readFileSync } from "node:fs";
@@ -23,6 +25,7 @@ import {
   renderScanPage,
   renderCancelConfirmPage,
   renderConfigPage,
+  renderProfileForm,
   renderHome,
   renderJob,
   renderLogin,
@@ -724,7 +727,7 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
       return { ok: false, error: "Definition must be valid JSON." };
     }
   };
-  const renderConfigWithError = (c: Context<AppEnv>, message: string, status: 400 | 403 | 409) => {
+  const renderConfigWithError = (c: Context<AppEnv>, message: string, status: 400 | 403 | 404 | 409) => {
     return c.html(
       renderConfigPage({
         revisions: ctx.store.configs.listRevisions(),
@@ -764,16 +767,94 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
           ctx.env ?? process.env,
           ctx.store.configs.getActiveRevision("default") ?? null,
         ),
+        profileEditor: {
+          knownRoles: KNOWN_REVIEWER_ROLES.map((role) => ({ id: role.id, title: role.title })),
+          modelCatalog: ctx.config.modelCatalog,
+        },
       }),
     );
   });
+
+  /**
+   * Structured-editor form handling: applies add/remove/reorder actions by
+   * re-rendering the form with mutated values (no persistence), or decodes
+   * and validates on save. Raw-JSON submissions (no `editor` field) keep the
+   * old path so scripts and export/import round-trips are unaffected.
+   */
+  type ProfileFormOutcome =
+    | { kind: "render"; response: Response }
+    | { kind: "save"; definition: unknown; note?: string };
+
+  const profileFormOptions = (c: Context<AppEnv>, existing?: { id: number; editSeq: number }) => ({
+    csrfToken: ensureCsrfToken(c, ctx.config.uiSessionSecret),
+    revision: existing,
+    knownRoles: KNOWN_REVIEWER_ROLES.map((role) => ({ id: role.id, title: role.title })),
+    modelCatalog: ctx.config.modelCatalog,
+  });
+
+  const handleProfileForm = async (
+    c: Context<AppEnv>,
+    existing?: { id: number; editSeq: number },
+  ): Promise<ProfileFormOutcome> => {
+    const body = (await c.req.parseBody()) as Record<string, unknown>;
+    let values = decodeProfileForm(body);
+    const action = decodeProfileAction(body);
+    if (action.kind !== "save") {
+      values = applyProfileAction(values, action, KNOWN_REVIEWER_ROLES.map((role) => role.id));
+      return {
+        kind: "render",
+        response: c.html(renderProfileForm(values, undefined, profileFormOptions(c, existing))),
+      };
+    }
+    const built = profileFormToDefinition(values);
+    if (!built.ok) {
+      return {
+        kind: "render",
+        response: c.html(renderProfileForm(values, built.errors, profileFormOptions(c, existing)), 400),
+      };
+    }
+    return { kind: "save", definition: built.definition, note: values.note };
+  };
 
   app.post("/config/drafts", async (c) => {
     if (!gateOn) return c.redirect("/", 302);
     const actor = configActor(c);
     if (!actor) return configWriteDenied(c);
-    const body = await c.req.parseBody();
-    const parsed = parseDefinition(typeof body.definition === "string" ? body.definition : undefined);
+    const bodyPreview = await c.req.parseBody();
+    if (bodyPreview.editor === "structured") {
+      const outcome = await handleProfileForm(c);
+      if (outcome.kind === "render") return outcome.response;
+      const result = ctx.store.configs.createDraft({
+        definition: outcome.definition,
+        note: outcome.note,
+        createdBy: actor.login,
+      });
+      if ("error" in result) {
+        const values = decodeProfileForm(bodyPreview);
+        return c.html(
+          renderConfigPage({
+            revisions: ctx.store.configs.listRevisions(),
+            audit: ctx.store.configs.listAudit(),
+            canWrite: gateOn,
+            error: result.issues.join("; "),
+            csrfToken: ensureCsrfToken(c, ctx.config.uiSessionSecret),
+            effectiveConfig: effectiveConfigEntries(
+              ctx.config,
+              ctx.env ?? process.env,
+              ctx.store.configs.getActiveRevision("default") ?? null,
+            ),
+            profileEditor: {
+              knownRoles: KNOWN_REVIEWER_ROLES.map((role) => ({ id: role.id, title: role.title })),
+              modelCatalog: ctx.config.modelCatalog,
+              form: { values, errors: { form: result.issues.join("; ") } },
+            },
+          }),
+          400,
+        );
+      }
+      return c.redirect("/config?notice=draft-created", 302);
+    }
+    const parsed = parseDefinition(typeof bodyPreview.definition === "string" ? bodyPreview.definition : undefined);
     if (!parsed.ok) return renderConfigWithError(c, parsed.error, 400);
     const result = ctx.store.configs.createDraft({
       definition: parsed.definition,
@@ -787,13 +868,71 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
     if (!gateOn) return c.redirect("/", 302);
     const actor = configActor(c);
     if (!actor) return configWriteDenied(c);
-    const body = await c.req.parseBody();
-    const parsed = parseDefinition(typeof body.definition === "string" ? body.definition : undefined);
+    const bodyPreview = await c.req.parseBody();
+    const revisionId = Number(c.req.param("id"));
+    const expectedEditSeq = Number(bodyPreview.expected_edit_seq ?? -1);
+    if (bodyPreview.editor === "structured") {
+      const existing = ctx.store.configs.getRevision(revisionId);
+      if (!existing || existing.status !== "draft") {
+        return renderConfigWithError(c, "Draft not found.", 404);
+      }
+      const outcome = await handleProfileForm(c, {
+        id: revisionId,
+        editSeq: Number.isFinite(expectedEditSeq) ? expectedEditSeq : existing.editSeq,
+      });
+      if (outcome.kind === "render") return outcome.response;
+      const result = ctx.store.configs.updateDraft({
+        id: revisionId,
+        definition: outcome.definition,
+        note: outcome.note,
+        expectedEditSeq,
+        updatedBy: actor.login,
+      });
+      if ("error" in result && result.error === "conflict") {
+        return renderConfigWithError(
+          c,
+          "Conflict: this draft was saved by someone else. Reload and re-apply your edit.",
+          409,
+        );
+      }
+      if ("error" in result) {
+        if (result.error !== "invalid") {
+          return renderConfigWithError(c, "Draft not found.", 404);
+        }
+        const values = decodeProfileForm(bodyPreview);
+        return c.html(
+          renderConfigPage({
+            revisions: ctx.store.configs.listRevisions(),
+            audit: ctx.store.configs.listAudit(),
+            canWrite: gateOn,
+            error: result.issues.join("; "),
+            csrfToken: ensureCsrfToken(c, ctx.config.uiSessionSecret),
+            effectiveConfig: effectiveConfigEntries(
+              ctx.config,
+              ctx.env ?? process.env,
+              ctx.store.configs.getActiveRevision("default") ?? null,
+            ),
+            profileEditor: {
+              knownRoles: KNOWN_REVIEWER_ROLES.map((role) => ({ id: role.id, title: role.title })),
+              modelCatalog: ctx.config.modelCatalog,
+              form: {
+                values,
+                errors: { form: result.issues.join("; ") },
+                revision: { id: revisionId, editSeq: expectedEditSeq },
+              },
+            },
+          }),
+          400,
+        );
+      }
+      return c.redirect("/config?notice=draft-saved", 302);
+    }
+    const parsed = parseDefinition(typeof bodyPreview.definition === "string" ? bodyPreview.definition : undefined);
     if (!parsed.ok) return renderConfigWithError(c, parsed.error, 400);
     const result = ctx.store.configs.updateDraft({
-      id: Number(c.req.param("id")),
+      id: revisionId,
       definition: parsed.definition,
-      expectedEditSeq: Number(body.expected_edit_seq ?? -1),
+      expectedEditSeq,
       updatedBy: actor.login,
     });
     if ("error" in result && result.error === "conflict") {
