@@ -3008,3 +3008,72 @@ describe("home queue pagination", () => {
     expect(html).toContain("aria-disabled=\"true\"");
   });
 });
+
+describe("home queue pagination review fixes", () => {
+  function seededApp2(count: number) {
+    const { app, store } = testApp();
+    for (let index = 0; index < count; index += 1) {
+      store.enqueue({
+        repoFullName: "acme/widgets",
+        repoOwner: "acme",
+        repoName: "widgets",
+        installationId: 1,
+        prNumber: index + 1,
+        prTitle: `job ${index + 1}`,
+        prBody: "",
+        prHtmlUrl: "",
+        prAuthor: "dev",
+        baseSha: "b",
+        headSha: `sha-${index + 1}`,
+        baseRef: "main",
+        headRef: "f",
+        reviewers: [],
+      });
+    }
+    return { app, store };
+  }
+
+  it("follows the Newer jobs link back up and treats a stale after cursor as the first page", async () => {
+    const { app } = seededApp2(60);
+    const firstHtml = await (await app.request("/")).text();
+    const beforeMatch = firstHtml.match(/href="\/\?before=(\d+)"/);
+    const secondHtml = await (await app.request(`/?before=${beforeMatch![1]}`)).text();
+    const afterMatch = secondHtml.match(/href="\/\?after=(\d+)"/);
+    expect(afterMatch?.[1]).toBeTruthy();
+    const up = await (await app.request(`/?after=${afterMatch![1]}`)).text();
+    expect(up).toContain("job 60");
+    expect(up).toContain('rel="next"');
+    expect(up).not.toContain('rel="prev"');
+    // A stale after bookmark beyond the newest id falls back to the first page.
+    const stale = await app.request("/?after=999999");
+    expect(stale.status).toBe(200);
+    expect((await stale.text()).replace(/<[^>]+>/g, "")).toContain("That page no longer exists");
+  });
+
+  it("renders the final partial page with a disabled Older link and live Newer link", async () => {
+    const { app } = seededApp2(30);
+    const firstHtml = await (await app.request("/")).text();
+    const beforeMatch = firstHtml.match(/href="\/\?before=(\d+)"/);
+    const lastHtml = await (await app.request(`/?before=${beforeMatch![1]}`)).text();
+    expect(lastHtml).toContain("job 5");
+    expect(lastHtml).toContain("job 1");
+    expect(lastHtml).toContain('aria-disabled="true"');
+    expect(lastHtml).toContain('rel="prev"');
+    expect(lastHtml).toContain("Viewing older jobs");
+    expect(lastHtml).not.toContain('rel="next"');
+  });
+
+  it("keeps the pagination nav on the POST /reviews error re-render", async () => {
+    const { app } = seededApp2(40);
+    const response = await app.request("/reviews", {
+      method: "POST",
+      headers: { "content-type": "application/x-www-form-urlencoded" },
+      body: "url=not-a-url",
+    });
+    expect(response.status).toBe(400);
+    const html = await response.text();
+    expect(html).toContain('class="jobs-pagination"');
+    expect(html).toContain('rel="next"');
+    expect(html).not.toContain("job 15");
+  });
+});

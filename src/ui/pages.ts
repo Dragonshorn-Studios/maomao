@@ -129,9 +129,10 @@ export function renderHome(jobs: JobRow[], store: JobStore, options: PageOptions
 }
 
 /**
- * Accessible keyset navigation over the home queue. Cursors come from the
- * page's boundary job ids, so links stay stable while new jobs are queued.
- * Renders nothing when the caller did not opt into pagination.
+ * Keyset navigation over the home queue. Cursors come from the page's
+ * boundary job ids, so links stay stable while new jobs are queued.
+ * rel=next/prev follow reading order down the newest-first list, so "next"
+ * is older. Renders nothing when the caller did not opt into pagination.
  */
 function renderJobsPagination(
   jobs: JobRow[],
@@ -149,10 +150,10 @@ function renderJobsPagination(
       ? `<a rel="prev" href="/?after=${newest.id}">Newer jobs</a>`
       : `<span class="muted" aria-disabled="true">Newer jobs</span>`;
   const olderNote = pagination.hasNewer
-    ? `<p role="status">Viewing older jobs — newest reviews are on the first page.</p>`
+    ? `<p class="jobs-pagination-note" role="status">Viewing older jobs — <a href="/">newest reviews are on the first page</a>.</p>`
     : "";
-  return `${olderNote}
-    <nav class="jobs-pagination" aria-label="Review jobs pages">
+  return `<nav class="jobs-pagination" aria-label="Review jobs pages">
+      ${olderNote}
       ${prevLink}
       ${nextLink}
     </nav>`;

@@ -304,7 +304,7 @@ button, input, textarea {
   margin-top: 1rem;
   font-size: 0.9rem;
 }
-.jobs-pagination p { margin: 0 0 0.35rem; }
+.jobs-pagination .jobs-pagination-note { margin: 0 0 0.35rem; }
 
 .notice, .error, .warn {
   border: 1px solid var(--line);

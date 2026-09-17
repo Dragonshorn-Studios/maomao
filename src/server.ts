@@ -510,14 +510,16 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
     const rawUrl = typeof body.url === "string" ? body.url : "";
     const csrfToken = gateOn ? ensureCsrfToken(c, ctx.config.uiSessionSecret) : undefined;
     const identity = c.get("identity");
+    const homePage = ctx.store.listJobsPage({});
     const home = (extra: { error?: string; notice?: string; reviewUrl?: string } = {}) =>
       c.html(
-        renderHome(ctx.store.listJobsPage({}).jobs, ctx.store, {
+        renderHome(homePage.jobs, ctx.store, {
           ...pageOpts,
           identity,
           csrfToken,
           ...extra,
           reviewUrl: extra.reviewUrl ?? rawUrl,
+          pagination: { hasOlder: homePage.hasOlder, hasNewer: homePage.hasNewer },
         }),
         extra.error ? 400 : 200,
       );
@@ -642,20 +644,25 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
 
   app.get("/", (c) => {
     const cursor = jobsPageCursor(c.req.query("before"), c.req.query("after"));
-    let page = cursor.after != null
-      ? ctx.store.listJobsPage({ after: cursor.after })
-      : ctx.store.listJobsPage({ before: cursor.before });
-    // A cursor past the newest (or below the oldest with nothing newer) yields
-    // an empty page; land on the first page instead of a dead end.
-    if (page.jobs.length === 0 && ctx.store.listJobsPage({ limit: 1 }).jobs.length > 0) {
+    let page = ctx.store.listJobsPage(cursor);
+    // Only out-of-range cursors empty the page: after at/past the newest id,
+    // or before at/below the oldest id. (A before cursor past the newest id
+    // never gets here empty — the store's id< query already returns the
+    // newest page.) If the page is empty while jobs exist, re-render the
+    // first page and say why instead of a dead end.
+    let staleCursorNotice: string | undefined;
+    if (page.jobs.length === 0) {
       page = ctx.store.listJobsPage({});
+      if (page.jobs.length > 0 && (cursor.before != null || cursor.after != null)) {
+        staleCursorNotice = "That page no longer exists — showing the newest jobs instead.";
+      }
     }
     return c.html(
       renderHome(page.jobs, ctx.store, {
         ...pageOpts,
         identity: c.get("identity"),
         csrfToken: gateOn ? ensureCsrfToken(c, ctx.config.uiSessionSecret) : undefined,
-        notice: noticeText(c.req.query("notice")),
+        notice: noticeText(c.req.query("notice")) ?? staleCursorNotice,
         error: c.req.query("error") || undefined,
         pagination: { hasOlder: page.hasOlder, hasNewer: page.hasNewer },
       }),
@@ -1623,10 +1630,13 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
 }
 
 /**
- * Parses home-queue pagination cursors. Malformed, negative, or non-finite
- * values are ignored (first page) — pagination input must never 500. A before
- * cursor at or beyond the newest id also falls back to the first page, so a
- * stale "newest" bookmark lands somewhere sane.
+ * Parses home-queue pagination cursors. Malformed, zero, negative, or
+ * beyond-MAX_SAFE_INTEGER values are dropped (caller renders the first page)
+ * — pagination input must never 500. Well-formed but out-of-range cursors
+ * pass through untouched: the store's exclusive `id <` query already serves
+ * the newest page for a before cursor above the newest id, and the GET /
+ * route re-renders the first page if a cursor would otherwise show an empty
+ * list.
  */
 function jobsPageCursor(beforeRaw: string | undefined, afterRaw: string | undefined): { before?: number; after?: number } {
   const parse = (raw: string | undefined): number | undefined => {

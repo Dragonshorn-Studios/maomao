@@ -53,7 +53,7 @@ describe("listJobsPage", () => {
     const store = seededStore(60);
     const seenForward: number[] = [];
     let cursor: { before?: number } = {};
-    let oldestPage = store.listJobsPage({});
+    let oldestPage: ReturnType<JobStore["listJobsPage"]>;
     for (;;) {
       const page = store.listJobsPage(cursor);
       oldestPage = page;
@@ -92,7 +92,7 @@ describe("listJobsPage", () => {
     const olderIds = older.jobs.map((job) => job.id);
 
     // Three new jobs queue while the operator browses the older page.
-    seededStoreAppend(store, 3);
+    seededStoreAppend(store, 3, 31);
     const reopened = store.listJobsPage({ before: boundary });
     expect(reopened.jobs.map((job) => job.id)).toEqual(olderIds);
     expect(reopened.hasNewer).toBe(true);
@@ -129,11 +129,11 @@ describe("listJobsPage", () => {
   it("treats out-of-range cursors safely", () => {
     const store = seededStore(5);
     // A before cursor beyond the newest id: everything is older, so the newest
-    // page is served (the route never shows an empty dead end).
+    // page is served.
     const beyond = store.listJobsPage({ before: 999_999 });
     expect(beyond.jobs).toHaveLength(5);
     expect(beyond.hasOlder).toBe(false);
-    // A before cursor below the oldest id: empty, with a way back.
+    // A before cursor at the oldest id (exclusive bound): empty, with a way back.
     const below = store.listJobsPage({ before: 1 });
     expect(below.jobs).toEqual([]);
     expect(below.hasOlder).toBe(false);
@@ -146,25 +146,44 @@ describe("listJobsPage", () => {
   });
 });
 
-function seededStoreAppend(store: JobStore, count: number): void {
-  const existing = store.listJobs(1)[0];
-  const start = existing?.pr_number ?? 0;
+function seededStoreAppend(store: JobStore, count: number, firstPrNumber: number): void {
   for (let index = 0; index < count; index += 1) {
     store.enqueue({
       repoFullName: "acme/widgets",
       repoOwner: "acme",
       repoName: "widgets",
       installationId: 1,
-      prNumber: start + index + 1,
-      prTitle: `job ${start + index + 1}`,
+      prNumber: firstPrNumber + index,
+      prTitle: `job ${firstPrNumber + index}`,
       prBody: "",
       prHtmlUrl: "",
       prAuthor: "dev",
       baseSha: "b",
-      headSha: `sha-${start + index + 1}`,
+      headSha: `sha-${firstPrNumber + index}`,
       baseRef: "main",
       headRef: "f",
       reviewers: [],
     });
   }
 }
+
+  it("reports hasOlder on after-pages even with id gaps below", () => {
+    const { store, db } = seededStoreWithDb(60);
+    const page2 = store.listJobsPage({ before: 36 });
+    // Gap out most rows below page 2 so length-based heuristics diverge.
+    db.prepare(`DELETE FROM jobs WHERE id % 2 = 1 AND id < 11`).run();
+    const up = store.listJobsPage({ after: page2.jobs[0]!.id });
+    expect(up.jobs).toHaveLength(25);
+    expect(up.hasOlder).toBe(true);
+    // And when everything below is gone, the flag tells the truth.
+    db.prepare(`DELETE FROM jobs WHERE id < ?`).run(up.jobs[0]!.id);
+    const up2 = store.listJobsPage({ after: 36 });
+    expect(up2.hasOlder).toBe(false);
+  });
+
+  it("does not report hasOlder for a full page that is also the last page", () => {
+    const store = seededStore(25);
+    const page = store.listJobsPage({});
+    expect(page.jobs).toHaveLength(25);
+    expect(page.hasOlder).toBe(false);
+  });

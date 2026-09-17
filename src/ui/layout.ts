@@ -23,7 +23,7 @@ export interface PageOptions {
   /** Latest reviewed head SHA for this pull request, for stale-finding detection. */
   prHeadSha?: string;
   uiFlavor?: UiFlavor;
-  /** Home-queue pagination state; absent on non-paginated renders. */
+  /** Pagination state; only the paginated home renders (including the POST /reviews error re-render) pass it. */
   pagination?: { hasOlder: boolean; hasNewer: boolean };
 }
 
