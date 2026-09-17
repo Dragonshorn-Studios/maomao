@@ -14,6 +14,7 @@ export {
   type ScanIssuePreviewItem,
 } from "./pages.js";
 export { renderConfigPage, type ConfigPageData, type ConfigRevisionView } from "./pages.js";
+export { renderEffectiveConfigSection, type EffectiveConfigView } from "./pages.js";
 export { renderPromptConfigPage, type PromptConfigPageData } from "./pages.js";
 export {
   renderScanPage,

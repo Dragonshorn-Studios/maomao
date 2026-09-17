@@ -297,6 +297,20 @@ button, input, textarea {
   filter: brightness(1.05);
 }
 
+.config-source {
+  display: inline-block;
+  margin-left: 0.4rem;
+  padding: 0.05rem 0.45rem;
+  border: 1px solid var(--line);
+  border-radius: 3px;
+  font-size: 0.68rem;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+  vertical-align: middle;
+  white-space: nowrap;
+}
+.config-source-profile { border-color: var(--jade); color: var(--jade); }
+.config-effective h3 { margin-top: 0.9rem; }
 .jobs-pagination {
   display: flex;
   justify-content: space-between;

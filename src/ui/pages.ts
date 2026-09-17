@@ -934,6 +934,49 @@ export interface ConfigPageData {
   canWrite: boolean;
   notice?: string;
   error?: string;
+  effectiveConfig?: EffectiveConfigView[];
+}
+
+export interface EffectiveConfigView {
+  group: string;
+  label: string;
+  value: string;
+  source: "profile" | "environment" | "default";
+  sourceDetail?: string;
+  notEnforced?: boolean;
+}
+
+/** Read-only source-labeled summary of the effective runtime configuration. */
+export function renderEffectiveConfigSection(entries: EffectiveConfigView[]): string {
+  if (entries.length === 0) return "";
+  const groups = new Map<string, EffectiveConfigView[]>();
+  for (const entry of entries) {
+    const list = groups.get(entry.group) ?? [];
+    list.push(entry);
+    groups.set(entry.group, list);
+  }
+  const sourceBadge = (entry: EffectiveConfigView): string => {
+    const detail = entry.sourceDetail ? ` ${escapeHtml(entry.sourceDetail)}` : "";
+    if (entry.source === "profile") return `<span class="config-source config-source-profile">Profile ${detail}</span>`;
+    if (entry.source === "environment") return `<span class="config-source">Environment</span>`;
+    return `<span class="config-source">Default</span>`;
+  };
+  const sections = [...groups.entries()]
+    .map(([group, groupEntries]) => {
+      const rows = groupEntries
+        .map(
+          (entry) => `<div>
+            <dt>${escapeHtml(entry.label)} ${sourceBadge(entry)}${entry.notEnforced ? ` <span class="config-source" title="Stored in the profile schema but not yet consumed by the pipeline">not enforced at runtime</span>` : ""}</dt>
+            <dd><code class="metric">${escapeHtml(entry.value)}</code></dd>
+          </div>`,
+        )
+        .join("");
+      return `<h3>${escapeHtml(group)}</h3><dl class="meta-grid config-effective">${rows}</dl>`;
+    })
+    .join("");
+  return `<h2 id="effective">Effective configuration</h2>
+    <p class="lede">What this process is actually running, with the source of every value. Credential values are never shown — only whether they are configured.</p>
+    ${sections}`;
 }
 
 function revisionCard(revision: ConfigRevisionView, data: ConfigPageData): string {
@@ -1021,6 +1064,7 @@ export function renderConfigPage(data: ConfigPageData): string {
     <p class="lede">Versioned review profiles and specialist selection. Activation is explicit and audited; credentials are never part of this configuration.</p>
     ${data.notice ? `<p class="notice" role="status">${escapeHtml(data.notice)}</p>` : ""}
     ${data.error ? `<p class="error" role="alert">${escapeHtml(data.error)}</p>` : ""}
+    ${data.effectiveConfig ? renderEffectiveConfigSection(data.effectiveConfig) : ""}
     <p><a href="/config/export">Export configuration (JSON)</a></p>
     <h2>Active</h2>
     ${active.map((revision) => revisionCard(revision, data)).join("") || `<p class="muted">No active revision — env configuration applies.</p>`}

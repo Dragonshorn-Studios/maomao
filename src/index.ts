@@ -38,7 +38,7 @@ const pipeline = createPipeline({
 const queue = new JobQueue(store, config.jobConcurrency, (jobId) => pipeline.run(jobId));
 queue.start();
 
-const app = createApp({ config, store, queue, github, opencode, startedAt: Date.now() });
+const app = createApp({ config, store, queue, github, opencode, startedAt: Date.now(), env: process.env });
 
 serve({ fetch: app.fetch, hostname: config.host, port: config.port }, (info) => {
   console.log(`Maomao listening on http://${info.address}:${info.port}`);

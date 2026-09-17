@@ -12,6 +12,7 @@ import { parseGithubPullUrl, PullUrlError } from "./github/pull-url.js";
 import { dispatchEnqueue, enqueuePullJob } from "./jobs/enqueue.js";
 import { cancelJob } from "./jobs/cancel.js";
 import { LIVE_JOB_STATES } from "./config.js";
+import { effectiveConfigEntries } from "./config-effective.js";
 import { subscribe } from "./events.js";
 import { redactSecrets } from "./util.js";
 import { readFileSync } from "node:fs";
@@ -84,6 +85,8 @@ export interface ServerContext {
   oauthFetch?: typeof fetch;
   /** Offline prompt-evaluation runner (never touches GitHub). */
   opencode?: OpenCodePort;
+  /** The environment loadConfig consumed; defaults to process.env. Injectable for tests. */
+  env?: NodeJS.ProcessEnv;
 }
 
 const OAUTH_STATE_TTL_MS = 10 * 60 * 1000;
@@ -751,6 +754,11 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
         canWrite: gateOn,
         csrfToken: gateOn ? ensureCsrfToken(c, ctx.config.uiSessionSecret) : undefined,
         notice: notices[noticeKey],
+        effectiveConfig: effectiveConfigEntries(
+          ctx.config,
+          ctx.env ?? process.env,
+          ctx.store.configs.getActiveRevision("default") ?? null,
+        ),
       }),
     );
   });

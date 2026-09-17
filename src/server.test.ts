@@ -38,7 +38,7 @@ function testApp(
     },
     abortMany() {},
   } as unknown as JobQueue;
-  const app = createApp({ config, store, queue, github, startedAt: Date.now(), oauthFetch, ...contextExtras });
+  const app = createApp({ config, store, queue, github, startedAt: Date.now(), oauthFetch, env: { ...env }, ...contextExtras });
   return { app, store, enqueued, webhookSecret };
 }
 
@@ -3075,5 +3075,126 @@ describe("home queue pagination review fixes", () => {
     expect(html).toContain('class="jobs-pagination"');
     expect(html).toContain('rel="next"');
     expect(html).not.toContain("job 15");
+  });
+});
+
+describe("effective configuration summary", () => {
+  const gateEnv = { UI_PASSWORD: "hunter2", UI_SESSION_SECRET: "session-secret-for-tests" };
+  const canaryEnv = {
+    UI_PASSWORD: "PASSWORD-CANARY",
+    UI_SESSION_SECRET: "SESSION-SECRET-CANARY",
+    GITHUB_APP_PRIVATE_KEY: "PRIVATE-KEY-CANARY-VALUE",
+    GITHUB_WEBHOOK_SECRET: "WEBHOOK-SECRET-CANARY",
+    GITHUB_OAUTH_CLIENT_SECRET: "OAUTH-SECRET-CANARY",
+    OPENCODE_REVIEWER_MODEL: "test/reviewer-env",
+    POST_EMPTY_REVIEW: "true",
+  };
+
+  async function configPage(app: ReturnType<typeof createApp>): Promise<string> {
+    const { session } = await loginSession(app);
+    const response = await app.request("/config", { headers: { cookie: session } });
+    expect(response.status).toBe(200);
+    return response.text();
+  }
+
+  it("renders the effective-config section with source badges", async () => {
+    const { app } = testApp(gateEnv);
+    const html = await configPage(app);
+    expect(html).toContain("Effective configuration");
+    expect(html).toContain("Reviewer model");
+    expect(html).toContain(">Default</span>");
+    expect(html).toContain("Allow APPROVE verdicts");
+  });
+
+  it("labels environment-backed values as Environment", async () => {
+    const env = {
+      ...gateEnv,
+      OPENCODE_REVIEWER_MODEL: "test/reviewer-env",
+      POST_EMPTY_REVIEW: "true",
+    };
+    const { app } = testApp(env);
+    const html = await configPage(app);
+    expect(html).toContain("test/reviewer-env");
+    // The source badge sits on the <dt> (label) line, above the value row.
+    const modelRow = html.split("\n").find((line) => line.includes("Reviewer model"));
+    expect(modelRow).toContain(">Environment</span>");
+  });
+
+  it("shows the active profile revision as the source for profile-backed values", async () => {
+    const { app, store } = testApp(gateEnv);
+    // The active revision must be named "default" — that is the name the
+    // resolution point queries.
+    const created = store.configs.createDraft({
+      definition: { name: "default", reviewers: [{ role: "correctness" }], minPublishableSeverity: "low" },
+      createdBy: "octocat",
+    });
+    if ("error" in created) throw new Error(created.issues.join("; "));
+    const activated = store.configs.activateRevision(created.revision.id, "octocat");
+    if ("error" in activated) throw new Error(activated.error);
+    const html = await configPage(app);
+    expect(html).toContain("config-source-profile");
+    expect(html).toContain("Profile reviewer set");
+    expect(html).toContain("Profile minimum publishable severity");
+  });
+
+  async function canaryConfigPage(app: ReturnType<typeof createApp>): Promise<string> {
+    // The canary password is not hunter2, so log in manually.
+    const page = await app.request("/login");
+    const { csrfCookie, csrfToken } = await csrfArtifacts(page);
+    const login = await app.request("/login", {
+      method: "POST",
+      headers: { cookie: csrfCookie, "content-type": "application/x-www-form-urlencoded" },
+      body: `password=${encodeURIComponent("PASSWORD-CANARY")}&next=%2F&csrf_token=${encodeURIComponent(csrfToken)}`,
+    });
+    expect(login.status).toBe(302);
+    const session = cookieFrom(login);
+    const response = await app.request("/config", { headers: { cookie: `${session}; ${csrfCookie}` } });
+    expect(response.status).toBe(200);
+    return response.text();
+  }
+
+  it("never leaks credential values into the rendered page", async () => {
+    const { app } = testApp(canaryEnv);
+    const html = await canaryConfigPage(app);
+    for (const canary of [
+      "PRIVATE-KEY-CANARY-VALUE",
+      "WEBHOOK-SECRET-CANARY",
+      "OAUTH-SECRET-CANARY",
+      "PASSWORD-CANARY",
+      "SESSION-SECRET-CANARY",
+    ]) {
+      expect(html, `credential canary ${canary} leaked into /config`).not.toContain(canary);
+    }
+    expect(html).toContain("configured");
+  });
+
+  it("keeps credentials out of the 403 denied page too", async () => {
+    // Password-gate sessions carry no identity, so POST /config renders the
+    // 403 denial page even while logged in.
+    const { app } = testApp({
+      UI_PASSWORD: "PASSWORD-CANARY",
+      UI_SESSION_SECRET: "SESSION-SECRET-CANARY",
+      GITHUB_APP_PRIVATE_KEY: "PRIVATE-KEY-CANARY-VALUE",
+      GITHUB_WEBHOOK_SECRET: "WEBHOOK-SECRET-CANARY",
+    });
+    const page = await app.request("/login");
+    const { csrfCookie, csrfToken } = await csrfArtifacts(page);
+    const login = await app.request("/login", {
+      method: "POST",
+      headers: { cookie: csrfCookie, "content-type": "application/x-www-form-urlencoded" },
+      body: `password=${encodeURIComponent("PASSWORD-CANARY")}&next=%2F&csrf_token=${encodeURIComponent(csrfToken)}`,
+    });
+    expect(login.status).toBe(302);
+    const session = cookieFrom(login);
+    const response = await app.request("/config/drafts", {
+      method: "POST",
+      headers: { cookie: `${session}; ${csrfCookie}`, "content-type": "application/x-www-form-urlencoded" },
+      body: `csrf_token=${encodeURIComponent(csrfToken)}&definition={}`,
+    });
+    expect(response.status).toBe(403);
+    const html = await response.text();
+    for (const canary of ["PRIVATE-KEY-CANARY-VALUE", "WEBHOOK-SECRET-CANARY", "PASSWORD-CANARY", "SESSION-SECRET-CANARY"]) {
+      expect(html, `credential canary ${canary} leaked into the 403 page`).not.toContain(canary);
+    }
   });
 });
