@@ -2856,6 +2856,19 @@ describe("manual cancel and dequeue hardening", () => {
     expect(store.getJob(jobId)?.state).toBe("cancelled");
   });
 
+  it("treats a cancel POST on a merge-cancelled job as idempotent, not an error", async () => {
+    // The confirm page was open when the merge webhook cancelled the job.
+    const { app, store } = testApp(oauthEnv, undefined, mockOauthFetch({ id: 1001, login: "octocat" }));
+    const jobId = seedReviewing(store);
+    store.setJobState(jobId, "reviewing");
+    store.cancelJobs({ jobId }, "pr_merged", null);
+    const { cookie, csrfToken } = await csrfForInner(app);
+    const response = await cancelPost(app, jobId, cookie, csrfToken);
+    expect(response.status).toBe(302);
+    expect(response.headers.get("location")).toContain("notice=cancel-already");
+    expect(store.getJob(jobId)?.cancelled_reason).toBe("pr_merged");
+  });
+
   it("attributes manual dequeue to a password-gate session without inventing a login", async () => {
     const { app, store } = testApp({ UI_PASSWORD: "hunter2", UI_SESSION_SECRET: "session-secret-for-tests" });
     const jobId = seedReviewing(store);

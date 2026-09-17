@@ -1772,8 +1772,9 @@ function renderCancelConfirm(c: Context<AppEnv>, ctx: ServerContext, pageOpts: P
 function cancelRunningJob(c: Context<AppEnv>, ctx: ServerContext, pageOpts: PageOptions, jobId: number) {
   const job = ctx.store.getJob(jobId);
   if (!job) return c.text("Not found", 404);
-  // A resubmission after this cancel already happened is idempotent, not an error.
-  if (job.state === "cancelled" && job.cancelled_reason === "manual_cancel") {
+  // A resubmission against an already-cancelled job is idempotent, not an
+  // error — whatever cancelled it (this route, the merge webhook, a dequeue).
+  if (job.state === "cancelled") {
     return c.redirect(`/jobs/${jobId}?notice=cancel-already`, 302);
   }
   if (!LIVE_JOB_STATES.includes(job.state)) {
