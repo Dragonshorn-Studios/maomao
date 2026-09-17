@@ -732,6 +732,11 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
         canWrite: gateOn,
         error: message,
         csrfToken: gateOn ? ensureCsrfToken(c, ctx.config.uiSessionSecret) : undefined,
+        effectiveConfig: effectiveConfigEntries(
+          ctx.config,
+          ctx.env ?? process.env,
+          ctx.store.configs.getActiveRevision("default") ?? null,
+        ),
       }),
       status,
     );

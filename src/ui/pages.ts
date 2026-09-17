@@ -3,6 +3,7 @@ import type { FindingRow } from "../findings/types.js";
 import { fingerprintFinding, stripHtmlComments } from "../findings/identity.js";
 import { POLICIES_WITH_EXTERNAL, POLICIES_WITH_INTERNAL } from "../routing/types.js";
 import { LIVE_JOB_STATES } from "../config.js";
+import type { EffectiveConfigEntry } from "../config-effective.js";
 import type { Severity } from "../schema.js";
 import { elapsedMs, escapeHtml, formatDuration, shortSha } from "../util.js";
 import {
@@ -934,28 +935,29 @@ export interface ConfigPageData {
   canWrite: boolean;
   notice?: string;
   error?: string;
-  effectiveConfig?: EffectiveConfigView[];
+  effectiveConfig?: EffectiveConfigEntry[];
 }
 
-export interface EffectiveConfigView {
-  group: string;
-  label: string;
-  value: string;
-  source: "profile" | "environment" | "default";
-  sourceDetail?: string;
-  notEnforced?: boolean;
+/** Env-derived values are operator-controlled but unbounded: clamp length and
+ * strip control characters so a giant or binary-laden variable cannot bloat or
+ * visually spoof the page. */
+function clampConfigValue(value: string): string {
+  const clean = value.replace(/[\u0000-\u001F\u007F]/g, " ");
+  return clean.length > 300 ? `${clean.slice(0, 300)}… (+${clean.length - 300} chars)` : clean;
 }
 
-/** Read-only source-labeled summary of the effective runtime configuration. */
-export function renderEffectiveConfigSection(entries: EffectiveConfigView[]): string {
+/** Renders the /config "Effective configuration" section: entries grouped by
+ * `group`, each with a source badge. Escapes and clamps all entry text.
+ * Returns "" when entries is empty. */
+function renderEffectiveConfigSection(entries: EffectiveConfigEntry[]): string {
   if (entries.length === 0) return "";
-  const groups = new Map<string, EffectiveConfigView[]>();
+  const groups = new Map<string, EffectiveConfigEntry[]>();
   for (const entry of entries) {
     const list = groups.get(entry.group) ?? [];
     list.push(entry);
     groups.set(entry.group, list);
   }
-  const sourceBadge = (entry: EffectiveConfigView): string => {
+  const sourceBadge = (entry: EffectiveConfigEntry): string => {
     const detail = entry.sourceDetail ? ` ${escapeHtml(entry.sourceDetail)}` : "";
     if (entry.source === "profile") return `<span class="config-source config-source-profile">Profile ${detail}</span>`;
     if (entry.source === "environment") return `<span class="config-source">Environment</span>`;
@@ -967,7 +969,7 @@ export function renderEffectiveConfigSection(entries: EffectiveConfigView[]): st
         .map(
           (entry) => `<div>
             <dt>${escapeHtml(entry.label)} ${sourceBadge(entry)}${entry.notEnforced ? ` <span class="config-source" title="Stored in the profile schema but not yet consumed by the pipeline">not enforced at runtime</span>` : ""}</dt>
-            <dd><code class="metric">${escapeHtml(entry.value)}</code></dd>
+            <dd><code class="metric">${escapeHtml(clampConfigValue(entry.value))}</code></dd>
           </div>`,
         )
         .join("");

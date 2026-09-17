@@ -3097,13 +3097,18 @@ describe("effective configuration summary", () => {
     return response.text();
   }
 
+  function sectionFor(html: string, label: string): string {
+    const match = html.match(new RegExp(`<dt>[^<]*${label}[\\s\\S]{0,200}?</dd>`));
+    expect(match, `row for ${label}`).toBeTruthy();
+    return match![0];
+  }
+
   it("renders the effective-config section with source badges", async () => {
     const { app } = testApp(gateEnv);
     const html = await configPage(app);
     expect(html).toContain("Effective configuration");
-    expect(html).toContain("Reviewer model");
-    expect(html).toContain(">Default</span>");
-    expect(html).toContain("Allow APPROVE verdicts");
+    expect(sectionFor(html, "Reviewer model")).toContain(">Default</span>");
+    expect(sectionFor(html, "Allow APPROVE verdicts")).toContain(">Default</span>");
   });
 
   it("labels environment-backed values as Environment", async () => {
@@ -3114,10 +3119,8 @@ describe("effective configuration summary", () => {
     };
     const { app } = testApp(env);
     const html = await configPage(app);
-    expect(html).toContain("test/reviewer-env");
-    // The source badge sits on the <dt> (label) line, above the value row.
-    const modelRow = html.split("\n").find((line) => line.includes("Reviewer model"));
-    expect(modelRow).toContain(">Environment</span>");
+    // The source badge sits on the <dt> (label) row, above the value row.
+    expect(sectionFor(html, "Reviewer model")).toContain(">Environment</span>");
   });
 
   it("shows the active profile revision as the source for profile-backed values", async () => {
@@ -3165,7 +3168,8 @@ describe("effective configuration summary", () => {
     ]) {
       expect(html, `credential canary ${canary} leaked into /config`).not.toContain(canary);
     }
-    expect(html).toContain("configured");
+    // Anchor the assertion to the credential row, not page prose.
+    expect(sectionFor(html, "GitHub webhook secret")).toContain('>configured</code>');
   });
 
   it("keeps credentials out of the 403 denied page too", async () => {
@@ -3196,5 +3200,27 @@ describe("effective configuration summary", () => {
     for (const canary of ["PRIVATE-KEY-CANARY-VALUE", "WEBHOOK-SECRET-CANARY", "PASSWORD-CANARY", "SESSION-SECRET-CANARY"]) {
       expect(html, `credential canary ${canary} leaked into the 403 page`).not.toContain(canary);
     }
+  });
+
+  it("keeps the section on config error re-renders (400 validation failure)", async () => {
+    const oauthEnv = {
+      UI_SESSION_SECRET: "session-secret-for-tests",
+      GITHUB_OAUTH_CLIENT_ID: "cid",
+      GITHUB_OAUTH_CLIENT_SECRET: "csecret",
+      MAOMAO_ADMIN_GITHUB_IDS: "1001",
+      MAOMAO_PUBLIC_URL: "https://maomao.example",
+    };
+    const { app } = testApp(oauthEnv, undefined, mockOauthFetch({ id: 1001, login: "octocat" }));
+    const session = await operatorSession(app);
+    const page = await app.request("/config", { headers: { cookie: session } });
+    const { csrfCookie, csrfToken } = await csrfArtifacts(page);
+    const response = await app.request("/config/drafts", {
+      method: "POST",
+      headers: { cookie: `${session}; ${csrfCookie}`, "content-type": "application/x-www-form-urlencoded" },
+      body: `csrf_token=${encodeURIComponent(csrfToken)}&definition=not-json`,
+    });
+    expect(response.status).toBe(400);
+    const html = await response.text();
+    expect(html).toContain("Effective configuration");
   });
 });
