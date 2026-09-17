@@ -47,6 +47,11 @@ describe("theme tokens", () => {
     expect(THEME_CSS).toContain(".typeahead-listbox");
     expect(THEME_CSS).toContain(".typeahead-option");
     expect(THEME_CSS).toContain("@keyframes spin");
+    // The Dequeue and Cancel review controls wear the same small-outline style as Retry.
+    expect(THEME_CSS).toContain("form.retry, form.retry-job, form.dequeue {");
+    expect(THEME_CSS).toContain(".retry button, .retry-job button, .dequeue button, a.cancel-review {");
+    expect(THEME_CSS).toContain(".dequeue button:hover, a.cancel-review:hover");
+    expect(THEME_CSS).toMatch(/a\.cancel-review \{[^}]*text-decoration: none/);
     expect(THEME_CSS).toContain(".section-head");
     expect(THEME_CSS).toMatch(/\.tick\.running[\s\S]*var\(--working\)/);
     expect(THEME_CSS).toMatch(/\.state-reviewing[\s\S]*var\(--working-soft\)/);
@@ -1135,6 +1140,8 @@ describe("dequeue and cancel controls", () => {
     store.setJobState(completed, "completed");
     const html = renderHome(store.listJobs(20), store, { csrfToken: "tok-123" });
 
+    expect(html).toContain(`<form class="dequeue" method="post" action="/jobs/${queued}/dequeue">`);
+    expect(html).toContain('class="cancel-review"');
     expect(html).toContain(`/jobs/${queued}/dequeue`);
     expect(html).toContain(`/jobs/${reviewing}/cancel`);
     // Terminal jobs must not expose an active control.
@@ -1149,12 +1156,14 @@ describe("dequeue and cancel controls", () => {
     const html = renderJob(store.getJob(queued)!, store.listReviewerRuns(queued), store.listLogs(queued), {
       csrfToken: "tok-123",
     });
+    expect(html).toContain(`<form class="dequeue" method="post" action="/jobs/${queued}/dequeue">`);
     expect(html).toContain(`/jobs/${queued}/dequeue`);
     expect(html).toContain("Removes this review from the queue");
 
     const reviewing = seed(store, 2, "r");
     store.setJobState(reviewing, "reviewing");
     const liveHtml = renderJob(store.getJob(reviewing)!, store.listReviewerRuns(reviewing), store.listLogs(reviewing), {});
+    expect(liveHtml).toContain('class="cancel-review"');
     expect(liveHtml).toContain(`/jobs/${reviewing}/cancel`);
     expect(liveHtml).toContain("Cancel review");
   });

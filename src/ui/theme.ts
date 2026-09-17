@@ -518,15 +518,18 @@ button, input, textarea {
   align-items: center;
   flex-wrap: wrap;
 }
-form.retry, form.retry-job {
+form.retry, form.retry-job, form.dequeue {
   margin: 0;
   background: none;
   border: none;
   box-shadow: none;
   padding: 0;
   display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
 }
-.retry button, .retry-job button {
+/* a.cancel-review is an anchor styled as a button — see the anchor resets below. */
+.retry button, .retry-job button, .dequeue button, a.cancel-review {
   background: var(--paper);
   color: var(--ink);
   border: 1px solid var(--line-strong);
@@ -536,7 +539,12 @@ form.retry, form.retry-job {
   cursor: pointer;
   white-space: nowrap;
 }
-.retry button:hover, .retry-job button:hover { color: var(--jade); border-color: var(--jade); }
+.retry button:hover, .retry-job button:hover, .dequeue button:hover, a.cancel-review:hover {
+  color: var(--jade);
+  border-color: var(--jade);
+}
+/* The cancel entry point is an anchor styled as a button: match the form controls. */
+a.cancel-review { text-decoration: none; display: inline-block; }
 .card .retry { margin-top: 0.55rem; }
 .role {
   display: inline-flex;
