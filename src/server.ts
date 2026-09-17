@@ -13,6 +13,7 @@ import { dispatchEnqueue, enqueuePullJob } from "./jobs/enqueue.js";
 import { cancelJob } from "./jobs/cancel.js";
 import { LIVE_JOB_STATES } from "./config.js";
 import { effectiveConfigEntries } from "./config-effective.js";
+import type { ProfileFieldErrors } from "./config-form.js";
 import { decodeProfileAction, decodeProfileForm, applyProfileAction, profileFormToDefinition } from "./config-form.js";
 import { KNOWN_REVIEWER_ROLES } from "./prompts.js";
 import { subscribe } from "./events.js";
@@ -46,6 +47,7 @@ import {
 } from "./ui/index.js";
 import type { JobRow } from "./jobs/store.js";
 import type { FindingRow } from "./findings/types.js";
+import type { ConfigPageData } from "./ui/index.js";
 import { issueWorthiness, parseAggregatedFindings, type IssueWorthiness } from "./findings/issue-worthiness.js";
 import { SCAN_ISSUE_MARKER_RE, scanIssueMarkerBase } from "./findings/identity.js";
 import { githubSecrets } from "./config.js";
@@ -727,7 +729,18 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
       return { ok: false, error: "Definition must be valid JSON." };
     }
   };
-  const renderConfigWithError = (c: Context<AppEnv>, message: string, status: 400 | 403 | 404 | 409) => {
+  const KNOWN_ROLE_OPTIONS = KNOWN_REVIEWER_ROLES.map((role) => ({ id: role.id, title: role.title }));
+  const profileEditorBase = () => ({
+    knownRoles: KNOWN_ROLE_OPTIONS,
+    modelCatalog: ctx.config.modelCatalog,
+  });
+
+  const renderConfigWithError = (
+    c: Context<AppEnv>,
+    message: string,
+    status: 400 | 403 | 404 | 409,
+    profileEditor?: ConfigPageData["profileEditor"],
+  ) => {
     return c.html(
       renderConfigPage({
         revisions: ctx.store.configs.listRevisions(),
@@ -740,6 +753,7 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
           ctx.env ?? process.env,
           ctx.store.configs.getActiveRevision("default") ?? null,
         ),
+        profileEditor: profileEditor ?? profileEditorBase(),
       }),
       status,
     );
@@ -767,10 +781,7 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
           ctx.env ?? process.env,
           ctx.store.configs.getActiveRevision("default") ?? null,
         ),
-        profileEditor: {
-          knownRoles: KNOWN_REVIEWER_ROLES.map((role) => ({ id: role.id, title: role.title })),
-          modelCatalog: ctx.config.modelCatalog,
-        },
+        profileEditor: profileEditorBase(),
       }),
     );
   });
@@ -785,35 +796,79 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
     | { kind: "render"; response: Response }
     | { kind: "save"; definition: unknown; note?: string };
 
-  const profileFormOptions = (c: Context<AppEnv>, existing?: { id: number; editSeq: number }) => ({
-    csrfToken: ensureCsrfToken(c, ctx.config.uiSessionSecret),
-    revision: existing,
-    knownRoles: KNOWN_REVIEWER_ROLES.map((role) => ({ id: role.id, title: role.title })),
-    modelCatalog: ctx.config.modelCatalog,
-  });
-
+  /**
+   * Structural actions and validation failures re-render the full config
+   * page (chrome, audit, effective config) with the in-progress form state
+   * applied — never a bare fragment, and never a persistence side effect:
+   * noop actions (boundary/malformed clicks) also land here untouched.
+   */
   const handleProfileForm = async (
     c: Context<AppEnv>,
+    body: Record<string, unknown>,
     existing?: { id: number; editSeq: number },
   ): Promise<ProfileFormOutcome> => {
-    const body = (await c.req.parseBody()) as Record<string, unknown>;
     let values = decodeProfileForm(body);
+    let definition: unknown;
     const action = decodeProfileAction(body);
-    if (action.kind !== "save") {
-      values = applyProfileAction(values, action, KNOWN_REVIEWER_ROLES.map((role) => role.id));
+    const errors: ProfileFieldErrors = {};
+    const isStructural = action.kind !== "save";
+    if (action.kind === "noop") {
+      errors.form = "That row action does not apply — nothing changed.";
+    } else if (action.kind !== "save") {
+      values = applyProfileAction(values, action, KNOWN_ROLE_OPTIONS.map((role) => role.id));
+    } else {
+      const built = profileFormToDefinition(values);
+      if (!built.ok) {
+        for (const [key, message] of Object.entries(built.errors)) {
+          if (key !== "form" && !errors[key]) errors[key] = message;
+        }
+        if (!errors.form) errors.form = built.errors.form;
+      } else {
+        definition = built.definition;
+        // Semantic checks the schema cannot express: duplicates flag the later
+        // row, and an empty reviewer list must be an explicit choice.
+        const seen = new Map<string, number>();
+        values.reviewers.forEach((row, index) => {
+          if (!row.role) return;
+          const first = seen.get(row.role);
+          if (first != null && !errors[`reviewer_role_${index}`]) {
+            errors[`reviewer_role_${index}`] = `role already used in reviewer ${first + 1}`;
+          } else {
+            seen.set(row.role, index);
+          }
+        });
+        if (values.reviewers.length === 0) {
+          errors.form = "At least one reviewer row is required.";
+        }
+      }
+    }
+    // Structural actions and failures re-render the full page; a noop click
+    // is a harmless no-op (200 with a status note), validation failures 400.
+    if (isStructural || Object.keys(errors).length > 0) {
       return {
         kind: "render",
-        response: c.html(renderProfileForm(values, undefined, profileFormOptions(c, existing))),
+        response: c.html(
+          renderConfigPage({
+            revisions: ctx.store.configs.listRevisions(),
+            audit: ctx.store.configs.listAudit(),
+            canWrite: gateOn,
+            error: errors.form,
+            csrfToken: ensureCsrfToken(c, ctx.config.uiSessionSecret),
+            effectiveConfig: effectiveConfigEntries(
+              ctx.config,
+              ctx.env ?? process.env,
+              ctx.store.configs.getActiveRevision("default") ?? null,
+            ),
+            profileEditor: {
+              ...profileEditorBase(),
+              form: { values, errors, revision: existing },
+            },
+          }),
+          isStructural ? 200 : 400,
+        ),
       };
     }
-    const built = profileFormToDefinition(values);
-    if (!built.ok) {
-      return {
-        kind: "render",
-        response: c.html(renderProfileForm(values, built.errors, profileFormOptions(c, existing)), 400),
-      };
-    }
-    return { kind: "save", definition: built.definition, note: values.note };
+    return { kind: "save", definition, note: values.note };
   };
 
   app.post("/config/drafts", async (c) => {
@@ -822,7 +877,7 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
     if (!actor) return configWriteDenied(c);
     const bodyPreview = await c.req.parseBody();
     if (bodyPreview.editor === "structured") {
-      const outcome = await handleProfileForm(c);
+      const outcome = await handleProfileForm(c, bodyPreview);
       if (outcome.kind === "render") return outcome.response;
       const result = ctx.store.configs.createDraft({
         definition: outcome.definition,
@@ -844,8 +899,7 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
               ctx.store.configs.getActiveRevision("default") ?? null,
             ),
             profileEditor: {
-              knownRoles: KNOWN_REVIEWER_ROLES.map((role) => ({ id: role.id, title: role.title })),
-              modelCatalog: ctx.config.modelCatalog,
+              ...profileEditorBase(),
               form: { values, errors: { form: result.issues.join("; ") } },
             },
           }),
@@ -876,9 +930,10 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
       if (!existing || existing.status !== "draft") {
         return renderConfigWithError(c, "Draft not found.", 404);
       }
-      const outcome = await handleProfileForm(c, {
+      const editSeq = Number.isFinite(expectedEditSeq) ? expectedEditSeq : existing.editSeq;
+      const outcome = await handleProfileForm(c, bodyPreview, {
         id: revisionId,
-        editSeq: Number.isFinite(expectedEditSeq) ? expectedEditSeq : existing.editSeq,
+        editSeq,
       });
       if (outcome.kind === "render") return outcome.response;
       const result = ctx.store.configs.updateDraft({
@@ -913,12 +968,11 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
               ctx.store.configs.getActiveRevision("default") ?? null,
             ),
             profileEditor: {
-              knownRoles: KNOWN_REVIEWER_ROLES.map((role) => ({ id: role.id, title: role.title })),
-              modelCatalog: ctx.config.modelCatalog,
+              ...profileEditorBase(),
               form: {
                 values,
                 errors: { form: result.issues.join("; ") },
-                revision: { id: revisionId, editSeq: expectedEditSeq },
+                revision: { id: revisionId, editSeq },
               },
             },
           }),

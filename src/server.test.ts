@@ -3384,3 +3384,167 @@ describe("structured profile editor", () => {
     expect(html).toContain("Create a draft");
   });
 });
+
+describe("structured profile editor review fixes", () => {
+  const oauthEnv = {
+    UI_SESSION_SECRET: "session-secret-for-tests",
+    GITHUB_OAUTH_CLIENT_ID: "cid",
+    GITHUB_OAUTH_CLIENT_SECRET: "csecret",
+    MAOMAO_ADMIN_GITHUB_IDS: "1001",
+    MAOMAO_PUBLIC_URL: "https://maomao.example",
+  };
+
+  async function operatorCsrf2(app: ReturnType<typeof createApp>) {
+    const session = await operatorSession(app);
+    const page = await app.request("/config", { headers: { cookie: session } });
+    const { csrfCookie, csrfToken } = await csrfArtifacts(page);
+    return { cookie: `${session}; ${csrfCookie}`, csrfToken };
+  }
+
+  function structuredBody2(fields: Record<string, string>): string {
+    return new URLSearchParams({ editor: "structured", action: "save", ...fields }).toString();
+  }
+
+  it("never persists from a boundary action click (up:0 on the first row)", async () => {
+    const { app, store } = testApp(oauthEnv, undefined, mockOauthFetch({ id: 1001, login: "octocat" }));
+    const { cookie, csrfToken } = await operatorCsrf2(app);
+    const before = store.configs.listRevisions().length;
+    const response = await app.request("/config/drafts", {
+      method: "POST",
+      headers: { cookie, "content-type": "application/x-www-form-urlencoded" },
+      body: structuredBody2({
+        csrf_token: csrfToken,
+        name: "never-saved",
+        reviewer_count: "1",
+        reviewer_role_0: "correctness",
+        action: "up:0",
+      }),
+    });
+    expect(response.status).toBe(200);
+    expect(store.configs.listRevisions().length).toBe(before);
+    const html = await response.text();
+    // Full-page render with an explanation, not a bare fragment.
+    expect(html).toContain("Review configuration");
+    expect(html).toContain("does not apply");
+  });
+
+  it("rejects a duplicate-role save at draft time, flagging the later row", async () => {
+    const { app, store } = testApp(oauthEnv, undefined, mockOauthFetch({ id: 1001, login: "octocat" }));
+    const { cookie, csrfToken } = await operatorCsrf2(app);
+    const before = store.configs.listRevisions().length;
+    const response = await app.request("/config/drafts", {
+      method: "POST",
+      headers: { cookie, "content-type": "application/x-www-form-urlencoded" },
+      body: structuredBody2({
+        csrf_token: csrfToken,
+        name: "dupes",
+        reviewer_count: "2",
+        reviewer_role_0: "correctness",
+        reviewer_role_1: "correctness",
+      }),
+    });
+    expect(response.status).toBe(400);
+    const html = await response.text();
+    expect(html).toContain("role already used in reviewer 1");
+    expect(store.configs.listRevisions().length).toBe(before);
+  });
+
+  it("rejects a zero-reviewer save with an explicit form error", async () => {
+    const { app, store } = testApp(oauthEnv, undefined, mockOauthFetch({ id: 1001, login: "octocat" }));
+    const { cookie, csrfToken } = await operatorCsrf2(app);
+    const response = await app.request("/config/drafts", {
+      method: "POST",
+      headers: { cookie, "content-type": "application/x-www-form-urlencoded" },
+      body: structuredBody2({
+        csrf_token: csrfToken,
+        name: "empty",
+        reviewer_count: "0",
+      }),
+    });
+    expect(response.status).toBe(400);
+    const html = await response.text();
+    expect(html).toContain("At least one reviewer row is required");
+    expect(store.configs.listRevisions().length).toBe(0);
+  });
+
+  it("flags invalid cost/token values instead of silently dropping them", async () => {
+    const { app, store } = testApp(oauthEnv, undefined, mockOauthFetch({ id: 1001, login: "octocat" }));
+    const { cookie, csrfToken } = await operatorCsrf2(app);
+    const response = await app.request("/config/drafts", {
+      method: "POST",
+      headers: { cookie, "content-type": "application/x-www-form-urlencoded" },
+      body: structuredBody2({
+        csrf_token: csrfToken,
+        name: "budgets",
+        reviewer_count: "1",
+        reviewer_role_0: "correctness",
+        max_cost_usd: "abc",
+        max_tokens: "1.5",
+      }),
+    });
+    expect(response.status).toBe(400);
+    const html = await response.text();
+    expect(html).toContain("must be a positive number");
+    expect(html).toContain("must be a positive whole number");
+    expect(store.configs.listRevisions().length).toBe(0);
+  });
+
+  it("retains submitted values when a draft edit fails validation", async () => {
+    const { app, store } = testApp(oauthEnv, undefined, mockOauthFetch({ id: 1001, login: "octocat" }));
+    const created = store.configs.createDraft({
+      definition: { name: "default", reviewers: [{ role: "correctness" }], minPublishableSeverity: "info" },
+      createdBy: "octocat",
+    });
+    if ("error" in created) throw new Error("draft failed");
+    const { cookie, csrfToken } = await operatorCsrf2(app);
+    const response = await app.request(`/config/drafts/${created.revision.id}`, {
+      method: "POST",
+      headers: { cookie, "content-type": "application/x-www-form-urlencoded" },
+      body: structuredBody2({
+        csrf_token: csrfToken,
+        expected_edit_seq: String(created.revision.editSeq),
+        name: "default",
+        reviewer_count: "1",
+        reviewer_role_0: "correctness",
+        reviewer_timeout_0: "abc",
+        note: "my in-progress note",
+      }),
+    });
+    expect(response.status).toBe(400);
+    const html = await response.text();
+    // The operator's in-progress edit survives; the stored definition is not
+    // silently substituted.
+    expect(html).toContain('value="abc"');
+    expect(html).toContain('value="my in-progress note"');
+    expect(html).toContain("timeout must be a positive number of seconds");
+  });
+
+  it("structural actions on the edit path target the draft, not a new draft", async () => {
+    const { app, store } = testApp(oauthEnv, undefined, mockOauthFetch({ id: 1001, login: "octocat" }));
+    const created = store.configs.createDraft({
+      definition: { name: "default", reviewers: [{ role: "correctness" }], minPublishableSeverity: "info" },
+      createdBy: "octocat",
+    });
+    if ("error" in created) throw new Error("draft failed");
+    const { cookie, csrfToken } = await operatorCsrf2(app);
+    const response = await app.request(`/config/drafts/${created.revision.id}`, {
+      method: "POST",
+      headers: { cookie, "content-type": "application/x-www-form-urlencoded" },
+      body: structuredBody2({
+        csrf_token: csrfToken,
+        expected_edit_seq: String(created.revision.editSeq),
+        name: "default",
+        reviewer_count: "1",
+        reviewer_role_0: "correctness",
+        action: "add",
+      }),
+    });
+    expect(response.status).toBe(200);
+    const html = await response.text();
+    // The re-rendered form keeps posting to the draft with the current edit_seq.
+    expect(html).toContain(`action="/config/drafts/${created.revision.id}"`);
+    expect(html).toContain(`value="${created.revision.editSeq}"`);
+    expect(html).toContain("Reviewer 2");
+    expect(store.configs.listRevisions().length).toBe(1);
+  });
+});

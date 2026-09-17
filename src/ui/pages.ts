@@ -4,6 +4,7 @@ import { fingerprintFinding, stripHtmlComments } from "../findings/identity.js";
 import { POLICIES_WITH_EXTERNAL, POLICIES_WITH_INTERNAL } from "../routing/types.js";
 import { LIVE_JOB_STATES } from "../config.js";
 import type { ProfileFieldErrors, ProfileFormValues } from "../config-form.js";
+import { initialProfileFormValues, profileFormValuesFromDefinition } from "../config-form.js";
 import type { EffectiveConfigEntry } from "../config-effective.js";
 import type { Severity } from "../schema.js";
 import { elapsedMs, escapeHtml, formatDuration, shortSha } from "../util.js";
@@ -954,47 +955,6 @@ function clampConfigValue(value: string): string {
   return clean.length > 300 ? `${clean.slice(0, 300)}… (+${clean.length - 300} chars)` : clean;
 }
 
-function emptyProfileFormValues(): ProfileFormValues {
-  return {
-    name: "default",
-    note: "",
-    reviewers: [{ role: "correctness", model: "", timeoutSeconds: "" }],
-    routerModel: "",
-    minSeverity: "info",
-    maxCostUsd: "",
-    maxTokens: "",
-  };
-}
-
-/** Prefills editor values from a stored definition (timeout ms → seconds). */
-export function profileFormValuesFromDefinition(
-  definition: unknown,
-  note: string | null,
-): ProfileFormValues {
-  const def = (definition ?? {}) as {
-    name?: string;
-    reviewers?: Array<{ role?: string; model?: string; timeoutMs?: number }>;
-    routerModel?: string;
-    minPublishableSeverity?: string;
-    maxTotalCostUsd?: number;
-    maxTotalTokens?: number;
-  };
-  return {
-    name: def.name ?? "",
-    note: note ?? "",
-    reviewers:
-      def.reviewers?.map((reviewer) => ({
-        role: reviewer.role ?? "",
-        model: reviewer.model ?? "",
-        timeoutSeconds: reviewer.timeoutMs != null ? String(Math.round(reviewer.timeoutMs / 1000)) : "",
-      })) ?? [],
-    routerModel: def.routerModel ?? "",
-    minSeverity: def.minPublishableSeverity ?? "info",
-    maxCostUsd: def.maxTotalCostUsd != null ? String(def.maxTotalCostUsd) : "",
-    maxTokens: def.maxTotalTokens != null ? String(def.maxTotalTokens) : "",
-  };
-}
-
 /** Renders the /config "Effective configuration" section: entries grouped by
  * `group`, each with a source badge. Escapes and clamps all entry text.
  * Returns "" when entries is empty. */
@@ -1082,7 +1042,7 @@ const SEVERITIES: readonly Severity[] = ["blocker", "high", "medium", "low", "in
 function fieldError(errors: ProfileFieldErrors | undefined, key: string): string {
   const message = errors?.[key];
   if (!message) return "";
-  return `<p class="error" role="alert" aria-live="polite">${escapeHtml(message)}</p>`;
+  return `<p class="error" role="alert" aria-live="polite" id="${escapeHtml(key)}-error">${escapeHtml(message)}</p>`;
 }
 
 /**
@@ -1114,25 +1074,37 @@ export function renderProfileForm(
   const reviewerRows = values.reviewers
     .map((row, index) => {
       const key = (leaf: string) => `reviewer_${leaf}_${index}`;
-      const rowError =
-        errors?.[`reviewer_role_${index}`] ??
-        errors?.[`reviewer_model_${index}`] ??
-        errors?.[`reviewer_timeout_${index}`];
+      const roleError = errors?.[`reviewer_role_${index}`];
+      const modelError = errors?.[`reviewer_model_${index}`];
+      const timeoutError = errors?.[`reviewer_timeout_${index}`];
+      const rowError = roleError ?? modelError ?? timeoutError;
+      // up:0 / down:last decode to noop actions; rendering them invites a
+      // click that does nothing. Boundary rows simply have fewer buttons.
+      const upButton =
+        index > 0
+          ? `<button type="submit" name="action" value="up:${index}" aria-label="Move reviewer ${index + 1} up">↑</button>`
+          : "";
+      const downButton =
+        index < values.reviewers.length - 1
+          ? `<button type="submit" name="action" value="down:${index}" aria-label="Move reviewer ${index + 1} down">↓</button>`
+          : "";
       return `<fieldset class="profile-reviewer">
         <legend>Reviewer ${index + 1}</legend>
-        ${rowError ? `<p class="error" role="alert">${escapeHtml(rowError)}</p>` : ""}
+        ${rowError ? `<p class="error" role="alert" id="${escapeHtml(`reviewer_row_${index}`)}-error">${escapeHtml(rowError)}</p>` : ""}
         <label>Role
           <select name="${key("role")}" ${invalidAttr(key("role"))} ${describedBy(key("role"))}>${roleOptions(row.role)}</select>
         </label>
         <label>Model override (optional; provider/model)
-          <input list="profile-model-catalog" name="${key("model")}" value="${escapeHtml(row.model)}" placeholder="provider/model"/>
+          <input list="profile-model-catalog" name="${key("model")}" value="${escapeHtml(row.model)}" placeholder="provider/model"
+            ${modelError ? `aria-invalid="true" aria-describedby="reviewer_row_${index}-error"` : ""}/>
         </label>
-        <label>Timeout in seconds (optional — <span title="Stored in the profile schema but not yet consumed by the pipeline">not enforced at runtime</span>)
-          <input type="number" min="1" name="${key("timeout")}" value="${escapeHtml(row.timeoutSeconds)}"/>
+        <label>Timeout in seconds (optional, decimals allowed — <span title="Stored in the profile schema but not yet consumed by the pipeline">not enforced at runtime</span>)
+          <input type="number" step="any" min="0" name="${key("timeout")}" value="${escapeHtml(row.timeoutSeconds)}"
+            ${timeoutError ? `aria-invalid="true" aria-describedby="reviewer_row_${index}-error"` : ""}/>
         </label>
         <div class="config-actions">
-          <button type="submit" name="action" value="up:${index}" aria-label="Move reviewer ${index + 1} up">↑</button>
-          <button type="submit" name="action" value="down:${index}" aria-label="Move reviewer ${index + 1} down">↓</button>
+          ${upButton}
+          ${downButton}
           <button type="submit" name="action" value="remove:${index}" aria-label="Remove reviewer ${index + 1}">Remove</button>
         </div>
       </fieldset>`;
@@ -1218,7 +1190,7 @@ export function renderConfigPage(data: ConfigPageData): string {
             knownRoles: data.profileEditor.knownRoles,
             modelCatalog: data.profileEditor.modelCatalog,
           })
-        : renderProfileForm(emptyProfileFormValues(), undefined, {
+        : renderProfileForm(initialProfileFormValues(), undefined, {
             csrfToken: data.csrfToken ?? "",
             knownRoles: data.profileEditor.knownRoles,
             modelCatalog: data.profileEditor.modelCatalog,
@@ -1253,11 +1225,15 @@ export function renderConfigPage(data: ConfigPageData): string {
     ${createForm}
     ${drafts
       .map((revision) => {
+        const failingForm =
+          data.profileEditor?.form?.revision?.id === revision.id ? data.profileEditor.form : undefined;
         const editor =
           data.canWrite && data.profileEditor
             ? renderProfileForm(
-                profileFormValuesFromDefinition(revision.definition, revision.note),
-                data.profileEditor.form?.revision?.id === revision.id ? data.profileEditor.form.errors : undefined,
+                failingForm
+                  ? failingForm.values
+                  : profileFormValuesFromDefinition(revision.definition, revision.note),
+                failingForm?.errors,
                 {
                   csrfToken: data.csrfToken ?? "",
                   revision: { id: revision.id, editSeq: revision.editSeq },

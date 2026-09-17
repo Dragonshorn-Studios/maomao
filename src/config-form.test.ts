@@ -3,8 +3,9 @@ import {
   applyProfileAction,
   decodeProfileAction,
   decodeProfileForm,
-  emptyProfileForm,
+  initialProfileFormValues,
   profileFormToDefinition,
+  profileFormValuesFromDefinition,
 } from "./config-form.js";
 
 function formBody(overrides: Record<string, unknown> = {}): Record<string, unknown> {
@@ -58,8 +59,10 @@ describe("decodeProfileAction", () => {
     expect(decodeProfileAction(formBody({ action: "up:2" }))).toEqual({ kind: "up", index: 2 });
     expect(decodeProfileAction(formBody({ action: "down:0" }))).toEqual({ kind: "down", index: 0 });
     // Malformed indexes fall back to save (no crash, no misapplied row edit).
-    expect(decodeProfileAction(formBody({ action: "remove:x" }))).toEqual({ kind: "save" });
-    expect(decodeProfileAction(formBody({ action: "up:0" }))).toEqual({ kind: "save" });
+    // Out-of-range and malformed actions are noops, never saves.
+    expect(decodeProfileAction(formBody({ action: "remove:x" }))).toEqual({ kind: "noop" });
+    expect(decodeProfileAction(formBody({ action: "remove" }))).toEqual({ kind: "noop" });
+    expect(decodeProfileAction(formBody({ action: "up:0" }))).toEqual({ kind: "noop" });
     expect(decodeProfileAction({})).toEqual({ kind: "save" });
   });
 });
@@ -67,7 +70,7 @@ describe("decodeProfileAction", () => {
 describe("applyProfileAction", () => {
   it("add preselects an unused known role", () => {
     const values = applyProfileAction(
-      { ...emptyProfileForm(), reviewers: [{ role: "correctness", model: "", timeoutSeconds: "" }] },
+      { ...initialProfileFormValues(), reviewers: [{ role: "correctness", model: "", timeoutSeconds: "" }] },
       { kind: "add" },
       ["correctness", "security", "tests"],
     );
@@ -75,7 +78,7 @@ describe("applyProfileAction", () => {
   });
 
   it("add caps at 12 rows", () => {
-    let values = emptyProfileForm();
+    let values = initialProfileFormValues();
     values = { ...values, reviewers: Array.from({ length: 12 }, (_, index) => ({ role: `r${index}`, model: "", timeoutSeconds: "" })) };
     const capped = applyProfileAction(values, { kind: "add" }, ["extra"]);
     expect(capped.reviewers).toHaveLength(12);
@@ -83,7 +86,7 @@ describe("applyProfileAction", () => {
 
   it("remove and reorder mutate only the targeted rows", () => {
     const values = {
-      ...emptyProfileForm(),
+      ...initialProfileFormValues(),
       reviewers: [
         { role: "a", model: "", timeoutSeconds: "" },
         { role: "b", model: "", timeoutSeconds: "" },
@@ -171,7 +174,7 @@ describe("profileFormToDefinition", () => {
     expect(result.errors.name).toContain("lowercase");
     expect(result.errors.reviewer_model_0).toContain("provider/model");
     expect(result.errors.reviewer_role_1).toContain("unknown specialist role");
-    expect(result.errors.reviewer_timeout_0).toContain("positive whole number");
+    expect(result.errors.reviewer_timeout_0).toContain("positive number of seconds");
     expect(result.errors.form).toBeTruthy();
   });
 
@@ -181,5 +184,52 @@ describe("profileFormToDefinition", () => {
     const tooBig = profileFormToDefinition(decodeProfileForm(formBody({ reviewer_timeout_0: "1801" })));
     expect(tooBig.ok).toBe(false);
     if (!tooBig.ok) expect(tooBig.errors.reviewer_timeout_0).toBeTruthy();
+  });
+});
+
+describe("review-pass fixes", () => {
+  it("maps zod errors through blank-row compaction to the row the operator sees", () => {
+    const result = profileFormToDefinition(
+      decodeProfileForm(
+        formBody({
+          reviewer_count: "3",
+          reviewer_role_0: "",
+          reviewer_role_1: "nobody",
+          reviewer_model_1: "no slash model",
+          reviewer_role_2: "correctness",
+        }),
+      ),
+    );
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    // Errors land on form rows 1 and 2 — not shifted onto the blank row 0.
+    expect(result.errors.reviewer_role_1).toContain("unknown specialist role");
+    expect(result.errors.reviewer_model_1).toContain("provider/model");
+    expect(result.errors.reviewer_role_0).toBeUndefined();
+  });
+
+  it("keeps invalid cost/token inputs as field errors instead of silently dropping them", () => {
+    const result = profileFormToDefinition(
+      decodeProfileForm(formBody({ max_cost_usd: "abc", max_tokens: "1.5" })),
+    );
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.errors.max_cost_usd).toContain("positive number");
+    expect(result.errors.max_tokens).toContain("positive whole number");
+  });
+
+  it("round-trips non-second-aligned timeouts exactly (definition → form → definition)", () => {
+    const definition = {
+      name: "default",
+      reviewers: [{ role: "correctness", timeoutMs: 901234 }],
+      minPublishableSeverity: "info",
+    };
+    const form = profileFormValuesFromDefinition(definition, null);
+    // Exact decimal seconds, never rounded.
+    expect(form.reviewers[0]?.timeoutSeconds).toBe("901.234");
+    const back = profileFormToDefinition(form);
+    expect(back).toMatchObject({ ok: true });
+    if (!back.ok) return;
+    expect(back.definition).toEqual(definition);
   });
 });
