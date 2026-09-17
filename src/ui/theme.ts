@@ -297,6 +297,15 @@ button, input, textarea {
   filter: brightness(1.05);
 }
 
+.jobs-pagination {
+  display: flex;
+  justify-content: space-between;
+  gap: 1rem;
+  margin-top: 1rem;
+  font-size: 0.9rem;
+}
+.jobs-pagination p { margin: 0 0 0.35rem; }
+
 .notice, .error, .warn {
   border: 1px solid var(--line);
   padding: 0.65rem 0.8rem;

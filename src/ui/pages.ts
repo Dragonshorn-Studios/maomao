@@ -101,6 +101,7 @@ export function renderHome(jobs: JobRow[], store: JobStore, options: PageOptions
   const cards = jobs
     .map((job) => renderQueueCard(job, jobMetrics(job, store), options.uiFlavor, options.csrfToken))
     .join("");
+  const paginationNav = renderJobsPagination(jobs, options.pagination);
 
   const body = `
     <h1>Review jobs</h1>
@@ -122,8 +123,39 @@ export function renderHome(jobs: JobRow[], store: JobStore, options: PageOptions
             <p><strong>${escapeHtml(empty.title)}</strong></p>
             <p class="muted">${escapeHtml(empty.body)}</p>
           </div>`
-    }`;
+    }
+    ${paginationNav}`;
   return layout("Maomao", body, options);
+}
+
+/**
+ * Accessible keyset navigation over the home queue. Cursors come from the
+ * page's boundary job ids, so links stay stable while new jobs are queued.
+ * Renders nothing when the caller did not opt into pagination.
+ */
+function renderJobsPagination(
+  jobs: JobRow[],
+  pagination?: { hasOlder: boolean; hasNewer: boolean },
+): string {
+  if (!pagination) return "";
+  const oldest = jobs[jobs.length - 1];
+  const newest = jobs[0];
+  const nextLink =
+    pagination.hasOlder && oldest
+      ? `<a rel="next" href="/?before=${oldest.id}">Older jobs</a>`
+      : `<span class="muted" aria-disabled="true">Older jobs</span>`;
+  const prevLink =
+    pagination.hasNewer && newest
+      ? `<a rel="prev" href="/?after=${newest.id}">Newer jobs</a>`
+      : `<span class="muted" aria-disabled="true">Newer jobs</span>`;
+  const olderNote = pagination.hasNewer
+    ? `<p role="status">Viewing older jobs — newest reviews are on the first page.</p>`
+    : "";
+  return `${olderNote}
+    <nav class="jobs-pagination" aria-label="Review jobs pages">
+      ${prevLink}
+      ${nextLink}
+    </nav>`;
 }
 
 export type JobPageOptions = PageOptions & {

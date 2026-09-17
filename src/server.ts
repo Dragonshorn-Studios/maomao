@@ -512,7 +512,7 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
     const identity = c.get("identity");
     const home = (extra: { error?: string; notice?: string; reviewUrl?: string } = {}) =>
       c.html(
-        renderHome(ctx.store.listJobs(75), ctx.store, {
+        renderHome(ctx.store.listJobsPage({}).jobs, ctx.store, {
           ...pageOpts,
           identity,
           csrfToken,
@@ -641,14 +641,23 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
   });
 
   app.get("/", (c) => {
-    const jobs = ctx.store.listJobs(75);
+    const cursor = jobsPageCursor(c.req.query("before"), c.req.query("after"));
+    let page = cursor.after != null
+      ? ctx.store.listJobsPage({ after: cursor.after })
+      : ctx.store.listJobsPage({ before: cursor.before });
+    // A cursor past the newest (or below the oldest with nothing newer) yields
+    // an empty page; land on the first page instead of a dead end.
+    if (page.jobs.length === 0 && ctx.store.listJobsPage({ limit: 1 }).jobs.length > 0) {
+      page = ctx.store.listJobsPage({});
+    }
     return c.html(
-      renderHome(jobs, ctx.store, {
+      renderHome(page.jobs, ctx.store, {
         ...pageOpts,
         identity: c.get("identity"),
         csrfToken: gateOn ? ensureCsrfToken(c, ctx.config.uiSessionSecret) : undefined,
         notice: noticeText(c.req.query("notice")),
         error: c.req.query("error") || undefined,
+        pagination: { hasOlder: page.hasOlder, hasNewer: page.hasNewer },
       }),
     );
   });
@@ -1611,6 +1620,27 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
   );
 
   return app;
+}
+
+/**
+ * Parses home-queue pagination cursors. Malformed, negative, or non-finite
+ * values are ignored (first page) — pagination input must never 500. A before
+ * cursor at or beyond the newest id also falls back to the first page, so a
+ * stale "newest" bookmark lands somewhere sane.
+ */
+function jobsPageCursor(beforeRaw: string | undefined, afterRaw: string | undefined): { before?: number; after?: number } {
+  const parse = (raw: string | undefined): number | undefined => {
+    if (!raw || !/^-?\d+$/.test(raw.trim())) return undefined;
+    const value = Number(raw.trim());
+    if (!Number.isSafeInteger(value) || value <= 0) return undefined;
+    return value;
+  };
+  const before = parse(beforeRaw);
+  const after = parse(afterRaw);
+  // before wins when both are present (links only ever carry one).
+  if (before != null) return { before };
+  if (after != null) return { after };
+  return {};
 }
 
 function noticeText(

@@ -2919,3 +2919,92 @@ describe("manual cancel and dequeue hardening", () => {
     });
   }
 });
+
+describe("home queue pagination", () => {
+  function seededApp(count: number) {
+    const { app, store } = testApp();
+    for (let index = 0; index < count; index += 1) {
+      store.enqueue({
+        repoFullName: "acme/widgets",
+        repoOwner: "acme",
+        repoName: "widgets",
+        installationId: 1,
+        prNumber: index + 1,
+        prTitle: `job ${index + 1}`,
+        prBody: "",
+        prHtmlUrl: "",
+        prAuthor: "dev",
+        baseSha: "b",
+        headSha: `sha-${index + 1}`,
+        baseRef: "main",
+        headRef: "f",
+        reviewers: [],
+      });
+    }
+    return { app, store };
+  }
+
+  it("serves the newest page first and paginates through the whole history", async () => {
+    const { app } = seededApp(60);
+    const first = await app.request("/");
+    const firstHtml = await first.text();
+    expect(first.status).toBe(200);
+    expect(firstHtml).toContain('rel="next"');
+    expect(firstHtml).not.toContain('rel="prev"');
+    expect(firstHtml).not.toContain("Viewing older jobs");
+    // Default page size 25: the 61st... the 26th-newest job must not be on page 1.
+    expect(firstHtml).toContain("job 60");
+    expect(firstHtml).not.toContain("job 35");
+    expect(firstHtml).not.toContain("job 34");
+
+    const beforeMatch = firstHtml.match(/href="\/\?before=(\d+)"/);
+    expect(beforeMatch?.[1]).toBeTruthy();
+    const second = await app.request(`/?before=${beforeMatch![1]}`);
+    const secondHtml = await second.text();
+    expect(secondHtml).toContain("job 34");
+    expect(secondHtml).not.toContain("job 60");
+    expect(secondHtml).toContain('rel="prev"');
+    expect(secondHtml).toContain("Viewing older jobs");
+  });
+
+  it("falls back to the first page for invalid cursors instead of erroring", async () => {
+    const { app } = seededApp(3);
+    for (const bad of ["abc", "-5", "1e9", "0", "12.5", "999999999999999999999999"]) {
+      const response = await app.request(`/?before=${encodeURIComponent(bad)}`);
+      expect(response.status).toBe(200);
+      const html = await response.text();
+      expect(html).toContain("job 3");
+      expect(html).not.toContain("Older jobs</a>");
+    }
+    // A before cursor beyond the newest id serves the newest page too.
+    const beyond = await app.request("/?before=999999");
+    expect(beyond.status).toBe(200);
+    expect((await beyond.text()).replace(/<[^>]+>/g, "")).toContain("job 3");
+  });
+
+  it("no longer renders an unbounded 75-job list: only the page is loaded", async () => {
+    const { app, store } = seededApp(90);
+    const html = await (await app.request("/")).text();
+    expect(html).toContain("job 90");
+    expect(html).not.toContain("job 65");
+    // The full history stays reachable through pagination.
+    let cursor: { before?: number } = {};
+    let oldest = Number.POSITIVE_INFINITY;
+    for (;;) {
+      const page = store.listJobsPage(cursor);
+      oldest = Math.min(oldest, ...page.jobs.map((job) => job.pr_number));
+      if (!page.hasOlder) break;
+      cursor = { before: page.jobs[page.jobs.length - 1]!.id };
+    }
+    expect(oldest).toBe(1);
+  });
+
+  it("renders an empty first page without navigation dead ends", async () => {
+    const { app } = seededApp(0);
+    const response = await app.request("/");
+    expect(response.status).toBe(200);
+    const html = await response.text();
+    expect(html).toContain("Nothing is under examination");
+    expect(html).toContain("aria-disabled=\"true\"");
+  });
+});

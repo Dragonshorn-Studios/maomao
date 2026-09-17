@@ -1,6 +1,6 @@
 import type { SqliteDb } from "../db.js";
 import type { CancelReason, JobState, ReviewerState } from "../config.js";
-import { LIVE_JOB_STATES } from "../config.js";
+import { JOBS_PAGE_SIZE_DEFAULT, JOBS_PAGE_SIZE_MAX, LIVE_JOB_STATES } from "../config.js";
 import type { FindingRow, FindingStatus } from "../findings/types.js";
 import { nowIso } from "../util.js";
 import { publish } from "../events.js";
@@ -378,6 +378,45 @@ export class JobStore {
 
   listJobs(limit = 50): JobRow[] {
     return this.db.prepare(`SELECT * FROM jobs ORDER BY id DESC LIMIT ?`).all(limit) as JobRow[];
+  }
+
+  /**
+   * Keyset pagination over the job list, newest first. Cursors are exclusive
+   * job ids: `before` pages older than that id, `after` pages newer. The
+   * +1-probe row computes hasOlder/hasNewer without offsets, so newly queued
+   * jobs never reshuffle an open cursor window. Limit is clamped to
+   * JOBS_PAGE_SIZE_MAX; invalid cursors are the caller's concern (the route
+   * falls back to the first page).
+   */
+  listJobsPage(input: { before?: number; after?: number; limit?: number }): {
+    jobs: JobRow[];
+    hasOlder: boolean;
+    hasNewer: boolean;
+  } {
+    const limit = Math.min(Math.max(1, input.limit ?? JOBS_PAGE_SIZE_DEFAULT), JOBS_PAGE_SIZE_MAX);
+    if (input.after != null) {
+      const probed = this.db
+        .prepare(`SELECT * FROM jobs WHERE id > ? ORDER BY id ASC LIMIT ?`)
+        .all(input.after, limit + 1) as JobRow[];
+      // Rows arrive oldest→newest; reverse into the page's newest-first order.
+      const jobs = probed.slice(0, limit).reverse();
+      const hasNewer = probed.length > limit;
+      const oldestOnPage = jobs[0]?.id ?? input.after;
+      const hasOlder = Boolean(
+        this.db.prepare(`SELECT id FROM jobs WHERE id < ? LIMIT 1`).get(oldestOnPage),
+      );
+      return { jobs, hasOlder, hasNewer };
+    }
+    const probed = this.db
+      .prepare(`SELECT * FROM jobs WHERE (? IS NULL OR id < ?) ORDER BY id DESC LIMIT ?`)
+      .all(input.before ?? null, input.before ?? null, limit + 1) as JobRow[];
+    const jobs = probed.slice(0, limit);
+    const hasOlder = probed.length > limit;
+    const newestOnPage = jobs[0]?.id ?? input.before ?? 0;
+    const hasNewer =
+      input.before != null &&
+      Boolean(this.db.prepare(`SELECT id FROM jobs WHERE id > ? LIMIT 1`).get(newestOnPage));
+    return { jobs, hasOlder, hasNewer };
   }
 
   listInterruptedJobs(): JobRow[] {
