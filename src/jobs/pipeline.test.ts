@@ -2094,7 +2094,7 @@ describe("finding reconciliation", () => {
     }).run(created.job.id);
     const row = store.getFinding("acme/widgets", 4, fingerprint);
     expect(row?.status).toBe("uncertain");
-    expect(row?.reconciliation_reason).toContain("GitHub App lacks permission");
+    expect(row?.reconciliation_reason).toContain("Contents must be Read & write");
     expect(row?.reconciliation_reason).toContain("Resource not accessible by integration");
     expect(row?.reconciliation_reason).toContain("will retry next review");
     expect(store.listLogs(created.job.id).map((line) => line.message).join("\n")).toContain(
@@ -3193,7 +3193,7 @@ describe("repository health scan", () => {
     }).run(created.job.id);
     const row = store.getFinding("acme/widgets", 0, fingerprint);
     expect(row?.status).toBe("uncertain");
-    expect(row?.reconciliation_reason).toContain("GitHub App lacks permission");
+    expect(row?.reconciliation_reason).toContain("Issues must be Read & write");
     expect(row?.reconciliation_reason).toContain("will retry next scan");
     expect(store.listLogs(created.job.id).map((line) => line.message).join("\n")).toContain(
       "Could not close issue",

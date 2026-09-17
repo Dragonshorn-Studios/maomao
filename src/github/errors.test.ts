@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { describeGithubError, githubRetryReason, isMissingGithubNodeError } from "./errors.js";
+import { describeGithubError, describeThreadResolveError, githubRetryReason, isMissingGithubNodeError } from "./errors.js";
 
 describe("describeGithubError", () => {
   it("pulls GraphQL error messages out of the Octokit wrapper", () => {
@@ -44,10 +44,19 @@ describe("githubRetryReason", () => {
   it("keeps the retry note and includes the GitHub detail", () => {
     const error = Object.assign(new Error("Resource not accessible by integration"), { status: 403 });
     expect(githubRetryReason("thread", error)).toBe(
-      "GitHub resolve failed (GitHub App lacks permission: Resource not accessible by integration); will retry next review.",
+      "GitHub resolve failed (Contents must be Read & write, then re-approve the installation (GitHub App lacks permission: Resource not accessible by integration)); will retry next review.",
+    );
+    expect(githubRetryReason("issue", error)).toBe(
+      "GitHub issue close failed (Issues must be Read & write, then re-approve the installation (GitHub App lacks permission: Resource not accessible by integration)); will retry next scan.",
     );
     expect(githubRetryReason("issue", "GitHub 502")).toBe(
       "GitHub issue close failed (GitHub 502); will retry next scan.",
     );
+  });
+
+  it("tells operators to grant Contents write when resolve is forbidden", () => {
+    const error = Object.assign(new Error("Resource not accessible by integration"), { status: 403 });
+    expect(describeThreadResolveError(error)).toContain("Contents must be Read & write");
+    expect(describeThreadResolveError(error)).toContain("re-approve the installation");
   });
 });

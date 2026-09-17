@@ -81,6 +81,24 @@ function classify(status: number | undefined, detail: string): string | undefine
   return undefined;
 }
 
+function isIntegrationForbidden(detail: string): boolean {
+  return /not accessible by integration|resource not accessible|\bforbidden\b/i.test(detail);
+}
+
+/**
+ * GitHub returns the same FORBIDDEN text for several missing App permissions.
+ * Resolving a review thread is gated on Contents write (repo write), not on
+ * Pull requests write. Closing an issue is gated on Issues write.
+ */
+function integrationPermissionHint(kind: "thread" | "issue", detail: string): string {
+  if (/Contents must be Read & write|Issues must be Read & write/.test(detail)) return detail;
+  if (!isIntegrationForbidden(detail)) return detail;
+  if (kind === "issue") {
+    return `Issues must be Read & write, then re-approve the installation (${detail})`;
+  }
+  return `Contents must be Read & write, then re-approve the installation (${detail})`;
+}
+
 export function describeGithubError(error: unknown): string {
   const status = statusOf(error);
   const detail = rawDetail(error) || "unknown GitHub error";
@@ -92,9 +110,17 @@ export function describeGithubError(error: unknown): string {
 }
 
 export function githubRetryReason(kind: "thread" | "issue", error: unknown): string {
-  const detail = typeof error === "string" ? error : describeGithubError(error);
+  const detail = integrationPermissionHint(
+    kind,
+    typeof error === "string" ? error : describeGithubError(error),
+  );
   if (kind === "issue") {
     return `GitHub issue close failed (${detail}); will retry next scan.`;
   }
   return `GitHub resolve failed (${detail}); will retry next review.`;
+}
+
+/** Same Contents-write hint for @maomao dismiss/reopen command warnings. */
+export function describeThreadResolveError(error: unknown): string {
+  return integrationPermissionHint("thread", describeGithubError(error));
 }
