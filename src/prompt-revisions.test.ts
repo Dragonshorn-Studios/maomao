@@ -198,3 +198,53 @@ describe("guardrail composition", () => {
     expect(composeReviewerPrompt(body)).toBe(rolePrompt);
   });
 });
+
+describe("bounded evaluation errors", () => {
+  it("stores a field-pathed schema summary for invalid evaluation output, never the raw Zod dump", async () => {
+    const db = openDb(":memory:");
+    const prompts = new PromptRevisionStore(db);
+    const draft = prompts.createDraft({ roleId: "correctness", body: "Review carefully.", createdBy: "octocat" });
+    if (!("revision" in draft)) throw new Error("draft creation failed");
+    const fixture = prompts.saveFixture({
+      name: "invalid-output-shape",
+      prMeta: {},
+      diff: "diff --git a/x b/x\n",
+      savedBy: "octocat",
+      acknowledged: true,
+    });
+    if (!("fixture" in fixture)) throw new Error("fixture creation failed");
+
+    const badShape = JSON.stringify({
+      schema_version: 1,
+      reviewer: "correctness",
+      verdict: "findings",
+      findings: Array.from({ length: 12 }, (_, index) => ({
+        severity: "critical",
+        confidence: 2,
+        category: "x",
+        summary: `s${index}`,
+        reason: `r${index}`,
+      })),
+    });
+    const result = await prompts.evaluatePrompt({
+      promptRevisionId: draft.revision.id,
+      fixtureId: fixture.fixture.id,
+      model: "test/model",
+      actor: "octocat",
+      opencode: {
+        async run() {
+          return { stdout: badShape, stderr: "", exitCode: 0, text: badShape, usage: {} };
+        },
+      },
+      extraArgs: [],
+    });
+    expect("evaluation" in result).toBe(true);
+    if (!("evaluation" in result)) return;
+    expect(result.evaluation.status).toBe("failed");
+    const error = result.evaluation.error ?? "";
+    expect(error).toContain("findings[0].severity");
+    expect(error).not.toContain("[{");
+    expect(error).not.toContain('"received"');
+    expect(error.length).toBeLessThan(500);
+  });
+});

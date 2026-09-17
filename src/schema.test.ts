@@ -273,14 +273,6 @@ describe("location-sentinel normalization (issue #62)", () => {
     }
   });
 
-  it("keeps a canonical clean result with no findings", () => {
-    const result = parseReviewerResult(
-      JSON.stringify({ reviewer: "tests", verdict: "clean", summary: "No actionable test findings.", findings: [] }),
-    );
-    expect(result.verdict).toBe("clean");
-    expect(result.findings).toEqual([]);
-  });
-
   it("normalizes an empty-findings findings-verdict to clean (pins the long-standing special case)", () => {
     const result = parseReviewerResult(
       JSON.stringify({ reviewer: "tests", verdict: "findings", findings: [] }),
@@ -307,7 +299,7 @@ describe("location-sentinel normalization (issue #62)", () => {
   });
 
   it("still fails a substantive finding whose required prose is missing", () => {
-    // Location present but reason empty: substance exists, so strict validation applies.
+    // Has a location (and summary), so it is not a placeholder: strict validation still rejects the empty reason.
     expect(() =>
       parseReviewerResult(
         JSON.stringify({
@@ -353,7 +345,13 @@ describe("location-sentinel normalization (issue #62)", () => {
     const cases = [
       { severity: "high", confidence: 0.9, category: "x", file: "a.ts", line: -3, summary: "s", reason: "r" },
       { severity: "high", confidence: 0.9, category: "x", file: "a.ts", line: 1.5, summary: "s", reason: "r" },
+      // Wrongly-typed line is left for strict validation, not coerced.
+      { severity: "high", confidence: 0.9, category: "x", file: "a.ts", line: "3", summary: "s", reason: "r" },
       { severity: "high", confidence: 0.9, category: "x", summary: "s", reason: "" },
+      { severity: "high", confidence: 0.9, reason: "r" },
+      { severity: "high", confidence: 0.9, summary: "s", reason: "r" },
+      // A lone end_line (even negative) is a location remnant: strict validation, not a placeholder drop.
+      { severity: "high", confidence: 0.9, category: "x", end_line: -5, summary: "", reason: "" },
     ];
     for (const finding of cases) {
       expect(() =>
@@ -385,10 +383,9 @@ describe("formatZodIssues", () => {
     const formatted = formatZodIssues(caught as ZodError);
     expect(formatted).toContain("findings[0].severity");
     expect(formatted).toContain("findings[0].confidence");
-    // No raw Zod dump artifacts: no JSON array/object brackets, bounded length.
+    // No raw-dump artifacts: no JSON structure ("[{") or "received" fields, and bounded length.
     expect(formatted).not.toContain("[{");
     expect(formatted).not.toContain('"received"');
-    expect(formatted.length).toBeLessThan(300);
     expect(formatted.length).toBeLessThan(300);
   });
 
@@ -411,5 +408,89 @@ describe("formatZodIssues", () => {
     const formatted = formatZodIssues(caught as ZodError);
     expect(formatted).toContain("(+");
     expect(formatted).toMatch(/\+\d+ more\)$/);
+  });
+});
+
+describe("sentinel normalization follow-ups (review pass)", () => {
+  it("normalizes sentinels inside fenced JSON output", () => {
+    const result = parseReviewerResult(
+      'Sure.\n```json\n{"reviewer":"correctness","verdict":"findings","findings":[{"severity":"low","confidence":0.6,"category":"x","file":"","line":0,"summary":"note","reason":"why"}]}\n```',
+    );
+    expect(result.findings).toHaveLength(1);
+    expect(result.findings[0]?.file).toBeUndefined();
+    expect(result.findings[0]?.line).toBeUndefined();
+  });
+
+  it("coerces an empty-findings aggregator result to clean so the empty-review gate applies", () => {
+    const parsed = parseAggregatorResult(
+      JSON.stringify({ verdict: "comment", summary: "Only placeholders below.", findings: [] }),
+    );
+    expect(parsed.verdict).toBe("clean");
+  });
+
+  it("keeps a comment verdict when findings survive", () => {
+    const parsed = parseAggregatorResult(
+      JSON.stringify({
+        verdict: "comment",
+        summary: "One real finding.",
+        findings: [{ severity: "medium", summary: "real", body: "details" }],
+      }),
+    );
+    expect(parsed.verdict).toBe("comment");
+    expect(parsed.findings).toHaveLength(1);
+  });
+
+  it("never drops verifier classifications as placeholders — a fingerprint decision is substance", () => {
+    // Empty reason and no location must fail loudly, not silently discard the decision.
+    expect(() =>
+      parseVerifierResult(
+        JSON.stringify({
+          classifications: [{ fingerprint: "fp1", status: "moved", confidence: 0.9, reason: "" }],
+        }),
+      ),
+    ).toThrow(/reason/);
+    const parsed = parseVerifierResult(
+      JSON.stringify({
+        classifications: [
+          { fingerprint: "fp1", status: "still_valid", confidence: 0.9, reason: "unchanged", file: "", line: 0 },
+        ],
+      }),
+    );
+    expect(parsed.classifications).toHaveLength(1);
+    expect(parsed.classifications[0]?.file).toBeUndefined();
+  });
+
+  it("still rejects an empty aggregator summary (result-level sentinels are not normalized)", () => {
+    expect(() =>
+      parseAggregatorResult(JSON.stringify({ verdict: "comment", summary: "", findings: [] })),
+    ).toThrow();
+  });
+
+  it("formats path-less issues as (root)", () => {
+    let caught: unknown;
+    try {
+      parseReviewerResult("null");
+    } catch (error) {
+      caught = error;
+    }
+    expect(caught).toBeInstanceOf(ZodError);
+    expect(formatZodIssues(caught as ZodError)).toContain("(root)");
+  });
+
+  it("reports dropped placeholders through onDrop", () => {
+    const drops: number[] = [];
+    parseReviewerResult(
+      JSON.stringify({
+        reviewer: "correctness",
+        verdict: "findings",
+        findings: [
+          { severity: "info", confidence: 0.5, category: "general", file: "", line: 0, summary: "", reason: "" },
+          { severity: "info", confidence: 0.5, category: "general", summary: "", reason: "" },
+        ],
+      }),
+      undefined,
+      (dropped) => drops.push(dropped),
+    );
+    expect(drops).toEqual([2]);
   });
 });

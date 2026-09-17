@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { SqliteDb } from "./db.js";
 import { nowIso, truncate } from "./util.js";
-import { parseReviewerResult } from "./schema.js";
+import { formatSchemaError, parseReviewerResult } from "./schema.js";
 import { composeReviewerPrompt, promptBodyFromRolePrompt } from "./prompts.js";
 import { KNOWN_REVIEWER_ROLES } from "./prompts.js";
 import type { OpenCodePort, OpenCodeRunResult } from "./opencode/parse.js";
@@ -316,9 +316,7 @@ The unified diff of the fixture is available as pr.diff in the working directory
       try {
         parsed = parseReviewerResult(result.text || result.stdout);
       } catch (error) {
-        return runFailure(
-          `evaluation output failed schema validation: ${error instanceof Error ? error.message : String(error)}`,
-        );
+        return runFailure(`evaluation output failed schema validation: ${formatSchemaError(error)}`);
       }
       const usageWarning =
         !usage || !usage.complete ? "usage incomplete: cost/token figures are a lower bound" : null;

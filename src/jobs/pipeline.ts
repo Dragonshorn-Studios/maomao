@@ -18,8 +18,7 @@ import {
   severityRank,
   SchemaValidationError,
   extractJsonFromText,
-  formatZodIssues,
-  normalizeLocationSentinels,
+  formatSchemaError,
   type AggregatorResult,
   type ReviewerResult,
   type Severity,
@@ -32,7 +31,6 @@ import { fingerprintFinding } from "../findings/identity.js";
 import type { ReconciliationSnapshot } from "../findings/types.js";
 import { currentFindingsForRisk } from "../findings/types.js";
 import { mapLimit, nowIso, sleep, truncate } from "../util.js";
-import { ZodError } from "zod";
 import { authorizationLogLine, authorizeGithubTarget, logAuthorizationRejection } from "../github/authorize.js";
 import { scanRoutingSignals, relevantDiffHunks } from "../routing/signals.js";
 import {
@@ -40,7 +38,7 @@ import {
   deterministicDecision,
   mergeModelDecision,
 } from "../routing/select.js";
-import { parseRouterResult } from "../routing/parse.js";
+import { parseInternalEscalationResult, parseRouterResult } from "../routing/parse.js";
 import { buildInternalEscalationPrompt, buildRouterPrompt } from "../routing/prompts.js";
 import { internalEscalationResultSchema } from "../routing/schema.js";
 import type { RoutingDecision } from "../routing/types.js";
@@ -494,6 +492,7 @@ async function runScanJob(deps: PipelineDeps, jobId: number, signal: AbortSignal
     );
     throwIfStale(store, jobId, signal);
     const items = await classifyPriorFindings({
+      onVerifierError: (message) => store.log(jobId, `Verifier failed: ${message}`, "warn"),
       config,
       opencode: deps.opencode,
       job,
@@ -769,6 +768,7 @@ async function reconcileAndRoute(
     `Reconciling ${priors.length} prior finding(s) for ${job.repo_full_name}#${job.pr_number} @ ${job.head_sha}`,
   );
   const items = await classifyPriorFindings({
+    onVerifierError: (message) => deps.store.log(job.id, `Verifier failed: ${message}`, "warn"),
     config: deps.config,
     opencode: deps.opencode,
     job,
@@ -849,7 +849,9 @@ async function runReviewer(
           if (chunk.includes("error")) deps.store.log(job.id, chunk.slice(0, 500), "debug", run.id);
         },
       });
-      const parsed = parseReviewerResult(result.text || result.stdout, run.role);
+      const parsed = parseReviewerResult(result.text || result.stdout, run.role, (dropped) => {
+        deps.store.log(job.id, `Reviewer ${run.role} dropped ${dropped} placeholder finding(s); raw output preserved`, "warn");
+      });
       deps.store.patchReviewer(run.id, {
         state: "done",
         raw_output: truncate(result.text || result.stdout, 200_000),
@@ -907,8 +909,10 @@ async function runAggregator(
 ): Promise<AggregatorResult> {
   const model = deps.config.opencode.aggregatorModel || deps.config.opencode.reviewerModel;
   const started = Date.now();
+  // Hoisted so the catch can preserve the raw output for debugging.
+  let result: Awaited<ReturnType<OpenCodePort["run"]>> | undefined;
   try {
-    const result = await deps.opencode.run({
+    result = await deps.opencode.run({
       cwd,
       model,
       prompt: buildAggregatorPrompt({
@@ -926,7 +930,9 @@ async function runAggregator(
       title: `maomao-aggregator-${job.id}`,
       signal,
     });
-    const parsed = parseAggregatorResult(result.text || result.stdout);
+    const parsed = parseAggregatorResult(result.text || result.stdout, (dropped) => {
+      deps.store.log(job.id, `Aggregator dropped ${dropped} placeholder finding(s); raw output preserved`, "warn");
+    });
     deps.store.patchJob(job.id, {
       aggregator_raw: truncate(result.text || result.stdout, 200_000),
       aggregator_normalized: JSON.stringify(parsed, null, 2),
@@ -944,7 +950,8 @@ async function runAggregator(
     const message = formatError(error);
     deps.store.log(job.id, `Aggregator OpenCode run failed (${message}); using deterministic fallback`, "warn");
     deps.store.patchJob(job.id, {
-      aggregator_raw: message,
+      // Preserve the model's output for debugging; the reason is in the log above.
+      aggregator_raw: truncate(result?.text || result?.stdout || "", 200_000),
       aggregator_normalized: JSON.stringify(fallback, null, 2),
       aggregator_model: model || null,
       aggregator_state: "done",
@@ -1033,9 +1040,9 @@ async function runInternalEscalation(
         lastError = over;
         break;
       }
-      const parsed = internalEscalationResultSchema.parse(
-        normalizeLocationSentinels(extractJsonFromText(result.text || result.stdout)),
-      );
+      const parsed = parseInternalEscalationResult(result.text || result.stdout, (dropped) => {
+        deps.store.log(job.id, `Internal escalation dropped ${dropped} placeholder finding(s); raw output preserved`, "warn");
+      });
       const merged = mergeInternalEscalation(firstPass, parsed);
       deps.store.patchJob(job.id, {
         internal_escalation_state: "done",
@@ -1396,10 +1403,7 @@ function parseStoredFindings(raw: string | null): AggregatorResult["findings"] {
 }
 
 function formatError(error: unknown): string {
-  if (error instanceof SchemaValidationError) return `${error.message}: ${error.issues}`;
-  // Bounded field-pathed summary; the raw Zod dump never reaches the UI
-  // (full output stays in raw_output for debugging).
-  if (error instanceof ZodError) return `schema invalid: ${formatZodIssues(error)}`;
-  if (error instanceof Error) return error.message;
-  return String(error);
+  // ZodError.message is an unbounded multi-line JSON dump; formatSchemaError
+  // keeps validation_error/failure_reason to bounded field paths.
+  return formatSchemaError(error);
 }
