@@ -63,7 +63,71 @@ export const verifierResultSchema = z.object({
 export type VerifierResult = z.infer<typeof verifierResultSchema>;
 
 export function parseVerifierResult(raw: string): VerifierResult {
-  return verifierResultSchema.parse(extractJsonFromText(raw));
+  return verifierResultSchema.parse(normalizeLocationSentinels(extractJsonFromText(raw), "classifications"));
+}
+
+/**
+ * Normalization boundary between JSON extraction and strict validation.
+ * Models serialize "no location" as sentinel values (`file: ""`, `line: 0`,
+ * `null`) instead of omitting the keys; that representation must not fail an
+ * otherwise valid result. Only the unambiguous "absent" sentinels are removed
+ * — negative, non-integer, or wrongly-typed values are left for strict
+ * validation to reject. A finding that carries no informational content at
+ * all (no location, no summary, no reason/body) is a placeholder and is
+ * dropped rather than rendered. Returns a cloned value; the input is not
+ * mutated.
+ */
+export function normalizeLocationSentinels(
+  raw: unknown,
+  itemsKey: "findings" | "classifications" = "findings",
+): unknown {
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return raw;
+  const items = (raw as Record<string, unknown>)[itemsKey];
+  if (!Array.isArray(items)) return raw;
+
+  const stripString = (item: Record<string, unknown>, key: string) => {
+    const value = item[key];
+    if (value === null || (typeof value === "string" && value.trim() === "")) delete item[key];
+  };
+  const stripLine = (item: Record<string, unknown>, key: string) => {
+    const value = item[key];
+    if (value === null || value === 0) delete item[key];
+  };
+
+  const normalizedItems = items.flatMap((item) => {
+    if (typeof item !== "object" || item === null || Array.isArray(item)) return [item];
+    const clone = { ...(item as Record<string, unknown>) };
+    stripString(clone, "file");
+    stripLine(clone, "line");
+    stripLine(clone, "end_line");
+    stripString(clone, "suggested_check");
+    // Placeholder: no location and no prose content — nothing to show or post.
+    const hasProse = ["summary", "reason", "body"].some(
+      (key) => typeof clone[key] === "string" && (clone[key] as string).trim() !== "",
+    );
+    if (!hasProse && clone.file === undefined && clone.line === undefined) return [];
+    return [clone];
+  });
+
+  return { ...(raw as Record<string, unknown>), [itemsKey]: normalizedItems };
+}
+
+/** Bounded, field-pathed issue list; the raw Zod dump never reaches the UI. */
+export function formatZodIssues(error: z.ZodError, maxIssues = 5): string {
+  const formatPath = (path: z.core.$ZodIssue["path"]): string => {
+    let out = "";
+    for (const segment of path) {
+      if (typeof segment === "number") out += `[${segment}]`;
+      else out += out.length > 0 ? `.${String(segment)}` : String(segment);
+    }
+    return out.length > 0 ? out : "(root)";
+  };
+  const issues = error.issues.slice(0, maxIssues).map((issue) => {
+    return `${formatPath(issue.path)}: ${issue.message}`;
+  });
+  const remaining = error.issues.length - issues.length;
+  if (remaining > 0) issues.push(`(+${remaining} more)`);
+  return issues.join("; ");
 }
 
 export class SchemaValidationError extends Error {
@@ -103,7 +167,7 @@ export function extractJsonFromText(raw: string): unknown {
 }
 
 export function parseReviewerResult(raw: string, expectedReviewer?: string): ReviewerResult {
-  const parsed = reviewerResultSchema.parse(extractJsonFromText(raw));
+  const parsed = reviewerResultSchema.parse(normalizeLocationSentinels(extractJsonFromText(raw)));
   if (expectedReviewer && parsed.reviewer !== expectedReviewer) {
     parsed.reviewer = expectedReviewer;
   }
@@ -196,7 +260,9 @@ function withAdvisoryTestCoalesce(parsed: AggregatorResult): AggregatorResult {
 }
 
 export function parseAggregatorResult(raw: string): AggregatorResult {
-  return withAdvisoryTestCoalesce(aggregatorResultSchema.parse(extractJsonFromText(raw)));
+  return withAdvisoryTestCoalesce(
+    aggregatorResultSchema.parse(normalizeLocationSentinels(extractJsonFromText(raw))),
+  );
 }
 
 export function fallbackAggregator(reviewers: ReviewerResult[]): AggregatorResult {

@@ -18,6 +18,8 @@ import {
   severityRank,
   SchemaValidationError,
   extractJsonFromText,
+  formatZodIssues,
+  normalizeLocationSentinels,
   type AggregatorResult,
   type ReviewerResult,
   type Severity,
@@ -1031,7 +1033,9 @@ async function runInternalEscalation(
         lastError = over;
         break;
       }
-      const parsed = internalEscalationResultSchema.parse(extractJsonFromText(result.text || result.stdout));
+      const parsed = internalEscalationResultSchema.parse(
+        normalizeLocationSentinels(extractJsonFromText(result.text || result.stdout)),
+      );
       const merged = mergeInternalEscalation(firstPass, parsed);
       deps.store.patchJob(job.id, {
         internal_escalation_state: "done",
@@ -1393,7 +1397,9 @@ function parseStoredFindings(raw: string | null): AggregatorResult["findings"] {
 
 function formatError(error: unknown): string {
   if (error instanceof SchemaValidationError) return `${error.message}: ${error.issues}`;
-  if (error instanceof ZodError) return `schema invalid: ${error.message}`;
+  // Bounded field-pathed summary; the raw Zod dump never reaches the UI
+  // (full output stays in raw_output for debugging).
+  if (error instanceof ZodError) return `schema invalid: ${formatZodIssues(error)}`;
   if (error instanceof Error) return error.message;
   return String(error);
 }
