@@ -113,8 +113,90 @@ export function parseReviewerResult(raw: string, expectedReviewer?: string): Rev
   return parsed;
 }
 
+const ADVISORY_TEST_COVERAGE_RE =
+  /\b(untested|missing tests?|no tests?( coverage)?|test coverage|without (a )?tests?|add (a |an )?tests?|lacks? tests?)\b/i;
+
+/** Low/info missing-coverage notes that must not become a cluster of GitHub inline threads. */
+export function isAdvisoryMissingTestFinding(finding: {
+  severity: string;
+  category?: string;
+  summary: string;
+  body?: string;
+  reviewers_agreed?: string[];
+}): boolean {
+  if (finding.severity !== "low" && finding.severity !== "info") return false;
+  const category = (finding.category ?? "").toLowerCase();
+  if (category === "tests" || category.startsWith("test")) return true;
+  if ((finding.reviewers_agreed ?? []).includes("tests")) return true;
+  return ADVISORY_TEST_COVERAGE_RE.test(`${finding.summary}\n${finding.body ?? ""}`);
+}
+
+function advisoryTestLocation(finding: { file?: string; line?: number; summary: string }): string {
+  if (finding.file && finding.line) return `${finding.file}:${finding.line} — ${finding.summary}`;
+  if (finding.file) return `${finding.file} — ${finding.summary}`;
+  return finding.summary;
+}
+
+function advisoryTestBody(items: AggregatorFinding[]): string {
+  const places = items.map((item) => `- ${advisoryTestLocation(item)}`);
+  const details = items.map((item) => item.body?.trim()).filter((text): text is string => Boolean(text));
+  return [
+    "Low/info missing-test notes combined into one comment. Not posted as inline threads.",
+    "",
+    "Places:",
+    ...places,
+    ...(details.length > 0 ? ["", ...details] : []),
+  ].join("\n");
+}
+
+/**
+ * Collapse low/info missing-test notes into a single finding with no file/line
+ * so `toInlineComments` skips them. Medium-or-higher test findings are left alone.
+ */
+export function coalesceAdvisoryTestFindings(findings: AggregatorFinding[]): AggregatorFinding[] {
+  const advisory: AggregatorFinding[] = [];
+  const rest: AggregatorFinding[] = [];
+  for (const finding of findings) {
+    if (isAdvisoryMissingTestFinding(finding)) advisory.push(finding);
+    else rest.push(finding);
+  }
+  if (advisory.length === 0) return findings;
+
+  const severity = advisory.some((finding) => finding.severity === "low") ? "low" : "info";
+  const confidence = Math.max(...advisory.map((finding) => finding.confidence ?? 0.5));
+  const reviewers = [...new Set(advisory.flatMap((finding) => finding.reviewers_agreed ?? []))];
+  const combined: AggregatorFinding = {
+    severity,
+    confidence,
+    category: "tests",
+    summary:
+      advisory.length === 1
+        ? advisory[0]!.summary
+        : "Missing tests (advisory): see listed locations",
+    body: advisoryTestBody(advisory),
+    reviewers_agreed: reviewers.length > 0 ? reviewers : ["tests"],
+  };
+  return [...rest, combined];
+}
+
+function withAdvisoryTestCoalesce(parsed: AggregatorResult): AggregatorResult {
+  const findings = coalesceAdvisoryTestFindings(parsed.findings);
+  const combined = findings.find(
+    (finding) =>
+      finding.category === "tests" &&
+      (finding.severity === "low" || finding.severity === "info") &&
+      !finding.file &&
+      !finding.line,
+  );
+  let summary = parsed.summary;
+  if (combined?.body && !summary.includes("Places:")) {
+    summary = `${summary.trim()}\n\n${combined.body}`;
+  }
+  return { ...parsed, findings, summary };
+}
+
 export function parseAggregatorResult(raw: string): AggregatorResult {
-  return aggregatorResultSchema.parse(extractJsonFromText(raw));
+  return withAdvisoryTestCoalesce(aggregatorResultSchema.parse(extractJsonFromText(raw)));
 }
 
 export function fallbackAggregator(reviewers: ReviewerResult[]): AggregatorResult {
@@ -138,7 +220,8 @@ export function fallbackAggregator(reviewers: ReviewerResult[]): AggregatorResul
     }
   }
   findings.sort((a, b) => severityRank(a.severity) - severityRank(b.severity));
-  if (findings.length === 0) {
+  const coalesced = coalesceAdvisoryTestFindings(findings);
+  if (coalesced.length === 0) {
     return {
       schema_version: 1,
       verdict: "clean",
@@ -146,7 +229,7 @@ export function fallbackAggregator(reviewers: ReviewerResult[]): AggregatorResul
       findings: [],
     };
   }
-  const blockers = findings.filter((finding) => finding.severity === "blocker" || finding.severity === "high");
+  const blockers = coalesced.filter((finding) => finding.severity === "blocker" || finding.severity === "high");
   const summaryLines = [
     "Maomao aggregated specialist reviewer evidence for this exact commit.",
     "",
@@ -154,16 +237,25 @@ export function fallbackAggregator(reviewers: ReviewerResult[]): AggregatorResul
       ? `**${blockers.length}** high-severity finding(s) retained after deduplication.`
       : "No blocker/high findings retained; remaining notes are advisory.",
     "",
-    ...findings.slice(0, 8).map((finding) => {
+    ...coalesced.slice(0, 8).map((finding) => {
       const loc = finding.file ? ` \`${finding.file}${finding.line ? `:${finding.line}` : ""}\`` : "";
       return `- **${finding.severity}**${loc}: ${finding.summary}`;
     }),
   ];
+  const combined = coalesced.find(
+    (finding) =>
+      finding.category === "tests" &&
+      (finding.severity === "low" || finding.severity === "info") &&
+      finding.body?.includes("Places:"),
+  );
+  if (combined?.body) {
+    summaryLines.push("", combined.body);
+  }
   return {
     schema_version: 1,
     verdict: "comment",
     summary: summaryLines.join("\n"),
-    findings,
+    findings: coalesced,
   };
 }
 

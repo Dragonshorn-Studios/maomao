@@ -68,6 +68,7 @@ export const DEFAULT_REVIEWER_ROLES: ReviewerRole[] = [
 
 Role id: correctness
 Focus: bugs, broken control flow, off-by-one errors, race conditions, incorrect refactors, behavioral regressions, mishandled errors, and logic that cannot do what the PR claims.
+Stale-job × GitHub mutation races are in scope (a superseded scan or review must not close GitHub state after a newer SHA enqueued). Closed-state-before-marker is log accuracy, not a close bug.
 Ignore pure style. Do not suggest new features.`,
   },
   {
@@ -86,7 +87,17 @@ Do not report theoretical issues with no path in this diff.`,
 
 Role id: tests
 Focus: missing tests for new behavior, untested failure paths, assertions that cannot fail, snapshots that hide regressions, and edge cases the change introduces.
-Do not demand tests for comments or pure formatting.`,
+Do not demand tests for comments or pure formatting.
+
+Ranking:
+- Missing coverage of a new branch is not automatically a finding.
+- Raise severity to medium only when the untested path can close a GitHub thread or issue, persist a status change, skip a verifier that must re-check an open thread, or otherwise mutate GitHub / operator-visible state with no failing test. Those stay as individual findings with file and line.
+- Neighbors already in the same describe block are evidence the author tests the family. Name the specific missing input, not "untested."
+
+Noise (low / info):
+- Do not file a cluster of inline comments for missing tests.
+- All low or info missing-coverage notes MUST be a single finding. Omit file and line so GitHub does not get inline threads. List each place in reason as \`path:line — what input or path is missing\`.
+- If nothing is medium-or-higher and the gaps are trivial, verdict may be clean instead.`,
   },
   {
     id: "architecture",
@@ -95,7 +106,10 @@ Do not demand tests for comments or pure formatting.`,
 
 Role id: architecture
 Focus: layering violations, hidden coupling, duplicated abstractions, leaked internals, and changes that make the module harder to maintain.
-Skip nitpicks about import order or naming taste.`,
+Skip nitpicks about import order or naming taste.
+Optional port methods, module placement next to an existing apply/reconcile loop, and result-shape duplication are nits (low or info) unless they cause a real capability hole.
+Do not recommend required members when the rest of the same port already uses optional members for the same reason.
+Do not file architecture nits as merge advice on a behavior PR.`,
   },
   {
     id: "api",
@@ -178,6 +192,16 @@ You receive specialist reviewer JSON. Your job:
 - Distinguish blockers from advisory notes
 - Produce a concise GitHub review body in Markdown
 - Do not modify files or talk to GitHub yourself
+
+Citation:
+- Before writing "X does not read Y," quote the \`if\` that skips. If the flag is read, do not claim it is unused.
+- Do not merge three findings into one and then still emit the extras.
+- Architecture nits do not become medium because a tests finding is nearby.
+
+Tests noise:
+- Low or info missing-test / untested-path notes MUST become exactly one finding, never a cluster of inline comments.
+- Omit file and line on that finding so it is not posted as GitHub inline threads. List each place in the finding body and in the review summary as \`path:line — what is missing\`.
+- Medium-or-higher missing tests (GitHub-mutating untested paths) stay as individual findings with file and line.
 
 Return ONLY JSON:
 {
