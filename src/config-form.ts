@@ -151,8 +151,11 @@ export function applyProfileAction(
   if (action.kind === "remove") {
     return { ...values, reviewers: values.reviewers.filter((_, index) => index !== action.index) };
   }
+  // Both indices must exist: an out-of-range move (e.g. up:1 on a one-row
+  // form) is a no-op, never a swap that writes undefined into the array.
   const swap = (a: number, b: number): ProfileFormValues => {
-    if (b < 0 || b >= values.reviewers.length) return values;
+    const last = values.reviewers.length - 1;
+    if (a < 0 || b < 0 || a > last || b > last) return values;
     const reviewers = [...values.reviewers];
     [reviewers[a], reviewers[b]] = [reviewers[b]!, reviewers[a]!];
     return { ...values, reviewers };
@@ -221,6 +224,12 @@ export function profileFormToDefinition(
     formIndices.push(formIndex);
     reviewers.push(entry);
   });
+  // The schema has no reviewer minimum (activation checks it there), so the
+  // editor enforces it here — AFTER compaction: a form whose only row is
+  // fully blank must not persist a reviewers: [] draft.
+  if (reviewers.length === 0 && !errors.form) {
+    errors.form = "At least one reviewer row is required.";
+  }
   const definition: Record<string, unknown> = {
     name: values.name,
     reviewers,

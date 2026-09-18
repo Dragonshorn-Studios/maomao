@@ -3548,3 +3548,66 @@ describe("structured profile editor review fixes", () => {
     expect(store.configs.listRevisions().length).toBe(1);
   });
 });
+
+describe("structured editor review-bot round-2 fixes", () => {
+  const oauthEnv = {
+    UI_SESSION_SECRET: "session-secret-for-tests",
+    GITHUB_OAUTH_CLIENT_ID: "cid",
+    GITHUB_OAUTH_CLIENT_SECRET: "csecret",
+    MAOMAO_ADMIN_GITHUB_IDS: "1001",
+    MAOMAO_PUBLIC_URL: "https://maomao.example",
+  };
+
+  async function operatorCsrf3(app: ReturnType<typeof createApp>) {
+    const session = await operatorSession(app);
+    const page = await app.request("/config", { headers: { cookie: session } });
+    const { csrfCookie, csrfToken } = await csrfArtifacts(page);
+    return { cookie: `${session}; ${csrfCookie}`, csrfToken };
+  }
+
+  it("does not persist a reviewers: [] draft from a single blank row", async () => {
+    const { app, store } = testApp(oauthEnv, undefined, mockOauthFetch({ id: 1001, login: "octocat" }));
+    const { cookie, csrfToken } = await operatorCsrf3(app);
+    const response = await app.request("/config/drafts", {
+      method: "POST",
+      headers: { cookie, "content-type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({
+        editor: "structured",
+        action: "save",
+        csrf_token: csrfToken,
+        name: "blank-row",
+        reviewer_count: "1",
+        reviewer_role_0: "",
+        reviewer_model_0: "",
+        reviewer_timeout_0: "",
+      }).toString(),
+    });
+    expect(response.status).toBe(400);
+    const html = await response.text();
+    expect(html).toContain("At least one reviewer row is required");
+    expect(store.configs.listRevisions().length).toBe(0);
+  });
+
+  it("answers an out-of-range move with a 200 re-render, not a 500", async () => {
+    const { app, store } = testApp(oauthEnv, undefined, mockOauthFetch({ id: 1001, login: "octocat" }));
+    const { cookie, csrfToken } = await operatorCsrf3(app);
+    const before = store.configs.listRevisions().length;
+    const response = await app.request("/config/drafts", {
+      method: "POST",
+      headers: { cookie, "content-type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({
+        editor: "structured",
+        action: "up:1",
+        csrf_token: csrfToken,
+        name: "one-row",
+        reviewer_count: "1",
+        reviewer_role_0: "correctness",
+      }).toString(),
+    });
+    expect(response.status).toBe(200);
+    const html = await response.text();
+    // The row is intact and still selected — no undefined blew up the render.
+    expect(html).toContain('value="correctness" selected');
+    expect(store.configs.listRevisions().length).toBe(before);
+  });
+});

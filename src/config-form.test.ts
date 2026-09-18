@@ -233,3 +233,27 @@ describe("review-pass fixes", () => {
     expect(back.definition).toEqual(definition);
   });
 });
+
+describe("review-bot round-2 medium fixes", () => {
+  it("rejects a save whose only reviewer row is fully blank (no reviewers: [] drafts)", () => {
+    const result = profileFormToDefinition(
+      decodeProfileForm(formBody({ reviewer_count: "1", reviewer_role_0: "" })),
+    );
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.errors.form).toContain("At least one reviewer row is required");
+  });
+
+  it("treats an out-of-range move as a no-op, never an undefined swap", () => {
+    const oneRow = {
+      ...initialProfileFormValues(),
+      reviewers: [{ role: "correctness", model: "", timeoutSeconds: "" }],
+    };
+    const moved = applyProfileAction(oneRow, { kind: "up", index: 1 }, ["correctness"]);
+    expect(moved).toEqual(oneRow);
+    const movedDown = applyProfileAction(oneRow, { kind: "down", index: 5 }, ["correctness"]);
+    expect(movedDown).toEqual(oneRow);
+    // Every row stays a real value — a render would never see undefined.
+    expect(moved.reviewers.every((row) => row != null && typeof row.role === "string")).toBe(true);
+  });
+});

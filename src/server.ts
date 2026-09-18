@@ -837,9 +837,6 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
             seen.set(row.role, index);
           }
         });
-        if (values.reviewers.length === 0) {
-          errors.form = "At least one reviewer row is required.";
-        }
       }
     }
     // Structural actions and failures re-render the full page; a noop click
