@@ -1,7 +1,7 @@
 import type { Config } from "../config.js";
 import type { JobStore, JobRow, ReviewerRunRow, NewJobInput } from "./store.js";
 import type { GithubPort } from "../github/client.js";
-import { buildReviewBody, findExistingReview, toInlineComments, inlineCommentFingerprints } from "../github/client.js";
+import { buildReviewBody, findExistingReview, selectInlineComments, inlineCommentFingerprints } from "../github/client.js";
 import type { CheckoutPort } from "../checkout.js";
 import {
   aggregatorUsagePersistence,
@@ -251,7 +251,7 @@ async function runJob(deps: PipelineDeps, jobId: number, signal: AbortSignal): P
     store.patchJob(jobId, { aggregator_normalized: JSON.stringify(aggregated, null, 2) });
 
     store.setJobState(jobId, "publishing", { aggregator_state: "done" });
-    const posted = await publishReview(deps, job, aggregated, parsedReviewers.length, snapshot, signal);
+    const posted = await publishReview(deps, job, aggregated, parsedReviewers.length, snapshot, diff, signal);
     const afterPublish = store.getJob(jobId) ?? job;
     if (posted) {
       store.patchJob(jobId, { github_review_id: posted.id, github_review_url: posted.url });
@@ -1079,6 +1079,7 @@ async function publishReview(
   aggregated: AggregatorResult,
   reviewerCount: number,
   snapshot: ReconciliationSnapshot,
+  diff: string,
   signal: AbortSignal,
 ): Promise<{ id: string; url: string; postedFingerprints: string[] } | undefined> {
   if (deps.store.isStale(job.id)) return undefined;
@@ -1137,14 +1138,25 @@ async function publishReview(
 
   deps.store.log(job.id, `Review event: ${decision.event} (${decision.reason})`);
 
+  const { comments, demoted } = selectInlineComments(publishable, {
+    limit: deps.config.maxInlineComments,
+    headSha: job.head_sha,
+    diff,
+  });
+  for (const entry of demoted) {
+    deps.store.log(
+      job.id,
+      `Finding not shown inline: ${entry.finding.file}:${entry.finding.line} is not in the diff (${entry.reason}); listing it in the review body`,
+      "warn",
+    );
+  }
   const body = buildReviewBody({
     headSha: job.head_sha,
     summary: aggregated.summary,
     findingsCount,
     reviewerCount,
+    demoted,
   });
-  const comments = toInlineComments(publishable, deps.config.maxInlineComments, job.head_sha);
-  const postedFingerprints = inlineCommentFingerprints(comments);
   // Re-check staleness after the decision: an APPROVE must never land on a superseded SHA.
   throwIfStale(deps.store, job.id, signal);
   const posted = await deps.github.createCommentReview({
@@ -1163,6 +1175,9 @@ async function publishReview(
     review_event: decision.event,
     review_event_reason: decision.reason,
   });
+  // Fingerprints of what GitHub actually accepted, not what we intended: the client
+  // degrades to a body-only review when inline locations are rejected.
+  const postedFingerprints = inlineCommentFingerprints(posted.postedComments ?? comments);
   return { ...posted, postedFingerprints };
 }
 
