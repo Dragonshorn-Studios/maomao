@@ -895,6 +895,33 @@ details summary { cursor: pointer; color: var(--ink-muted); }
   to { transform: rotate(360deg); }
 }
 
+/* Pancake easter egg: chip next to the home heading plus the
+   "maomao earned a pancake" drop animation, played when a reload
+   after an SSE event reveals a newly completed job. */
+.pancake-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  padding: 0.15rem 0.6rem;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  font-size: 0.8rem;
+  color: var(--muted, inherit);
+  vertical-align: middle;
+}
+.pancake-chip svg { width: 16px; height: 16px; flex: none; }
+.pancake-chip.nom {
+  border-color: var(--working);
+  color: inherit;
+}
+@keyframes pancake-drop {
+  0% { transform: translateY(-1.2em) scale(0.5); opacity: 0; }
+  45% { transform: translateY(0.12em) scale(1.08); opacity: 1; }
+  70% { transform: translateY(-0.22em) scale(1); }
+  100% { transform: translateY(0) scale(1); opacity: 1; }
+}
+.pancake-chip.nom svg { animation: pancake-drop 0.9s ease-in-out; }
+
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after {
     animation-duration: 0.01ms !important;

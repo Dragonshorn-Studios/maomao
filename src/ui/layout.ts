@@ -75,6 +75,35 @@ const APPEARANCE_BOOT = `
 })();
 `.trim();
 
+/**
+ * Pancake easter egg trigger. The home page renders a `.pancake-chip` carrying
+ * the latest completed job id; a reload (often fired by the SSE handler below)
+ * that reveals a newer id than the localStorage high-water mark plays the
+ * drop animation once, then records the id. No chip (plain flavor, other
+ * pages) means no script work.
+ */
+const PANCAKE_BOOT = `
+(function () {
+  function boot() {
+    var chip = document.querySelector(".pancake-chip[data-pancake-latest]");
+    if (!chip || chip.dataset.pancakeCount === "0") return;
+    var latest = Number(chip.getAttribute("data-pancake-latest")) || 0;
+    var KEY = "maomao-pancakes";
+    var seen = 0;
+    try { seen = Number(localStorage.getItem(KEY)) || 0; } catch {}
+    if (latest <= seen) return;
+    try { localStorage.setItem(KEY, String(latest)); } catch {}
+    chip.classList.add("nom");
+    setTimeout(function () { chip.classList.remove("nom"); }, 2000);
+  }
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", boot);
+  } else {
+    boot();
+  }
+})();
+`.trim();
+
 export function layout(title: string, body: string, options: PageOptions = {}): string {
   const live = options.live !== false;
   const logout = options.showLogout
@@ -138,6 +167,7 @@ export function layout(title: string, body: string, options: PageOptions = {}): 
   <link rel="stylesheet" href="${THEME_HREF}"/>
   <script src="${PIERRE_DIFFS_HREF}" defer></script>
   <script>${APPEARANCE_BOOT}</script>
+  <script>${PANCAKE_BOOT}</script>
 </head>
 <body>
   <a class="skip" href="#main">Skip to content</a>

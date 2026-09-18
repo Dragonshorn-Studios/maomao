@@ -381,6 +381,20 @@ export class JobStore {
   }
 
   /**
+   * Pancake easter egg: derived, not stored — every completed job is one
+   * pancake, counting straight off the jobs table so restarts and retries
+   * never double-count. `latestId` is the newest completed job id (0 if none);
+   * the UI compares it against a localStorage high-water mark to decide when
+   * to play the animation.
+   */
+  pancakeStats(): { count: number; latestId: number } {
+    const row = this.db
+      .prepare(`SELECT COUNT(*) AS count, MAX(id) AS latest FROM jobs WHERE state = 'completed'`)
+      .get() as { count: number; latest: number | null };
+    return { count: row.count, latestId: row.latest ?? 0 };
+  }
+
+  /**
    * Keyset pagination over the job list, newest first. Cursors are exclusive
    * job ids: `before` pages older than that id, `after` pages newer. A +1
    * probe row (plus an existence check for the opposite edge) derives

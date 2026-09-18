@@ -32,7 +32,7 @@ import {
   usageIncompleteCopy,
   usageReportedCopy,
 } from "./copy.js";
-import { roleGlyph } from "./glyphs.js";
+import { pancakeMark, roleGlyph } from "./glyphs.js";
 import { TYPEAHEAD_HREF } from "./typeahead.js";
 import { csrfInput, layout, type PageOptions, type UiIdentity } from "./layout.js";
 import {
@@ -105,10 +105,11 @@ export function renderHome(jobs: JobRow[], store: JobStore, options: PageOptions
     .map((job) => renderQueueCard(job, jobMetrics(job, store), options.uiFlavor, options.csrfToken))
     .join("");
   const paginationNav = renderJobsPagination(jobs, options.pagination);
+  const pancakeChip = pancakeChipFor(store, options.uiFlavor);
 
   const body = `
     <h1>Review jobs</h1>
-    <p class="lede">Recent pull request reviews. Each job is anchored to an exact head SHA.</p>
+    <p class="lede">Recent pull request reviews. Each job is anchored to an exact head SHA.${pancakeChip ? ` ${pancakeChip}` : ""}</p>
     ${options.notice ? `<p class="notice" role="status">${escapeHtml(options.notice)}</p>` : ""}
     ${options.error ? `<p class="error" role="alert">${escapeHtml(options.error)}</p>` : ""}
     <form class="trigger" method="post" action="/reviews">
@@ -129,6 +130,20 @@ export function renderHome(jobs: JobRow[], store: JobStore, options: PageOptions
     }
     ${paginationNav}`;
   return layout("Maomao", body, options);
+}
+
+/**
+ * Pancake easter egg chip for the home page: one pancake per completed
+ * review job, apothecary flavor only. Empty at zero completions so the
+ * page stays quiet until maomao has actually earned a treat. The chip
+ * carries `data-pancake-latest` for the client-side animation trigger.
+ */
+function pancakeChipFor(store: JobStore, flavor?: UiFlavor): string {
+  if ((flavor ?? "apothecary") !== "apothecary") return "";
+  const { count, latestId } = store.pancakeStats();
+  if (count === 0) return "";
+  const label = count === 1 ? "1 pancake earned" : `${count} pancakes earned`;
+  return `<span class="pancake-chip" data-pancake-latest="${latestId}" title="Maomao earns a pancake for every completed review">${pancakeMark()} ${label}</span>`;
 }
 
 /**
