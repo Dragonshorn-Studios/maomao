@@ -921,13 +921,16 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
     if (!actor) return configWriteDenied(c);
     const bodyPreview = await c.req.parseBody();
     const revisionId = Number(c.req.param("id"));
-    const expectedEditSeq = Number(bodyPreview.expected_edit_seq ?? -1);
+    const rawEditSeq = Number(bodyPreview.expected_edit_seq ?? -1);
     if (bodyPreview.editor === "structured") {
       const existing = ctx.store.configs.getRevision(revisionId);
       if (!existing || existing.status !== "draft") {
         return renderConfigWithError(c, "Draft not found.", 404);
       }
-      const editSeq = Number.isFinite(expectedEditSeq) ? expectedEditSeq : existing.editSeq;
+      // A malformed hidden field (NaN binds as NULL in SQLite and never
+      // matches) is treated as the sequence the form was rendered with,
+      // rather than a misleading concurrency conflict.
+      const editSeq = Number.isFinite(rawEditSeq) ? rawEditSeq : existing.editSeq;
       const outcome = await handleProfileForm(c, bodyPreview, {
         id: revisionId,
         editSeq,
@@ -937,7 +940,7 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
         id: revisionId,
         definition: outcome.definition,
         note: outcome.note,
-        expectedEditSeq,
+        expectedEditSeq: editSeq,
         updatedBy: actor.login,
       });
       if ("error" in result && result.error === "conflict") {
@@ -980,10 +983,12 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
     }
     const parsed = parseDefinition(typeof bodyPreview.definition === "string" ? bodyPreview.definition : undefined);
     if (!parsed.ok) return renderConfigWithError(c, parsed.error, 400);
+    const rawJsonExisting = ctx.store.configs.getRevision(revisionId);
+    const rawJsonEditSeq = Number.isFinite(rawEditSeq) ? rawEditSeq : rawJsonExisting?.editSeq ?? -1;
     const result = ctx.store.configs.updateDraft({
       id: revisionId,
       definition: parsed.definition,
-      expectedEditSeq,
+      expectedEditSeq: rawJsonEditSeq,
       updatedBy: actor.login,
     });
     if ("error" in result && result.error === "conflict") {

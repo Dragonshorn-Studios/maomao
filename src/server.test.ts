@@ -3611,3 +3611,98 @@ describe("structured editor review-bot round-2 fixes", () => {
     expect(store.configs.listRevisions().length).toBe(before);
   });
 });
+
+describe("structured editor review-bot low fixes", () => {
+  const oauthEnv = {
+    UI_SESSION_SECRET: "session-secret-for-tests",
+    GITHUB_OAUTH_CLIENT_ID: "cid",
+    GITHUB_OAUTH_CLIENT_SECRET: "csecret",
+    MAOMAO_ADMIN_GITHUB_IDS: "1001",
+    MAOMAO_PUBLIC_URL: "https://maomao.example",
+  };
+
+  async function operatorCsrf4(app: ReturnType<typeof createApp>) {
+    const session = await operatorSession(app);
+    const page = await app.request("/config", { headers: { cookie: session } });
+    const { csrfCookie, csrfToken } = await csrfArtifacts(page);
+    return { cookie: `${session}; ${csrfCookie}`, csrfToken };
+  }
+
+  it("associates every row error with the real paragraph id and shows all messages", async () => {
+    const { app } = testApp(oauthEnv, undefined, mockOauthFetch({ id: 1001, login: "octocat" }));
+    const { cookie, csrfToken } = await operatorCsrf4(app);
+    // Both a bad model and a bad timeout on the same row.
+    const response = await app.request("/config/drafts", {
+      method: "POST",
+      headers: { cookie, "content-type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({
+        editor: "structured",
+        action: "save",
+        csrf_token: csrfToken,
+        name: "row-errors",
+        reviewer_count: "2",
+        reviewer_role_0: "correctness",
+        reviewer_role_1: "nobody",
+        reviewer_model_0: "no slash model",
+        reviewer_timeout_0: "-5",
+      }).toString(),
+    });
+    expect(response.status).toBe(400);
+    const html = await response.text();
+    // Both messages render (previously only the first per-row error showed).
+    expect(html).toContain("provider/model");
+    expect(html).toContain("positive number of seconds");
+    // The rendered id every control points at actually exists…
+    expect(html).toMatch(/id="reviewer_row_0-error"[^]*aria-describedby="reviewer_row_0-error"/);
+    // …and the never-rendered reviewer_role_N-error ids are gone from the DOM.
+    expect(html).not.toContain('aria-describedby="reviewer_role_1-error"');
+    expect(html).not.toContain('aria-describedby="reviewer_role_0-error"');
+  });
+
+  it("treats a malformed expected_edit_seq as the rendered sequence, not a conflict", async () => {
+    const { app, store } = testApp(oauthEnv, undefined, mockOauthFetch({ id: 1001, login: "octocat" }));
+    const created = store.configs.createDraft({
+      definition: { name: "default", reviewers: [{ role: "correctness" }], minPublishableSeverity: "info" },
+      createdBy: "octocat",
+    });
+    if ("error" in created) throw new Error("draft failed");
+    const { cookie, csrfToken } = await operatorCsrf4(app);
+    const response = await app.request(`/config/drafts/${created.revision.id}`, {
+      method: "POST",
+      headers: { cookie, "content-type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({
+        editor: "structured",
+        action: "save",
+        csrf_token: csrfToken,
+        expected_edit_seq: "abc",
+        name: "default",
+        reviewer_count: "2",
+        reviewer_role_0: "correctness",
+        reviewer_role_1: "security",
+      }).toString(),
+    });
+    // The malformed hidden field falls back to the sequence the form was
+    // rendered with — the save succeeds instead of a misleading 409.
+    expect(response.status).toBe(302);
+    expect(response.headers.get("location")).toContain("notice=draft-saved");
+    expect(store.configs.getRevision(created.revision.id)?.definition.reviewers.map((r) => r.role)).toEqual([
+      "correctness",
+      "security",
+    ]);
+    // A genuinely stale numeric seq still conflicts.
+    const stale = await app.request(`/config/drafts/${created.revision.id}`, {
+      method: "POST",
+      headers: { cookie, "content-type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({
+        editor: "structured",
+        action: "save",
+        csrf_token: csrfToken,
+        expected_edit_seq: "0",
+        name: "default",
+        reviewer_count: "1",
+        reviewer_role_0: "correctness",
+      }).toString(),
+    });
+    expect(stale.status).toBe(409);
+  });
+});

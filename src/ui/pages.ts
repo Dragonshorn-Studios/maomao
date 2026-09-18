@@ -1077,7 +1077,11 @@ export function renderProfileForm(
       const roleError = errors?.[`reviewer_role_${index}`];
       const modelError = errors?.[`reviewer_model_${index}`];
       const timeoutError = errors?.[`reviewer_timeout_${index}`];
-      const rowError = roleError ?? modelError ?? timeoutError;
+      // Every present row error renders; all three controls point their
+      // aria-describedby at this one paragraph's id.
+      const rowErrors = [roleError, modelError, timeoutError].filter(
+        (message): message is string => Boolean(message),
+      );
       // up:0 / down:last decode to noop actions; rendering them invites a
       // click that does nothing. Boundary rows simply have fewer buttons.
       const upButton =
@@ -1090,9 +1094,9 @@ export function renderProfileForm(
           : "";
       return `<fieldset class="profile-reviewer">
         <legend>Reviewer ${index + 1}</legend>
-        ${rowError ? `<p class="error" role="alert" id="${escapeHtml(`reviewer_row_${index}`)}-error">${escapeHtml(rowError)}</p>` : ""}
+        ${rowErrors.length > 0 ? `<p class="error" role="alert" id="${escapeHtml(`reviewer_row_${index}`)}-error">${rowErrors.map((message) => escapeHtml(message)).join("<br/>")}</p>` : ""}
         <label>Role
-          <select name="${key("role")}" ${invalidAttr(key("role"))} ${describedBy(key("role"))}>${roleOptions(row.role)}</select>
+          <select name="${key("role")}" ${roleError ? `aria-invalid="true" aria-describedby="reviewer_row_${index}-error"` : ""}>${roleOptions(row.role)}</select>
         </label>
         <label>Model override (optional; provider/model)
           <input list="profile-model-catalog" name="${key("model")}" value="${escapeHtml(row.model)}" placeholder="provider/model"
