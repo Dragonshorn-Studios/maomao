@@ -23,6 +23,8 @@ export interface PageOptions {
   /** Latest reviewed head SHA for this pull request, for stale-finding detection. */
   prHeadSha?: string;
   uiFlavor?: UiFlavor;
+  /** Pagination state; only the paginated home renders (including the POST /reviews error re-render) pass it. */
+  pagination?: { hasOlder: boolean; hasNewer: boolean };
 }
 
 export function csrfInput(token: string | undefined): string {

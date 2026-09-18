@@ -38,7 +38,7 @@ function testApp(
     },
     abortMany() {},
   } as unknown as JobQueue;
-  const app = createApp({ config, store, queue, github, startedAt: Date.now(), oauthFetch, ...contextExtras });
+  const app = createApp({ config, store, queue, github, startedAt: Date.now(), oauthFetch, env: { ...env }, ...contextExtras });
   return { app, store, enqueued, webhookSecret };
 }
 
@@ -2918,4 +2918,791 @@ describe("manual cancel and dequeue hardening", () => {
       body: `csrf_token=${encodeURIComponent(csrfToken)}`,
     });
   }
+});
+
+describe("home queue pagination", () => {
+  function seededApp(count: number) {
+    const { app, store } = testApp();
+    for (let index = 0; index < count; index += 1) {
+      store.enqueue({
+        repoFullName: "acme/widgets",
+        repoOwner: "acme",
+        repoName: "widgets",
+        installationId: 1,
+        prNumber: index + 1,
+        prTitle: `job ${index + 1}`,
+        prBody: "",
+        prHtmlUrl: "",
+        prAuthor: "dev",
+        baseSha: "b",
+        headSha: `sha-${index + 1}`,
+        baseRef: "main",
+        headRef: "f",
+        reviewers: [],
+      });
+    }
+    return { app, store };
+  }
+
+  it("serves the newest page first and paginates through the whole history", async () => {
+    const { app } = seededApp(60);
+    const first = await app.request("/");
+    const firstHtml = await first.text();
+    expect(first.status).toBe(200);
+    expect(firstHtml).toContain('rel="next"');
+    expect(firstHtml).not.toContain('rel="prev"');
+    expect(firstHtml).not.toContain("Viewing older jobs");
+    // Default page size 25: the 61st... the 26th-newest job must not be on page 1.
+    expect(firstHtml).toContain("job 60");
+    expect(firstHtml).not.toContain("job 35");
+    expect(firstHtml).not.toContain("job 34");
+
+    const beforeMatch = firstHtml.match(/href="\/\?before=(\d+)"/);
+    expect(beforeMatch?.[1]).toBeTruthy();
+    const second = await app.request(`/?before=${beforeMatch![1]}`);
+    const secondHtml = await second.text();
+    expect(secondHtml).toContain("job 34");
+    expect(secondHtml).not.toContain("job 60");
+    expect(secondHtml).toContain('rel="prev"');
+    expect(secondHtml).toContain("Viewing older jobs");
+  });
+
+  it("falls back to the first page for invalid cursors instead of erroring", async () => {
+    const { app } = seededApp(3);
+    for (const bad of ["abc", "-5", "1e9", "0", "12.5", "999999999999999999999999"]) {
+      const response = await app.request(`/?before=${encodeURIComponent(bad)}`);
+      expect(response.status).toBe(200);
+      const html = await response.text();
+      expect(html).toContain("job 3");
+      expect(html).not.toContain("Older jobs</a>");
+    }
+    // A before cursor beyond the newest id serves the newest page too.
+    const beyond = await app.request("/?before=999999");
+    expect(beyond.status).toBe(200);
+    expect((await beyond.text()).replace(/<[^>]+>/g, "")).toContain("job 3");
+  });
+
+  it("no longer renders an unbounded 75-job list: only the page is loaded", async () => {
+    const { app, store } = seededApp(90);
+    const html = await (await app.request("/")).text();
+    expect(html).toContain("job 90");
+    expect(html).not.toContain("job 65");
+    // The full history stays reachable through pagination.
+    let cursor: { before?: number } = {};
+    let oldest = Number.POSITIVE_INFINITY;
+    for (;;) {
+      const page = store.listJobsPage(cursor);
+      oldest = Math.min(oldest, ...page.jobs.map((job) => job.pr_number));
+      if (!page.hasOlder) break;
+      cursor = { before: page.jobs[page.jobs.length - 1]!.id };
+    }
+    expect(oldest).toBe(1);
+  });
+
+  it("renders an empty first page without navigation dead ends", async () => {
+    const { app } = seededApp(0);
+    const response = await app.request("/");
+    expect(response.status).toBe(200);
+    const html = await response.text();
+    expect(html).toContain("Nothing is under examination");
+    expect(html).toContain("aria-disabled=\"true\"");
+  });
+});
+
+describe("home queue pagination review fixes", () => {
+  function seededApp2(count: number) {
+    const { app, store } = testApp();
+    for (let index = 0; index < count; index += 1) {
+      store.enqueue({
+        repoFullName: "acme/widgets",
+        repoOwner: "acme",
+        repoName: "widgets",
+        installationId: 1,
+        prNumber: index + 1,
+        prTitle: `job ${index + 1}`,
+        prBody: "",
+        prHtmlUrl: "",
+        prAuthor: "dev",
+        baseSha: "b",
+        headSha: `sha-${index + 1}`,
+        baseRef: "main",
+        headRef: "f",
+        reviewers: [],
+      });
+    }
+    return { app, store };
+  }
+
+  it("follows the Newer jobs link back up and treats a stale after cursor as the first page", async () => {
+    const { app } = seededApp2(60);
+    const firstHtml = await (await app.request("/")).text();
+    const beforeMatch = firstHtml.match(/href="\/\?before=(\d+)"/);
+    const secondHtml = await (await app.request(`/?before=${beforeMatch![1]}`)).text();
+    const afterMatch = secondHtml.match(/href="\/\?after=(\d+)"/);
+    expect(afterMatch?.[1]).toBeTruthy();
+    const up = await (await app.request(`/?after=${afterMatch![1]}`)).text();
+    expect(up).toContain("job 60");
+    expect(up).toContain('rel="next"');
+    expect(up).not.toContain('rel="prev"');
+    // A stale after bookmark beyond the newest id falls back to the first page.
+    const stale = await app.request("/?after=999999");
+    expect(stale.status).toBe(200);
+    expect((await stale.text()).replace(/<[^>]+>/g, "")).toContain("That page no longer exists");
+  });
+
+  it("renders the final partial page with a disabled Older link and live Newer link", async () => {
+    const { app } = seededApp2(30);
+    const firstHtml = await (await app.request("/")).text();
+    const beforeMatch = firstHtml.match(/href="\/\?before=(\d+)"/);
+    const lastHtml = await (await app.request(`/?before=${beforeMatch![1]}`)).text();
+    expect(lastHtml).toContain("job 5");
+    expect(lastHtml).toContain("job 1");
+    expect(lastHtml).toContain('aria-disabled="true"');
+    expect(lastHtml).toContain('rel="prev"');
+    expect(lastHtml).toContain("Viewing older jobs");
+    expect(lastHtml).not.toContain('rel="next"');
+  });
+
+  it("keeps the pagination nav on the POST /reviews error re-render", async () => {
+    const { app } = seededApp2(40);
+    const response = await app.request("/reviews", {
+      method: "POST",
+      headers: { "content-type": "application/x-www-form-urlencoded" },
+      body: "url=not-a-url",
+    });
+    expect(response.status).toBe(400);
+    const html = await response.text();
+    expect(html).toContain('class="jobs-pagination"');
+    expect(html).toContain('rel="next"');
+    expect(html).not.toContain("job 15");
+  });
+});
+
+describe("effective configuration summary", () => {
+  const gateEnv = { UI_PASSWORD: "hunter2", UI_SESSION_SECRET: "session-secret-for-tests" };
+  const canaryEnv = {
+    UI_PASSWORD: "PASSWORD-CANARY",
+    UI_SESSION_SECRET: "SESSION-SECRET-CANARY",
+    GITHUB_APP_PRIVATE_KEY: "PRIVATE-KEY-CANARY-VALUE",
+    GITHUB_WEBHOOK_SECRET: "WEBHOOK-SECRET-CANARY",
+    GITHUB_OAUTH_CLIENT_SECRET: "OAUTH-SECRET-CANARY",
+    OPENCODE_REVIEWER_MODEL: "test/reviewer-env",
+    POST_EMPTY_REVIEW: "true",
+  };
+
+  async function configPage(app: ReturnType<typeof createApp>): Promise<string> {
+    const { session } = await loginSession(app);
+    const response = await app.request("/config", { headers: { cookie: session } });
+    expect(response.status).toBe(200);
+    return response.text();
+  }
+
+  function sectionFor(html: string, label: string): string {
+    const match = html.match(new RegExp(`<dt>[^<]*${label}[\\s\\S]{0,200}?</dd>`));
+    expect(match, `row for ${label}`).toBeTruthy();
+    return match![0];
+  }
+
+  it("renders the effective-config section with source badges", async () => {
+    const { app } = testApp(gateEnv);
+    const html = await configPage(app);
+    expect(html).toContain("Effective configuration");
+    expect(sectionFor(html, "Reviewer model")).toContain(">Default</span>");
+    expect(sectionFor(html, "Allow APPROVE verdicts")).toContain(">Default</span>");
+  });
+
+  it("labels environment-backed values as Environment", async () => {
+    const env = {
+      ...gateEnv,
+      OPENCODE_REVIEWER_MODEL: "test/reviewer-env",
+      POST_EMPTY_REVIEW: "true",
+    };
+    const { app } = testApp(env);
+    const html = await configPage(app);
+    // The source badge sits on the <dt> (label) row, above the value row.
+    expect(sectionFor(html, "Reviewer model")).toContain(">Environment</span>");
+  });
+
+  it("shows the active profile revision as the source for profile-backed values", async () => {
+    const { app, store } = testApp(gateEnv);
+    // The active revision must be named "default" — that is the name the
+    // resolution point queries.
+    const created = store.configs.createDraft({
+      definition: { name: "default", reviewers: [{ role: "correctness" }], minPublishableSeverity: "low" },
+      createdBy: "octocat",
+    });
+    if ("error" in created) throw new Error(created.issues.join("; "));
+    const activated = store.configs.activateRevision(created.revision.id, "octocat");
+    if ("error" in activated) throw new Error(activated.error);
+    const html = await configPage(app);
+    expect(html).toContain("config-source-profile");
+    expect(html).toContain("Profile reviewer set");
+    expect(html).toContain("Profile minimum publishable severity");
+  });
+
+  async function canaryConfigPage(app: ReturnType<typeof createApp>): Promise<string> {
+    // The canary password is not hunter2, so log in manually.
+    const page = await app.request("/login");
+    const { csrfCookie, csrfToken } = await csrfArtifacts(page);
+    const login = await app.request("/login", {
+      method: "POST",
+      headers: { cookie: csrfCookie, "content-type": "application/x-www-form-urlencoded" },
+      body: `password=${encodeURIComponent("PASSWORD-CANARY")}&next=%2F&csrf_token=${encodeURIComponent(csrfToken)}`,
+    });
+    expect(login.status).toBe(302);
+    const session = cookieFrom(login);
+    const response = await app.request("/config", { headers: { cookie: `${session}; ${csrfCookie}` } });
+    expect(response.status).toBe(200);
+    return response.text();
+  }
+
+  it("never leaks credential values into the rendered page", async () => {
+    const { app } = testApp(canaryEnv);
+    const html = await canaryConfigPage(app);
+    for (const canary of [
+      "PRIVATE-KEY-CANARY-VALUE",
+      "WEBHOOK-SECRET-CANARY",
+      "OAUTH-SECRET-CANARY",
+      "PASSWORD-CANARY",
+      "SESSION-SECRET-CANARY",
+    ]) {
+      expect(html, `credential canary ${canary} leaked into /config`).not.toContain(canary);
+    }
+    // Anchor the assertion to the credential row, not page prose.
+    expect(sectionFor(html, "GitHub webhook secret")).toContain('>configured</code>');
+  });
+
+  it("keeps credentials out of the 403 denied page too", async () => {
+    // Password-gate sessions carry no identity, so POST /config renders the
+    // 403 denial page even while logged in.
+    const { app } = testApp({
+      UI_PASSWORD: "PASSWORD-CANARY",
+      UI_SESSION_SECRET: "SESSION-SECRET-CANARY",
+      GITHUB_APP_PRIVATE_KEY: "PRIVATE-KEY-CANARY-VALUE",
+      GITHUB_WEBHOOK_SECRET: "WEBHOOK-SECRET-CANARY",
+    });
+    const page = await app.request("/login");
+    const { csrfCookie, csrfToken } = await csrfArtifacts(page);
+    const login = await app.request("/login", {
+      method: "POST",
+      headers: { cookie: csrfCookie, "content-type": "application/x-www-form-urlencoded" },
+      body: `password=${encodeURIComponent("PASSWORD-CANARY")}&next=%2F&csrf_token=${encodeURIComponent(csrfToken)}`,
+    });
+    expect(login.status).toBe(302);
+    const session = cookieFrom(login);
+    const response = await app.request("/config/drafts", {
+      method: "POST",
+      headers: { cookie: `${session}; ${csrfCookie}`, "content-type": "application/x-www-form-urlencoded" },
+      body: `csrf_token=${encodeURIComponent(csrfToken)}&definition={}`,
+    });
+    expect(response.status).toBe(403);
+    const html = await response.text();
+    for (const canary of ["PRIVATE-KEY-CANARY-VALUE", "WEBHOOK-SECRET-CANARY", "PASSWORD-CANARY", "SESSION-SECRET-CANARY"]) {
+      expect(html, `credential canary ${canary} leaked into the 403 page`).not.toContain(canary);
+    }
+  });
+
+  it("keeps the section on config error re-renders (400 validation failure)", async () => {
+    const oauthEnv = {
+      UI_SESSION_SECRET: "session-secret-for-tests",
+      GITHUB_OAUTH_CLIENT_ID: "cid",
+      GITHUB_OAUTH_CLIENT_SECRET: "csecret",
+      MAOMAO_ADMIN_GITHUB_IDS: "1001",
+      MAOMAO_PUBLIC_URL: "https://maomao.example",
+    };
+    const { app } = testApp(oauthEnv, undefined, mockOauthFetch({ id: 1001, login: "octocat" }));
+    const session = await operatorSession(app);
+    const page = await app.request("/config", { headers: { cookie: session } });
+    const { csrfCookie, csrfToken } = await csrfArtifacts(page);
+    const response = await app.request("/config/drafts", {
+      method: "POST",
+      headers: { cookie: `${session}; ${csrfCookie}`, "content-type": "application/x-www-form-urlencoded" },
+      body: `csrf_token=${encodeURIComponent(csrfToken)}&definition=not-json`,
+    });
+    expect(response.status).toBe(400);
+    const html = await response.text();
+    expect(html).toContain("Effective configuration");
+  });
+});
+
+describe("structured profile editor", () => {
+  const oauthEnv = {
+    UI_SESSION_SECRET: "session-secret-for-tests",
+    GITHUB_OAUTH_CLIENT_ID: "cid",
+    GITHUB_OAUTH_CLIENT_SECRET: "csecret",
+    MAOMAO_ADMIN_GITHUB_IDS: "1001",
+    MAOMAO_PUBLIC_URL: "https://maomao.example",
+  };
+
+  async function operatorCsrf(app: ReturnType<typeof createApp>) {
+    const session = await operatorSession(app);
+    const page = await app.request("/config", { headers: { cookie: session } });
+    const { csrfCookie, csrfToken } = await csrfArtifacts(page);
+    return { cookie: `${session}; ${csrfCookie}`, csrfToken, session };
+  }
+
+  function structuredBody(fields: Record<string, string>): string {
+    return new URLSearchParams({ editor: "structured", action: "save", ...fields }).toString();
+  }
+
+  it("creates a draft through the structured form and stores the validated definition", async () => {
+    const { app, store } = testApp(oauthEnv, undefined, mockOauthFetch({ id: 1001, login: "octocat" }));
+    const { cookie, csrfToken } = await operatorCsrf(app);
+    const response = await app.request("/config/drafts", {
+      method: "POST",
+      headers: { cookie, "content-type": "application/x-www-form-urlencoded" },
+      body: structuredBody({
+        csrf_token: csrfToken,
+        name: "structured-made",
+        note: "from the editor",
+        reviewer_count: "2",
+        reviewer_role_0: "correctness",
+        reviewer_model_0: "test/model",
+        reviewer_timeout_0: "120",
+        reviewer_role_1: "security",
+        min_severity: "low",
+        router_model: "test/router",
+        max_cost_usd: "1.5",
+        max_tokens: "500000",
+      }),
+    });
+    expect(response.status).toBe(302);
+    expect(response.headers.get("location")).toContain("notice=draft-created");
+    const revision = store.configs.listRevisions().find((row) => row.name === "structured-made");
+    expect(revision?.definition).toEqual({
+      name: "structured-made",
+      reviewers: [
+        { role: "correctness", model: "test/model", timeoutMs: 120000 },
+        { role: "security" },
+      ],
+      minPublishableSeverity: "low",
+      routerModel: "test/router",
+      maxTotalCostUsd: 1.5,
+      maxTotalTokens: 500000,
+    });
+    expect(revision?.note).toBe("from the editor");
+  });
+
+  it("re-renders the form with field errors and the submitted values retained", async () => {
+    const { app } = testApp(oauthEnv, undefined, mockOauthFetch({ id: 1001, login: "octocat" }));
+    const { cookie, csrfToken } = await operatorCsrf(app);
+    const response = await app.request("/config/drafts", {
+      method: "POST",
+      headers: { cookie, "content-type": "application/x-www-form-urlencoded" },
+      body: structuredBody({
+        csrf_token: csrfToken,
+        name: "Bad Name",
+        reviewer_count: "1",
+        reviewer_role_0: "correctness",
+        reviewer_model_0: "no slash model",
+      }),
+    });
+    expect(response.status).toBe(400);
+    const html = await response.text();
+    expect(html).toContain("Some fields need attention");
+    expect(html).toContain("lowercase");
+    expect(html).toContain("provider/model");
+    // Submitted values retained.
+    expect(html).toContain('value="Bad Name"');
+    expect(html).toContain('value="no slash model"');
+    // A11y wiring: the failing control points at its error.
+    expect(html).toContain('aria-invalid="true"');
+  });
+
+  it("applies structural actions without saving", async () => {
+    const { app, store } = testApp(oauthEnv, undefined, mockOauthFetch({ id: 1001, login: "octocat" }));
+    const { cookie, csrfToken } = await operatorCsrf(app);
+    const before = store.configs.listRevisions().length;
+    const response = await app.request("/config/drafts", {
+      method: "POST",
+      headers: { cookie, "content-type": "application/x-www-form-urlencoded" },
+      body: structuredBody({
+        csrf_token: csrfToken,
+        name: "never-saved",
+        reviewer_count: "2",
+        reviewer_role_0: "correctness",
+        reviewer_role_1: "security",
+        action: "remove:0",
+      }),
+    });
+    expect(response.status).toBe(200);
+    const html = await response.text();
+    expect(html).toContain("Reviewer 1");
+    // Row 0 (correctness) was removed; security remains as the row's selection.
+    expect(html).toContain('value="security" selected');
+    expect(html).not.toContain('value="correctness" selected');
+    expect(store.configs.listRevisions().length).toBe(before);
+  });
+
+  it("edits an existing draft with optimistic concurrency, JSON submissions still working", async () => {
+    const { app, store } = testApp(oauthEnv, undefined, mockOauthFetch({ id: 1001, login: "octocat" }));
+    const { cookie, csrfToken } = await operatorCsrf(app);
+    const created = store.configs.createDraft({
+      definition: { name: "default", reviewers: [{ role: "correctness" }], minPublishableSeverity: "info" },
+      createdBy: "octocat",
+    });
+    if ("error" in created) throw new Error("draft failed");
+    const draftId = created.revision.id;
+    const editSeq = created.revision.editSeq;
+
+    const response = await app.request(`/config/drafts/${draftId}`, {
+      method: "POST",
+      headers: { cookie, "content-type": "application/x-www-form-urlencoded" },
+      body: structuredBody({
+        csrf_token: csrfToken,
+        expected_edit_seq: String(editSeq),
+        name: "default",
+        reviewer_count: "2",
+        reviewer_role_0: "correctness",
+        reviewer_role_1: "security",
+        min_severity: "low",
+      }),
+    });
+    expect(response.status).toBe(302);
+    expect(response.headers.get("location")).toContain("notice=draft-saved");
+    expect(store.configs.getRevision(draftId)?.definition.reviewers.map((r) => r.role)).toEqual(["correctness", "security"]);
+
+    // Stale edit_seq → 409 conflict, and the raw-JSON path still works.
+    const stale = await app.request(`/config/drafts/${draftId}`, {
+      method: "POST",
+      headers: { cookie, "content-type": "application/x-www-form-urlencoded" },
+      body: `csrf_token=${encodeURIComponent(csrfToken)}&expected_edit_seq=${editSeq}&definition=${encodeURIComponent(
+        JSON.stringify({ name: "default", reviewers: [{ role: "tests" }], minPublishableSeverity: "info" }),
+      )}`,
+    });
+    expect(stale.status).toBe(409);
+    expect(store.configs.getRevision(draftId)?.definition.reviewers.map((r) => r.role)).toEqual(["correctness", "security"]);
+  });
+
+  it("renders the structured create form on GET /config when the gate allows writes", async () => {
+    const { app } = testApp(oauthEnv, undefined, mockOauthFetch({ id: 1001, login: "octocat" }));
+    const session = await operatorSession(app);
+    const html = await (await app.request("/config", { headers: { cookie: session } })).text();
+    expect(html).toContain('name="editor" value="structured"');
+    expect(html).toContain("Minimum publishable severity");
+    expect(html).toContain("not enforced at runtime");
+    expect(html).toContain("Create a draft");
+  });
+});
+
+describe("structured profile editor review fixes", () => {
+  const oauthEnv = {
+    UI_SESSION_SECRET: "session-secret-for-tests",
+    GITHUB_OAUTH_CLIENT_ID: "cid",
+    GITHUB_OAUTH_CLIENT_SECRET: "csecret",
+    MAOMAO_ADMIN_GITHUB_IDS: "1001",
+    MAOMAO_PUBLIC_URL: "https://maomao.example",
+  };
+
+  async function operatorCsrf2(app: ReturnType<typeof createApp>) {
+    const session = await operatorSession(app);
+    const page = await app.request("/config", { headers: { cookie: session } });
+    const { csrfCookie, csrfToken } = await csrfArtifacts(page);
+    return { cookie: `${session}; ${csrfCookie}`, csrfToken };
+  }
+
+  function structuredBody2(fields: Record<string, string>): string {
+    return new URLSearchParams({ editor: "structured", action: "save", ...fields }).toString();
+  }
+
+  it("never persists from a boundary action click (up:0 on the first row)", async () => {
+    const { app, store } = testApp(oauthEnv, undefined, mockOauthFetch({ id: 1001, login: "octocat" }));
+    const { cookie, csrfToken } = await operatorCsrf2(app);
+    const before = store.configs.listRevisions().length;
+    const response = await app.request("/config/drafts", {
+      method: "POST",
+      headers: { cookie, "content-type": "application/x-www-form-urlencoded" },
+      body: structuredBody2({
+        csrf_token: csrfToken,
+        name: "never-saved",
+        reviewer_count: "1",
+        reviewer_role_0: "correctness",
+        action: "up:0",
+      }),
+    });
+    expect(response.status).toBe(200);
+    expect(store.configs.listRevisions().length).toBe(before);
+    const html = await response.text();
+    // Full-page render with an explanation, not a bare fragment.
+    expect(html).toContain("Review configuration");
+    expect(html).toContain("does not apply");
+  });
+
+  it("rejects a duplicate-role save at draft time, flagging the later row", async () => {
+    const { app, store } = testApp(oauthEnv, undefined, mockOauthFetch({ id: 1001, login: "octocat" }));
+    const { cookie, csrfToken } = await operatorCsrf2(app);
+    const before = store.configs.listRevisions().length;
+    const response = await app.request("/config/drafts", {
+      method: "POST",
+      headers: { cookie, "content-type": "application/x-www-form-urlencoded" },
+      body: structuredBody2({
+        csrf_token: csrfToken,
+        name: "dupes",
+        reviewer_count: "2",
+        reviewer_role_0: "correctness",
+        reviewer_role_1: "correctness",
+      }),
+    });
+    expect(response.status).toBe(400);
+    const html = await response.text();
+    expect(html).toContain("role already used in reviewer 1");
+    expect(store.configs.listRevisions().length).toBe(before);
+  });
+
+  it("rejects a zero-reviewer save with an explicit form error", async () => {
+    const { app, store } = testApp(oauthEnv, undefined, mockOauthFetch({ id: 1001, login: "octocat" }));
+    const { cookie, csrfToken } = await operatorCsrf2(app);
+    const response = await app.request("/config/drafts", {
+      method: "POST",
+      headers: { cookie, "content-type": "application/x-www-form-urlencoded" },
+      body: structuredBody2({
+        csrf_token: csrfToken,
+        name: "empty",
+        reviewer_count: "0",
+      }),
+    });
+    expect(response.status).toBe(400);
+    const html = await response.text();
+    expect(html).toContain("At least one reviewer row is required");
+    expect(store.configs.listRevisions().length).toBe(0);
+  });
+
+  it("flags invalid cost/token values instead of silently dropping them", async () => {
+    const { app, store } = testApp(oauthEnv, undefined, mockOauthFetch({ id: 1001, login: "octocat" }));
+    const { cookie, csrfToken } = await operatorCsrf2(app);
+    const response = await app.request("/config/drafts", {
+      method: "POST",
+      headers: { cookie, "content-type": "application/x-www-form-urlencoded" },
+      body: structuredBody2({
+        csrf_token: csrfToken,
+        name: "budgets",
+        reviewer_count: "1",
+        reviewer_role_0: "correctness",
+        max_cost_usd: "abc",
+        max_tokens: "1.5",
+      }),
+    });
+    expect(response.status).toBe(400);
+    const html = await response.text();
+    expect(html).toContain("must be a positive number");
+    expect(html).toContain("must be a positive whole number");
+    expect(store.configs.listRevisions().length).toBe(0);
+  });
+
+  it("retains submitted values when a draft edit fails validation", async () => {
+    const { app, store } = testApp(oauthEnv, undefined, mockOauthFetch({ id: 1001, login: "octocat" }));
+    const created = store.configs.createDraft({
+      definition: { name: "default", reviewers: [{ role: "correctness" }], minPublishableSeverity: "info" },
+      createdBy: "octocat",
+    });
+    if ("error" in created) throw new Error("draft failed");
+    const { cookie, csrfToken } = await operatorCsrf2(app);
+    const response = await app.request(`/config/drafts/${created.revision.id}`, {
+      method: "POST",
+      headers: { cookie, "content-type": "application/x-www-form-urlencoded" },
+      body: structuredBody2({
+        csrf_token: csrfToken,
+        expected_edit_seq: String(created.revision.editSeq),
+        name: "default",
+        reviewer_count: "1",
+        reviewer_role_0: "correctness",
+        reviewer_timeout_0: "abc",
+        note: "my in-progress note",
+      }),
+    });
+    expect(response.status).toBe(400);
+    const html = await response.text();
+    // The operator's in-progress edit survives; the stored definition is not
+    // silently substituted.
+    expect(html).toContain('value="abc"');
+    expect(html).toContain('value="my in-progress note"');
+    expect(html).toContain("timeout must be a positive number of seconds");
+  });
+
+  it("structural actions on the edit path target the draft, not a new draft", async () => {
+    const { app, store } = testApp(oauthEnv, undefined, mockOauthFetch({ id: 1001, login: "octocat" }));
+    const created = store.configs.createDraft({
+      definition: { name: "default", reviewers: [{ role: "correctness" }], minPublishableSeverity: "info" },
+      createdBy: "octocat",
+    });
+    if ("error" in created) throw new Error("draft failed");
+    const { cookie, csrfToken } = await operatorCsrf2(app);
+    const response = await app.request(`/config/drafts/${created.revision.id}`, {
+      method: "POST",
+      headers: { cookie, "content-type": "application/x-www-form-urlencoded" },
+      body: structuredBody2({
+        csrf_token: csrfToken,
+        expected_edit_seq: String(created.revision.editSeq),
+        name: "default",
+        reviewer_count: "1",
+        reviewer_role_0: "correctness",
+        action: "add",
+      }),
+    });
+    expect(response.status).toBe(200);
+    const html = await response.text();
+    // The re-rendered form keeps posting to the draft with the current edit_seq.
+    expect(html).toContain(`action="/config/drafts/${created.revision.id}"`);
+    expect(html).toContain(`value="${created.revision.editSeq}"`);
+    expect(html).toContain("Reviewer 2");
+    expect(store.configs.listRevisions().length).toBe(1);
+  });
+});
+
+describe("structured editor review-bot round-2 fixes", () => {
+  const oauthEnv = {
+    UI_SESSION_SECRET: "session-secret-for-tests",
+    GITHUB_OAUTH_CLIENT_ID: "cid",
+    GITHUB_OAUTH_CLIENT_SECRET: "csecret",
+    MAOMAO_ADMIN_GITHUB_IDS: "1001",
+    MAOMAO_PUBLIC_URL: "https://maomao.example",
+  };
+
+  async function operatorCsrf3(app: ReturnType<typeof createApp>) {
+    const session = await operatorSession(app);
+    const page = await app.request("/config", { headers: { cookie: session } });
+    const { csrfCookie, csrfToken } = await csrfArtifacts(page);
+    return { cookie: `${session}; ${csrfCookie}`, csrfToken };
+  }
+
+  it("does not persist a reviewers: [] draft from a single blank row", async () => {
+    const { app, store } = testApp(oauthEnv, undefined, mockOauthFetch({ id: 1001, login: "octocat" }));
+    const { cookie, csrfToken } = await operatorCsrf3(app);
+    const response = await app.request("/config/drafts", {
+      method: "POST",
+      headers: { cookie, "content-type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({
+        editor: "structured",
+        action: "save",
+        csrf_token: csrfToken,
+        name: "blank-row",
+        reviewer_count: "1",
+        reviewer_role_0: "",
+        reviewer_model_0: "",
+        reviewer_timeout_0: "",
+      }).toString(),
+    });
+    expect(response.status).toBe(400);
+    const html = await response.text();
+    expect(html).toContain("At least one reviewer row is required");
+    expect(store.configs.listRevisions().length).toBe(0);
+  });
+
+  it("answers an out-of-range move with a 200 re-render, not a 500", async () => {
+    const { app, store } = testApp(oauthEnv, undefined, mockOauthFetch({ id: 1001, login: "octocat" }));
+    const { cookie, csrfToken } = await operatorCsrf3(app);
+    const before = store.configs.listRevisions().length;
+    const response = await app.request("/config/drafts", {
+      method: "POST",
+      headers: { cookie, "content-type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({
+        editor: "structured",
+        action: "up:1",
+        csrf_token: csrfToken,
+        name: "one-row",
+        reviewer_count: "1",
+        reviewer_role_0: "correctness",
+      }).toString(),
+    });
+    expect(response.status).toBe(200);
+    const html = await response.text();
+    // The row is intact and still selected — no undefined blew up the render.
+    expect(html).toContain('value="correctness" selected');
+    expect(store.configs.listRevisions().length).toBe(before);
+  });
+});
+
+describe("structured editor review-bot low fixes", () => {
+  const oauthEnv = {
+    UI_SESSION_SECRET: "session-secret-for-tests",
+    GITHUB_OAUTH_CLIENT_ID: "cid",
+    GITHUB_OAUTH_CLIENT_SECRET: "csecret",
+    MAOMAO_ADMIN_GITHUB_IDS: "1001",
+    MAOMAO_PUBLIC_URL: "https://maomao.example",
+  };
+
+  async function operatorCsrf4(app: ReturnType<typeof createApp>) {
+    const session = await operatorSession(app);
+    const page = await app.request("/config", { headers: { cookie: session } });
+    const { csrfCookie, csrfToken } = await csrfArtifacts(page);
+    return { cookie: `${session}; ${csrfCookie}`, csrfToken };
+  }
+
+  it("associates every row error with the real paragraph id and shows all messages", async () => {
+    const { app } = testApp(oauthEnv, undefined, mockOauthFetch({ id: 1001, login: "octocat" }));
+    const { cookie, csrfToken } = await operatorCsrf4(app);
+    // Both a bad model and a bad timeout on the same row.
+    const response = await app.request("/config/drafts", {
+      method: "POST",
+      headers: { cookie, "content-type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({
+        editor: "structured",
+        action: "save",
+        csrf_token: csrfToken,
+        name: "row-errors",
+        reviewer_count: "2",
+        reviewer_role_0: "correctness",
+        reviewer_role_1: "nobody",
+        reviewer_model_0: "no slash model",
+        reviewer_timeout_0: "-5",
+      }).toString(),
+    });
+    expect(response.status).toBe(400);
+    const html = await response.text();
+    // Both messages render (previously only the first per-row error showed).
+    expect(html).toContain("provider/model");
+    expect(html).toContain("positive number of seconds");
+    // The rendered id every control points at actually exists…
+    expect(html).toMatch(/id="reviewer_row_0-error"[^]*aria-describedby="reviewer_row_0-error"/);
+    // …and the never-rendered reviewer_role_N-error ids are gone from the DOM.
+    expect(html).not.toContain('aria-describedby="reviewer_role_1-error"');
+    expect(html).not.toContain('aria-describedby="reviewer_role_0-error"');
+  });
+
+  it("treats a malformed expected_edit_seq as the rendered sequence, not a conflict", async () => {
+    const { app, store } = testApp(oauthEnv, undefined, mockOauthFetch({ id: 1001, login: "octocat" }));
+    const created = store.configs.createDraft({
+      definition: { name: "default", reviewers: [{ role: "correctness" }], minPublishableSeverity: "info" },
+      createdBy: "octocat",
+    });
+    if ("error" in created) throw new Error("draft failed");
+    const { cookie, csrfToken } = await operatorCsrf4(app);
+    const response = await app.request(`/config/drafts/${created.revision.id}`, {
+      method: "POST",
+      headers: { cookie, "content-type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({
+        editor: "structured",
+        action: "save",
+        csrf_token: csrfToken,
+        expected_edit_seq: "abc",
+        name: "default",
+        reviewer_count: "2",
+        reviewer_role_0: "correctness",
+        reviewer_role_1: "security",
+      }).toString(),
+    });
+    // The malformed hidden field falls back to the sequence the form was
+    // rendered with — the save succeeds instead of a misleading 409.
+    expect(response.status).toBe(302);
+    expect(response.headers.get("location")).toContain("notice=draft-saved");
+    expect(store.configs.getRevision(created.revision.id)?.definition.reviewers.map((r) => r.role)).toEqual([
+      "correctness",
+      "security",
+    ]);
+    // A genuinely stale numeric seq still conflicts.
+    const stale = await app.request(`/config/drafts/${created.revision.id}`, {
+      method: "POST",
+      headers: { cookie, "content-type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({
+        editor: "structured",
+        action: "save",
+        csrf_token: csrfToken,
+        expected_edit_seq: "0",
+        name: "default",
+        reviewer_count: "1",
+        reviewer_role_0: "correctness",
+      }).toString(),
+    });
+    expect(stale.status).toBe(409);
+  });
 });

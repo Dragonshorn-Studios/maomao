@@ -107,6 +107,8 @@ export function acceptClassification(
 }
 
 export async function classifyPriorFindings(input: {
+  /** Called when the verifier run fails, so the pipeline can log the cause. */
+  onVerifierError?: (message: string) => void;
   config: Config;
   opencode: OpenCodePort;
   job: JobRow;
@@ -247,6 +249,7 @@ async function runVerifier(
     diff: string;
     workspaceDir: string;
     signal: AbortSignal;
+    onVerifierError?: (message: string) => void;
   },
   priors: PriorFinding[],
 ): Promise<Array<{ fingerprint: string; status: FindingClassification; confidence: number; reason: string; file?: string; line?: number }>> {
@@ -310,7 +313,8 @@ async function runVerifier(
       file: item.file,
       line: item.line,
     }));
-  } catch {
+  } catch (error) {
+    input.onVerifierError?.(error instanceof Error ? error.message : String(error));
     return priors.map((prior) => ({
       fingerprint: prior.fingerprint,
       status: "uncertain" as const,

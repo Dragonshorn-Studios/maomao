@@ -63,7 +63,107 @@ export const verifierResultSchema = z.object({
 export type VerifierResult = z.infer<typeof verifierResultSchema>;
 
 export function parseVerifierResult(raw: string): VerifierResult {
-  return verifierResultSchema.parse(extractJsonFromText(raw));
+  // Sentinel stripping only: classifications are never dropped as placeholders.
+  return verifierResultSchema.parse(
+    normalizeLocationSentinels(extractJsonFromText(raw), "classifications"),
+  );
+}
+
+/**
+ * Normalization boundary between JSON extraction and strict validation.
+ * Models serialize "no location" as sentinel values (`file: ""`, `line: 0`,
+ * `null`, whitespace) instead of omitting the keys; that representation must
+ * not fail an otherwise valid result. Empty optional prose (`suggested_check`)
+ * is stripped the same way. Only the unambiguous "absent" sentinels are
+ * removed — negative, non-integer, or wrongly-typed values are left for
+ * strict validation to reject. A finding that carries no informational
+ * content at all (no location on any key, no summary/reason/body prose) is a
+ * placeholder and is dropped rather than rendered; the drop is reported
+ * through `onDrop` so callers can leave an audit trace. Verifier
+ * classifications are never dropped — a fingerprint/status decision is
+ * substance even without prose, and losing one silently would mislabel a
+ * prior as unclassified. Returns a cloned value; the input is not mutated.
+ */
+export function normalizeLocationSentinels(
+  raw: unknown,
+  itemsKey: "findings" | "classifications" = "findings",
+  onDrop?: (droppedPlaceholders: number) => void,
+): unknown {
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return raw;
+  const items = (raw as Record<string, unknown>)[itemsKey];
+  if (!Array.isArray(items)) return raw;
+
+  const stripString = (item: Record<string, unknown>, key: string) => {
+    const value = item[key];
+    if (value === null || (typeof value === "string" && value.trim() === "")) delete item[key];
+  };
+  const stripLine = (item: Record<string, unknown>, key: string) => {
+    const value = item[key];
+    if (value === null || value === 0) delete item[key];
+  };
+
+  let dropped = 0;
+  const normalizedItems = items.flatMap((item) => {
+    if (typeof item !== "object" || item === null || Array.isArray(item)) return [item];
+    const clone = { ...(item as Record<string, unknown>) };
+    stripString(clone, "file");
+    stripLine(clone, "line");
+    stripLine(clone, "end_line");
+    stripString(clone, "suggested_check");
+    if (itemsKey === "classifications") return [clone];
+    // Placeholder: no location on any key and no prose content — nothing to
+    // show or post. Any surviving location value routes to strict validation.
+    const hasProse = ["summary", "reason", "body"].some(
+      (key) => typeof clone[key] === "string" && (clone[key] as string).trim() !== "",
+    );
+    if (
+      !hasProse &&
+      clone.file === undefined &&
+      clone.line === undefined &&
+      clone.end_line === undefined
+    ) {
+      dropped += 1;
+      return [];
+    }
+    return [clone];
+  });
+  if (dropped > 0) onDrop?.(dropped);
+
+  return { ...(raw as Record<string, unknown>), [itemsKey]: normalizedItems };
+}
+
+/**
+ * Bounded, field-pathed issue list ("findings[0].severity: …", first
+ * `maxIssues` entries plus a "(+N more)" marker). Use instead of
+ * `ZodError.message`, which is an unbounded multi-line JSON dump.
+ */
+export function formatZodIssues(error: z.ZodError, maxIssues = 5): string {
+  const formatPath = (path: PropertyKey[] | undefined): string => {
+    let out = "";
+    for (const segment of path ?? []) {
+      if (typeof segment === "number") out += `[${segment}]`;
+      else out += out.length > 0 ? `.${String(segment)}` : String(segment);
+    }
+    return out.length > 0 ? out : "(root)";
+  };
+  const issues = (Array.isArray(error.issues) ? error.issues : [])
+    .slice(0, maxIssues)
+    .map((issue) => `${formatPath(issue.path)}: ${issue.message}`);
+  const remaining = error.issues.length - issues.length;
+  if (remaining > 0) issues.push(`(+${remaining} more)`);
+  return issues.join("; ");
+}
+
+/**
+ * One formatter for model-output failures everywhere they surface to
+ * operators (validation_error, failure_reason, evaluation errors): curated
+ * message for extraction failures, bounded field paths for schema failures.
+ */
+export function formatSchemaError(error: unknown): string {
+  if (error instanceof SchemaValidationError) return `${error.message}: ${error.issues}`;
+  if (error instanceof z.ZodError) return `schema invalid: ${formatZodIssues(error)}`;
+  if (error instanceof Error) return error.message;
+  return String(error);
 }
 
 export class SchemaValidationError extends Error {
@@ -102,8 +202,14 @@ export function extractJsonFromText(raw: string): unknown {
   }
 }
 
-export function parseReviewerResult(raw: string, expectedReviewer?: string): ReviewerResult {
-  const parsed = reviewerResultSchema.parse(extractJsonFromText(raw));
+export function parseReviewerResult(
+  raw: string,
+  expectedReviewer?: string,
+  onDrop?: (droppedPlaceholders: number) => void,
+): ReviewerResult {
+  const parsed = reviewerResultSchema.parse(
+    normalizeLocationSentinels(extractJsonFromText(raw), "findings", onDrop),
+  );
   if (expectedReviewer && parsed.reviewer !== expectedReviewer) {
     parsed.reviewer = expectedReviewer;
   }
@@ -195,8 +301,19 @@ function withAdvisoryTestCoalesce(parsed: AggregatorResult): AggregatorResult {
   return { ...parsed, findings, summary };
 }
 
-export function parseAggregatorResult(raw: string): AggregatorResult {
-  return withAdvisoryTestCoalesce(aggregatorResultSchema.parse(extractJsonFromText(raw)));
+export function parseAggregatorResult(
+  raw: string,
+  onDrop?: (droppedPlaceholders: number) => void,
+): AggregatorResult {
+  const parsed = withAdvisoryTestCoalesce(
+    aggregatorResultSchema.parse(normalizeLocationSentinels(extractJsonFromText(raw), "findings", onDrop)),
+  );
+  // Mirror the reviewer rule: an empty-findings result is clean, so the
+  // POST_EMPTY_REVIEW gate applies instead of posting a summary-only review.
+  if (parsed.findings.length === 0 && parsed.verdict === "comment") {
+    return { ...parsed, verdict: "clean" };
+  }
+  return parsed;
 }
 
 export function fallbackAggregator(reviewers: ReviewerResult[]): AggregatorResult {

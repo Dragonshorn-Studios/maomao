@@ -12,6 +12,10 @@ import { parseGithubPullUrl, PullUrlError } from "./github/pull-url.js";
 import { dispatchEnqueue, enqueuePullJob } from "./jobs/enqueue.js";
 import { cancelJob } from "./jobs/cancel.js";
 import { LIVE_JOB_STATES } from "./config.js";
+import { effectiveConfigEntries } from "./config-effective.js";
+import type { ProfileFieldErrors } from "./config-form.js";
+import { decodeProfileAction, decodeProfileForm, applyProfileAction, profileFormToDefinition } from "./config-form.js";
+import { KNOWN_REVIEWER_ROLES } from "./prompts.js";
 import { subscribe } from "./events.js";
 import { redactSecrets } from "./util.js";
 import { readFileSync } from "node:fs";
@@ -22,6 +26,7 @@ import {
   renderScanPage,
   renderCancelConfirmPage,
   renderConfigPage,
+  renderProfileForm,
   renderHome,
   renderJob,
   renderLogin,
@@ -42,6 +47,7 @@ import {
 } from "./ui/index.js";
 import type { JobRow } from "./jobs/store.js";
 import type { FindingRow } from "./findings/types.js";
+import type { ConfigPageData } from "./ui/index.js";
 import { issueWorthiness, parseAggregatedFindings, type IssueWorthiness } from "./findings/issue-worthiness.js";
 import { SCAN_ISSUE_MARKER_RE, scanIssueMarkerBase } from "./findings/identity.js";
 import { githubSecrets } from "./config.js";
@@ -84,6 +90,8 @@ export interface ServerContext {
   oauthFetch?: typeof fetch;
   /** Offline prompt-evaluation runner (never touches GitHub). */
   opencode?: OpenCodePort;
+  /** The environment loadConfig consumed; defaults to process.env. Injectable for tests. */
+  env?: NodeJS.ProcessEnv;
 }
 
 const OAUTH_STATE_TTL_MS = 10 * 60 * 1000;
@@ -510,14 +518,16 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
     const rawUrl = typeof body.url === "string" ? body.url : "";
     const csrfToken = gateOn ? ensureCsrfToken(c, ctx.config.uiSessionSecret) : undefined;
     const identity = c.get("identity");
+    const homePage = ctx.store.listJobsPage({});
     const home = (extra: { error?: string; notice?: string; reviewUrl?: string } = {}) =>
       c.html(
-        renderHome(ctx.store.listJobs(75), ctx.store, {
+        renderHome(homePage.jobs, ctx.store, {
           ...pageOpts,
           identity,
           csrfToken,
           ...extra,
           reviewUrl: extra.reviewUrl ?? rawUrl,
+          pagination: { hasOlder: homePage.hasOlder, hasNewer: homePage.hasNewer },
         }),
         extra.error ? 400 : 200,
       );
@@ -641,14 +651,28 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
   });
 
   app.get("/", (c) => {
-    const jobs = ctx.store.listJobs(75);
+    const cursor = jobsPageCursor(c.req.query("before"), c.req.query("after"));
+    let page = ctx.store.listJobsPage(cursor);
+    // Only out-of-range cursors empty the page: after at/past the newest id,
+    // or before at/below the oldest id. (A before cursor past the newest id
+    // never gets here empty — the store's id< query already returns the
+    // newest page.) If the page is empty while jobs exist, re-render the
+    // first page and say why instead of a dead end.
+    let staleCursorNotice: string | undefined;
+    if (page.jobs.length === 0) {
+      page = ctx.store.listJobsPage({});
+      if (page.jobs.length > 0 && (cursor.before != null || cursor.after != null)) {
+        staleCursorNotice = "That page no longer exists — showing the newest jobs instead.";
+      }
+    }
     return c.html(
-      renderHome(jobs, ctx.store, {
+      renderHome(page.jobs, ctx.store, {
         ...pageOpts,
         identity: c.get("identity"),
         csrfToken: gateOn ? ensureCsrfToken(c, ctx.config.uiSessionSecret) : undefined,
-        notice: noticeText(c.req.query("notice")),
+        notice: noticeText(c.req.query("notice")) ?? staleCursorNotice,
         error: c.req.query("error") || undefined,
+        pagination: { hasOlder: page.hasOlder, hasNewer: page.hasNewer },
       }),
     );
   });
@@ -705,7 +729,18 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
       return { ok: false, error: "Definition must be valid JSON." };
     }
   };
-  const renderConfigWithError = (c: Context<AppEnv>, message: string, status: 400 | 403 | 409) => {
+  const KNOWN_ROLE_OPTIONS = KNOWN_REVIEWER_ROLES.map((role) => ({ id: role.id, title: role.title }));
+  const profileEditorBase = () => ({
+    knownRoles: KNOWN_ROLE_OPTIONS,
+    modelCatalog: ctx.config.modelCatalog,
+  });
+
+  const renderConfigWithError = (
+    c: Context<AppEnv>,
+    message: string,
+    status: 400 | 403 | 404 | 409,
+    profileEditor?: ConfigPageData["profileEditor"],
+  ) => {
     return c.html(
       renderConfigPage({
         revisions: ctx.store.configs.listRevisions(),
@@ -713,6 +748,12 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
         canWrite: gateOn,
         error: message,
         csrfToken: gateOn ? ensureCsrfToken(c, ctx.config.uiSessionSecret) : undefined,
+        effectiveConfig: effectiveConfigEntries(
+          ctx.config,
+          ctx.env ?? process.env,
+          ctx.store.configs.getActiveRevision("default") ?? null,
+        ),
+        profileEditor: profileEditor ?? profileEditorBase(),
       }),
       status,
     );
@@ -735,16 +776,136 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
         canWrite: gateOn,
         csrfToken: gateOn ? ensureCsrfToken(c, ctx.config.uiSessionSecret) : undefined,
         notice: notices[noticeKey],
+        effectiveConfig: effectiveConfigEntries(
+          ctx.config,
+          ctx.env ?? process.env,
+          ctx.store.configs.getActiveRevision("default") ?? null,
+        ),
+        profileEditor: profileEditorBase(),
       }),
     );
   });
+
+  /**
+   * Structured-editor form handling: applies add/remove/reorder actions by
+   * re-rendering the form with mutated values (no persistence), or decodes
+   * and validates on save. Raw-JSON submissions (no `editor` field) keep the
+   * old path so scripts and export/import round-trips are unaffected.
+   */
+  type ProfileFormOutcome =
+    | { kind: "render"; response: Response }
+    | { kind: "save"; definition: unknown; note?: string };
+
+  /**
+   * Structural actions and validation failures re-render the full config
+   * page (chrome, audit, effective config) with the in-progress form state
+   * applied — never a bare fragment, and never a persistence side effect:
+   * noop actions (boundary/malformed clicks) also land here untouched.
+   */
+  const handleProfileForm = async (
+    c: Context<AppEnv>,
+    body: Record<string, unknown>,
+    existing?: { id: number; editSeq: number },
+  ): Promise<ProfileFormOutcome> => {
+    let values = decodeProfileForm(body);
+    let definition: unknown;
+    const action = decodeProfileAction(body);
+    const errors: ProfileFieldErrors = {};
+    const isStructural = action.kind !== "save";
+    if (action.kind === "noop") {
+      errors.form = "That row action does not apply — nothing changed.";
+    } else if (action.kind !== "save") {
+      values = applyProfileAction(values, action, KNOWN_ROLE_OPTIONS.map((role) => role.id));
+    } else {
+      const built = profileFormToDefinition(values);
+      if (!built.ok) {
+        for (const [key, message] of Object.entries(built.errors)) {
+          if (key !== "form" && !errors[key]) errors[key] = message;
+        }
+        if (!errors.form) errors.form = built.errors.form;
+      } else {
+        definition = built.definition;
+        // Semantic checks the schema cannot express: duplicates flag the later
+        // row, and an empty reviewer list must be an explicit choice.
+        const seen = new Map<string, number>();
+        values.reviewers.forEach((row, index) => {
+          if (!row.role) return;
+          const first = seen.get(row.role);
+          if (first != null && !errors[`reviewer_role_${index}`]) {
+            errors[`reviewer_role_${index}`] = `role already used in reviewer ${first + 1}`;
+          } else {
+            seen.set(row.role, index);
+          }
+        });
+      }
+    }
+    // Structural actions and failures re-render the full page; a noop click
+    // is a harmless no-op (200 with a status note), validation failures 400.
+    if (isStructural || Object.keys(errors).length > 0) {
+      return {
+        kind: "render",
+        response: c.html(
+          renderConfigPage({
+            revisions: ctx.store.configs.listRevisions(),
+            audit: ctx.store.configs.listAudit(),
+            canWrite: gateOn,
+            error: errors.form,
+            csrfToken: ensureCsrfToken(c, ctx.config.uiSessionSecret),
+            effectiveConfig: effectiveConfigEntries(
+              ctx.config,
+              ctx.env ?? process.env,
+              ctx.store.configs.getActiveRevision("default") ?? null,
+            ),
+            profileEditor: {
+              ...profileEditorBase(),
+              form: { values, errors, revision: existing },
+            },
+          }),
+          isStructural ? 200 : 400,
+        ),
+      };
+    }
+    return { kind: "save", definition, note: values.note };
+  };
 
   app.post("/config/drafts", async (c) => {
     if (!gateOn) return c.redirect("/", 302);
     const actor = configActor(c);
     if (!actor) return configWriteDenied(c);
-    const body = await c.req.parseBody();
-    const parsed = parseDefinition(typeof body.definition === "string" ? body.definition : undefined);
+    const bodyPreview = await c.req.parseBody();
+    if (bodyPreview.editor === "structured") {
+      const outcome = await handleProfileForm(c, bodyPreview);
+      if (outcome.kind === "render") return outcome.response;
+      const result = ctx.store.configs.createDraft({
+        definition: outcome.definition,
+        note: outcome.note,
+        createdBy: actor.login,
+      });
+      if ("error" in result) {
+        const values = decodeProfileForm(bodyPreview);
+        return c.html(
+          renderConfigPage({
+            revisions: ctx.store.configs.listRevisions(),
+            audit: ctx.store.configs.listAudit(),
+            canWrite: gateOn,
+            error: result.issues.join("; "),
+            csrfToken: ensureCsrfToken(c, ctx.config.uiSessionSecret),
+            effectiveConfig: effectiveConfigEntries(
+              ctx.config,
+              ctx.env ?? process.env,
+              ctx.store.configs.getActiveRevision("default") ?? null,
+            ),
+            profileEditor: {
+              ...profileEditorBase(),
+              form: { values, errors: { form: result.issues.join("; ") } },
+            },
+          }),
+          400,
+        );
+      }
+      return c.redirect("/config?notice=draft-created", 302);
+    }
+    const parsed = parseDefinition(typeof bodyPreview.definition === "string" ? bodyPreview.definition : undefined);
     if (!parsed.ok) return renderConfigWithError(c, parsed.error, 400);
     const result = ctx.store.configs.createDraft({
       definition: parsed.definition,
@@ -758,13 +919,76 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
     if (!gateOn) return c.redirect("/", 302);
     const actor = configActor(c);
     if (!actor) return configWriteDenied(c);
-    const body = await c.req.parseBody();
-    const parsed = parseDefinition(typeof body.definition === "string" ? body.definition : undefined);
+    const bodyPreview = await c.req.parseBody();
+    const revisionId = Number(c.req.param("id"));
+    const rawEditSeq = Number(bodyPreview.expected_edit_seq ?? -1);
+    if (bodyPreview.editor === "structured") {
+      const existing = ctx.store.configs.getRevision(revisionId);
+      if (!existing || existing.status !== "draft") {
+        return renderConfigWithError(c, "Draft not found.", 404);
+      }
+      // A malformed hidden field (NaN binds as NULL in SQLite and never
+      // matches) is treated as the sequence the form was rendered with,
+      // rather than a misleading concurrency conflict.
+      const editSeq = Number.isFinite(rawEditSeq) ? rawEditSeq : existing.editSeq;
+      const outcome = await handleProfileForm(c, bodyPreview, {
+        id: revisionId,
+        editSeq,
+      });
+      if (outcome.kind === "render") return outcome.response;
+      const result = ctx.store.configs.updateDraft({
+        id: revisionId,
+        definition: outcome.definition,
+        note: outcome.note,
+        expectedEditSeq: editSeq,
+        updatedBy: actor.login,
+      });
+      if ("error" in result && result.error === "conflict") {
+        return renderConfigWithError(
+          c,
+          "Conflict: this draft was saved by someone else. Reload and re-apply your edit.",
+          409,
+        );
+      }
+      if ("error" in result) {
+        if (result.error !== "invalid") {
+          return renderConfigWithError(c, "Draft not found.", 404);
+        }
+        const values = decodeProfileForm(bodyPreview);
+        return c.html(
+          renderConfigPage({
+            revisions: ctx.store.configs.listRevisions(),
+            audit: ctx.store.configs.listAudit(),
+            canWrite: gateOn,
+            error: result.issues.join("; "),
+            csrfToken: ensureCsrfToken(c, ctx.config.uiSessionSecret),
+            effectiveConfig: effectiveConfigEntries(
+              ctx.config,
+              ctx.env ?? process.env,
+              ctx.store.configs.getActiveRevision("default") ?? null,
+            ),
+            profileEditor: {
+              ...profileEditorBase(),
+              form: {
+                values,
+                errors: { form: result.issues.join("; ") },
+                revision: { id: revisionId, editSeq },
+              },
+            },
+          }),
+          400,
+        );
+      }
+      return c.redirect("/config?notice=draft-saved", 302);
+    }
+    const parsed = parseDefinition(typeof bodyPreview.definition === "string" ? bodyPreview.definition : undefined);
     if (!parsed.ok) return renderConfigWithError(c, parsed.error, 400);
+    const rawJsonExisting = ctx.store.configs.getRevision(revisionId);
+    const rawJsonEditSeq = Number.isFinite(rawEditSeq) ? rawEditSeq : rawJsonExisting?.editSeq ?? -1;
     const result = ctx.store.configs.updateDraft({
-      id: Number(c.req.param("id")),
+      id: revisionId,
       definition: parsed.definition,
-      expectedEditSeq: Number(body.expected_edit_seq ?? -1),
+      expectedEditSeq: rawJsonEditSeq,
       updatedBy: actor.login,
     });
     if ("error" in result && result.error === "conflict") {
@@ -1611,6 +1835,30 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
   );
 
   return app;
+}
+
+/**
+ * Parses home-queue pagination cursors. Malformed, zero, negative, or
+ * beyond-MAX_SAFE_INTEGER values are dropped (caller renders the first page)
+ * — pagination input must never 500. Well-formed but out-of-range cursors
+ * pass through untouched: the store's exclusive `id <` query already serves
+ * the newest page for a before cursor above the newest id, and the GET /
+ * route re-renders the first page if a cursor would otherwise show an empty
+ * list.
+ */
+function jobsPageCursor(beforeRaw: string | undefined, afterRaw: string | undefined): { before?: number; after?: number } {
+  const parse = (raw: string | undefined): number | undefined => {
+    if (!raw || !/^-?\d+$/.test(raw.trim())) return undefined;
+    const value = Number(raw.trim());
+    if (!Number.isSafeInteger(value) || value <= 0) return undefined;
+    return value;
+  };
+  const before = parse(beforeRaw);
+  const after = parse(afterRaw);
+  // before wins when both are present (links only ever carry one).
+  if (before != null) return { before };
+  if (after != null) return { after };
+  return {};
 }
 
 function noticeText(

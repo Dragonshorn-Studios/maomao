@@ -3595,3 +3595,279 @@ describe("external dispatch cancellation guard", () => {
     expect(store.listLogs(created.job.id).some((line) => line.message.includes("External dispatch skipped"))).toBe(true);
   });
 });
+
+describe("location-sentinel reviewer output (issue #62)", () => {
+  it("completes a reviewer that serializes missing location as sentinels; the finding stays non-inline", async () => {
+    const config = loadConfig({
+      REVIEWER_ROLES: "correctness",
+      OPENCODE_REVIEWER_MODEL: "test/model",
+      OPENCODE_TIMEOUT_MS: "5000",
+      POST_EMPTY_REVIEW: "true",
+    });
+    const store = new JobStore(openDb(":memory:"));
+    const reviewInputs: { comments: unknown[] }[] = [];
+    const github: GithubPort = githubPort({
+      createCommentReview: async (input) => {
+        reviewInputs.push({ comments: input.comments });
+        return { id: "77", url: "https://example.test/reviews/77" };
+      },
+    });
+    const created = enqueueJob(store, config);
+    await createPipeline({
+      config,
+      store,
+      github,
+      checkout: await fixtureCheckout(),
+      opencode: {
+        async run(input) {
+          const text = input.prompt.includes("Role id: correctness")
+            ? JSON.stringify({
+                schema_version: 1,
+                reviewer: "correctness",
+                verdict: "findings",
+                findings: [
+                  {
+                    severity: "medium",
+                    confidence: 0.8,
+                    category: "correctness",
+                    file: "",
+                    line: 0,
+                    end_line: 0,
+                    summary: "cache sweeper race",
+                    reason: "two writers interleave",
+                    suggested_check: "",
+                  },
+                ],
+              })
+            : JSON.stringify({
+                schema_version: 1,
+                verdict: "comment",
+                summary: "One locationless finding.",
+                findings: [
+                  {
+                    severity: "medium",
+                    confidence: 0.8,
+                    category: "correctness",
+                    summary: "cache sweeper race",
+                    body: "two writers interleave",
+                    reviewers_agreed: ["correctness"],
+                  },
+                ],
+              });
+          return { stdout: text, stderr: "", exitCode: 0, text, usage: { promptTokens: 3, completionTokens: 2 } };
+        },
+      },
+    }).run(created.job.id);
+
+    expect(store.getJob(created.job.id)?.state).toBe("completed");
+    const run = store.listReviewerRuns(created.job.id).find((r) => r.role === "correctness");
+    expect(run?.state).toBe("done");
+    expect(run?.validation_error).toBeNull();
+    // Persisted normalized JSON: optional sentinels absent, not empty strings or zeros.
+    const normalized = JSON.parse(run?.normalized_json ?? "{}");
+    expect(normalized.findings[0].file).toBeUndefined();
+    expect(normalized.findings[0].line).toBeUndefined();
+    expect(JSON.stringify(normalized)).not.toContain('"file":""');
+    // Locationless finding: review body carries it, no inline comments.
+    expect(reviewInputs).toHaveLength(1);
+    expect(reviewInputs[0]?.comments).toEqual([]);
+  });
+
+  it("writes a bounded field-pathed validation error, never the raw Zod dump", async () => {
+    const config = loadConfig({
+      REVIEWER_ROLES: "correctness",
+      OPENCODE_REVIEWER_MODEL: "test/model",
+      OPENCODE_TIMEOUT_MS: "5000",
+      OPENCODE_MAX_RETRIES: "0",
+    });
+    const store = new JobStore(openDb(":memory:"));
+    const created = enqueueJob(store, config);
+    await createPipeline({
+      config,
+      store,
+      github: githubPort(),
+      checkout: await fixtureCheckout(),
+      opencode: {
+        async run(input) {
+          if (!input.prompt.includes("Role id:")) {
+            throw new Error("aggregator must not run");
+          }
+          const text = JSON.stringify({
+            schema_version: 1,
+            reviewer: "correctness",
+            verdict: "findings",
+            findings: [
+              { severity: "critical", confidence: 2, category: "x", summary: "real", reason: "real" },
+            ],
+          });
+          return { stdout: text, stderr: "", exitCode: 0, text, usage: { promptTokens: 1, completionTokens: 1 } };
+        },
+      },
+    }).run(created.job.id);
+
+    expect(store.getJob(created.job.id)?.state).toBe("failed");
+    const run = store.listReviewerRuns(created.job.id).find((r) => r.role === "correctness");
+    expect(run?.state).toBe("failed");
+    const validationError = run?.validation_error ?? "";
+    expect(validationError).toContain("findings[0].severity");
+    expect(validationError).toContain("findings[0].confidence");
+    expect(validationError.length).toBeGreaterThan(0);
+    expect(validationError.length).toBeLessThan(400);
+  });
+});
+
+describe("sentinel normalization review fixes", () => {
+  it("applies the POST_EMPTY_REVIEW gate when the aggregator only produced placeholder findings", async () => {
+    const config = loadConfig({
+      REVIEWER_ROLES: "correctness",
+      OPENCODE_REVIEWER_MODEL: "test/model",
+      OPENCODE_TIMEOUT_MS: "5000",
+      // POST_EMPTY_REVIEW defaults to false.
+    });
+    const store = new JobStore(openDb(":memory:"));
+    const posted: number[] = [];
+    const created = enqueueJob(store, config);
+    await createPipeline({
+      config,
+      store,
+      github: githubPort({
+        createCommentReview: async () => {
+          posted.push(1);
+          return { id: "x", url: "u" };
+        },
+      }),
+      checkout: await fixtureCheckout(),
+      opencode: {
+        async run(input) {
+          const text = input.prompt.includes("Role id: correctness")
+            ? JSON.stringify({
+                schema_version: 1,
+                reviewer: "correctness",
+                verdict: "clean",
+                findings: [],
+              })
+            : JSON.stringify({
+                schema_version: 1,
+                verdict: "comment",
+                summary: "Nothing survived.",
+                findings: [
+                  { severity: "info", file: "", line: 0, summary: "", body: "" },
+                ],
+              });
+          return { stdout: text, stderr: "", exitCode: 0, text, usage: { promptTokens: 1, completionTokens: 1 } };
+        },
+      },
+    }).run(created.job.id);
+
+    expect(store.getJob(created.job.id)?.state).toBe("completed");
+    // Placeholder-only aggregator output normalizes to clean; without
+    // POST_EMPTY_REVIEW nothing is posted.
+    expect(posted).toHaveLength(0);
+    const logs = store.listLogs(created.job.id).map((row) => row.message).join("\n");
+    expect(logs).toContain("Aggregator dropped 1 placeholder finding(s)");
+    expect(logs).toContain("not posting");
+  });
+
+  it("leaves an audit log when a reviewer's findings are all placeholders", async () => {
+    const config = loadConfig({
+      REVIEWER_ROLES: "correctness",
+      OPENCODE_REVIEWER_MODEL: "test/model",
+      OPENCODE_TIMEOUT_MS: "5000",
+      POST_EMPTY_REVIEW: "true",
+    });
+    const store = new JobStore(openDb(":memory:"));
+    const created = enqueueJob(store, config);
+    await createPipeline({
+      config,
+      store,
+      github: githubPort(),
+      checkout: await fixtureCheckout(),
+      opencode: {
+        async run(input) {
+          const text = input.prompt.includes("Role id: correctness")
+            ? JSON.stringify({
+                schema_version: 1,
+                reviewer: "correctness",
+                verdict: "findings",
+                findings: [
+                  { severity: "info", confidence: 0.5, category: "general", file: "", line: 0, summary: "", reason: "" },
+                ],
+              })
+            : JSON.stringify({
+                schema_version: 1,
+                verdict: "clean",
+                summary: "Specialist reviewers reported no validated findings for this commit.",
+                findings: [],
+              });
+          return { stdout: text, stderr: "", exitCode: 0, text, usage: { promptTokens: 1, completionTokens: 1 } };
+        },
+      },
+    }).run(created.job.id);
+
+    expect(store.getJob(created.job.id)?.state).toBe("completed");
+    const logs = store.listLogs(created.job.id).map((row) => row.message).join("\n");
+    expect(logs).toContain("Reviewer correctness dropped 1 placeholder finding(s)");
+    const run = store.listReviewerRuns(created.job.id).find((r) => r.role === "correctness");
+    expect(run?.state).toBe("done");
+    expect(JSON.parse(run?.normalized_json ?? "{}").verdict).toBe("clean");
+  });
+
+  it("normalizes the internal escalation output through the shared parse helper", async () => {
+    const config = loadConfig({
+      REVIEWER_ROLES: "correctness",
+      OPENCODE_REVIEWER_MODEL: "test/model",
+      OPENCODE_TIMEOUT_MS: "5000",
+      POISON_ALERT_INTERNAL_ENABLED: "true",
+      POISON_ALERT_INTERNAL_MODEL: "test/lab",
+      POISON_ALERT_POLICY: "internal_and_external",
+    });
+    const store = new JobStore(openDb(":memory:"));
+    const created = enqueueJob(store, config);
+    // Route to poison-alert by patching the routing decision before review.
+    store.patchJob(created.job.id, { routing_profile: "poison-alert", routing_state: "done", routing_mode: "model", routing_reason: "test", routing_source: "model", routing_confidence: 1 });
+    await createPipeline({
+      config,
+      store,
+      github: githubPort({
+        createCommentReview: async () => ({ id: "9", url: "https://example.test/reviews/9" }),
+      }),
+      checkout: await fixtureCheckout(),
+      opencode: {
+        async run(input) {
+          if (input.model === "test/lab") {
+            const text = JSON.stringify({
+              schema_version: 1,
+              confirmed: true,
+              alert_cleared: false,
+              summary: "Confirmed one leak.",
+              findings: [
+                { id: "f1", severity: "high", file: "", line: 0, summary: "leak", body: "details" },
+                { id: "f2", severity: "info", file: "", line: 0, summary: "", body: "" },
+              ],
+            });
+            return { stdout: text, stderr: "", exitCode: 0, text, usage: { promptTokens: 1, completionTokens: 1 } };
+          }
+          const text = input.prompt.includes("Role id: correctness")
+            ? reviewerJson("correctness")
+            : JSON.stringify({
+                schema_version: 1,
+                verdict: "comment",
+                summary: "Confirmed leak.",
+                findings: [
+                  { severity: "high", confidence: 0.9, category: "security", summary: "leak", body: "details", reviewers_agreed: ["security"] },
+                ],
+              });
+          return { stdout: text, stderr: "", exitCode: 0, text, usage: { promptTokens: 1, completionTokens: 1 } };
+        },
+      },
+    }).run(created.job.id);
+
+    const job = store.getJob(created.job.id);
+    expect(job?.state).toBe("completed");
+    expect(job?.internal_escalation_state).toBe("done");
+    const raw = job?.internal_escalation_raw ?? "";
+    expect(raw).toContain("Confirmed one leak");
+    const logs = store.listLogs(created.job.id).map((row) => row.message).join("\n");
+    expect(logs).toContain("Internal escalation dropped 1 placeholder finding(s)");
+  });
+});

@@ -13,7 +13,7 @@ export {
   type ScanIssuePreviewData,
   type ScanIssuePreviewItem,
 } from "./pages.js";
-export { renderConfigPage, type ConfigPageData, type ConfigRevisionView } from "./pages.js";
+export { renderConfigPage, renderProfileForm, type ConfigPageData, type ConfigRevisionView } from "./pages.js";
 export { renderPromptConfigPage, type PromptConfigPageData } from "./pages.js";
 export {
   renderScanPage,
