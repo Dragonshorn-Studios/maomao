@@ -1571,6 +1571,138 @@ describe("pre-review routing and poison-alert", () => {
   });
 });
 
+describe("inline comment anchoring", () => {
+  it("demotes findings whose line is not in the diff and publishes the rest inline", async () => {
+    const config = loadConfig({ REVIEWER_ROLES: "correctness", OPENCODE_REVIEWER_MODEL: "test/model" });
+    const store = new JobStore(openDb(":memory:"));
+    const created = enqueueJob(store, config, "anchoredsha");
+    const postedComments: { path: string; line: number }[] = [];
+    let reviewBody = "";
+    await createPipeline({
+      config,
+      store,
+      github: githubPort({
+        // The hunk only covers line 1 on the new side; line 77 is a hallucinated location.
+        getPullDiff: async () =>
+          "diff --git a/example.ts b/example.ts\n--- a/example.ts\n+++ b/example.ts\n@@ -1,1 +1,1 @@\n-old\n+new\n",
+        createCommentReview: async (input) => {
+          postedComments.push(...input.comments.map((comment) => ({ path: comment.path, line: comment.line })));
+          reviewBody = input.body;
+          return { id: "31", url: "u" };
+        },
+      }),
+      checkout: await fixtureCheckout(),
+      opencode: {
+        async run(input) {
+          const roleMatch = input.prompt.match(/Role id: (\w+)/);
+          const text = roleMatch
+            ? reviewerJson(roleMatch[1])
+            : JSON.stringify({
+                schema_version: 1,
+                verdict: "comment",
+                summary: "Mixed findings.",
+                findings: [
+                  {
+                    severity: "high",
+                    confidence: 0.9,
+                    category: "correctness",
+                    file: "example.ts",
+                    line: 1,
+                    summary: "anchored bug",
+                  },
+                  {
+                    severity: "medium",
+                    confidence: 0.8,
+                    category: "correctness",
+                    file: "example.ts",
+                    line: 77,
+                    summary: "floating bug",
+                  },
+                ],
+              });
+          return { stdout: text, stderr: "", exitCode: 0, text, usage: {} };
+        },
+      },
+    }).run(created.job.id);
+    expect(store.getJob(created.job.id)?.state).toBe("completed");
+    expect(postedComments).toEqual([{ path: "example.ts", line: 1 }]);
+    expect(reviewBody).toContain("Findings not shown inline");
+    expect(reviewBody).toContain("`example.ts:77`");
+    const logs = store.listLogs(created.job.id).map((row) => row.message).join("\n");
+    expect(logs).toContain("example.ts:77 is not in the diff");
+  });
+
+  it("keeps a moved thread open when the inline fallback posted no replacement comment", async () => {
+    const priorFinding = {
+      severity: "high" as const,
+      confidence: 0.9,
+      category: "correctness",
+      file: "example.ts",
+      line: 1,
+      summary: "bug",
+    };
+    const fingerprint = fingerprintFinding(priorFinding);
+    const config = loadConfig({ REVIEWER_ROLES: "correctness", OPENCODE_REVIEWER_MODEL: "test/model" });
+    const store = new JobStore(openDb(":memory:"));
+    const created = enqueueJob(store, config, "movedfallbacksha");
+    const resolved: string[] = [];
+    await createPipeline({
+      config,
+      store,
+      github: githubPort({
+        getPullDiff: async () =>
+          "diff --git a/example.ts b/example.ts\n--- a/example.ts\n+++ b/example.ts\n@@ -8,1 +8,1 @@\n-old line\n+new line\n",
+        listReviewThreads: async () => [threadFor(fingerprint)],
+        resolveReviewThread: async (_id, threadId) => {
+          resolved.push(threadId);
+        },
+        // postedComments: [] simulates the client's body-only fallback after GitHub
+        // rejected the inline locations: the replacement comment never landed.
+        createCommentReview: async () => ({ id: "2", url: "u", postedComments: [] }),
+      }),
+      checkout: await fixtureCheckout(),
+      opencode: {
+        async run(input) {
+          if (input.prompt.includes("finding verifier")) {
+            return {
+              stdout: "",
+              stderr: "",
+              exitCode: 0,
+              text: JSON.stringify({
+                classifications: [
+                  {
+                    fingerprint,
+                    status: "moved",
+                    confidence: 0.92,
+                    reason: "relocated",
+                    file: "example.ts",
+                    line: 8,
+                  },
+                ],
+              }),
+              usage: {},
+            };
+          }
+          if (input.prompt.includes("Role id:")) {
+            return { stdout: "", stderr: "", exitCode: 0, text: reviewerJson("correctness"), usage: {} };
+          }
+          return {
+            stdout: "",
+            stderr: "",
+            exitCode: 0,
+            text: JSON.stringify({ verdict: "comment", summary: "moved", findings: [] }),
+            usage: {},
+          };
+        },
+      },
+    }).run(created.job.id);
+    expect(store.getJob(created.job.id)?.state).toBe("completed");
+    expect(resolved).toEqual([]);
+    const logs = store.listLogs(created.job.id).map((row) => row.message).join("\n");
+    expect(logs).toContain("no replacement comment was posted");
+  });
+});
+
 function enqueueJob(store: JobStore, config: ReturnType<typeof loadConfig>, headSha = "cafebabe") {
   return store.enqueue({
     repoFullName: "acme/widgets",
@@ -1753,6 +1885,8 @@ describe("finding reconciliation", () => {
       config,
       store,
       github: githubPort({
+        getPullDiff: async () =>
+          "diff --git a/example.ts b/example.ts\n--- a/example.ts\n+++ b/example.ts\n@@ -8,1 +8,1 @@\n-old line\n+new line\n",
         listReviewThreads: async () => [threadFor(fingerprint)],
         resolveReviewThread: async (_id, threadId) => {
           resolved.push(threadId);

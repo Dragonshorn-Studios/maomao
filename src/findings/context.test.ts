@@ -2,7 +2,7 @@ import { mkdtemp, realpath, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { anchoredDiffHunk, readSnippet, resolveSafeRepoPath } from "./context.js";
+import { anchoredDiffHunk, diffCommentAnchor, readSnippet, resolveSafeRepoPath } from "./context.js";
 
 describe("safe repo path", () => {
   it("rejects lexical traversal and committed symlinks that escape the repo", async () => {
@@ -146,5 +146,47 @@ deleted file mode 100644
     const rendered = result.hunk.lines.join("\n");
     expect(rendered.length).toBeLessThanOrEqual(1_700);
     expect(result.hunk.truncated).toBe(true);
+  });
+});
+
+describe("diff comment anchor", () => {
+  // Hunk body: keep (old 5 / new 5), two deletions (old 6, 7), keep (old 8 / new 6).
+  // The deletions shift the new numbering, so line 7 only exists on the old side.
+  const diff = `diff --git a/src/app.ts b/src/app.ts
+--- a/src/app.ts
++++ b/src/app.ts
+@@ -5,4 +5,2 @@
+ keep
+-gone six
+-gone seven
+ keep
+`;
+
+  it("anchors new-side lines on the RIGHT", () => {
+    expect(diffCommentAnchor(diff, "src/app.ts", 5)).toEqual({ ok: true, side: "RIGHT" });
+  });
+
+  it("prefers RIGHT when the line exists on both sides", () => {
+    expect(diffCommentAnchor(diff, "src/app.ts", 6)).toEqual({ ok: true, side: "RIGHT" });
+  });
+
+  it("anchors deleted lines on the LEFT", () => {
+    expect(diffCommentAnchor(diff, "src/app.ts", 7)).toEqual({ ok: true, side: "LEFT" });
+  });
+
+  it("rejects lines outside every hunk", () => {
+    expect(diffCommentAnchor(diff, "src/app.ts", 99)).toEqual({ ok: false, reason: "outside_hunk" });
+  });
+
+  it("reports missing files, binaries, and missing locations explicitly", () => {
+    expect(diffCommentAnchor(diff, "src/other.ts", 5)).toEqual({ ok: false, reason: "file_unchanged" });
+    expect(diffCommentAnchor("", "src/app.ts", 5)).toEqual({ ok: false, reason: "missing_location" });
+    expect(diffCommentAnchor(diff, "src/app.ts", 0)).toEqual({ ok: false, reason: "missing_location" });
+    const binary = `diff --git a/asset.png b/asset.png
+--- a/asset.png
++++ b/asset.png
+GIT binary patch
+literal 10`;
+    expect(diffCommentAnchor(binary, "asset.png", 1)).toEqual({ ok: false, reason: "binary" });
   });
 });

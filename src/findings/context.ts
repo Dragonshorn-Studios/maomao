@@ -112,20 +112,8 @@ function headerPaths(line: string): { oldPath: string; newPath: string } | undef
   return { oldPath: unquote(match[1]), newPath: unquote(match[2]) };
 }
 
-/**
- * Extracts a small unified hunk around `line` for `filePath` from the authoritative PR diff,
- * for display on finding cards. The model-reported line is only a hint: it must fall inside a
- * real hunk of the reviewed SHA's diff, otherwise nothing is shown (no silent remapping).
- */
-export function anchoredDiffHunk(
-  diff: string,
-  filePath: string | null | undefined,
-  line: number | null | undefined,
-  contextLines = 4,
-  maxChars = 1_600,
-): AnchoredHunkResult {
-  if (!diff || !filePath) return { ok: false, reason: "missing_location" };
-  const normalized = normalizePath(filePath);
+/** The raw diff lines of one file's section, matched by exact normalized path. */
+function fileDiffSection(diff: string, normalized: string): string[] | undefined {
   const section: string[] = [];
   let inFile = false;
   for (const raw of diff.split("\n")) {
@@ -141,11 +129,15 @@ export function anchoredDiffHunk(
     }
     if (inFile) section.push(raw);
   }
-  if (!inFile) return { ok: false, reason: "file_unchanged" };
-  if (section.some((l) => l.startsWith("GIT binary patch") || l.startsWith("Binary files"))) {
-    return { ok: false, reason: "binary" };
-  }
+  return inFile ? section : undefined;
+}
 
+function isBinarySection(section: string[]): boolean {
+  return section.some((l) => l.startsWith("GIT binary patch") || l.startsWith("Binary files"));
+}
+
+/** Unified-diff hunks of one file section with both sides' line numbers resolved. */
+function parseHunkLines(section: string[]): HunkLine[][] {
   const hunks: HunkLine[][] = [];
   let current: HunkLine[] | undefined;
   let oldNo = 0;
@@ -169,6 +161,60 @@ export function anchoredDiffHunk(
       current.push({ marker: " ", text: raw.slice(1), oldNo: oldNo++, newNo: newNo++ });
     }
   }
+  return hunks;
+}
+
+export type DiffCommentSide = "LEFT" | "RIGHT";
+
+export type DiffCommentAnchorResult =
+  | { ok: true; side: DiffCommentSide }
+  | { ok: false; reason: AnchoredHunkReason };
+
+/**
+ * Whether GitHub would accept a review comment anchored at (filePath, line): the line
+ * must appear on a side of a hunk in the PR diff. Prefers the new side (RIGHT); a line
+ * that only exists on the old side (deleted code) still anchors, on the LEFT.
+ */
+export function diffCommentAnchor(
+  diff: string | null | undefined,
+  filePath: string | null | undefined,
+  line: number | null | undefined,
+): DiffCommentAnchorResult {
+  if (!diff || !filePath || line == null || line < 1) return { ok: false, reason: "missing_location" };
+  const normalized = normalizePath(filePath);
+  const section = fileDiffSection(diff, normalized);
+  if (!section) return { ok: false, reason: "file_unchanged" };
+  if (isBinarySection(section)) return { ok: false, reason: "binary" };
+  const hunks = parseHunkLines(section);
+  if (hunks.length === 0) return { ok: false, reason: "no_hunks" };
+  let onOldSide = false;
+  for (const hunk of hunks) {
+    for (const entry of hunk) {
+      if (entry.newNo === line) return { ok: true, side: "RIGHT" };
+      if (entry.oldNo === line) onOldSide = true;
+    }
+  }
+  return onOldSide ? { ok: true, side: "LEFT" } : { ok: false, reason: "outside_hunk" };
+}
+
+/**
+ * Extracts a small unified hunk around `line` for `filePath` from the authoritative PR diff,
+ * for display on finding cards. The model-reported line is only a hint: it must fall inside a
+ * real hunk of the reviewed SHA's diff, otherwise nothing is shown (no silent remapping).
+ */
+export function anchoredDiffHunk(
+  diff: string,
+  filePath: string | null | undefined,
+  line: number | null | undefined,
+  contextLines = 4,
+  maxChars = 1_600,
+): AnchoredHunkResult {
+  if (!diff || !filePath) return { ok: false, reason: "missing_location" };
+  const normalized = normalizePath(filePath);
+  const section = fileDiffSection(diff, normalized);
+  if (!section) return { ok: false, reason: "file_unchanged" };
+  if (isBinarySection(section)) return { ok: false, reason: "binary" };
+  const hunks = parseHunkLines(section);
   if (hunks.length === 0) return { ok: false, reason: "no_hunks" };
 
   let target: { hunk: HunkLine[]; index: number } | undefined;

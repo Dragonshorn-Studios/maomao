@@ -2,6 +2,7 @@ import { createAppAuth } from "@octokit/auth-app";
 import { Octokit } from "@octokit/rest";
 import type { Config } from "../config.js";
 import { limitedGithubFetch, unwrapDiffTooLarge } from "./diff-limit.js";
+import { diffCommentAnchor } from "../findings/context.js";
 import { findingMarker, fingerprintFinding, parseFindingMarker } from "../findings/identity.js";
 import { reviewMarker } from "../prompts.js";
 
@@ -15,6 +16,8 @@ export interface PullReviewComment {
 export interface PostedReview {
   id: string;
   url: string;
+  /** Inline comments GitHub actually accepted; empty when the fallback posted a body-only review. */
+  postedComments?: PullReviewComment[];
 }
 
 export interface ResolvedPull {
@@ -444,35 +447,27 @@ export class GithubClient implements GithubPort, ManualTriggerPort {
   }): Promise<PostedReview> {
     const octokit = this.installationOctokit(input.installationId);
     const event = input.event ?? "COMMENT";
-    try {
-      const response = await octokit.rest.pulls.createReview({
-        owner: input.owner,
-        repo: input.repo,
-        pull_number: input.pullNumber,
-        commit_id: input.commitId,
-        event,
-        body: input.body,
-        comments: input.comments.map((comment) => ({
-          path: comment.path,
-          body: comment.body,
-          line: comment.line,
-          side: comment.side ?? "RIGHT",
-        })),
-      });
-      return { id: String(response.data.id), url: response.data.html_url ?? "" };
-    } catch (error) {
-      if (input.comments.length === 0) throw error;
-      // Inline comments must land on diff lines; fall back to a body-only review.
-      const response = await octokit.rest.pulls.createReview({
-        owner: input.owner,
-        repo: input.repo,
-        pull_number: input.pullNumber,
-        commit_id: input.commitId,
-        event,
-        body: `${input.body}\n\n_Inline comments were omitted because GitHub rejected one or more diff locations._`,
-      });
-      return { id: String(response.data.id), url: response.data.html_url ?? "" };
-    }
+    return createReviewWithFallback({
+      comments: input.comments,
+      body: input.body,
+      post: async (comments, body) => {
+        const response = await octokit.rest.pulls.createReview({
+          owner: input.owner,
+          repo: input.repo,
+          pull_number: input.pullNumber,
+          commit_id: input.commitId,
+          event,
+          body,
+          comments: comments.map((comment) => ({
+            path: comment.path,
+            body: comment.body,
+            line: comment.line,
+            side: comment.side ?? "RIGHT",
+          })),
+        });
+        return { id: response.data.id, url: response.data.html_url ?? "" };
+      },
+    });
   }
 
   async listIssueComments(
@@ -608,6 +603,34 @@ export class GithubClient implements GithubPort, ManualTriggerPort {
   }
 }
 
+/**
+ * Post a review with inline comments, degrading instead of dying: if GitHub rejects
+ * the batch, retry once as a body-only review; if that retry also fails, surface the
+ * original error (it explains why we degraded).
+ */
+export async function createReviewWithFallback(input: {
+  comments: PullReviewComment[];
+  body: string;
+  post: (comments: PullReviewComment[], body: string) => Promise<{ id: number | string; url?: string }>;
+}): Promise<PostedReview> {
+  try {
+    const review = await input.post(input.comments, input.body);
+    return { id: String(review.id), url: review.url ?? "", postedComments: input.comments };
+  } catch (error) {
+    if (input.comments.length === 0) throw error;
+    // Inline comments must land on diff lines; fall back to a body-only review.
+    try {
+      const review = await input.post(
+        [],
+        `${input.body}\n\n_Inline comments were omitted because GitHub rejected one or more diff locations._`,
+      );
+      return { id: String(review.id), url: review.url ?? "", postedComments: [] };
+    } catch {
+      throw error;
+    }
+  }
+}
+
 export function findExistingReview(
   reviews: { id: number; body: string; commitId?: string; htmlUrl?: string }[],
   headSha: string,
@@ -618,11 +641,30 @@ export function findExistingReview(
   return { id: String(match.id), url: match.htmlUrl ?? "" };
 }
 
+export interface InlineCommentFinding {
+  file?: string;
+  line?: number;
+  summary: string;
+  body?: string;
+  severity: string;
+  category?: string;
+  fingerprint?: string;
+}
+
+/** A finding whose reported location cannot anchor in the diff, demoted to the review body. */
+export interface DemotedFinding {
+  finding: InlineCommentFinding;
+  reason: string;
+}
+
+const DEMOTED_BODY_LIMIT = 10;
+
 export function buildReviewBody(input: {
   headSha: string;
   summary: string;
   findingsCount: number;
   reviewerCount: number;
+  demoted?: DemotedFinding[];
 }): string {
   const marker = reviewMarker(input.headSha);
   const header = [
@@ -630,35 +672,64 @@ export function buildReviewBody(input: {
     `Maomao reviewed commit \`${input.headSha}\` with ${input.reviewerCount} specialist run(s).`,
     "",
   ].join("\n");
-  return `${header}${input.summary.trim()}\n`;
+  let body = `${header}${input.summary.trim()}\n`;
+  const demoted = input.demoted ?? [];
+  if (demoted.length > 0) {
+    const shown = demoted.slice(0, DEMOTED_BODY_LIMIT);
+    const lines = shown.map(
+      (entry) =>
+        `- **${entry.finding.severity}**: ${entry.finding.summary} — \`${entry.finding.file}:${entry.finding.line}\``,
+    );
+    if (demoted.length > shown.length) lines.push(`- … and ${demoted.length - shown.length} more`);
+    body += `\n#### Findings not shown inline\n\nThese locations are not part of the diff hunks, so they are listed here instead:\n\n${lines.join("\n")}\n`;
+  }
+  return body;
+}
+
+function inlineComment(finding: InlineCommentFinding, headSha: string, side: "LEFT" | "RIGHT"): PullReviewComment {
+  const fingerprint = finding.fingerprint ?? fingerprintFinding(finding);
+  return {
+    path: finding.file ?? "",
+    line: finding.line ?? 1,
+    side,
+    body: `${findingMarker(fingerprint, headSha)}\n**${finding.severity}**: ${finding.summary}${finding.body ? `\n\n${finding.body}` : ""}`,
+  };
+}
+
+/**
+ * Split publishable findings into inline comments GitHub will accept and findings whose
+ * reported location is not in the diff (demoted to the review body by the caller). Without
+ * a diff to validate against, every located finding passes through as before.
+ */
+export function selectInlineComments(
+  findings: InlineCommentFinding[],
+  opts: { limit: number; headSha: string; diff?: string },
+): { comments: PullReviewComment[]; demoted: DemotedFinding[] } {
+  const comments: PullReviewComment[] = [];
+  const demoted: DemotedFinding[] = [];
+  for (const finding of findings) {
+    if (!finding.file || !finding.line) continue;
+    const anchor = opts.diff
+      ? diffCommentAnchor(opts.diff, finding.file, finding.line)
+      : ({ ok: true, side: "RIGHT" } as const);
+    if (!anchor.ok) {
+      demoted.push({ finding, reason: anchor.reason });
+      continue;
+    }
+    // Cap only the inline set: findings beyond it stay unlisted (summary only),
+    // exactly as before, while unanchorable ones always reach the body.
+    if (comments.length >= opts.limit) continue;
+    comments.push(inlineComment(finding, opts.headSha, anchor.side));
+  }
+  return { comments, demoted };
 }
 
 export function toInlineComments(
-  findings: {
-    file?: string;
-    line?: number;
-    summary: string;
-    body?: string;
-    severity: string;
-    category?: string;
-    fingerprint?: string;
-  }[],
+  findings: InlineCommentFinding[],
   limit: number,
   headSha: string,
 ): PullReviewComment[] {
-  const comments: PullReviewComment[] = [];
-  for (const finding of findings) {
-    if (comments.length >= limit) break;
-    if (!finding.file || !finding.line) continue;
-    const fingerprint = finding.fingerprint ?? fingerprintFinding(finding);
-    comments.push({
-      path: finding.file,
-      line: finding.line,
-      side: "RIGHT",
-      body: `${findingMarker(fingerprint, headSha)}\n**${finding.severity}**: ${finding.summary}${finding.body ? `\n\n${finding.body}` : ""}`,
-    });
-  }
-  return comments;
+  return selectInlineComments(findings, { limit, headSha }).comments;
 }
 
 export function inlineCommentFingerprints(comments: PullReviewComment[]): string[] {
