@@ -10,7 +10,9 @@ export interface ExplainerEvents {
 
 export class ExplainerEventParser {
   private buffer = "";
-  private readonly seen = new Set<string>();
+  /** Part id -> index into textParts, for last-write-wins part updates. */
+  private readonly partIndex = new Map<string, number>();
+  private anonymousParts = 0;
   sessionId: string | undefined;
   textParts: string[] = [];
 
@@ -39,11 +41,16 @@ export class ExplainerEventParser {
       this.sessionId = event.sessionID;
     }
     if (event.type === "text" && typeof event.part?.text === "string" && event.part.text.length > 0) {
-      // The same part can be re-emitted; dedupe by part id when the
-      // provider supplies one so the transcript never doubles a paragraph.
-      const key = event.part.id ?? `text:${event.part.text}`;
-      if (this.seen.has(key)) return;
-      this.seen.add(key);
+      // A part can be re-emitted with grown text (provider-side streaming);
+      // the newest emission of an id replaces its earlier snapshot, while
+      // anonymous parts append (nothing to key them on but order).
+      const id = event.part.id;
+      if (id != null && this.partIndex.has(id)) {
+        this.textParts[this.partIndex.get(id)!] = event.part.text;
+        return;
+      }
+      if (id != null) this.partIndex.set(id, this.textParts.length);
+      else this.anonymousParts += 1;
       this.textParts.push(event.part.text);
     }
   }

@@ -48,14 +48,20 @@ describe("ExplainerEventParser", () => {
     expect(result.sessionId).toBe("ses_first");
   });
 
-  it("dedupes an identical re-emitted part but keeps distinct parts", () => {
-    const result = events(
+  it("re-emissions of a part id replace their snapshot (no doubling, no truncation)", () => {
+    const parser = new ExplainerEventParser();
+    const first = parser.feed(
+      [`{"type":"text","part":{"id":"p1","text":"same"}}`, `{"type":"text","part":{"id":"p1","text":"same"}}`].join("\n") + "\n",
+    );
+    expect(first.textParts).toEqual(["same"]);
+    const second = parser.feed(
       [
         `{"type":"text","part":{"id":"p1","text":"same"}}`,
-        `{"type":"text","part":{"id":"p1","text":"same"}}`,
         `{"type":"text","part":{"id":"p2","text":"same"}}`,
+        `{"type":"text","part":{"id":"g1","text":"Hel"}}`,
+        `{"type":"text","part":{"id":"g1","text":"Hello world"}}`,
       ].join("\n") + "\n",
     );
-    expect(result.textParts).toEqual(["same", "same"]);
+    expect(second.textParts).toEqual(["same", "same", "Hello world"]);
   });
 });
