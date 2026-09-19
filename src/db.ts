@@ -507,10 +507,13 @@ function rebuildTableScoped(db: SqliteDb, rebuild: ScopedRebuild): void {
   const pattern = new RegExp(
     rebuild.from
       .replace(/[()]/g, (match) => `\\${match}`)
-      // Tolerate reformatted whitespace (e.g. "UNIQUE(a,b)") around commas so
-      // an externally pretty-printed legacy schema still migrates.
-      .replace(/,/g, ",\\s*")
-      .replace(/\s+/g, "\\s+"),
+      // Whitespace runs become \\s* and commas consume any trailing whitespace,
+      // so an externally reformatted legacy schema — "UNIQUE(a,b)", missing
+      // newlines, doubled spaces — still matches the shipped formatting.
+      // Content stays load-bearing: a constraint over different columns
+      // refuses to match and the migration fails closed.
+      .replace(/,\s*/g, ",\\s*")
+      .replace(/\s+/g, "\\s*"),
   );
   if (!pattern.test(row.sql)) {
     throw new Error(

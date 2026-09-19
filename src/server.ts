@@ -1985,7 +1985,10 @@ function renderJobError(
       csrfToken: pageOpts.showLogout ? ensureCsrfToken(c, ctx.config.uiSessionSecret) : undefined,
       prHeadSha: latest?.head_sha ?? job.head_sha,
       error,
-      prFindings: ctx.store.listFindings(job.repo_full_name, job.pr_number),
+      prFindings: ctx.store.listFindings(job.repo_full_name, job.pr_number, {
+        provider: job.provider,
+        instance: job.provider_instance,
+      }),
     }),
     400,
   );
