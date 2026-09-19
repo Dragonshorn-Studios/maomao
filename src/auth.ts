@@ -48,6 +48,9 @@ export function isPublicPath(path: string): boolean {
   return (
     path === "/health" ||
     path === "/webhooks/github" ||
+    // GitLab webhook endpoints carry the connection id and verify their own
+    // per-connection secret, exactly like the GitHub webhook above.
+    path.startsWith("/webhooks/gitlab/") ||
     path === "/login" ||
     path === "/logout" ||
     path === "/login/github" ||
@@ -64,7 +67,7 @@ export function isPublicPath(path: string): boolean {
 }
 
 export function csrfExemptPath(path: string): boolean {
-  return path === "/webhooks/github";
+  return path === "/webhooks/github" || path.startsWith("/webhooks/gitlab/");
 }
 
 export type CsrfRejectReason = "missing-cookie" | "missing-field" | "mismatch" | "bad-token";

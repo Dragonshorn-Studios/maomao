@@ -10,6 +10,7 @@ type OpenCodeLike = OpenCodePort;
 import { createApp } from "./server.js";
 import { ForgeConnectionStore } from "./forge/connections.js";
 import { generateForgeKeyHex } from "./forge/secretbox.js";
+import { computeSignature } from "./gitlab/signature.js";
 import { fingerprintFinding } from "./findings/identity.js";
 import { SESSION_COOKIE, CSRF_COOKIE, issueCsrfToken } from "./auth.js";
 import type { GithubPort, ManualTriggerPort, ResolvedPull } from "./github/client.js";
@@ -3829,5 +3830,105 @@ describe("forge connection routes", () => {
       body: `csrf_token=${encodeURIComponent(session.csrfToken)}`,
     });
     expect(response.status).toBe(404);
+  });
+});
+describe("gitlab webhook route", () => {
+  function signedHeaders(secret: string, rawBody: string, webhookId: string) {
+    const timestamp = String(Math.floor(Date.now() / 1000));
+    const signature = computeSignature(
+      Buffer.from(secret.replace(/^whsec_/, ""), "base64"),
+      webhookId,
+      timestamp,
+      rawBody,
+    );
+    return {
+      "content-type": "application/json",
+      "x-gitlab-event": "merge_request",
+      "webhook-id": webhookId,
+      "webhook-timestamp": timestamp,
+      "webhook-signature": signature,
+    };
+  }
+
+  it("verifies per-connection secrets and enqueues through the route", async () => {
+    const forgeConnections = new ForgeConnectionStore(openDb(":memory:"), Buffer.from(generateForgeKeyHex(), "hex"));
+    const { app } = testApp(
+      {
+        GITHUB_WEBHOOK_SECRET: "s3cret",
+        GITHUB_APP_ID: "1",
+        GITHUB_APP_PRIVATE_KEY: "k",
+        REVIEWER_ROLES: "correctness,security",
+      },
+      undefined,
+      undefined,
+      { forgeConnections },
+    );
+    const secret = `whsec_${Buffer.from("unit-test-signing-secret-0000000000").toString("base64")}`;
+    const { id } = forgeConnections.create({
+      provider: "gitlab",
+      label: "acme",
+      instanceUrl: "https://gitlab.com",
+      token: "glpat-connection-token",
+      tokenType: "group",
+      scopeType: "group",
+      scopePath: "acme",
+      webhookSecret: secret,
+      allowPrivateNetwork: false,
+      allowInsecureHttp: false,
+      allowApprove: false,
+    });
+    const payload = JSON.stringify({
+      object_kind: "merge_request",
+      user: { id: 111, username: "octocat" },
+      project: { id: 42, path_with_namespace: "acme/widgets" },
+      object_attributes: {
+        iid: 7,
+        action: "open",
+        state: "opened",
+        title: "t",
+        url: "https://gitlab.com/acme/widgets/-/merge_requests/7",
+        source_branch: "feature",
+        target_branch: "main",
+        last_commit: { id: "headroute1" },
+      },
+    });
+    const response = await app.request(`/webhooks/gitlab/${id}`, {
+      method: "POST",
+      headers: signedHeaders(secret, payload, "whid-route-1"),
+      body: payload,
+    });
+    expect(response.status).toBe(202);
+    const body = (await response.json()) as { ok: boolean; jobId: number };
+    expect(body.ok).toBe(true);
+  });
+
+  it("rejects bad secrets with 401 without leaking verification detail shape", async () => {
+    const forgeConnections = new ForgeConnectionStore(openDb(":memory:"), Buffer.from(generateForgeKeyHex(), "hex"));
+    const { app } = testApp(
+      { GITHUB_WEBHOOK_SECRET: "s3cret", GITHUB_APP_ID: "1", GITHUB_APP_PRIVATE_KEY: "k", REVIEWER_ROLES: "correctness" },
+      undefined,
+      undefined,
+      { forgeConnections },
+    );
+    const secret = `whsec_${Buffer.from("unit-test-signing-secret-0000000000").toString("base64")}`;
+    const { id } = forgeConnections.create({
+      provider: "gitlab",
+      label: "acme",
+      instanceUrl: "https://gitlab.com",
+      token: "glpat-connection-token",
+      tokenType: "group",
+      scopeType: "group",
+      scopePath: "acme",
+      webhookSecret: secret,
+      allowPrivateNetwork: false,
+      allowInsecureHttp: false,
+      allowApprove: false,
+    });
+    const response = await app.request(`/webhooks/gitlab/${id}`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-gitlab-event": "merge_request" },
+      body: "{}",
+    });
+    expect(response.status).toBe(401);
   });
 });

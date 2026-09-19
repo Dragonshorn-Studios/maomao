@@ -4,6 +4,7 @@ import { deleteCookie, getCookie, setCookie } from "hono/cookie";
 import type { Config } from "./config.js";
 import type { JobStore } from "./jobs/store.js";
 import { handleGithubWebhook } from "./github/webhooks.js";
+import { handleGitLabWebhook } from "./gitlab/webhooks.js";
 import { ForgeConnectionStore, countConnections, toView } from "./forge/connections.js";
 import { probeConnection } from "./forge/probe.js";
 import { InstanceUrlError } from "./forge/safe-http.js";
@@ -507,6 +508,38 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
         rawBody,
       },
       rateLimiter,
+      // Dropped from the in-memory queue inside the handler, before any
+      // post-cancellation logging could fail; abortMany is idempotent.
+      abortJobs: (ids) => ctx.queue.abortMany(ids),
+    });
+    if (result.enqueue) {
+      dispatchEnqueue(ctx.queue, result.enqueue);
+    }
+    if (result.dispatchJobId) {
+      ctx.queue.enqueue(result.dispatchJobId);
+    }
+    return c.json(result.body, result.status as 200);
+  });
+
+  app.post("/webhooks/gitlab/:connectionId", async (c) => {
+    if (!ctx.forgeConnections) {
+      return c.text("Forge connections require MAOMAO_FORGE_KEY", 503);
+    }
+    const rawBody = await c.req.text();
+    const result = await handleGitLabWebhook({
+      config: ctx.config,
+      store: ctx.store,
+      connections: ctx.forgeConnections,
+      rateLimiter,
+      connectionId: c.req.param("connectionId"),
+      request: {
+        event: c.req.header("x-gitlab-event") ?? "",
+        rawBody,
+        webhookId: c.req.header("webhook-id"),
+        webhookTimestamp: c.req.header("webhook-timestamp"),
+        webhookSignature: c.req.header("webhook-signature"),
+        legacyToken: c.req.header("x-gitlab-token"),
+      },
       // Dropped from the in-memory queue inside the handler, before any
       // post-cancellation logging could fail; abortMany is idempotent.
       abortJobs: (ids) => ctx.queue.abortMany(ids),

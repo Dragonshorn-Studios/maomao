@@ -1,4 +1,5 @@
 import type { CancelReason } from "../config.js";
+import type { ForgeScope } from "../forge/types.js";
 import { scopeOf } from "../forge/types.js";
 import { publish } from "../events.js";
 import type { JobStore } from "./store.js";
@@ -23,6 +24,8 @@ export interface CancelInput {
 export interface CancelJobsForPullInput extends CancelInput {
   repoFullName: string;
   prNumber: number;
+  /** Defaults to the env GitHub connection; GitLab callers must pass their own. */
+  scope?: Partial<ForgeScope>;
 }
 
 /** Must be idempotent and must not throw; see CancelInput.onCancelled. */
@@ -62,7 +65,11 @@ export function cancelJobsForPull(
   input: CancelJobsForPullInput,
 ): { cancelledJobIds: number[] } {
   const cancelledJobIds = store.cancelJobs(
-    { repoFullName: input.repoFullName, prNumber: input.prNumber },
+    {
+      repoFullName: input.repoFullName,
+      prNumber: input.prNumber,
+      scope: input.scope,
+    },
     input.reason,
     input.actor ?? null,
   );
