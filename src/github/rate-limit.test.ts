@@ -62,3 +62,29 @@ describe("WindowRateLimiter", () => {
     expect(limiter.wouldAllow("a", 3, 10_000)).toBe(true);
   });
 });
+describe("string keys", () => {
+  it("isolates forge scopes from numeric GitHub ids sharing the same digits", () => {
+    const limiter = new RepoRateLimiter();
+    for (let index = 0; index < 3; index += 1) {
+      limiter.recordKey("gitlab:gitlab.com:42", 3, 60_000);
+    }
+    expect(limiter.wouldAllowKey("gitlab:gitlab.com:42", 3, 60_000)).toBe(false);
+    expect(limiter.wouldAllow(42, 3, 60_000)).toBe(true);
+    expect(limiter.wouldAllowKey("gitlab:gitlab.com:43", 3, 60_000)).toBe(true);
+  });
+
+  it("bridges numeric and string access to the same bucket", () => {
+    const limiter = new RepoRateLimiter();
+    limiter.record(42, 2, 60_000);
+    expect(limiter.wouldAllowKey("42", 2, 60_000)).toBe(true);
+    limiter.recordKey("42", 2, 60_000);
+    expect(limiter.wouldAllow(42, 2, 60_000)).toBe(false);
+  });
+
+  it("treats empty keys as always-allowed no-ops", () => {
+    const limiter = new RepoRateLimiter();
+    expect(limiter.wouldAllowKey("", 3, 60_000)).toBe(false);
+    limiter.recordKey("", 3, 60_000);
+    expect(limiter.size()).toBe(0);
+  });
+});

@@ -15,6 +15,7 @@ import { parseFindingMarker } from "../findings/identity.js";
 import { isAllowlistedOverrideAuthor, sanitizeCommentText, threadFingerprintIndex } from "../findings/overrides.js";
 import { accessLevelToPermission, GitLabApiClient, toForgeDiscussions, type GitLabCommandApi } from "./client.js";
 import { deliveryIdFrom, verifyGitLabWebhook } from "./signature.js";
+import type { ForgeDiscussion } from "../forge/types.js";
 import type { EnqueueResult, JobStore } from "../jobs/store.js";
 import { enqueuePullJob } from "../jobs/enqueue.js";
 import { cancelJobsForPull } from "../jobs/cancel.js";
@@ -30,6 +31,9 @@ export interface GitLabWebhookRequest {
   webhookTimestamp?: string;
   webhookSignature?: string;
   legacyToken?: string;
+  /** Per-event and per-webhook UUIDs from newer GitLab; idempotency fallbacks. */
+  eventUuid?: string;
+  webhookUuid?: string;
 }
 
 export interface GitLabWebhookHandleResult {
@@ -331,20 +335,37 @@ async function handleNoteEvent(input: {
   }
 
   const body = note.note ?? "";
-  if (commentLooksLikeMaomaoEscalation(body)) {
+  // Maomao's own marker comments (escalation banners, reviews, findings) are
+  // dead on arrival regardless of whether the connection has a probed bot
+  // identity — finding bodies quote the diff, so they can carry planted text.
+  if (commentLooksLikeMaomaoEscalation(body) || parseFindingMarker(body)) {
     return ignored("ignored maomao marker comment");
   }
-
-  const scope = { provider: "gitlab", instance: connection.instance.hostname };
-  const discussions = toForgeDiscussions(await input.gitlab.listDiscussions(projectId!, mrIid!));
-  const noteDiscussion = discussions.find((discussion) =>
-    discussion.comments.some((candidate) => candidate.databaseId === noteId),
-  );
   const command = parseOverrideCommand(body);
   const escalate = mentionsEscalateCommand(body, input.config.poisonAlert.mentionName, input.config.poisonAlert.escalateCommand);
   if (!command && !escalate) {
     return ignored("not a maomao command");
   }
+
+  const scope = { provider: "gitlab", instance: connection.instance.hostname };
+  // The escalate branch never reads discussions; only the dismiss/reopen
+  // branches pay the lookup cost.
+  let discussions: ForgeDiscussion[] = [];
+  if (!escalate) {
+    const listed = await input.gitlab.listDiscussions(projectId!, mrIid!);
+    if (listed.truncated) {
+      // A truncated listing cannot prove the note is outside a Maomao
+      // discussion; leave the delivery unclaimed so a retry can try again.
+      return {
+        status: 200,
+        body: { ok: true, warning: "discussion list exceeded the processing cap; command not applied" },
+      };
+    }
+    discussions = toForgeDiscussions(listed.discussions);
+  }
+  const noteDiscussion = discussions.find((discussion) =>
+    discussion.comments.some((candidate) => candidate.databaseId === noteId),
+  );
 
   const memberLevel = await input.gitlab.getAccessLevel(projectId!, actorId);
   const permission = accessLevelToPermission(memberLevel);
@@ -382,8 +403,7 @@ async function handleNoteEvent(input: {
   }
 
   const fingerprints = threadFingerprintIndex(discussions);
-  const markerInNote = parseFindingMarker(note?.note ?? "");
-  const fingerprint = markerInNote?.id ?? fingerprints.get(String(noteId));
+  const fingerprint = fingerprints.get(String(noteId));
   const marker = noteDiscussion
     ? noteDiscussion.comments.map((candidate) => parseFindingMarker(candidate.body)).find(Boolean)
     : undefined;
@@ -494,7 +514,7 @@ export async function handleGitLabWebhook(input: {
     return { status: 401, body: { error: verification.reason } };
   }
 
-  if (request.event === "ping") {
+  if (request.event.toLowerCase() === "ping" || request.event.toLowerCase() === "ping hook") {
     return { status: 200, body: { ok: true, event: "ping" } };
   }
   let parsed: GitLabMergeRequestEvent;
@@ -518,8 +538,8 @@ export async function handleGitLabWebhook(input: {
   const deliveryId = deliveryIdFrom(
     {
       "webhook-id": request.webhookId,
-      "x-gitlab-event-uuid": undefined,
-      "x-gitlab-webhook-uuid": undefined,
+      "x-gitlab-event-uuid": request.eventUuid,
+      "x-gitlab-webhook-uuid": request.webhookUuid,
     },
     request.event,
     `${connection.row.id}:${request.rawBody}`,
@@ -529,23 +549,33 @@ export async function handleGitLabWebhook(input: {
     return { status: 200, body: { ok: true, duplicate: true, reason: "duplicate delivery" } };
   }
 
-  if (parsed.object_kind === "merge_request") {
-    return handleMergeRequestEvent({
+  try {
+    if (parsed.object_kind === "merge_request") {
+      return await handleMergeRequestEvent({
+        store,
+        config: input.config,
+        connection,
+        rateLimiter: input.rateLimiter,
+        request,
+        deliveryId,
+        abortJobs: input.abortJobs,
+      });
+    }
+    return await handleNoteEvent({
       store,
       config: input.config,
       connection,
-      rateLimiter: input.rateLimiter,
       request,
       deliveryId,
-      abortJobs: input.abortJobs,
+      gitlab: (input.gitlabFactory ?? ((opened: OpenedConnection) => new GitLabApiClient(opened)))(connection),
     });
+  } catch (error) {
+    // An escaped API failure would otherwise become Hono's bare 500 with no
+    // log at all; log it so the operator can see GitLab delivery failures.
+    const message = error instanceof Error ? error.message : String(error);
+    console.error(
+      `gitlab webhook: handling failed for ${request.event} delivery ${deliveryId || "unknown"}: ${message.replace(/[\x00-\x1f]/g, " ")}`,
+    );
+    return { status: 500, body: { error: "webhook handling failed; see server logs" } };
   }
-  return handleNoteEvent({
-    store,
-    config: input.config,
-    connection,
-    request,
-    deliveryId,
-    gitlab: (input.gitlabFactory ?? ((opened: OpenedConnection) => new GitLabApiClient(opened)))(connection),
-  });
 }

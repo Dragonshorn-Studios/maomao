@@ -27,7 +27,7 @@ export interface GitLabDiscussion {
 export function toForgeDiscussions(discussions: GitLabDiscussion[]): ForgeDiscussion[] {
   return discussions.map((discussion) => ({
     id: discussion.id,
-    isResolved: discussion.notes.some((note) => note.resolvable && note.resolved) ?? false,
+    isResolved: discussion.notes.some((note) => note.resolvable === true && note.resolved === true),
     comments: discussion.notes.map((note) => ({
       id: String(note.id),
       databaseId: note.id,
@@ -41,11 +41,20 @@ export function toForgeDiscussions(discussions: GitLabDiscussion[]): ForgeDiscus
  * The discussion/membership surface webhook command handling needs. Slice 4's
  * provider extends GitLabApiClient; tests can stub just this shape.
  */
+export interface GitLabDiscussionPage {
+  discussions: GitLabDiscussion[];
+  /** True when the processing cap stopped the listing; callers must not act on a partial view. */
+  truncated: boolean;
+}
+
 export interface GitLabCommandApi {
-  listDiscussions(projectId: number, mergeRequestIid: number): Promise<GitLabDiscussion[]>;
+  listDiscussions(projectId: number, mergeRequestIid: number): Promise<GitLabDiscussionPage>;
   resolveDiscussion(projectId: number, mergeRequestIid: number, discussionId: string, resolved: boolean): Promise<void>;
   getAccessLevel(projectId: number, userId: number): Promise<number | undefined>;
 }
+
+/** Processing cap on discussion listings; keeps a hostile instance bounded. */
+const DISCUSSION_CAP = 500;
 
 export class GitLabApiClient implements GitLabCommandApi {
   constructor(private readonly connection: OpenedConnection) {}
@@ -71,22 +80,24 @@ export class GitLabApiClient implements GitLabCommandApi {
     return JSON.parse(response.body) as T;
   }
 
-  async listDiscussions(projectId: number, mergeRequestIid: number): Promise<GitLabDiscussion[]> {
+  async listDiscussions(projectId: number, mergeRequestIid: number): Promise<GitLabDiscussionPage> {
     const discussions: GitLabDiscussion[] = [];
     let page = 1;
     // GitLab paginates at 20 by default; a MR rarely has more than a few
     // hundred discussions, and the cap keeps a hostile instance bounded.
-    while (discussions.length < 500) {
+    while (discussions.length < DISCUSSION_CAP) {
       const page_ = await this.getJson<GitLabDiscussion[]>(
         `${this.projectPath(projectId)}/merge_requests/${mergeRequestIid}/discussions?per_page=100&page=${page}`,
       );
       if (!Array.isArray(page_)) break;
       discussions.push(...page_);
-      const nextPage = page_.length >= 100 ? page + 1 : 0;
-      if (!nextPage) break;
-      page = nextPage;
+      if (page_.length < 100) {
+        return { discussions, truncated: false };
+      }
+      page += 1;
     }
-    return discussions;
+    // Full page at the cap: there may be more; report the truncation.
+    return { discussions, truncated: true };
   }
 
   async resolveDiscussion(projectId: number, mergeRequestIid: number, discussionId: string, resolved: boolean): Promise<void> {
@@ -100,8 +111,10 @@ export class GitLabApiClient implements GitLabCommandApi {
       timeoutMs: 15_000,
       maxBytes: 1024 * 1024,
     });
-    // GitLab returns 400 when the discussion is not resolvable (system or
-    // diff-less notes); treat those as already satisfied.
+    // Tolerances: 404 means the discussion is gone; a 400 on UNRESOLVE means
+    // it was already open (GitLab rejects resolving non-resolvable/unresolved
+    // state asymmetrically). Everything else — including failing to resolve —
+    // surfaces to the caller's warning path.
     if (response.status >= 400 && response.status !== 404 && !(response.status === 400 && !resolved)) {
       throw new SafeHttpError(`could not ${resolved ? "resolve" : "unresolve"} discussion: status ${response.status}`, response.status);
     }

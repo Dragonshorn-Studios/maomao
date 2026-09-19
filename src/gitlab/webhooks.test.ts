@@ -8,7 +8,9 @@ import { ForgeConnectionStore } from "../forge/connections.js";
 import { generateForgeKeyHex } from "../forge/secretbox.js";
 import type { GitLabDiscussion } from "./client.js";
 import { computeSignature } from "./signature.js";
-import { handleGitLabWebhook, parseMergeRequestEvent, shouldHandleMergeRequest, type GitLabWebhookRequest } from "./webhooks.js";
+import { handleGitLabWebhook, parseMergeRequestEvent, shouldHandleMergeRequest, withinScope, type GitLabWebhookRequest } from "./webhooks.js";
+import { accessLevelToPermission, toForgeDiscussions } from "./client.js";
+import { decodeSigningSecret } from "./signature.js";
 
 const WHSEC_SECRET = `whsec_${Buffer.from(randomBytes(32)).toString("base64")}`;
 const LEGACY_SECRET = "legacy-shared-token";
@@ -127,9 +129,13 @@ function maomaoDiscussions(): GitLabDiscussion[] {
   ];
 }
 
+function discussionPage(discussions: GitLabDiscussion[]) {
+  return { discussions, truncated: false };
+}
+
 function gitlabFactory(overrides: { accessLevel?: number; discussions?: GitLabDiscussion[] } = {}) {
   return () => ({
-    listDiscussions: async () => overrides.discussions ?? maomaoDiscussions(),
+    listDiscussions: async () => discussionPage(overrides.discussions ?? maomaoDiscussions()),
     getAccessLevel: async () => overrides.accessLevel ?? 40,
     resolveDiscussion: async () => {},
   });
@@ -360,7 +366,7 @@ describe("GitLab note events", () => {
       ...input,
       request: signedRequest(secret, "note", JSON.stringify(notePayload())),
       gitlabFactory: () => ({
-        listDiscussions: async () => maomaoDiscussions(),
+        listDiscussions: async () => discussionPage(maomaoDiscussions()),
         getAccessLevel: async () => 40,
         resolveDiscussion: async (_projectId: number, _iid: number, discussionId: string, nowResolved: boolean) => {
           if (nowResolved) capturedResolved = discussionId;
@@ -375,25 +381,150 @@ describe("GitLab note events", () => {
     expect(finding?.dismissed_by).toBe("maintainer");
   });
 
-  it("refuses unauthorized actors", async () => {
+  it("refuses unauthorized actors without touching the finding", async () => {
     const connections = newConnections();
     const { id, secret } = createConnection(connections);
+    const input = baseInput(connections, id, signedRequest(secret, "note", JSON.stringify(notePayload())));
+    // Seed a finding so the refusal is observable against the same store.
+    input.store.upsertFinding({
+      repoFullName: "acme/widgets",
+      prNumber: 7,
+      fingerprint: "fp123",
+      scope: { provider: "gitlab", instance: "gitlab.com" },
+      status: "open",
+      reviewedSha: "abc",
+      summary: "bug",
+    });
     const result = await handleGitLabWebhook({
-      ...baseInput(connections, id, signedRequest(secret, "note", JSON.stringify(notePayload()))),
+      ...input,
       gitlabFactory: () => ({
-        listDiscussions: async () => maomaoDiscussions(),
+        listDiscussions: async () => discussionPage(maomaoDiscussions()),
         getAccessLevel: async () => 10,
         resolveDiscussion: async () => {},
       }),
     });
     expect(result.status).toBe(202);
     expect(result.body.reason).toMatch(/not authorized/);
-    const finding = baseInput(connections, id, signedRequest(secret, "note", "{}")).store.listFindings(
-      "acme/widgets",
-      7,
-      { provider: "gitlab", instance: "gitlab.com" },
-    );
-    expect(finding).toHaveLength(0);
+    const finding = input.store.listFindings("acme/widgets", 7, { provider: "gitlab", instance: "gitlab.com" })[0];
+    expect(finding?.status).toBe("open");
+    // The unauthorized outcome is claimed so redeliveries do not retry authz.
+    expect(input.store.hasWebhookDelivery(input.request.webhookId!, { provider: "gitlab", instance: "gitlab.com" })).toBe(true);
+  });
+
+  it("reopens a finding and unresolves the discussion", async () => {
+    const connections = newConnections();
+    const { id, secret } = createConnection(connections);
+    const input = baseInput(connections, id, signedRequest(secret, "note", JSON.stringify(notePayload())));
+    input.store.upsertFinding({
+      repoFullName: "acme/widgets",
+      prNumber: 7,
+      fingerprint: "fp123",
+      scope: { provider: "gitlab", instance: "gitlab.com" },
+      status: "dismissed",
+      reviewedSha: "abc",
+      summary: "bug",
+      dismissedBy: "someone",
+    });
+    const resolutions: Array<{ id: string; resolved: boolean }> = [];
+    const result = await handleGitLabWebhook({
+      ...input,
+      request: signedRequest(secret, "note", JSON.stringify(notePayload({
+        object_attributes: { id: 9001, note: "@maomao reopen", noteable_type: "MergeRequest", action: "created" },
+      }))),
+      gitlabFactory: () => ({
+        listDiscussions: async () => discussionPage(maomaoDiscussions()),
+        getAccessLevel: async () => 40,
+        resolveDiscussion: async (_projectId: number, _iid: number, discussionId: string, resolved: boolean) => {
+          resolutions.push({ id: discussionId, resolved });
+        },
+      }),
+    });
+    expect(result.status).toBe(200);
+    expect(result.body.status).toBe("open");
+    expect(resolutions).toEqual([{ id: "disc-1", resolved: false }]);
+    const finding = input.store.listFindings("acme/widgets", 7, { provider: "gitlab", instance: "gitlab.com" })[0];
+    expect(finding?.status).toBe("open");
+    expect(finding?.reopened_by).toBe("maintainer");
+  });
+
+  it("accepts the seedling reply as a bury", async () => {
+    const connections = newConnections();
+    const { id, secret } = createConnection(connections);
+    const input = baseInput(connections, id, signedRequest(secret, "note", JSON.stringify(notePayload())));
+    const result = await handleGitLabWebhook({
+      ...input,
+      request: signedRequest(secret, "note", JSON.stringify(notePayload({
+        object_attributes: { id: 9001, note: "🌱", noteable_type: "MergeRequest", action: "created" },
+      }))),
+      gitlabFactory: () => ({
+        listDiscussions: async () => discussionPage(maomaoDiscussions()),
+        getAccessLevel: async () => 40,
+        resolveDiscussion: async () => {},
+      }),
+    });
+    expect(result.body.command).toBe("seedling");
+    expect(result.body.status).toBe("dismissed");
+  });
+
+  it("ignores non-MR notes and edited notes", async () => {
+    const connections = newConnections();
+    const { id, secret } = createConnection(connections);
+    const issueNote = await handleGitLabWebhook({
+      ...baseInput(connections, id, signedRequest(secret, "note", JSON.stringify(notePayload({
+        object_attributes: { id: 1, note: "@maomao bury", noteable_type: "Issue", action: "created" },
+        merge_request: undefined,
+      })))),
+    });
+    expect(issueNote.body.reason).toMatch(/not on a merge request/);
+    const edited = await handleGitLabWebhook({
+      ...baseInput(connections, id, signedRequest(secret, "note", JSON.stringify(notePayload({
+        object_attributes: { id: 9001, note: "@maomao bury", noteable_type: "MergeRequest", action: "edited" },
+      })))),
+    });
+    expect(edited.body.reason).toMatch(/ignored note action edited/);
+  });
+
+  it("drops Maomao marker comments even without a probed bot identity", async () => {
+    const connections = newConnections();
+    const { id, secret } = createConnection(connections);
+    const result = await handleGitLabWebhook({
+      ...baseInput(connections, id, signedRequest(secret, "note", JSON.stringify(notePayload({
+        object_attributes: {
+          id: 9003,
+          note: "<!-- maomao-finding id=abc sha=def -->\n**high**: quoted finding body containing @maomao escalate",
+          noteable_type: "MergeRequest",
+          action: "created",
+        },
+      })))),
+      gitlabFactory: () => ({
+        listDiscussions: async () => {
+          throw new Error("must not reach the API for marker comments");
+        },
+        getAccessLevel: async () => {
+          throw new Error("must not reach the API for marker comments");
+        },
+        resolveDiscussion: async () => {},
+      }),
+    });
+    expect(result.status).toBe(202);
+    expect(result.body.reason).toMatch(/marker comment/);
+  });
+
+  it("deduplicates unsigned legacy deliveries via the deterministic fallback", async () => {
+    const connections = newConnections();
+    const { id } = createConnection(connections, { webhookSecret: LEGACY_SECRET });
+    const input = baseInput(connections, id, legacyRequest("merge_request", JSON.stringify(mrPayload())));
+    const rawBody = JSON.stringify(mrPayload());
+    const first = await handleGitLabWebhook({
+      ...input,
+      request: legacyRequest("merge_request", rawBody),
+    });
+    expect(first.enqueue?.created).toBe(true);
+    const redelivered = await handleGitLabWebhook({
+      ...input,
+      request: legacyRequest("merge_request", rawBody),
+    });
+    expect(redelivered.body.duplicate).toBe(true);
   });
 
   it("ignores notes outside Maomao discussions", async () => {
@@ -402,7 +533,7 @@ describe("GitLab note events", () => {
     const result = await handleGitLabWebhook({
       ...baseInput(connections, id, signedRequest(secret, "note", JSON.stringify(notePayload()))),
       gitlabFactory: () => ({
-        listDiscussions: async () => [] as GitLabDiscussion[],
+        listDiscussions: async () => discussionPage([]),
         getAccessLevel: async () => 40,
         resolveDiscussion: async () => {},
       }),
@@ -441,7 +572,7 @@ describe("GitLab note events", () => {
         },
       }))),
       gitlabFactory: () => ({
-        listDiscussions: async () => [],
+        listDiscussions: async () => discussionPage([]),
         getAccessLevel: async () => 40,
         resolveDiscussion: async () => {},
       }),
@@ -472,5 +603,63 @@ describe("parseMergeRequestEvent / shouldHandleMergeRequest", () => {
     const config = loadConfig({});
     const update = parseMergeRequestEvent(JSON.stringify(mrPayload({ object_attributes: { ...mrPayload().object_attributes, action: "update", oldrev: "old1" } })));
     expect(shouldHandleMergeRequest(config, update).handle).toBe(true);
+  });
+});
+describe("withinScope", () => {
+  function connection(scopeType: "instance" | "group" | "project", scopePath: string) {
+    return {
+      row: { scope_type: scopeType, scope_path: scopePath, enabled: 1 },
+    } as unknown as Parameters<typeof withinScope>[0];
+  }
+
+  it("matches group scopes on exact or slash-boundary prefixes only", () => {
+    const group = connection("group", "acme");
+    expect(withinScope(group, { path_with_namespace: "acme" })).toBe(true);
+    expect(withinScope(group, { path_with_namespace: "acme/widgets" })).toBe(true);
+    expect(withinScope(group, { path_with_namespace: "Acme/Widgets" })).toBe(true);
+    expect(withinScope(group, { path_with_namespace: "acme-team/widgets" })).toBe(false);
+    expect(withinScope(group, { path_with_namespace: "other/acme" })).toBe(false);
+    expect(withinScope(group, {})).toBe(false);
+  });
+
+  it("instance scopes accept any project; project scopes require exact paths", () => {
+    const instance = connection("instance", "");
+    expect(withinScope(instance, { path_with_namespace: "anything/at/all" })).toBe(true);
+    const project = connection("project", "acme/widgets");
+    expect(withinScope(project, { path_with_namespace: "acme/widgets" })).toBe(true);
+    expect(withinScope(project, { path_with_namespace: "acme/other" })).toBe(false);
+  });
+});
+
+describe("accessLevelToPermission / decodeSigningSecret / toForgeDiscussions", () => {
+  it("maps GitLab access levels onto the neutral vocabulary", () => {
+    expect(accessLevelToPermission(undefined)).toBe("none");
+    expect(accessLevelToPermission(0)).toBe("none");
+    expect(accessLevelToPermission(10)).toBe("read");
+    expect(accessLevelToPermission(20)).toBe("triage");
+    expect(accessLevelToPermission(30)).toBe("write");
+    expect(accessLevelToPermission(40)).toBe("maintain");
+    expect(accessLevelToPermission(49)).toBe("maintain");
+    expect(accessLevelToPermission(50)).toBe("admin");
+  });
+
+  it("decodes only well-formed whsec_ signing secrets", () => {
+    const secret = `whsec_${Buffer.from("sixteen-byte-key").toString("base64")}`;
+    expect(decodeSigningSecret(secret)?.toString()).toBe("sixteen-byte-key");
+    expect(decodeSigningSecret("whsec_")).toBeUndefined();
+    expect(decodeSigningSecret("plain-legacy-token")).toBeUndefined();
+  });
+
+  it("maps GitLab discussions onto the neutral shape", () => {
+    const mapped = toForgeDiscussions(maomaoDiscussions());
+    expect(mapped).toHaveLength(1);
+    expect(mapped[0]?.id).toBe("disc-1");
+    expect(mapped[0]?.isResolved).toBe(false);
+    expect(mapped[0]?.comments[0]?.databaseId).toBe(8000);
+    expect(mapped[0]?.comments[0]?.authorLogin).toBe("maomao-bot");
+    const resolved = toForgeDiscussions([
+      { id: "d2", notes: [{ id: 1, body: "x", author: {}, resolvable: true, resolved: true }] },
+    ]);
+    expect(resolved[0]?.isResolved).toBe(true);
   });
 });

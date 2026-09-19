@@ -156,3 +156,13 @@ describe("oauth state store", () => {
     expect(states.consume("not-a-nonce")).toBeUndefined();
   });
 });
+describe("gitlab webhook path exemptions", () => {
+  it("treats the gitlab webhook route as public and CSRF-exempt", () => {
+    expect(isPublicPath("/webhooks/gitlab/abc-123")).toBe(true);
+    expect(isPublicPath("/webhooks/gitlab/abc-123/extra")).toBe(true);
+    expect(csrfExemptPath("/webhooks/gitlab/abc-123")).toBe(true);
+    // Only the webhook prefix is public; the connections page stays gated.
+    expect(isPublicPath("/webhooks/gitlab")).toBe(false);
+    expect(isPublicPath("/connections")).toBe(false);
+  });
+});

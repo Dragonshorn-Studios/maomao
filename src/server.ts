@@ -539,6 +539,8 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
         webhookTimestamp: c.req.header("webhook-timestamp"),
         webhookSignature: c.req.header("webhook-signature"),
         legacyToken: c.req.header("x-gitlab-token"),
+        eventUuid: c.req.header("x-gitlab-event-uuid"),
+        webhookUuid: c.req.header("x-gitlab-webhook-uuid"),
       },
       // Dropped from the in-memory queue inside the handler, before any
       // post-cancellation logging could fail; abortMany is idempotent.
