@@ -319,6 +319,31 @@ function migrate(db: SqliteDb): void {
       error TEXT,
       created_at TEXT NOT NULL
     );
+
+    CREATE TABLE IF NOT EXISTS forge_connections (
+      id TEXT PRIMARY KEY,
+      provider TEXT NOT NULL,
+      label TEXT NOT NULL DEFAULT '',
+      instance_base_url TEXT NOT NULL,
+      api_base_url TEXT NOT NULL,
+      token_sealed TEXT NOT NULL,
+      token_fingerprint TEXT NOT NULL DEFAULT '',
+      token_type TEXT NOT NULL DEFAULT 'pat',
+      scope_type TEXT NOT NULL DEFAULT 'instance',
+      scope_path TEXT NOT NULL DEFAULT '',
+      webhook_secret_sealed TEXT NOT NULL,
+      ca_pem TEXT,
+      allow_private_network INTEGER NOT NULL DEFAULT 0,
+      allow_insecure_http INTEGER NOT NULL DEFAULT 0,
+      allow_approve INTEGER NOT NULL DEFAULT 0,
+      enabled INTEGER NOT NULL DEFAULT 1,
+      bot_user_id INTEGER,
+      bot_username TEXT,
+      token_scopes_json TEXT,
+      version_json TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
   `);
 
     // Legacy (pre-multi-forge) databases: rebuild the provider-scoped tables so

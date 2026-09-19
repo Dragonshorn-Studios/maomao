@@ -10,15 +10,32 @@ import { GithubClient } from "./github/client.js";
 import { createCheckout, sweepWorkspaces } from "./checkout.js";
 import { createOpenCodeRunner } from "./opencode/spawn.js";
 import { oauthCallbackUrl, oauthEnabled } from "./oauth.js";
+import { ForgeConnectionStore } from "./forge/connections.js";
+import { ensureEnvGitLabConnection } from "./forge/bootstrap.js";
 
 const config = loadConfig();
-assertRuntimeConfig(config);
 mkdirSync(config.workspaceRoot, { recursive: true });
 void sweepWorkspaces(config.workspaceRoot, config.workspaceRetentionHours).then((removed) => {
   if (removed > 0) console.log(`Removed ${removed} expired workspace(s)`);
 });
 
 const db = openDb(config.databasePath);
+const forgeConnections = config.forgeKey
+  ? new ForgeConnectionStore(db, config.forgeKey)
+  : undefined;
+// Persisted connections must exist before boot validation so a GitLab-only
+// deployment can boot without GitHub credentials.
+let bootstrapped: ReturnType<typeof ensureEnvGitLabConnection>;
+if (forgeConnections) {
+  bootstrapped = ensureEnvGitLabConnection(forgeConnections, config);
+  if (bootstrapped?.created) {
+    console.log(`Seeded GitLab connection from environment: ${bootstrapped.id}`);
+  }
+}
+assertRuntimeConfig(config, {
+  gitlabConnections: forgeConnections?.list("gitlab").length ?? 0,
+  gitlabBootstrap: Boolean(config.gitlabBootstrap),
+});
 const store = new JobStore(db, config.modelCatalog);
 // A crash mid-creation can leave pending scan-issue claims (issue_number 0);
 // no loop is in flight at boot, so anything left over is orphaned.
@@ -38,7 +55,7 @@ const pipeline = createPipeline({
 const queue = new JobQueue(store, config.jobConcurrency, (jobId) => pipeline.run(jobId));
 queue.start();
 
-const app = createApp({ config, store, queue, github, opencode, startedAt: Date.now(), env: process.env });
+const app = createApp({ config, store, queue, github, opencode, forgeConnections, startedAt: Date.now(), env: process.env });
 
 serve({ fetch: app.fetch, hostname: config.host, port: config.port }, (info) => {
   console.log(`Maomao listening on http://${info.address}:${info.port}`);

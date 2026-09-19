@@ -4,6 +4,9 @@ import { deleteCookie, getCookie, setCookie } from "hono/cookie";
 import type { Config } from "./config.js";
 import type { JobStore } from "./jobs/store.js";
 import { handleGithubWebhook } from "./github/webhooks.js";
+import { ForgeConnectionStore, type ForgeConnectionRow } from "./forge/connections.js";
+import { probeConnection } from "./forge/probe.js";
+import { InstanceUrlError } from "./forge/safe-http.js";
 import type { ManualTriggerPort, GithubPort } from "./github/client.js";
 import type { OpenCodePort } from "./opencode/parse.js";
 import { authorizeGithubAccount, authorizeGithubRepository, authorizeGithubTarget, logAuthorizationRejection, logRateLimited, rejectUnauthorized } from "./github/authorize.js";
@@ -21,6 +24,7 @@ import { redactSecrets } from "./util.js";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import {
+  renderConnectionsPage,
   renderScanConfirmPage,
   renderScanIssuePreviewPage,
   renderScanPage,
@@ -90,6 +94,8 @@ export interface ServerContext {
   oauthFetch?: typeof fetch;
   /** Offline prompt-evaluation runner (never touches GitHub). */
   opencode?: OpenCodePort;
+  /** Persisted forge connections (GitLab). Undefined until MAOMAO_FORGE_KEY is set. */
+  forgeConnections?: ForgeConnectionStore;
   /** The environment loadConfig consumed; defaults to process.env. Injectable for tests. */
   env?: NodeJS.ProcessEnv;
 }
@@ -767,6 +773,94 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
       status,
     );
   };
+
+
+  // ---- Forge connections (GitLab) ----
+
+  app.get("/connections", (c) => {
+    if (!ctx.forgeConnections) {
+      return c.text("Forge connections require MAOMAO_FORGE_KEY", 503);
+    }
+    const rows = ctx.forgeConnections.list();
+    return c.html(
+      renderConnectionsPage({
+        connections: rows,
+        csrfToken: gateOn ? ensureCsrfToken(c, ctx.config.uiSessionSecret) : undefined,
+        options: { ...pageOpts, notice: c.req.query("notice") ?? undefined, error: c.req.query("error") ?? undefined },
+      }),
+    );
+  });
+
+  app.post("/connections", async (c) => {
+    if (!ctx.forgeConnections) {
+      return c.text("Forge connections require MAOMAO_FORGE_KEY", 503);
+    }
+    const body = await c.req.parseBody();
+    const text = (name: string) => (typeof body[name] === "string" ? (body[name] as string).trim() : "");
+    const checked = (name: string) => body[name] === "1";
+    const redirect = (query: string) => c.redirect(`/connections${query}`, 303);
+    try {
+      const row = ctx.forgeConnections.create({
+        provider: "gitlab",
+        label: text("label"),
+        instanceUrl: text("instanceUrl"),
+        token: typeof body.token === "string" ? body.token : "",
+        tokenType: (["project", "group", "pat"] as const).includes(text("tokenType") as "project")
+          ? (text("tokenType") as "project" | "group" | "pat")
+          : "pat",
+        scopeType: (["instance", "group", "project"] as const).includes(text("scopeType") as "instance")
+          ? (text("scopeType") as "instance" | "group" | "project")
+          : "instance",
+        scopePath: text("scopePath"),
+        webhookSecret: typeof body.webhookSecret === "string" ? body.webhookSecret : "",
+        caPem: typeof body.caPem === "string" && body.caPem.trim() ? body.caPem : undefined,
+        allowPrivateNetwork: checked("allowPrivateNetwork"),
+        allowInsecureHttp: checked("allowInsecureHttp"),
+        allowApprove: checked("allowApprove"),
+      });
+      const probe = await probeConnection(ctx.forgeConnections, row.id, { timeoutMs: 10_000 });
+      if (probe.ok) {
+        return redirect(`?notice=${encodeURIComponent(`Connection created and validated as ${probe.botUsername} on ${row.instance_base_url}.`)}`);
+      }
+      return redirect(
+        `?error=${encodeURIComponent(`Connection created, but validation failed: ${probe.error} The token or URL can be corrected after deleting and re-adding the connection.`)}`,
+      );
+    } catch (error) {
+      const message =
+        error instanceof InstanceUrlError
+          ? `instance URL rejected: ${error.message}`
+          : error instanceof Error
+            ? error.message
+            : String(error);
+      console.warn(`connections: create failed: ${message}`);
+      return redirect(`?error=${encodeURIComponent(message)}`);
+    }
+  });
+
+  app.post("/connections/:id/probe", async (c) => {
+    if (!ctx.forgeConnections) return c.text("Forge connections require MAOMAO_FORGE_KEY", 503);
+    const id = c.req.param("id");
+    const probe = await probeConnection(ctx.forgeConnections, id, { timeoutMs: 10_000 });
+    if (probe.ok) {
+      return c.redirect(`/connections?notice=${encodeURIComponent(`Probe ok: ${probe.botUsername}${probe.version ? ` on GitLab ${probe.version}` : ""}`)}`, 303);
+    }
+    return c.redirect(`/connections?error=${encodeURIComponent(`Probe failed: ${probe.error}`)}`, 303);
+  });
+
+  app.post("/connections/:id/toggle", (c) => {
+    if (!ctx.forgeConnections) return c.text("Forge connections require MAOMAO_FORGE_KEY", 503);
+    const id = c.req.param("id");
+    const row = ctx.forgeConnections.get(id);
+    if (!row) return c.text("Not found", 404);
+    ctx.forgeConnections.update(id, { enabled: row.enabled !== 1 });
+    return c.redirect("/connections", 303);
+  });
+
+  app.post("/connections/:id/delete", (c) => {
+    if (!ctx.forgeConnections) return c.text("Forge connections require MAOMAO_FORGE_KEY", 503);
+    ctx.forgeConnections.delete(c.req.param("id"));
+    return c.redirect("/connections", 303);
+  });
 
   app.get("/config", (c) => {
     if (!gateOn) return c.redirect("/", 302);
