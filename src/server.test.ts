@@ -4016,6 +4016,6 @@ describe("home forge filter", () => {
     const html = await home.text();
     expect(html).not.toContain('role="navigation" aria-label="Filter by forge"');
     // Both jobs render unfiltered on a single-scope store.
-    expect(home.text ? html.match(/#7/g)?.length ?? 0 : 0).toBeGreaterThanOrEqual(1);
+    expect((html.match(/acme\/widgets/g) ?? []).length).toBeGreaterThanOrEqual(2);
   });
 });
