@@ -227,6 +227,10 @@ describe("effectiveConfigEntries", () => {
       value: "opened, synchronize",
     });
     expect(find(entries, "Allowed GitHub accounts")).toMatchObject({ source: "environment", value: "1001" });
+    expect(find(entries, "Comment override authors")).toMatchObject({
+      source: "default",
+      value: "(empty — write/maintain/admin collaborators)",
+    });
     expect(find(entries, "Repository rate limit")).toMatchObject({ value: "6 per 60min" });
     expect(find(entries, "Internal re-check")).toMatchObject({ value: "enabled" });
     expect(find(entries, "Internal model")).toMatchObject({ source: "environment", value: "test/lab" });
@@ -249,6 +253,7 @@ describe("env-var to entry mapping (table)", () => {
     ["GITHUB_REVIEW_ALLOW_REQUEST_CHANGES", "Allow REQUEST_CHANGES verdicts"],
     ["REVIEW_DRAFTS", "Review drafts"],
     ["MAX_INLINE_COMMENTS", "Max inline comments"],
+    ["MAOMAO_OVERRIDE_AUTHORS", "Comment override authors"],
     ["POISON_ALERT_INTERNAL_MAX_COST_USD", "Internal max cost"],
     ["POISON_ALERT_INTERNAL_MAX_TOKENS", "Internal max tokens"],
     ["POISON_ALERT_EXTERNAL_MIN_SEVERITY", "External minimum severity"],

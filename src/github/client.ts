@@ -139,7 +139,27 @@ export interface GithubPort {
     owner: string,
     repo: string,
     pullNumber: number,
-  ): Promise<{ id: number; body: string; userLogin?: string; userType?: string }[]>;
+  ): Promise<
+    { id: number; body: string; userLogin?: string; userType?: string; authorAssociation?: string }[]
+  >;
+  /** Inline review comments on a pull request (read-only; existing App permissions). */
+  listPullReviewComments?(
+    installationId: number,
+    owner: string,
+    repo: string,
+    pullNumber: number,
+  ): Promise<
+    {
+      id: number;
+      body: string;
+      userLogin?: string;
+      userType?: string;
+      authorAssociation?: string;
+      path?: string;
+      line?: number;
+      inReplyToId?: number;
+    }[]
+  >;
   createIssueComment?(input: {
     installationId: number;
     owner: string;
@@ -475,7 +495,9 @@ export class GithubClient implements GithubPort, ManualTriggerPort {
     owner: string,
     repo: string,
     pullNumber: number,
-  ): Promise<{ id: number; body: string; userLogin?: string; userType?: string }[]> {
+  ): Promise<
+    { id: number; body: string; userLogin?: string; userType?: string; authorAssociation?: string }[]
+  > {
     const octokit = this.installationOctokit(installationId);
     const comments = await octokit.paginate(octokit.rest.issues.listComments, {
       owner,
@@ -483,11 +505,48 @@ export class GithubClient implements GithubPort, ManualTriggerPort {
       issue_number: pullNumber,
       per_page: 100,
     });
-    return comments.map((comment) => ({
+    return comments.slice(-200).map((comment) => ({
       id: comment.id,
       body: comment.body ?? "",
       userLogin: comment.user?.login ?? undefined,
       userType: comment.user?.type ?? undefined,
+      authorAssociation: comment.author_association ?? undefined,
+    }));
+  }
+
+  async listPullReviewComments(
+    installationId: number,
+    owner: string,
+    repo: string,
+    pullNumber: number,
+  ): Promise<
+    {
+      id: number;
+      body: string;
+      userLogin?: string;
+      userType?: string;
+      authorAssociation?: string;
+      path?: string;
+      line?: number;
+      inReplyToId?: number;
+    }[]
+  > {
+    const octokit = this.installationOctokit(installationId);
+    const comments = await octokit.paginate(octokit.rest.pulls.listReviewComments, {
+      owner,
+      repo,
+      pull_number: pullNumber,
+      per_page: 100,
+    });
+    return comments.slice(-200).map((comment) => ({
+      id: comment.id,
+      body: comment.body ?? "",
+      userLogin: comment.user?.login ?? undefined,
+      userType: comment.user?.type ?? undefined,
+      authorAssociation: comment.author_association ?? undefined,
+      path: comment.path ?? undefined,
+      line: comment.line ?? comment.original_line ?? undefined,
+      inReplyToId: comment.in_reply_to_id ?? undefined,
     }));
   }
 

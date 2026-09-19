@@ -117,6 +117,11 @@ export interface Config {
   allowedGithubAccountIds: number[];
   /** GitHub repository REST numeric ids (`repository.id`). Empty = unrestricted on this axis. */
   allowedGithubRepositoryIds: number[];
+  /**
+   * GitHub logins allowed to dismiss findings via explicit comment phrases
+   * (`rejected by design`, `by design`, …). Empty = any write/maintain/admin collaborator.
+   */
+  overrideAuthors: string[];
   /** Max pull-request diff size in bytes; download aborts at this cap. `0` disables. */
   maxDiffBytes: number;
   /** Max created jobs per repository id inside `repoRateWindowMs` (per process). `0` disables. */
@@ -293,6 +298,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     ),
     allowedGithubAccountIds: parseIdList(env.ALLOWED_GITHUB_ACCOUNT_IDS, "ALLOWED_GITHUB_ACCOUNT_IDS"),
     allowedGithubRepositoryIds: parseIdList(env.ALLOWED_GITHUB_REPOSITORY_IDS, "ALLOWED_GITHUB_REPOSITORY_IDS"),
+    overrideAuthors: parseCsv(env.MAOMAO_OVERRIDE_AUTHORS).map((login) => login.toLowerCase()),
     maxDiffBytes: clamp(parseInteger(env.MAX_DIFF_BYTES, 1_048_576), 0, 50 * 1024 * 1024),
     repoRateLimitPerWindow: Math.max(0, parseInteger(env.REPO_RATE_LIMIT_PER_WINDOW, 6)),
     repoRateWindowMs: Math.max(0, parseInteger(env.REPO_RATE_WINDOW_MS, 60 * 60 * 1000)),
