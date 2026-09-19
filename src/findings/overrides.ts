@@ -280,7 +280,7 @@ export async function collectHumanOverrides(input: {
   };
 }
 
-/** Structural subset of JobRow used here; kept as a type so the module stays import-cycle free. */
+/** Structural subset of JobRow; keeps this module decoupled from the store. */
 interface JobRowFields {
   provider: string;
   provider_instance: string;
@@ -346,7 +346,7 @@ async function resolveOverrideSignals(input: {
     const login = comment.login;
     if (!login) continue;
     if (allowlist.length > 0 && !allowlist.includes(login.toLowerCase())) continue;
-    if (input.forge.isBotLogin(login) || isMaomaoLogin(login, appSlug) || (comment.userType ?? "").toLowerCase() === "bot") continue;
+    if (input.forge.isBotLogin(login) || (comment.userType ?? "").toLowerCase() === "bot") continue;
 
     let permission = permissionCache.get(login.toLowerCase());
     if (permission == null) {

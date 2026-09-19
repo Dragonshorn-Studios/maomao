@@ -449,7 +449,7 @@ describe("settled resolved classification", () => {
       expect.objectContaining({
         fingerprint: "abc",
         status: "resolved",
-        reason: "GitHub thread already resolved",
+        reason: "Forge thread already resolved",
         threadId: "PRRT_closed",
         githubAlreadyResolved: true,
       }),
@@ -911,7 +911,7 @@ describe("marker hygiene and resolve retries", () => {
     const row = store.getFinding(job.repo_full_name, job.pr_number, "fpcatch000000001");
     expect(row?.status).toBe("resolved");
     expect(row?.github_thread_id).toBe("PRRT_caught");
-    expect(row?.reconciliation_reason).toBe("GitHub thread already resolved");
+    expect(row?.reconciliation_reason).toBe("Forge thread already resolved");
   });
 
   it("does not re-attach a republished fingerprint to the already-resolved old thread", () => {

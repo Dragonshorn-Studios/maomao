@@ -681,7 +681,10 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
     const id = Number(c.req.param("id"));
     const job = ctx.store.getJob(id);
     if (!job) return c.text("Not found", 404);
-    const latest = ctx.store.findLatestJobForPull(job.repo_full_name, job.pr_number);
+    const latest = ctx.store.findLatestJobForPull(job.repo_full_name, job.pr_number, undefined, {
+      provider: job.provider,
+      instance: job.provider_instance,
+    });
     return c.html(
       renderJob(job, ctx.store.listReviewerRuns(id), ctx.store.listLogs(id), {
         ...pageOpts,
@@ -1950,7 +1953,10 @@ function renderJobError(
   job: JobRow,
   error: string,
 ) {
-  const latest = ctx.store.findLatestJobForPull(job.repo_full_name, job.pr_number);
+  const latest = ctx.store.findLatestJobForPull(job.repo_full_name, job.pr_number, undefined, {
+    provider: job.provider,
+    instance: job.provider_instance,
+  });
   return c.html(
     renderJob(job, ctx.store.listReviewerRuns(job.id), ctx.store.listLogs(job.id), {
       ...pageOpts,

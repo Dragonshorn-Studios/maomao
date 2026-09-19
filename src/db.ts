@@ -436,6 +436,8 @@ interface ScopedRebuild {
   from: string;
   to: string;
   appendPk?: string;
+  /** Legacy single-column PK moved into the scoped composite PK; NULLs coalesce to ''. */
+  pkColumn?: string;
 }
 
 const SCOPED_REBUILDS: ScopedRebuild[] = [
@@ -464,12 +466,14 @@ const SCOPED_REBUILDS: ScopedRebuild[] = [
     from: "delivery_id TEXT PRIMARY KEY",
     to: `${PROVIDER_COLUMNS},\n      delivery_id TEXT NOT NULL`,
     appendPk: "PRIMARY KEY (provider, provider_instance, delivery_id)",
+    pkColumn: "delivery_id",
   },
   {
     table: "processed_review_commands",
     from: "comment_id TEXT PRIMARY KEY",
     to: `${PROVIDER_COLUMNS},\n      comment_id TEXT NOT NULL`,
     appendPk: "PRIMARY KEY (provider, provider_instance, comment_id)",
+    pkColumn: "comment_id",
   },
 ];
 
@@ -485,8 +489,11 @@ interface ColumnInfo {
  * In-place legacy migration of one table: rename → recreate from the stored
  * CREATE statement with the scoped constraint → carry over columns that were
  * added by earlier `ensureColumn` migrations (they are absent from the stored
- * SQL) → copy rows → drop the legacy table. Preserves row ids and all data;
- * indexes die with the rename and are recreated by `migrate` afterwards.
+ * SQL) → copy rows → drop the legacy table. The whole sequence runs in one
+ * transaction: any failure rolls the rename back, the legacy table and its
+ * rows survive untouched, and the next start retries the migration. Row ids
+ * and all data are preserved; indexes die with the rename and are recreated
+ * by `migrate` afterwards.
  */
 function rebuildTableScoped(db: SqliteDb, rebuild: ScopedRebuild): void {
   // Already scoped (fresh v2 database, or rebuilt in an earlier pass).
@@ -514,8 +521,8 @@ function rebuildTableScoped(db: SqliteDb, rebuild: ScopedRebuild): void {
   }
 
   const legacyColumns = columnNames(db, rebuild.table);
-  db.exec(`ALTER TABLE ${rebuild.table} RENAME TO ${legacyName}`);
-  try {
+  db.transaction(() => {
+    db.exec(`ALTER TABLE ${rebuild.table} RENAME TO ${legacyName}`);
     db.exec(newSql);
     // Columns ensured after v1 shipped exist only in table_info, not in the
     // stored CREATE text; re-add them before copying so no data is lost.
@@ -526,13 +533,17 @@ function rebuildTableScoped(db: SqliteDb, rebuild: ScopedRebuild): void {
       const ddl = `${info.type}${info.notnull ? " NOT NULL" : ""}${info.dflt_value != null ? ` DEFAULT ${info.dflt_value}` : ""}`;
       db.exec(`ALTER TABLE ${rebuild.table} ADD COLUMN "${info.name}" ${ddl}`);
     }
+    // The old single-column PKs tolerated NULL (SQLite quirk); the new scoped
+    // PKs do not. Legacy NULL keys belong to rows no dedup claim ever wrote.
+    const select = [...legacyColumns].map(
+      (name) => (rebuild.pkColumn === name ? `COALESCE("${name}", '') AS "${name}"` : `"${name}"`),
+    );
     const columnList = [...legacyColumns].map((name) => `"${name}"`).join(", ");
     db.exec(
-      `INSERT INTO ${rebuild.table} (${columnList}) SELECT ${columnList} FROM ${legacyName}`,
+      `INSERT INTO ${rebuild.table} (${columnList}) SELECT ${select.join(", ")} FROM ${legacyName}`,
     );
-  } finally {
-    db.exec(`DROP TABLE IF EXISTS ${legacyName}`);
-  }
+    db.exec(`DROP TABLE ${legacyName}`);
+  })();
 }
 
 function columnNames(db: SqliteDb, table: string): Set<string> {

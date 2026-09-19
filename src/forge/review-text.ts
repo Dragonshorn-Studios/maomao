@@ -12,10 +12,12 @@ import type { ForgeInlineComment, ForgePublishResult, ForgeSummary } from "./typ
  * Post a review with inline comments, degrading instead of dying: if the forge
  * rejects the batch, retry once as a body-only review; if that retry also
  * fails, surface the original error (it explains why we degraded).
+ * `forgeLabel` names the forge in the reader-visible degradation note.
  */
 export async function createReviewWithFallback(input: {
   comments: ForgeInlineComment[];
   body: string;
+  forgeLabel?: string;
   post: (comments: ForgeInlineComment[], body: string) => Promise<{ id: number | string; url?: string }>;
 }): Promise<ForgePublishResult> {
   try {
@@ -25,9 +27,10 @@ export async function createReviewWithFallback(input: {
     if (input.comments.length === 0) throw error;
     // Inline comments must land on diff lines; fall back to a body-only review.
     try {
+      const label = input.forgeLabel ?? "the forge";
       const review = await input.post(
         [],
-        `${input.body}\n\n_Inline comments were omitted because the forge rejected one or more diff locations._`,
+        `${input.body}\n\n_Inline comments were omitted because ${label} rejected one or more diff locations._`,
       );
       return { id: String(review.id), url: review.url ?? "", postedComments: [] };
     } catch {
@@ -106,9 +109,10 @@ function inlineComment(
 }
 
 /**
- * Split publishable findings into inline comments the forge will accept and findings whose
- * reported location is not in the diff (demoted to the review body by the caller). Without
- * a diff to validate against, every located finding passes through as before.
+ * Split publishable findings into inline comments the forge will accept and
+ * findings whose reported location is not in the diff (demoted to the review
+ * body by the caller). Without a diff to validate against, every located
+ * finding is treated as anchorable on the RIGHT side.
  */
 export function selectInlineComments(
   findings: InlineCommentFinding[],
@@ -125,8 +129,9 @@ export function selectInlineComments(
       demoted.push({ finding, reason: anchor.reason });
       continue;
     }
-    // Cap only the inline set: findings beyond it stay unlisted (summary only),
-    // exactly as before, while unanchorable ones always reach the body.
+    // The cap applies only to the inline set: findings beyond it stay
+    // summary-only, while unanchorable ones always reach the body and never
+    // consume cap slots.
     if (comments.length >= opts.limit) continue;
     comments.push(inlineComment(finding, opts.headSha, anchor.side));
   }

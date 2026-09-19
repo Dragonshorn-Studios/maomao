@@ -4,6 +4,7 @@ import type { GithubPort } from "../github/client.js";
 import type { ForgePort } from "../forge/port.js";
 import { ForgeRegistry } from "../forge/registry.js";
 import type { ForgeDiscussion, ForgeInlineComment, ForgeRepoTarget, ForgeSummary, ForgeVerdict } from "../forge/types.js";
+import { forgeTargetOf, scopeOf } from "../forge/types.js";
 import { buildReviewBody, findExistingReview, selectInlineComments, inlineCommentFingerprints } from "../forge/review-text.js";
 import type { CheckoutPort } from "../checkout.js";
 import {
@@ -75,9 +76,9 @@ import {
 export interface PipelineDeps {
   config: Config;
   store: JobStore;
-  /** GitHub client for GitHub-only features (health scans, issue creation). */
+  /** GitHub client for GitHub-only features (issue creation, scan-issue closing) and the default registry's backing client. */
   github: GithubPort;
-  /** Forge adapters for the review pipeline; defaults to a registry over `github`. */
+  /** Registry resolving each job's forge port; defaults to a registry over `github`. */
   forge?: ForgeRegistry;
   checkout: CheckoutPort;
   opencode: OpenCodePort;
@@ -350,7 +351,7 @@ async function runJob(deps: PipelineDeps, forge: ForgeRegistry, jobId: number, s
     store.log(jobId, `Preparing isolated workspace for ${job.repo_full_name}#${job.pr_number} @ ${job.head_sha}`);
     throwIfStale(store, jobId, signal);
 
-    const target = forgeTargetForJob(job);
+    const target = forgeTargetOf(job);
     const provider = forge.forJob(job);
     const clone = await provider.cloneSpec(target);
     const diff = await provider.getChangeDiff(target, config.maxDiffBytes);
@@ -362,7 +363,7 @@ async function runJob(deps: PipelineDeps, forge: ForgeRegistry, jobId: number, s
       jobId,
       cloneUrl: clone.cloneUrl,
       gitAuthArgs: clone.gitAuthArgs,
-      headRefspec: clone.headRefspec,
+      remoteRef: clone.remoteRef,
       secrets: [...clone.secrets, ...globalSecrets(config)],
       baseSha: job.base_sha,
       headSha: job.head_sha,
@@ -478,7 +479,7 @@ async function runJob(deps: PipelineDeps, forge: ForgeRegistry, jobId: number, s
     }
     persistClassifications(store, job, snapshot.items, diff);
     try {
-      const threads = await provider.listDiscussions(forgeTargetForJob(job));
+      const threads = await provider.listDiscussions(forgeTargetOf(job));
       persistThreadsAsFindings({
         store,
         job,
@@ -520,6 +521,7 @@ async function runJob(deps: PipelineDeps, forge: ForgeRegistry, jobId: number, s
             failure.fingerprint,
             "uncertain",
             githubRetryReason("thread", failure.reason),
+            scopeOf(job),
           );
         }
       }
@@ -603,17 +605,17 @@ async function runScanJob(deps: PipelineDeps, forge: ForgeRegistry, jobId: numbe
     store.log(jobId, `Health scan of ${job.repo_full_name} at ${job.head_sha}`);
     const provider = forge.forJob(job);
     if (!provider.getCommitDiff) throw new Error("health scans require a forge provider with commit diff support");
-    const target = forgeTargetForJob(job);
+    const target = forgeTargetOf(job);
     const diff = await provider.getCommitDiff(target, job.head_sha);
     if (config.maxDiffBytes > 0 && diff.length > config.maxDiffBytes) {
       throw new Error(`commit diff exceeds MAX_DIFF_BYTES (${diff.length} > ${config.maxDiffBytes})`);
     }
-    const clone = await provider.cloneSpec(target);
+    const clone = await provider.cloneSpec(target, { anonymous: job.installation_id === 0 });
     const workspace = await deps.checkout.prepare({
       jobId,
       cloneUrl: clone.cloneUrl,
       gitAuthArgs: clone.gitAuthArgs,
-      headRefspec: clone.headRefspec,
+      remoteRef: clone.remoteRef,
       secrets: [...clone.secrets, ...globalSecrets(config)],
       baseSha: job.head_sha,
       headSha: job.head_sha,
@@ -687,6 +689,7 @@ async function runScanJob(deps: PipelineDeps, forge: ForgeRegistry, jobId: numbe
       store.upsertFinding({
         repoFullName: job.repo_full_name,
         prNumber: 0,
+        scope: scopeOf(job),
         fingerprint,
         status: "open",
         reviewedSha: job.head_sha,
@@ -707,7 +710,7 @@ async function runScanJob(deps: PipelineDeps, forge: ForgeRegistry, jobId: numbe
       persisted += 1;
     }
 
-    const stored = store.listFindings(job.repo_full_name, 0);
+    const stored = store.listFindings(job.repo_full_name, 0, scopeOf(job));
     const priors = collectPriorFindings({ threads: [], stored }).filter(
       (prior) => !currentFingerprints.has(prior.fingerprint),
     );
@@ -763,6 +766,7 @@ async function runScanJob(deps: PipelineDeps, forge: ForgeRegistry, jobId: numbe
           failure.fingerprint,
           "uncertain",
           githubRetryReason("issue", failure.reason),
+          scopeOf(job),
         );
       }
     } catch (error) {
@@ -802,18 +806,6 @@ async function runScanJob(deps: PipelineDeps, forge: ForgeRegistry, jobId: numbe
 
 function globalSecrets(config: Config): string[] {
   return [config.github.privateKey, config.github.webhookSecret].filter((value) => value.length > 4);
-}
-
-/** Storage-scoped target for a job's forge connection. */
-export function forgeTargetForJob(job: JobRow): ForgeRepoTarget {
-  return {
-    provider: job.provider,
-    instance: job.provider_instance,
-    repoOwner: job.repo_owner,
-    repoName: job.repo_name,
-    repoFullName: job.repo_full_name,
-    changeNumber: job.pr_number,
-  };
 }
 
 function throwIfStale(store: JobStore, jobId: number, signal: AbortSignal): void {
@@ -996,7 +988,7 @@ async function reconcileAndRoute(
   profileBudget?: ProfileBudget,
 ): Promise<ReconciliationSnapshot> {
   deps.store.setJobState(job.id, "reconciling");
-  const threads = await forge.listDiscussions(forgeTargetForJob(job));
+  const threads = await forge.listDiscussions(forgeTargetOf(job));
   const humanOverrides = await loadHumanOverrides(deps, forge, job, threads);
   persistFingerprintOverrides(deps, job, humanOverrides);
   if (humanOverrides.commentCount > 0 || humanOverrides.overrides.length > 0) {
@@ -1005,7 +997,7 @@ async function reconcileAndRoute(
       `Human discussion: ${humanOverrides.commentCount} non-Maomao comment(s), ${humanOverrides.overrides.length} allowlisted dismiss signal(s)`,
     );
   }
-  const stored = deps.store.listFindings(job.repo_full_name, job.pr_number);
+  const stored = deps.store.listFindings(job.repo_full_name, job.pr_number, scopeOf(job));
   const priors = collectPriorFindings({ threads, stored });
   deps.store.log(
     job.id,
@@ -1361,7 +1353,7 @@ async function publishReview(
   signal: AbortSignal,
 ): Promise<{ id: string; url: string; postedFingerprints: string[] } | undefined> {
   if (deps.store.isStale(job.id)) return undefined;
-  const target = forgeTargetForJob(job);
+  const target = forgeTargetOf(job);
 
   const existing: ForgeSummary[] = await forge.listSummaries(target);
   const already = findExistingReview(existing, job.head_sha);
@@ -1380,6 +1372,7 @@ async function publishReview(
     deps.store.dismissFinding({
       repoFullName: job.repo_full_name,
       prNumber: job.pr_number,
+      scope: scopeOf(job),
       fingerprint: entry.finding.fingerprint,
       actor: entry.override.author,
       command: entry.override.signal,
@@ -1465,14 +1458,14 @@ async function publishReview(
     comments,
     verdict: decision.event satisfies ForgeVerdict,
   });
-  // Record the event only after GitHub accepted the review, so a recorded event
+  // Record the event only after the forge accepted the review, so a recorded event
   // always corresponds to a delivered one.
   deps.store.patchJob(job.id, {
     review_event: decision.event,
     review_event_reason: decision.reason,
   });
-  // Fingerprints of what GitHub actually accepted, not what we intended: the client
-  // degrades to a body-only review when inline locations are rejected.
+  // Fingerprints of what the forge actually accepted, not what we intended:
+  // publishReview degrades to a body-only review when inline locations are rejected.
   const postedFingerprints = inlineCommentFingerprints(posted.postedComments ?? comments);
   return { ...posted, postedFingerprints };
 }
@@ -1536,8 +1529,9 @@ async function dispatchExternalEscalation(
     return;
   }
 
-  const provider = latest.provider || "github";
-  const instance = latest.provider_instance || "github.com";
+  const scope = scopeOf(latest);
+  const provider = scope.provider;
+  const instance = scope.instance;
   const id = latest.escalation_id || escalationId({
     provider,
     instance,
@@ -1744,7 +1738,7 @@ function persistFingerprintOverrides(
   context: HumanOverrideContext,
 ): void {
   if (context.overrides.length === 0) return;
-  const stored = deps.store.listFindings(job.repo_full_name, job.pr_number);
+  const stored = deps.store.listFindings(job.repo_full_name, job.pr_number, scopeOf(job));
   const byFingerprint = new Map(stored.map((row) => [row.fingerprint, row]));
   for (const override of context.overrides) {
     if (!override.fingerprint) continue;
@@ -1761,6 +1755,7 @@ function persistFingerprintOverrides(
     deps.store.dismissFinding({
       repoFullName: job.repo_full_name,
       prNumber: job.pr_number,
+      scope: scopeOf(job),
       fingerprint: override.fingerprint,
       actor: override.author,
       command: override.signal,

@@ -47,25 +47,17 @@ describe("GitHubProvider", () => {
     const provider = new GitHubProvider(fakeGithub(), 42, "maomao");
     const spec = await provider.cloneSpec(scopedTarget());
     expect(spec.cloneUrl).toBe("https://github.com/acme/widgets.git");
-    expect(spec.headRefspec).toBe("+refs/pull/7/head:refs/maomao/pr");
+    expect(spec.remoteRef).toBe("refs/pull/7/head");
     expect(spec.gitAuthArgs.join(" ")).toContain("AUTHORIZATION: basic");
     expect(spec.secrets.some((secret) => secret.includes("tok-abc123"))).toBe(true);
   });
 
-  it("omits auth for installation id 0 (unauthenticated public scans)", async () => {
-    const getToken = async () => {
-      throw new Error("should not mint a token for installation 0");
-    };
-    const provider = new GitHubProvider(fakeGithub(), 0, "maomao", getToken);
-    const spec = await provider.cloneSpec(scopedTarget());
+  it("refuses anonymous clone material for a review job with installation 0", async () => {
+    const provider = new GitHubProvider(fakeGithub(), 0, "maomao");
+    await expect(provider.cloneSpec(scopedTarget())).rejects.toThrow(/cannot authenticate a review/);
+    // Health scans opt in explicitly.
+    const spec = await provider.cloneSpec(scopedTarget(), { anonymous: true });
     expect(spec.gitAuthArgs).toEqual([]);
-    expect(spec.secrets).toEqual([]);
-  });
-
-  it("redacts installation ids and keeps target numbers project-local", async () => {
-    const provider = new GitHubProvider(fakeGithub(), 42, "maomao");
-    expect(provider.provider).toBe("github");
-    expect(provider.instance).toBe("github.com");
   });
 
   it("publishes with the verdict and returns what the forge accepted", async () => {
@@ -189,6 +181,51 @@ describe("ForgeRegistry", () => {
       }),
     ).toThrow(/no forge connection configured for gitlab:gitlab.corp.internal/);
   });
+
+  it("fails closed when a github-scoped row names a different instance", () => {
+    const registry = new ForgeRegistry(fakeGithub(), "maomao");
+    expect(() =>
+      registry.forJob({
+        provider: "github",
+        provider_instance: "github.enterprise.test",
+        installation_id: 1,
+      }),
+    ).toThrow(/no forge connection configured for github:github.enterprise.test/);
+  });
+
+  it("fails closed while non-default connections are unresolvable", () => {
+    const registry = new ForgeRegistry(fakeGithub(), "maomao");
+    expect(() =>
+      registry.forJob({
+        provider: "github",
+        provider_instance: "github.com",
+        forge_connection_id: "conn-7",
+        installation_id: 1,
+      }),
+    ).toThrow(/non-default connections are not resolvable/);
+  });
+});
+
+describe("normalizeScope", () => {
+  it("defaults only when both fields are missing and lowercases identity", async () => {
+    const { normalizeScope, scopeOf } = await import("./types.js");
+    expect(normalizeScope()).toEqual({ provider: "github", instance: "github.com" });
+    expect(normalizeScope({})).toEqual({ provider: "github", instance: "github.com" });
+    expect(normalizeScope({ provider: " GitLab ", instance: "GitLab.com " })).toEqual({
+      provider: "gitlab",
+      instance: "gitlab.com",
+    });
+    expect(scopeOf({ provider: "gitlab", provider_instance: "gitlab.com" })).toEqual({
+      provider: "gitlab",
+      instance: "gitlab.com",
+    });
+  });
+
+  it("rejects half-specified scopes instead of inventing a partition", async () => {
+    const { normalizeScope } = await import("./types.js");
+    expect(() => normalizeScope({ provider: "gitlab" })).toThrow(/incomplete forge scope/);
+    expect(() => normalizeScope({ instance: "gitlab.com" })).toThrow(/incomplete forge scope/);
+  });
 });
 
 /** Shapes one pre-multi-forge database: the shipped v1 constraint set plus rows. */
@@ -297,6 +334,47 @@ function legacySchema(db: SqliteDb): void {
     `INSERT INTO merged_pulls (repo_full_name, pr_number, merged_at, delivery_id)
      VALUES ('acme/widgets', 3, '2026-01-01', 'delivery-1')`,
   ).run();
+  db.exec(`
+    CREATE TABLE scan_issues (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      job_id INTEGER NOT NULL,
+      repo_full_name TEXT NOT NULL,
+      fingerprint TEXT NOT NULL,
+      issue_number INTEGER NOT NULL,
+      issue_url TEXT NOT NULL,
+      title TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      UNIQUE (repo_full_name, fingerprint)
+    );
+    CREATE TABLE processed_review_commands (
+      comment_id TEXT PRIMARY KEY,
+      delivery_id TEXT,
+      command TEXT NOT NULL,
+      result TEXT NOT NULL,
+      created_at TEXT NOT NULL
+    );
+  `);
+  db.prepare(
+    `INSERT INTO scan_issues (job_id, repo_full_name, fingerprint, issue_number, issue_url, title, created_at)
+     VALUES (1, 'acme/widgets', 'fpscan0000000001', 12, 'https://github.com/acme/widgets/issues/12', 'scan finding', '2026-01-01')`,
+  ).run();
+  db.prepare(
+    `INSERT INTO processed_review_commands (comment_id, delivery_id, command, result, created_at)
+     VALUES ('987654', 'delivery-2', 'dismiss', 'ok', '2026-01-01')`,
+  ).run();
+  db.prepare(
+    `INSERT INTO webhook_deliveries (delivery_id, event, result, created_at)
+     VALUES (NULL, 'ping', 'ignored', '2026-01-01')`,
+  ).run();
+
+  // Columns earlier versions added via ALTER ADD COLUMN exist only in
+  // table_info, not in the stored CREATE text — real v1 databases all look
+  // like this, and their data must survive the rebuild.
+  db.exec(`ALTER TABLE jobs ADD COLUMN review_event TEXT`);
+  db.exec(`ALTER TABLE jobs ADD COLUMN routing_state TEXT NOT NULL DEFAULT 'queued'`);
+  db.exec(`ALTER TABLE findings ADD COLUMN diff_hunk TEXT`);
+  db.prepare(`UPDATE jobs SET review_event = 'COMMENT', routing_state = 'done' WHERE id = 1`).run();
+  db.prepare(`UPDATE findings SET diff_hunk = '@@ -1 +1 @@' WHERE fingerprint = 'fp123'`).run();
 }
 
 describe("provider-scoped storage migration", () => {
@@ -318,6 +396,20 @@ describe("provider-scoped storage migration", () => {
       expect(finding).toMatchObject({ fingerprint: "fp123", provider: "github", provider_instance: "github.com" });
       expect(store.hasWebhookDelivery("delivery-1")).toBe(true);
       expect(store.hasMergedPull("acme/widgets", 3)).toBe(true);
+      // Columns ensured by earlier migrations keep their data through the rebuild.
+      expect(job).toMatchObject({ review_event: "COMMENT", routing_state: "done" });
+      const refinding = store.listFindings("acme/widgets", 3)[0];
+      expect(refinding?.diff_hunk).toBe("@@ -1 +1 @@");
+      // The scan-issue registry and review-command idempotency rows survive.
+      expect(store.hasScanIssue("acme/widgets", "fpscan0000000001")).toBe(true);
+      expect(store.getScanIssue("acme/widgets", "fpscan0000000001")?.issue_number).toBe(12);
+      expect(store.hasReviewCommand("987654")).toBe(true);
+      // Legacy NULL primary keys (old SQLite single-column PK quirk) coalesce
+      // to '' instead of destroying the copy; the row was never a real claim.
+      expect(db.prepare(`SELECT COUNT(*) AS n FROM webhook_deliveries`).get()).toEqual({ n: 2 });
+      expect(db.prepare(`SELECT provider FROM webhook_deliveries WHERE delivery_id = ''`).get()).toEqual({
+        provider: "github",
+      });
 
       // Foreign keys survived the rebuild: the legacy job can still take
       // child rows (job_logs references jobs(id)) and integrity is clean.
@@ -367,6 +459,34 @@ describe("provider-scoped storage migration", () => {
       });
       expect(duplicateGithub.created).toBe(false);
       expect(duplicateGithub.skippedReason).toContain("already");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("provider-scoped migration refusal", () => {
+  it("fails closed when a table's stored schema does not match the shipped v1 shape", () => {
+    const dir = mkdtempSync(join(tmpdir(), "maomao-forge-drift-"));
+    const path = join(dir, "drifted.sqlite");
+    try {
+      const drifted = new Database(path);
+      drifted.exec(`
+        CREATE TABLE jobs (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          repo_full_name TEXT NOT NULL,
+          pr_number INTEGER NOT NULL,
+          head_sha TEXT NOT NULL,
+          state TEXT NOT NULL,
+          CONSTRAINT unexpected UNIQUE (repo_full_name, pr_number)
+        );
+      `);
+      drifted.close();
+      expect(() => openDb(path)).toThrow(/Cannot migrate jobs/);
+      // The drifted table and its rows are untouched for operator inspection.
+      const after = new Database(path);
+      expect(after.prepare(`SELECT COUNT(*) AS n FROM jobs`).get()).toEqual({ n: 0 });
+      after.close();
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -431,11 +551,18 @@ describe("cross-connection storage isolation", () => {
       summary: "gitlab copy",
       scope: { provider: "gitlab", instance: "gitlab.com" },
     });
+    // The default scope must never leak the other instance's rows: exactly one
+    // row per scope, and the scoped reads return each side's own copy.
+    expect(store.listFindings("acme/widgets", 5)).toHaveLength(1);
+    expect(store.listFindings("acme/widgets", 5, { provider: "gitlab", instance: "gitlab.com" })).toHaveLength(1);
     expect(store.listFindings("acme/widgets", 5)[0]?.status).toBe("open");
     expect(store.listFindings("acme/widgets", 5, { provider: "gitlab", instance: "gitlab.com" })[0]?.status).toBe(
       "dismissed",
     );
     expect(store.getFinding("acme/widgets", 5, "fpfedcba98765432")?.summary).toBe("github copy");
+    expect(
+      store.getFinding("acme/widgets", 5, "fpfedcba98765432", { provider: "gitlab", instance: "gitlab.com" })?.summary,
+    ).toBe("gitlab copy");
 
     // Merged markers and webhook deliveries are scoped the same way.
     store.markPullMerged("acme/widgets", 5, "d-github");
@@ -453,6 +580,40 @@ describe("cross-connection storage isolation", () => {
 
     // Cancellation on one instance leaves the other running.
     store.cancelJobs({ repoFullName: "acme/widgets", prNumber: 5 }, "manual_cancel", null);
+    expect(store.getJob(gitlabJob.id)?.state).toBe("queued");
+
+    // Scan-issue claims with the same fingerprint stay independent per instance.
+    expect(store.claimScanIssue({ jobId: githubJob.id, repoFullName: "acme/widgets", fingerprint: "fpX", title: "t" })).toBe(true);
+    expect(
+      store.claimScanIssue({
+        jobId: gitlabJob.id,
+        repoFullName: "acme/widgets",
+        fingerprint: "fpX",
+        title: "t",
+        scope: { provider: "gitlab", instance: "gitlab.com" },
+      }),
+    ).toBe(true);
+    expect(store.hasScanIssue("acme/widgets", "fpX")).toBe(true);
+    expect(store.hasScanIssue("acme/widgets", "fpX", { provider: "gitlab", instance: "gitlab.com" })).toBe(true);
+    expect(store.hasScanIssue("acme/widgets", "fpX", { provider: "gitlab", instance: "gitlab.corp.internal" })).toBe(false);
+
+    // Review-command ids are only unique per instance: both claims succeed.
+    expect(store.claimReviewCommand("777", "d1", "dismiss", "ok")).toBe(true);
+    expect(store.hasReviewCommand("777")).toBe(true);
+    expect(store.claimReviewCommand("777", "d2", "dismiss", "ok", { provider: "gitlab", instance: "gitlab.com" })).toBe(true);
+    expect(store.hasReviewCommand("777", { provider: "gitlab", instance: "gitlab.com" })).toBe(true);
+    expect(store.hasReviewCommand("777", { provider: "gitlab", instance: "gitlab.corp.internal" })).toBe(false);
+  });
+
+  it("refuses to cancel a non-default-scope job by id without an explicit scope", () => {
+    const store = newStore();
+    const gitlabJob = store.enqueue(
+      jobInput({ headSha: "sha", provider: "gitlab", providerInstance: "gitlab.corp.internal" }),
+    ).job;
+    // The id form defaults to the GitHub scope; cancelling a GitLab job by id
+    // alone matches nothing. Callers holding the row must pass its scope.
+    const cancelled = store.cancelJobs({ jobId: gitlabJob.id }, "manual_cancel", null);
+    expect(cancelled).toEqual([]);
     expect(store.getJob(gitlabJob.id)?.state).toBe("queued");
   });
 

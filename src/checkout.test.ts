@@ -66,7 +66,7 @@ describe("createCheckout", () => {
         jobId: 1,
         cloneUrl: origin,
         gitAuthArgs: gitHttpAuthArgs(TOKEN),
-        headRefspec: "+refs/pull/7/head:refs/maomao/pr",
+        remoteRef: "refs/pull/7/head",
         baseSha: headSha,
         headSha,
         secrets: [TOKEN],
@@ -98,6 +98,53 @@ describe("createCheckout", () => {
     }
   });
 
+  it("pins any provider's native head ref to refs/maomao/pr", async () => {
+    const tmp = await mkdtemp(join(tmpdir(), "maomao-co-ref-"));
+    const origin = join(tmp, "origin");
+    const work = join(tmp, "ws");
+    try {
+      const init = await execFile("git", ["init", "-b", "main", origin], { env: process.env });
+      expect(init.exitCode).toBe(0);
+      await git(origin, ["config", "user.email", "test@example.com"]);
+      await git(origin, ["config", "user.name", "maomao-test"]);
+      await writeFile(join(origin, "README.md"), "hello\n");
+      await git(origin, ["add", "README.md"]);
+      await git(origin, ["commit", "-m", "init"]);
+      const headSha = await git(origin, ["rev-parse", "HEAD"]);
+      // GitLab-shaped native ref, proving the local-ref contract is checkout-owned.
+      await git(origin, ["update-ref", "refs/merge-requests/9/head", headSha]);
+
+      const checkout = createCheckout(work, "git");
+      const workspace = await checkout.prepare({
+        jobId: 3,
+        cloneUrl: origin,
+        remoteRef: "refs/merge-requests/9/head",
+        baseSha: headSha,
+        headSha,
+        fetchDiff: async () => "",
+        metadata: {},
+      });
+      const checked = await git(workspace.repoDir, ["rev-parse", "HEAD"]);
+      expect(checked).toBe(headSha);
+      await checkout.cleanup(workspace.dir);
+    } finally {
+      await rm(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it("redacts secrets from execFile timeout messages", async () => {
+    const secret = "super-secret-header-value";
+    const message: string = await execFile("bash", ["-c", `sleep 5; echo ${secret}`], {
+      timeoutMs: 50,
+      secrets: [secret],
+    }).then(
+      () => "",
+      (error: unknown) => (error instanceof Error ? error.message : String(error)),
+    );
+    expect(message).toContain("timed out");
+    expect(message).not.toContain(secret);
+    expect(message).toContain("[redacted]");
+  });
   it("redacts the installation token when git fetch fails", async () => {
     const tmp = await mkdtemp(join(tmpdir(), "maomao-co-fail-"));
     const work = join(tmp, "ws");
@@ -133,7 +180,7 @@ esac
           jobId: 2,
           cloneUrl: "https://github.com/acme/widgets.git",
           gitAuthArgs: gitHttpAuthArgs(TOKEN),
-          headRefspec: "+refs/pull/7/head:refs/maomao/pr",
+          remoteRef: "refs/pull/7/head",
           baseSha: "aaa",
           headSha: "bbb",
           secrets: [TOKEN],

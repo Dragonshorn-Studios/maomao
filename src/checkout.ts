@@ -43,7 +43,8 @@ export async function execFile(
       options.timeoutMs && options.timeoutMs > 0
         ? setTimeout(() => {
             child.kill("SIGKILL");
-            reject(new Error(`timed out after ${options.timeoutMs}ms: ${command} ${args.join(" ")}`));
+            const commandLine = redactSecrets(`${command} ${args.join(" ")}`, options.secrets ?? []);
+            reject(new Error(`timed out after ${options.timeoutMs}ms: ${commandLine}`));
           }, options.timeoutMs)
         : undefined;
     const onAbort = () => child.kill("SIGKILL");
@@ -122,10 +123,15 @@ export interface CheckoutPort {
   prepare(input: {
     jobId: number;
     cloneUrl: string;
-    /** `git -c …` authentication arguments from the provider; never logged. */
+    /** `git -c …` authentication arguments from the provider; must also appear in `secrets`. */
     gitAuthArgs?: string[];
-    /** Refspec pinning the change head, targeting refs/maomao/pr (e.g. +refs/pull/N/head:refs/maomao/pr). */
-    headRefspec: string;
+    /**
+     * The provider's native head ref (e.g. refs/pull/7/head). prepare pins it
+     * to the local refs/maomao/pr itself — that local-ref name is a contract:
+     * the anti-drift check resolves exactly that ref and falls back to
+     * detaching `headSha` directly when it is absent.
+     */
+    remoteRef: string;
     /** Secret material to redact from subprocess output. */
     secrets?: string[];
     baseSha: string;
@@ -187,7 +193,7 @@ export function createCheckout(workspaceRoot: string, gitBin = "git"): CheckoutP
         "--no-tags",
         "--no-recurse-submodules",
         "origin",
-        input.headRefspec,
+        `+${input.remoteRef}:refs/maomao/pr`,
       ]);
       if (fetchPr.exitCode !== 0) {
         const fetchSha = await git([

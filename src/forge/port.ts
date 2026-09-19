@@ -10,6 +10,7 @@
 import type {
   ForgeChange,
   ForgeCloneSpec,
+  ForgeConversationComment,
   ForgeDiscussion,
   ForgeInlineComment,
   ForgePermission,
@@ -27,7 +28,7 @@ export interface ForgePort {
   getChange(target: ForgeRepoTarget): Promise<ForgeChange>;
   /** Unified diff of the change, bounded by `maxBytes` when > 0. */
   getChangeDiff(target: ForgeRepoTarget, maxBytes?: number): Promise<string>;
-  /** Diff of one commit on the default branch (health scans). Optional until a provider ships it. */
+  /** Diff of one commit on the default branch (health scans). Optional: providers without it cannot run health scans. */
   getCommitDiff?(target: Omit<ForgeRepoTarget, "changeNumber">, sha: string): Promise<string>;
 
   /** Existing review summaries on the change; marker-scanned for idempotent publish. */
@@ -43,27 +44,15 @@ export interface ForgePort {
   /** Effective permission of an actor on the repository, in the neutral vocabulary. */
   getActorPermission(target: ForgeRepoTarget, username: string): Promise<ForgePermission>;
   /** Conversation comments (change-level and inline) for human-override scanning. */
-  listConversationComments?(
-    target: ForgeRepoTarget,
-  ): Promise<
-    Array<{
-      id: string;
-      source: "conversation" | "inline";
-      body: string;
-      login?: string;
-      userType?: string;
-      authorAssociation?: string;
-      path?: string;
-      line?: number;
-      inReplyToId?: string;
-    }>
-  >;
+  listConversationComments?(target: ForgeRepoTarget): Promise<ForgeConversationComment[]>;
 
-  /** Authenticated clone material for the change head; secrets never enter logs or model context. */
-  cloneSpec(target: ForgeRepoTarget): Promise<ForgeCloneSpec>;
+  /**
+   * Authenticated clone material for the change head; secrets never enter logs
+   * or model context. `anonymous: true` is the unauthenticated public-scan
+   * path — providers must refuse it for anything but public read-only access.
+   */
+  cloneSpec(target: ForgeRepoTarget, opts?: { anonymous?: boolean }): Promise<ForgeCloneSpec>;
 
   /** True when the login belongs to this connection's bot identity (review-loop guard). */
   isBotLogin(login: string | undefined): boolean;
 }
-
-export type ForgeInlineComments = ForgeInlineComment[];

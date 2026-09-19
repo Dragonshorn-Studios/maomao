@@ -1,13 +1,20 @@
 import { createAppAuth } from "@octokit/auth-app";
 import { Octokit } from "@octokit/rest";
 import type { Config } from "../config.js";
-import type { ForgeVerdict } from "../forge/types.js";
+import type {
+  ForgeDiscussion,
+  ForgeDiscussionComment,
+  ForgeInlineComment,
+  ForgePermission,
+  ForgePublishResult,
+  ForgeVerdict,
+} from "../forge/types.js";
 import { createReviewWithFallback } from "../forge/review-text.js";
 import { limitedGithubFetch, unwrapDiffTooLarge } from "./diff-limit.js";
 
-// Publication and thread-marker logic is forge-neutral and lives in src/forge;
-// these re-exports keep the historical import paths working for the GitHub
-// webhook path and its tests.
+// Re-export shim: the GitHub webhook path and its tests still import these
+// neutral helpers under historical names from here; new forge-neutral code
+// imports from src/forge directly.
 export {
   buildReviewBody,
   createReviewWithFallback,
@@ -18,28 +25,21 @@ export {
   type DemotedFinding,
   type InlineCommentFinding,
 } from "../forge/review-text.js";
-export type { ForgeVerdict as ForgeReviewEvent };
 export {
   discussionContainsComment as threadContainsComment,
-  discussionRoot as threadRoot,
   findingComment,
   isMaomaoDiscussion as isMaomaoThread,
   parseDiscussionFindingMarker as parseThreadFindingMarker,
 } from "../forge/discussions.js";
 
-export interface PullReviewComment {
-  path: string;
-  body: string;
-  line: number;
-  side?: "LEFT" | "RIGHT";
-}
-
-export interface PostedReview {
-  id: string;
-  url: string;
-  /** Inline comments GitHub actually accepted; empty when the fallback posted a body-only review. */
-  postedComments?: PullReviewComment[];
-}
+// Historical GitHub-facing names for the neutral port types; structural drift
+// between the two vocabularies is now a compile error instead of a silent one.
+export type PullReviewComment = ForgeInlineComment;
+export type PostedReview = ForgePublishResult;
+export type RepoPermission = ForgePermission;
+export type ReviewThreadComment = ForgeDiscussionComment;
+export type ReviewThread = ForgeDiscussion;
+export type ReviewEvent = ForgeVerdict;
 
 export interface ResolvedPull {
   installationId: number;
@@ -69,27 +69,6 @@ export interface ManualTriggerPort {
   getPull(installationId: number, owner: string, repo: string, pullNumber: number): Promise<ResolvedPull>;
 }
 
-export type RepoPermission = "admin" | "maintain" | "write" | "triage" | "read" | "none";
-
-export interface ReviewThreadComment {
-  id: string;
-  databaseId?: number;
-  body: string;
-  path?: string;
-  line?: number | null;
-  authorLogin?: string;
-}
-
-export interface ReviewThread {
-  id: string;
-  isResolved: boolean;
-  path?: string;
-  line?: number | null;
-  comments: ReviewThreadComment[];
-}
-
-export type ReviewEvent = ForgeVerdict;
-
 export interface GithubPort {
   getInstallationToken(installationId: number): Promise<string>;
   getPullDiff(
@@ -114,6 +93,8 @@ export interface GithubPort {
     body: string;
     comments: PullReviewComment[];
     event?: ReviewEvent;
+    /** Name used in the reader-visible degrade note; defaults to the neutral "the forge". */
+    forgeLabel?: string;
   }): Promise<PostedReview>;
   getRepositoryHead?(
     installationId: number,
@@ -485,12 +466,14 @@ export class GithubClient implements GithubPort, ManualTriggerPort {
     body: string;
     comments: PullReviewComment[];
     event?: ReviewEvent;
+    forgeLabel?: string;
   }): Promise<PostedReview> {
     const octokit = this.installationOctokit(input.installationId);
     const event = input.event ?? "COMMENT";
     return createReviewWithFallback({
       comments: input.comments,
       body: input.body,
+      forgeLabel: input.forgeLabel,
       post: async (comments, body) => {
         const response = await octokit.rest.pulls.createReview({
           owner: input.owner,
@@ -682,11 +665,6 @@ export class GithubClient implements GithubPort, ManualTriggerPort {
     }
   }
 }
-
-/**
- * Post a review with inline comments, degrading instead of dying. The
- * implementation is forge-neutral and lives in src/forge/review-text.ts.
- */
 
 export function maomaoBotLogins(appSlug: string): string[] {
   const slug = (appSlug || "maomao").replace(/\[bot\]$/i, "").toLowerCase();

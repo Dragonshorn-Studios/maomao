@@ -20,13 +20,54 @@ export interface ForgeScope {
 export const GITHUB_PROVIDER = "github";
 export const GITHUB_INSTANCE = "github.com";
 
-/** Default storage scope for rows written before per-connection scoping existed. */
+/**
+ * Storage identity for rows written before per-connection scoping existed and
+ * for call sites that are GitHub-only by construction (the GitHub webhook
+ * handler). Defaults must be greppable call sites, never invisible fallbacks.
+ */
 export const DEFAULT_FORGE_SCOPE: ForgeScope = { provider: GITHUB_PROVIDER, instance: GITHUB_INSTANCE };
 
+/**
+ * Missing or blank fields on both axes fall back to the default GitHub scope,
+ * so legacy rows resolve to the env-configured connection. A half-specified
+ * scope is a caller bug and throws — half a connection identity is never a
+ * valid storage partition.
+ */
 export function normalizeScope(scope?: Partial<ForgeScope>): ForgeScope {
+  const provider = scope?.provider?.trim().toLowerCase();
+  const instance = scope?.instance?.trim().toLowerCase();
+  if ((provider == null || provider === "") && (instance == null || instance === "")) {
+    return { ...DEFAULT_FORGE_SCOPE };
+  }
+  if (!provider || !instance) {
+    throw new Error(
+      `incomplete forge scope (provider=${scope?.provider ?? ""}, instance=${scope?.instance ?? ""}): both provider and instance are required`,
+    );
+  }
+  return { provider, instance };
+}
+
+/** Structural read of a row's persisted scope; both columns are NOT NULL. */
+export function scopeOf(row: { provider: string; provider_instance: string }): ForgeScope {
+  return { provider: row.provider, instance: row.provider_instance };
+}
+
+/** Storage-scoped target for a job row (or any row carrying the same six columns). */
+export function forgeTargetOf(row: {
+  provider: string;
+  provider_instance: string;
+  repo_owner: string;
+  repo_name: string;
+  repo_full_name: string;
+  pr_number: number;
+}): ForgeRepoTarget {
   return {
-    provider: scope?.provider?.trim() || GITHUB_PROVIDER,
-    instance: scope?.instance?.trim() || GITHUB_INSTANCE,
+    provider: row.provider,
+    instance: row.provider_instance,
+    repoOwner: row.repo_owner,
+    repoName: row.repo_name,
+    repoFullName: row.repo_full_name,
+    changeNumber: row.pr_number,
   };
 }
 
@@ -76,6 +117,19 @@ export interface ForgeDiscussionComment {
   authorLogin?: string;
 }
 
+/** One conversation/inline comment as surfaced to the human-override scanner. */
+export interface ForgeConversationComment {
+  id: string;
+  source: "conversation" | "inline";
+  body: string;
+  login?: string;
+  userType?: string;
+  authorAssociation?: string;
+  path?: string;
+  line?: number;
+  inReplyToId?: string;
+}
+
 export interface ForgeDiscussion {
   id: string;
   isResolved: boolean;
@@ -120,10 +174,14 @@ export interface ForgePublishInput {
 /** Everything a checkout needs to fetch the change head, provider-supplied. */
 export interface ForgeCloneSpec {
   cloneUrl: string;
-  /** `git -c …` arguments carrying authentication; never logged. */
+  /** `git -c …` arguments carrying authentication; also listed in `secrets` so subprocess output is redacted. */
   gitAuthArgs: string[];
-  /** Fetch refspec pinning the change head to a local ref (e.g. +refs/pull/N/head:refs/maomao/pr). */
-  headRefspec: string;
+  /**
+   * The provider's native head ref (e.g. refs/pull/7/head). Checkout pins it
+   * to the local refs/maomao/pr itself, so the local-ref convention lives in
+   * exactly one place.
+   */
+  remoteRef: string;
   /** Secret material (tokens, basic-auth strings) that must be redacted from subprocess output. */
   secrets: string[];
 }

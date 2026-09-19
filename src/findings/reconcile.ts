@@ -148,7 +148,7 @@ export async function classifyPriorFindings(input: {
         status: "resolved",
         confidence: 1,
         reason: prior.githubAlreadyResolved
-          ? "GitHub thread already resolved"
+          ? "Forge thread already resolved"
           : "already resolved; no open thread to re-check",
         threadId: prior.threadId,
         commentId: prior.commentId,

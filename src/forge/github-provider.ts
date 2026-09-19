@@ -13,6 +13,7 @@ import { GITHUB_INSTANCE, GITHUB_PROVIDER } from "./types.js";
 import type {
   ForgeChange,
   ForgeCloneSpec,
+  ForgeConversationComment,
   ForgeDiscussion,
   ForgePermission,
   ForgePublishInput,
@@ -107,6 +108,7 @@ export class GitHubProvider implements ForgePort {
       body: input.body,
       comments: input.comments,
       event: input.verdict,
+      forgeLabel: "GitHub",
     });
   }
 
@@ -136,30 +138,13 @@ export class GitHubProvider implements ForgePort {
     );
   }
 
-  async listConversationComments(target: ForgeRepoTarget): Promise<
-    Array<{
-      id: string;
-      source: "conversation" | "inline";
-      body: string;
-      login?: string;
-      userType?: string;
-      authorAssociation?: string;
-      path?: string;
-      line?: number;
-      inReplyToId?: string;
-    }>
-  > {
-    const out: Array<{
-      id: string;
-      source: "conversation" | "inline";
-      body: string;
-      login?: string;
-      userType?: string;
-      authorAssociation?: string;
-      path?: string;
-      line?: number;
-      inReplyToId?: string;
-    }> = [];
+  /**
+   * Last MAX_OVERRIDE_COMMENTS per source (conversation and inline are capped
+   * separately). The override scanner consumes port output uncapped, so the
+   * adapter owns the historical bound.
+   */
+  async listConversationComments(target: ForgeRepoTarget): Promise<ForgeConversationComment[]> {
+    const out: ForgeConversationComment[] = [];
     if (this.client.listIssueComments) {
       const comments = await this.client.listIssueComments(
         this.installationId,
@@ -202,12 +187,20 @@ export class GitHubProvider implements ForgePort {
     return out;
   }
 
-  async cloneSpec(target: ForgeRepoTarget): Promise<ForgeCloneSpec> {
+  async cloneSpec(target: ForgeRepoTarget, opts?: { anonymous?: boolean }): Promise<ForgeCloneSpec> {
     const cloneUrl = `https://${this.instance}/${target.repoFullName}.git`;
-    const headRefspec = `+refs/pull/${target.changeNumber}/head:refs/maomao/pr`;
-    // Installation id 0 marks unauthenticated scans of public repositories.
+    const remoteRef = `refs/pull/${target.changeNumber}/head`;
+    // Installation id 0 marks unauthenticated public-repository scans. A
+    // pull-request review job with installation 0 is a broken binding: fail
+    // fast instead of silently fetching anonymously (and spending the whole
+    // pipeline on a review that could never be published).
     if (this.installationId === 0) {
-      return { cloneUrl, gitAuthArgs: [], headRefspec, secrets: [] };
+      if (!opts?.anonymous) {
+        throw new Error(
+          `job targets installation_id 0; the GitHub App cannot authenticate a review of ${target.repoFullName}`,
+        );
+      }
+      return { cloneUrl, gitAuthArgs: [], remoteRef, secrets: [] };
     }
     const token = this.getToken
       ? await this.getToken(this.installationId)
@@ -215,7 +208,7 @@ export class GitHubProvider implements ForgePort {
     return {
       cloneUrl,
       gitAuthArgs: gitHttpAuthArgs(token),
-      headRefspec,
+      remoteRef,
       secrets: gitAuthSecrets(token),
     };
   }
