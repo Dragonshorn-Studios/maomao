@@ -426,7 +426,6 @@ describe("GitLab finding lifecycle parity", () => {
     const otherFp = fingerprintFinding({
       category: "correctness",
       file: "src/app.ts",
-      line: 3,
       summary: "other resolved issue on the same MR",
       body: "",
     });
