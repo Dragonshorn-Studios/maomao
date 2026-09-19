@@ -15,7 +15,7 @@
     "test": "npm run build:vendor && vitest run",
     "test:watch": "vitest",
     "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.chat.json --noEmit",
-    "build:vendor": "esbuild src/ui/pierre-entry.ts --bundle --minify --format=iife --global-name=__maomaoPierre --target=es2020 --outfile=dist/assets/vendor/pierre-diffs.js && esbuild src/ui/chat-entry.tsx --bundle --minify --format=iife --target=es2020 --outfile=dist/assets/chat.js"
+    "build:vendor": "esbuild src/ui/pierre-entry.ts --bundle --minify --format=iife --global-name=__maomaoPierre --target=es2020 --outfile=dist/assets/vendor/pierre-diffs.js && esbuild src/ui/chat-entry.tsx --bundle --minify --format=iife --jsx=automatic --target=es2020 --outfile=dist/assets/chat.js"
   },
   "dependencies": {
     "@hono/node-server": "^1.19.6",

@@ -2,11 +2,12 @@
  * "Ask Maomao" chat island: an assistant-ui LocalRuntime mounted into the
  * job chat page. Talks only to Maomao's own streaming route (same-origin,
  * session-gated, CSRF-protected) — never to opencode directly. The no-JS
- * form fallback in the page is removed once the island mounts.
+ * form fallback in the page is removed only after the island commits.
  */
 import {
   AssistantRuntimeProvider,
   ComposerPrimitive,
+  ErrorPrimitive,
   MessagePrimitive,
   ThreadPrimitive,
   useLocalRuntime,
@@ -14,6 +15,8 @@ import {
   type ChatModelAdapter,
 } from "@assistant-ui/react";
 import { createRoot } from "react-dom/client";
+import { useEffect } from "react";
+import { sseDataEvents } from "./sse.js";
 
 interface ChatConfig {
   streamUrl: string;
@@ -28,40 +31,24 @@ function chatConfig(): ChatConfig | undefined {
   try {
     const parsed = JSON.parse(el.textContent) as Partial<ChatConfig>;
     if (!parsed.streamUrl) return undefined;
-    return { streamUrl: parsed.streamUrl, csrfToken: parsed.csrfToken };
+    return { streamUrl: parsed.streamUrl, csrfToken: parsed.csrfToken ?? undefined };
   } catch {
     return undefined;
   }
 }
 
-/** Reads an SSE stream of `data: {"delta"|"error"|"done"}` events. */
-async function* sseEvents(body: ReadableStream<Uint8Array>): AsyncGenerator<Record<string, unknown>> {
-  const reader = body.getReader();
-  const decoder = new TextDecoder();
-  let buffer = "";
-  try {
-    for (;;) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      buffer += decoder.decode(value, { stream: true });
-      let boundary = buffer.indexOf("\n\n");
-      while (boundary >= 0) {
-        const rawEvent = buffer.slice(0, boundary);
-        buffer = buffer.slice(boundary + 2);
-        for (const line of rawEvent.split("\n")) {
-          if (!line.startsWith("data: ")) continue;
-          try {
-            yield JSON.parse(line.slice(6)) as Record<string, unknown>;
-          } catch {
-            // Malformed event: skip rather than corrupt the transcript.
-          }
-        }
-        boundary = buffer.indexOf("\n\n");
-      }
-    }
-  } finally {
-    reader.releaseLock();
+/** Human guidance for the failure modes an operator can actually fix. */
+function describeFetchFailure(response: Response): string {
+  if (response.status === 403) {
+    return "Your session or form token expired — reload this page and try again.";
   }
+  if (response.status === 404) {
+    return "The explainer is not available for this job.";
+  }
+  if (response.status === 401) {
+    return "Your session expired — reload the page to sign in again.";
+  }
+  return `the explainer refused the request (status ${response.status})`;
 }
 
 function createAdapter(config: ChatConfig): ChatModelAdapter {
@@ -82,12 +69,20 @@ function createAdapter(config: ChatConfig): ChatModelAdapter {
         body: form.toString(),
         signal: abortSignal,
       });
-      if (!response.ok || !response.body) {
-        throw new Error(`the explainer refused the request (status ${response.status})`);
+      if (!response.ok) {
+        const data = (await response.json().catch(() => null)) as { error?: unknown } | null;
+        const serverMessage = typeof data?.error === "string" ? data.error : describeFetchFailure(response);
+        throw new Error(serverMessage);
       }
+      // A session-expiry redirect answers 200 with the login HTML; the SSE
+      // content-type check turns that into advice the operator can act on.
+      if (!response.headers.get("content-type")?.includes("text/event-stream")) {
+        throw new Error("Your session expired — reload the page to sign in again.");
+      }
+      if (!response.body) throw new Error(FALLBACK);
 
       let text = "";
-      for await (const event of sseEvents(response.body)) {
+      for await (const event of sseDataEvents(response.body)) {
         if (typeof event.delta === "string" && event.delta.length > 0) {
           text += event.delta;
           yield { content: [{ type: "text", text }] };
@@ -118,6 +113,7 @@ const AssistantMessage = () => (
   <div className="chat-bubble chat-bubble-assistant">
     <span className="muted">Maomao</span>
     <MessagePrimitive.Content components={{ Text: TextPart }} />
+    <ErrorPrimitive.Message className="chat-error" role="alert" />
   </div>
 );
 
@@ -146,11 +142,23 @@ const Thread = () => (
 
 function ChatApp({ config }: { config: ChatConfig }): React.ReactElement {
   const runtime = useLocalRuntime(createAdapter(config));
+  // Remove the no-JS fallback only after the island has committed successfully.
+  useEffect(() => {
+    document.getElementById("maomao-chat-form")?.remove();
+  }, []);
   return (
     <AssistantRuntimeProvider runtime={runtime}>
       <Thread />
     </AssistantRuntimeProvider>
   );
+}
+
+export function mountChat(): void {
+  const root = document.getElementById("maomao-chat-root");
+  const config = chatConfig();
+  if (!root || !config || root.dataset.mounted === "true") return;
+  root.dataset.mounted = "true";
+  createRoot(root).render(<ChatApp config={config} />);
 }
 
 if (document.readyState === "loading") {
@@ -159,15 +167,3 @@ if (document.readyState === "loading") {
   mountChat();
 }
 
-export function mountChat(): void {
-  const root = document.getElementById("maomao-chat-root");
-  const config = chatConfig();
-  if (!root || !config || root.dataset.mounted === "true") return;
-  root.dataset.mounted = "true";
-  // The no-JS round-trip form is redundant once the live island is up.
-  document.getElementById("maomao-chat-form")?.remove();
-  createRoot(root).render(<ChatApp config={config} />);
-}
-
-/** Test seam: the SSE reader over a fetch Response body. */
-export { sseEvents };

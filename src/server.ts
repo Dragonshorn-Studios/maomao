@@ -771,10 +771,23 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
     const chat = ctx.chat;
     const conversation = chat.store.getOrCreateConversation(jobId, actionActor(c) ?? null);
     const encoder = new TextEncoder();
+    // Client disconnects cancel the response stream before the abort signal
+    // kills the run; enqueueing into a cancelled controller throws, so every
+    // stream op is guarded and treated as a disconnect.
+    let closed = false;
     const stream = new ReadableStream<Uint8Array>({
+      cancel() {
+        closed = true;
+      },
       async start(controller) {
-        const send = (payload: Record<string, unknown>) =>
-          controller.enqueue(encoder.encode(`data: ${JSON.stringify(payload)}\n\n`));
+        const send = (payload: Record<string, unknown>) => {
+          if (closed) return;
+          try {
+            controller.enqueue(encoder.encode(`data: ${JSON.stringify(payload)}\n\n`));
+          } catch {
+            closed = true;
+          }
+        };
         try {
           await chat.service.send({
             job,
@@ -790,7 +803,12 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
             send({ error: redactSecrets(raw, githubSecrets(ctx.config)).slice(0, 300) });
           }
         } finally {
-          controller.close();
+          closed = true;
+          try {
+            controller.close();
+          } catch {
+            // Already cancelled by the client disconnect.
+          }
         }
       },
     });
