@@ -32,7 +32,11 @@ function chatConfig(): ChatConfig | undefined {
   try {
     const parsed = JSON.parse(el.textContent) as Partial<ChatConfig>;
     if (!parsed.streamUrl) return undefined;
-    return { streamUrl: parsed.streamUrl, csrfToken: parsed.csrfToken ?? undefined };
+    return {
+      streamUrl: parsed.streamUrl,
+      csrfToken: parsed.csrfToken ?? undefined,
+      suggestions: Array.isArray(parsed.suggestions) ? parsed.suggestions.filter((item): item is string => typeof item === "string") : undefined,
+    };
   } catch {
     return undefined;
   }

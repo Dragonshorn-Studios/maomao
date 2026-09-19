@@ -6,6 +6,7 @@
 import { escapeHtml } from "../util.js";
 import type { ChatConversationRow, ChatMessageRow } from "../chat/store.js";
 import { layout, csrfInput, type PageOptions } from "./layout.js";
+import { severityRank } from "../schema.js";
 import { CHAT_BUNDLE_HREF } from "./paths.js";
 
 export interface ChatPageData {
