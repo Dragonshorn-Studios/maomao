@@ -35,6 +35,15 @@ export function buildOpenCodeArgs(input: {
   ];
 }
 
+/**
+ * Secret-bearing values from the sanitized child env (provider keys etc.).
+ * Chat surfaces that echo model output must redact with these in addition to
+ * Maomao's own credentials — the runner applies them to stdout/stderr only.
+ */
+export function opencodeEnvSecrets(env: NodeJS.ProcessEnv): string[] {
+  return Object.values(env).filter((value): value is string => Boolean(value && value.length > 8));
+}
+
 export function createOpenCodeRunner(defaultBin = "opencode"): OpenCodePort {
   return {
     async run(input: OpenCodeRunInput): Promise<OpenCodeRunResult> {
@@ -50,7 +59,7 @@ export function createOpenCodeRunner(defaultBin = "opencode"): OpenCodePort {
         TERM: "dumb",
       };
       const env = sanitizeChildEnv(process.env, { ...extras, ...(input.env ?? {}) });
-      const secrets = Object.values(env).filter((value): value is string => Boolean(value && value.length > 8));
+      const secrets = opencodeEnvSecrets(env);
 
       return new Promise((resolve, reject) => {
         if (input.signal?.aborted) {

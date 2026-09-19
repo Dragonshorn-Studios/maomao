@@ -39,9 +39,9 @@ export class ExplainerEventParser {
       this.sessionId = event.sessionID;
     }
     if (event.type === "text" && typeof event.part?.text === "string" && event.part.text.length > 0) {
-      const key = `${event.part.id ?? ""}:${event.part.text}`;
-      // The same text part can be re-emitted; dedupe by part id + content so
-      // the transcript never doubles a paragraph.
+      // The same part can be re-emitted; dedupe by part id when the
+      // provider supplies one so the transcript never doubles a paragraph.
+      const key = event.part.id ?? `text:${event.part.text}`;
       if (this.seen.has(key)) return;
       this.seen.add(key);
       this.textParts.push(event.part.text);

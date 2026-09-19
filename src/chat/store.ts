@@ -57,13 +57,33 @@ export class ChatStore {
       | undefined;
   }
 
-  /** The conversation an operator is currently chatting in for this job. */
+  /**
+   * The conversation an operator is chatting in for this job: the newest one,
+   * regardless of state — an errored conversation stays visible (banner) and
+   * its next send resumes the same opencode session.
+   */
   activeConversationForJob(jobId: number): ChatConversationRow | undefined {
     return this.db
-      .prepare(
-        `SELECT * FROM chat_conversations WHERE job_id = ? AND state = 'active' ORDER BY id DESC LIMIT 1`,
-      )
+      .prepare(`SELECT * FROM chat_conversations WHERE job_id = ? ORDER BY id DESC LIMIT 1`)
       .get(jobId) as ChatConversationRow | undefined;
+  }
+
+  /** Creates the conversation, or returns the newest existing one (double-submit safe). */
+  getOrCreateConversation(jobId: number, createdBy: string | null): ChatConversationRow {
+    return this.db.transaction(() => {
+      const existing = this.activeConversationForJob(jobId);
+      if (existing) return existing;
+      return this.createConversation(jobId, createdBy);
+    })();
+  }
+
+  /** Marks every active conversation of a job superseded by an explicit reset. */
+  supersedeActive(jobId: number): void {
+    this.db
+      .prepare(
+        `UPDATE chat_conversations SET state = 'reset', updated_at = ? WHERE job_id = ? AND state = 'active'`,
+      )
+      .run(nowIso(), jobId);
   }
 
   listMessages(conversationId: number): ChatMessageRow[] {
@@ -105,9 +125,10 @@ export class ChatStore {
          WHERE id = ?`,
       )
       .run(input.cost ?? null, input.totalTokens ?? null, now, input.conversationId);
-    return this.db
-      .prepare(`SELECT * FROM chat_messages WHERE conversation_id = ? AND created_at = ? ORDER BY id DESC LIMIT 1`)
-      .get(input.conversationId, now) as ChatMessageRow;
+    const id = (this.db.prepare(`SELECT last_insert_rowid() AS id`).get() as { id: number }).id;
+    const row = this.db.prepare(`SELECT * FROM chat_messages WHERE id = ?`).get(id) as ChatMessageRow | undefined;
+    if (!row) throw new Error("failed to append chat message");
+    return row;
   }
 
   bindSession(conversationId: number, sessionId: string, workspacePath: string): void {

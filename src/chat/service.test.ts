@@ -1,4 +1,4 @@
-import { mkdirSync } from "node:fs";
+import { mkdirSync, rmSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import { openDb } from "../db.js";
 import { JobStore, type JobRow } from "../jobs/store.js";
@@ -199,6 +199,85 @@ describe("ChatService", () => {
     expect(messages.map((message) => message.role)).toEqual(["user", "assistant", "user", "assistant"]);
     expect(runs[0]?.prompt.endsWith("first")).toBe(true);
     expect(runs[1]?.prompt.endsWith("second")).toBe(true);
+  });
+
+  it("refuses to persist a reply when opencode exits nonzero", async () => {
+    const { service, chatStore, jobStore } = harness();
+    const job = jobStore.getJob(1)!;
+    const conversation = chatStore.createConversation(1, null);
+    const failing: OpenCodePort = {
+      async run(input) {
+        input.onStdout?.('{"type":"step_start","sessionID":"ses_x","part":{}}\n');
+        return { stdout: "err", stderr: "model not found", exitCode: 1, text: "", usage: {} };
+      },
+    };
+    const deps = service as unknown as { deps: { opencode: OpenCodePort } };
+    const original = deps.deps.opencode;
+    deps.deps.opencode = failing;
+    await expect(service.send({ job, conversation, question: "q" })).rejects.toThrow(/explainer run failed/);
+    // No fake assistant reply persisted; the question remains; conversation recoverable.
+    expect(chatStore.listMessages(conversation.id).map((m) => m.role)).toEqual(["user"]);
+    expect(chatStore.getConversation(conversation.id)?.state).toBe("error");
+    // The next send resumes the same (errored) conversation once the cause clears.
+    deps.deps.opencode = original;
+    await service.send({ job, conversation, question: "retry" });
+    expect(chatStore.getConversation(conversation.id)?.state).toBe("active");
+  });
+
+  it("does not persist a partial answer as complete when aborted mid-send", async () => {
+    const { service, chatStore, jobStore } = harness();
+    const job = jobStore.getJob(1)!;
+    const conversation = chatStore.createConversation(1, null);
+    const controller = new AbortController();
+    const aborting: OpenCodePort = {
+      async run(input) {
+        input.onStdout?.('{"type":"step_start","sessionID":"ses_a","part":{}}\n');
+        input.onStdout?.('{"type":"text","part":{"id":"p1","text":"partial ans"}}\n');
+        controller.abort();
+        return { stdout: "partial", stderr: "", exitCode: 1, text: "partial ans", usage: { totalTokens: 3, complete: false } };
+      },
+    };
+    (service as unknown as { deps: { opencode: OpenCodePort } }).deps.opencode = aborting;
+    await expect(
+      service.send({ job, conversation, question: "q", signal: controller.signal }),
+    ).rejects.toThrow(/interrupted/);
+    expect(chatStore.listMessages(conversation.id).map((m) => m.role)).toEqual(["user"]);
+  });
+
+  it("re-prepares the workspace after it was swept", async () => {
+    const { service, chatStore, jobStore, prepareCount, runs } = harness();
+    const job = jobStore.getJob(1)!;
+    const conversation = chatStore.createConversation(1, null);
+    await service.send({ job, conversation, question: "one" });
+    // Sweep: the chat checkout root is removed underneath the conversation.
+    rmSync("/tmp/chat-fixture", { recursive: true, force: true });
+    await service.send({ job, conversation, question: "two" });
+    expect(prepareCount.count).toBe(2);
+    expect(runs[1]?.cwd.endsWith("/repo")).toBe(true);
+  });
+
+  it("keeps the redaction of model output aligned with the child env secrets", async () => {
+    const envKey = "sk-provider-secret-key-000";
+    const harnessEnv = harness();
+    const { service, chatStore, jobStore } = harnessEnv;
+    const job = jobStore.getJob(1)!;
+    const conversation = chatStore.createConversation(1, null);
+    process.env.TEST_PROVIDER_KEY_BACKDOOR = envKey;
+    try {
+      const leaking: OpenCodePort = {
+        async run(input) {
+          const text = `the key is ${process.env.TEST_PROVIDER_KEY_BACKDOOR}`;
+          input.onStdout?.(`{"type":"text","part":{"id":"p1","text":${JSON.stringify(text)}}}\n`);
+          return { stdout: "s", stderr: "", exitCode: 0, text, usage: { totalTokens: 1, cost: 0, complete: true } };
+        },
+      };
+      (service as unknown as { deps: { opencode: OpenCodePort } }).deps.opencode = leaking;
+      const result = await service.send({ job, conversation, question: "q" });
+      expect(result.reply.content).not.toContain(envKey);
+      expect(result.reply.content).toContain("[redacted]");
+    } finally {
+      delete process.env.TEST_PROVIDER_KEY_BACKDOOR;
+    }
   });
 
   it("runs in the prepared checkout's repo directory and reuses it across messages", async () => {

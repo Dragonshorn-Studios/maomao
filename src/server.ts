@@ -748,8 +748,7 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
     const body = await c.req.parseBody();
     const question = typeof body.question === "string" ? body.question.trim().slice(0, 4_000) : "";
     if (!question) return c.redirect(`/jobs/${jobId}/chat?notice=${encodeURIComponent("Write a question first.")}`, 303);
-    const conversation =
-      ctx.chat.store.activeConversationForJob(jobId) ?? ctx.chat.store.createConversation(jobId, actionActor(c) ?? null);
+    const conversation = ctx.chat.store.getOrCreateConversation(jobId, actionActor(c) ?? null);
     try {
       await ctx.chat.service.send({
         job,
@@ -758,11 +757,16 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
         signal: c.req.raw.signal,
       });
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
+      if (error instanceof Error && error.name === "AbortError") {
+        // Operator navigated away mid-answer; the partial question stays in the
+        // transcript and the conversation is recoverable. Redirect cleanly.
+        return c.redirect(`/jobs/${jobId}/chat`, 303);
+      }
+      const raw = error instanceof Error ? error.message : String(error);
       const friendly =
         error instanceof ChatBudgetError
-          ? message
-          : `The explainer could not answer: ${message.slice(0, 300)}`;
+          ? raw
+          : `The explainer could not answer: ${redactSecrets(raw, githubSecrets(ctx.config)).slice(0, 300)}`;
       return c.redirect(`/jobs/${jobId}/chat?error=${encodeURIComponent(friendly)}`, 303);
     }
     return c.redirect(`/jobs/${jobId}/chat`, 303);
@@ -772,6 +776,7 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
     if (!ctx.config.chat.enabled || !ctx.chat) return c.text("Not found", 404);
     const jobId = Number(c.req.param("id"));
     if (!ctx.store.getJob(jobId)) return c.text("Not found", 404);
+    ctx.chat.store.supersedeActive(jobId);
     ctx.chat.store.createConversation(jobId, actionActor(c) ?? null);
     return c.redirect(`/jobs/${jobId}/chat`, 303);
   });

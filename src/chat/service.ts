@@ -13,9 +13,9 @@ import type { GithubPort } from "../github/client.js";
 import type { CheckoutPort } from "../checkout.js";
 import { createCheckout } from "../checkout.js";
 import type { OpenCodePort } from "../opencode/parse.js";
-import { OpenCodeTimeoutError } from "../opencode/spawn.js";
+import { OpenCodeTimeoutError, opencodeEnvSecrets } from "../opencode/spawn.js";
 import { reviewerPermissionConfig } from "../opencode/env.js";
-import { redactSecrets } from "../util.js";
+import { formatDuration, redactSecrets } from "../util.js";
 import type { ChatConversationRow, ChatMessageRow, ChatStore } from "./store.js";
 import { ExplainerEventParser } from "./events.js";
 
@@ -76,7 +76,10 @@ const REPO_DIR = "repo";
 
 export class ChatService {
   private readonly checkout: CheckoutPort;
-  /** Serializes sends per conversation: one opencode run at a time. */
+  /**
+   * Serializes sends per JOB (not per conversation): conversations on one job
+   * share the checkout directory, and a reset while a send streams would clobber it.
+   */
   private readonly locks = new Map<number, Promise<unknown>>();
 
   constructor(private readonly deps: ChatServiceDeps) {
@@ -90,16 +93,13 @@ export class ChatService {
     signal?: AbortSignal;
     onDelta?: (text: string) => void;
   }): Promise<ChatSendResult> {
-    const previous = this.locks.get(input.conversation.id) ?? Promise.resolve();
-    const run = previous.catch(() => undefined).then(() => this.sendLocked(input));
-    this.locks.set(
-      input.conversation.id,
-      run.catch(() => undefined),
-    );
+    const previous = this.locks.get(input.job.id) ?? Promise.resolve();
+    const chained = previous.catch(() => undefined).then(() => this.sendLocked(input));
+    this.locks.set(input.job.id, chained);
     try {
-      return await run;
+      return await chained;
     } finally {
-      if (this.locks.get(input.conversation.id) === run) this.locks.delete(input.conversation.id);
+      if (this.locks.get(input.job.id) === chained) this.locks.delete(input.job.id);
     }
   }
 
@@ -111,7 +111,10 @@ export class ChatService {
     onDelta?: (text: string) => void;
   }): Promise<ChatSendResult> {
     const { config, chatStore } = this.deps;
-    const budget = chatStore.usage(input.conversation.id);
+    // Re-read under the lock: a queued send must not run on a stale row
+    // snapshot missing the session binding a previous send just wrote.
+    const conversation = chatStore.getConversation(input.conversation.id) ?? input.conversation;
+    const budget = chatStore.usage(conversation.id);
     if (budget.messages >= config.chat.maxMessages) {
       throw new ChatBudgetError(
         `This conversation reached its message limit (${config.chat.maxMessages}); reset it to start a new one.`,
@@ -123,16 +126,19 @@ export class ChatService {
       );
     }
 
-    const workspace = await this.ensureWorkspace(input.conversation, input.job);
+    const workspace = await this.ensureWorkspace(conversation, input.job);
     const repoDir = join(workspace, REPO_DIR);
 
-    chatStore.appendMessage({ conversationId: input.conversation.id, role: "user", content: input.question });
+    chatStore.appendMessage({ conversationId: conversation.id, role: "user", content: input.question });
 
     const firstMessage = budget.messages === 0;
     const prompt = firstMessage ? this.seedPrompt(input.job, input.question) : input.question;
     const started = Date.now();
     const parser = new ExplainerEventParser();
     let lastDeltaIndex = 0;
+
+    const redactAll = (text: string) =>
+      redactSecrets(text, [...githubSecrets(config), ...opencodeEnvSecrets(process.env)]);
 
     try {
       const result = await this.deps.opencode.run({
@@ -141,15 +147,15 @@ export class ChatService {
         prompt,
         files: [],
         timeoutMs: config.chat.timeoutMs,
-        extraArgs: input.conversation.opencode_session_id
-          ? ["--session", input.conversation.opencode_session_id]
+        extraArgs: conversation.opencode_session_id
+          ? ["--session", conversation.opencode_session_id]
           : [],
         signal: input.signal,
         onStdout: (chunk) => {
           const { sessionId, textParts } = parser.feed(chunk);
-          if (sessionId && !input.conversation.opencode_session_id) {
-            chatStore.bindSession(input.conversation.id, sessionId, workspace);
-            input.conversation.opencode_session_id = sessionId;
+          if (sessionId && !conversation.opencode_session_id) {
+            chatStore.bindSession(conversation.id, sessionId, workspace);
+            conversation.opencode_session_id = sessionId;
           }
           for (; lastDeltaIndex < textParts.length; lastDeltaIndex += 1) {
             input.onDelta?.(textParts[lastDeltaIndex]!);
@@ -157,17 +163,28 @@ export class ChatService {
         },
       });
 
-      const sessionId = parser.sessionId ?? input.conversation.opencode_session_id;
-      if (sessionId) {
-        chatStore.bindSession(input.conversation.id, sessionId, workspace);
+      // A failed run must never become an empty "assistant reply": the runner
+      // resolves on any exit, so failures are only visible here.
+      const stderr = result.stderr.trim();
+      if (result.exitCode !== 0 || (parser.textParts.length === 0 && !result.usage.totalTokens)) {
+        throw new Error(
+          `explainer run failed (exit ${result.exitCode}): ${redactAll(stderr.slice(0, 300) || "no output; model auth or configuration is the usual cause")}`,
+        );
       }
-      const replyText = redactSecrets(
-        parser.textParts.join("\n\n") || result.text,
-        githubSecrets(config),
-      );
+      // A disconnect or timeout mid-stream leaves a partial answer; persisting
+      // it as a complete reply would misrepresent what happened.
+      if (input.signal?.aborted) {
+        throw new Error("explainer was interrupted before the answer completed");
+      }
+
+      const sessionId = parser.sessionId ?? conversation.opencode_session_id;
+      if (sessionId) {
+        chatStore.bindSession(conversation.id, sessionId, workspace);
+      }
+      const replyText = redactAll(parser.textParts.join("\n\n") || result.text);
       const usage = result.usage;
       const reply = chatStore.appendMessage({
-        conversationId: input.conversation.id,
+        conversationId: conversation.id,
         role: "assistant",
         content: replyText,
         cost: usage.cost,
@@ -176,13 +193,18 @@ export class ChatService {
       });
       return { reply, sessionId: sessionId ?? "" };
     } catch (error) {
+      if (input.signal?.aborted || (error instanceof Error && error.message === "aborted")) {
+        // Operator disconnect: not a conversation failure. The question stays
+        // in the transcript; the next send resumes the same session.
+        throw abortError();
+      }
       const message =
         error instanceof OpenCodeTimeoutError
-          ? `the explainer timed out after ${config.chat.timeoutMs}ms`
+          ? `the explainer timed out after ${formatDuration(config.chat.timeoutMs)}`
           : error instanceof Error
-            ? redactSecrets(error.message, githubSecrets(config))
+            ? redactAll(error.message)
             : String(error);
-      this.deps.chatStore.setError(input.conversation.id, message);
+      chatStore.setError(conversation.id, message);
       throw error instanceof Error && error.name === "AbortError" ? abortError() : error;
     }
   }
@@ -263,7 +285,7 @@ export class ChatService {
 }
 
 function abortError(): Error {
-  const error = new Error("aborted");
+  const error = new Error("explainer interrupted");
   error.name = "AbortError";
   return error;
 }
