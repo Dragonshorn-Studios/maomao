@@ -4129,6 +4129,10 @@ describe("profile budget ceilings and per-reviewer timeouts", () => {
     expect(job?.state).toBe("failed");
     expect(job?.failure_reason).toContain("profile budget exceeded — profile total cost 2 exceeded cap 1");
     expect(store.listReviewerRuns(created.job.id).find((run) => run.role === "correctness")?.state).toBe("done");
+    // Runs that never started under a failed job are never left queued.
+    const neverStarted = store.listReviewerRuns(created.job.id).find((run) => run.role === "security");
+    expect(neverStarted?.state).toBe("failed");
+    expect(neverStarted?.validation_error).toContain("job ended before this reviewer finished");
   });
 
   it("degrades in a health scan exactly like a review: skips remaining reviewers and stores no model aggregation", async () => {
@@ -4279,6 +4283,100 @@ describe("profile budget ceilings and per-reviewer timeouts", () => {
     expect(store.listReviewerRuns(created.job.id).find((run) => run.role === "correctness")?.state).toBe("done");
   });
 
+  it("counts router-spend usage into the budget so a big routing model trips the ceiling before specialists run", async () => {
+    const config = loadConfig({
+      REVIEWER_ROUTING: "hybrid",
+      REVIEWER_ROLES: "correctness",
+      OPENCODE_REVIEWER_MODEL: "test/model",
+      OPENCODE_ROUTER_MODEL: "test/router",
+      OPENCODE_REVIEWER_CONCURRENCY: "1",
+      POST_EMPTY_REVIEW: "true",
+      GITHUB_APP_ID: "1",
+      GITHUB_WEBHOOK_SECRET: "s",
+      GITHUB_APP_PRIVATE_KEY: "k",
+    });
+    const store = new JobStore(openDb(":memory:"));
+    await activateProfile(store, {
+      name: "default",
+      reviewers: [{ role: "correctness" }],
+      minPublishableSeverity: "medium",
+      maxTotalCostUsd: 1,
+    });
+    let reviewerCalls = 0;
+    const opencode: OpenCodePort = {
+      async run(input) {
+        if (input.model === "test/router") {
+          const text = JSON.stringify({ profile: "diagnosis", reviewers: ["correctness"], reason: "routed", confidence: 0.9 });
+          // The router alone burns $2 — above the $1.00 profile cap.
+          return { stdout: text, stderr: "", exitCode: 0, text, usage: { cost: 2, totalTokens: 20_000 } };
+        }
+        reviewerCalls += 1;
+        const roleMatch = input.prompt.match(/Role id: (\w+)/);
+        const text = roleMatch ? reviewerJson(roleMatch[1], "clean") : "{}";
+        return { stdout: text, stderr: "", exitCode: 0, text, usage: {} };
+      },
+    };
+    const created = store.enqueue({ ...jobInput("routerspendsha"), reviewers: [] });
+    await createPipeline({
+      config,
+      store,
+      github: githubPort({
+        getPullDiff: async () => "diff --git a/example.ts b/example.ts\n",
+        listReviews: async () => [],
+        createCommentReview: async () => ({ id: "5", url: "u" }),
+      }),
+      checkout: await fixtureCheckout(),
+      opencode,
+    }).run(created.job.id);
+
+    // The specialist never ran because the router spend already latched the budget.
+    const securityless = store.listReviewerRuns(created.job.id);
+    expect(reviewerCalls).toBe(0);
+    expect(securityless[0]?.state).toBe("failed");
+    expect(securityless[0]?.validation_error).toContain("skipped: profile budget exceeded — profile total cost 2 exceeded cap 1");
+  });
+
+  it("counts an aggregator run that executed but threw against the ceiling", async () => {
+    const config = profileConfig();
+    const store = new JobStore(openDb(":memory:"));
+    await activateProfile(store, {
+      name: "default",
+      reviewers: [{ role: "correctness" }],
+      minPublishableSeverity: "medium",
+      maxTotalCostUsd: 1,
+    });
+    const opencode: OpenCodePort = {
+      async run(input) {
+        const roleMatch = input.prompt.match(/Role id: (\w+)/);
+        if (roleMatch) {
+          const text = reviewerJson(roleMatch[1], "clean");
+          return { stdout: text, stderr: "", exitCode: 0, text, usage: { cost: 0.1, totalTokens: 1000 } };
+        }
+        // The aggregator executed ($1.00 minimal spend on top of $0.10) but its
+        // output was unparseable; the failure path must still count the spend.
+        const text = "not json";
+        return { stdout: text, stderr: "", exitCode: 0, text, usage: { cost: 1, totalTokens: 15_000 } };
+      },
+    };
+    const created = store.enqueue({ ...jobInput("aggspendsha"), reviewers: [] });
+    await createPipeline({
+      config,
+      store,
+      github: githubPort({
+        getPullDiff: async () => "diff --git a/example.ts b/example.ts\n",
+        listReviews: async () => [],
+        createCommentReview: async () => ({ id: "5", url: "u" }),
+      }),
+      checkout: await fixtureCheckout(),
+      opencode,
+    }).run(created.job.id);
+
+    const job = store.getJob(created.job.id);
+    expect(job?.state).toBe("completed");
+    expect(job?.aggregator_fallback).toBe(1);
+    expect(job?.budget_exceeded_warning).toContain("profile total cost 1.1 exceeded cap 1");
+  });
+
   it("stops an over-budget reviewer from respending on retries", async () => {
     const config = profileConfig();
     const store = new JobStore(openDb(":memory:"));
@@ -4385,5 +4483,102 @@ describe("profile budget ceilings and per-reviewer timeouts", () => {
     const prior = store.getFinding("acme/widgets", 0, "prior-finding-fixed");
     expect(prior?.status).toBe("uncertain");
     expect(prior?.reconciliation_reason).toContain("verifier skipped: profile total cost 2 exceeded cap 1");
+  });
+
+  it("aborts at the internal-escalation checkpoint in fail mode when aggregation spend tripped the ceiling", async () => {
+    const config = loadConfig({
+      REVIEWER_ROUTING: "hybrid",
+      REVIEWER_ROLES: "correctness",
+      OPENCODE_REVIEWER_CONCURRENCY: "1",
+      OPENCODE_REVIEWER_MODEL: "test/model",
+      OPENCODE_ROUTER_MODEL: "test/router",
+      POST_EMPTY_REVIEW: "true",
+      GITHUB_APP_ID: "1",
+      GITHUB_WEBHOOK_SECRET: "s",
+      GITHUB_APP_PRIVATE_KEY: "k",
+      POISON_ALERT_POLICY: "internal_and_external",
+      POISON_ALERT_INTERNAL_ENABLED: "true",
+      POISON_ALERT_INTERNAL_MODEL: "test/lab",
+    });
+    const store = new JobStore(openDb(":memory:"));
+    await activateProfile(store, {
+      name: "default",
+      reviewers: [{ role: "correctness" }],
+      minPublishableSeverity: "medium",
+      maxTotalCostUsd: 1,
+      onBudgetExceeded: "fail",
+    });
+    const opencode: OpenCodePort = {
+      async run(input) {
+        if (input.model === "test/router") {
+          const text = JSON.stringify({ profile: "poison-alert", reviewers: ["correctness"], reason: "routed", confidence: 1 });
+          return { stdout: text, stderr: "", exitCode: 0, text, usage: {} };
+        }
+        if (input.model === "test/lab") {
+          throw new Error("internal pass must not run when fail mode already tripped");
+        }
+        const roleMatch = input.prompt.match(/Role id: (\w+)/);
+        // The specialist is cheap ($0.25); aggregation is the big spend ($2).
+        const text = roleMatch
+          ? reviewerJson(roleMatch[1], "clean")
+          : JSON.stringify({ schema_version: 1, verdict: "clean", summary: "clean", findings: [] });
+        return { stdout: text, stderr: "", exitCode: 0, text, usage: { cost: roleMatch ? 0.25 : 2, totalTokens: roleMatch ? 2000 : 20_000 } };
+      },
+    };
+    const created = store.enqueue({ ...jobInput("internalfailsha"), reviewers: [] });
+    await createPipeline({
+      config,
+      store,
+      github: githubPort({
+        getPullDiff: async () => "diff --git a/example.ts b/example.ts\n",
+        listReviews: async () => [],
+        createCommentReview: async () => ({ id: "5", url: "u" }),
+      }),
+      checkout: await fixtureCheckout(),
+      opencode,
+    }).run(created.job.id);
+
+    const job = store.getJob(created.job.id);
+    expect(job?.state).toBe("failed");
+    expect(job?.failure_reason).toContain("profile budget exceeded — profile total cost 2.25 exceeded cap 1");
+    // The internal stage was never reached: it never left not_requested.
+    expect(job?.internal_escalation_state).toBe("not_requested");
+  });
+
+  it("fails a scan with zero parsed reviewers and a latched budget using the explicit budget reason", async () => {
+    const config = profileConfig();
+    const store = new JobStore(openDb(":memory:"));
+    await activateProfile(store, {
+      name: "default",
+      reviewers: [{ role: "correctness" }],
+      minPublishableSeverity: "medium",
+      maxTotalCostUsd: 0.5,
+    });
+    const base = pipelineFixture();
+    const created = store.enqueue({
+      ...jobInput("scanzeropsha"),
+      reviewers: [],
+      jobType: "health_scan",
+      scanBranch: "main",
+      prNumber: 0,
+    });
+    const github = githubPort({ getCommitDiff: async () => "diff --git a/example.ts b/example.ts\n" });
+    await createPipeline({
+      config,
+      store,
+      github,
+      checkout: await fixtureCheckout(),
+      opencode: {
+        async run(input) {
+          // Reviewer attempt burns $0.60 (above the $0.50 cap) and fails the parse.
+          const text = "not json";
+          return { stdout: text, stderr: "", exitCode: 0, text, usage: { cost: 0.6, totalTokens: 3000 } };
+        },
+      },
+    }).run(created.job.id);
+
+    const job = store.getJob(created.job.id);
+    expect(job?.state).toBe("failed");
+    expect(job?.failure_reason).toContain("profile budget exceeded — profile total cost 0.6 exceeded cap 0.5");
   });
 });

@@ -168,27 +168,41 @@ function createProfileBudget(definition: ProfileDefinition | null): ProfileBudge
 }
 
 /**
- * Degraded aggregation when the profile budget is gone: deterministic
- * fallback findings instead of an aggregator model run, flagged on the job so
- * the publish review-event logic treats it like an aggregator failure.
+ * Canonical degraded-fallback aggregation patch — the single owner of what a
+ * fallback aggregation looks like on the job row, shared by the budget
+ * degradation path (no model output to preserve) and runAggregator's
+ * model-failure catch (which preserves the truncated raw output).
  */
+function applyAggregatorFallback(
+  store: JobStore,
+  jobId: number,
+  model: string | null,
+  reviewers: ReviewerResult[],
+  raw: string | null,
+  durationMs: number,
+): AggregatorResult {
+  const fallback = fallbackAggregator(reviewers);
+  store.patchJob(jobId, {
+    aggregator_raw: raw,
+    aggregator_normalized: JSON.stringify(fallback, null, 2),
+    aggregator_model: model,
+    aggregator_state: "done",
+    aggregator_fallback: 1,
+    aggregator_finished_at: nowIso(),
+    aggregator_duration_ms: durationMs,
+  });
+  return fallback;
+}
+
+/** Budget degradation: no model run happened, so there is no raw output to preserve. */
 function degradedAggregation(
-  deps: PipelineDeps,
+  store: JobStore,
   jobId: number,
   reviewers: ReviewerResult[],
   message: string,
 ): AggregatorResult {
-  const fallback = fallbackAggregator(reviewers);
-  deps.store.patchJob(jobId, {
-    aggregator_raw: null,
-    aggregator_normalized: JSON.stringify(fallback, null, 2),
-    aggregator_state: "done",
-    aggregator_fallback: 1,
-    aggregator_finished_at: nowIso(),
-    aggregator_duration_ms: 0,
-    budget_exceeded_warning: message,
-  });
-  return fallback;
+  store.patchJob(jobId, { budget_exceeded_warning: message });
+  return applyAggregatorFallback(store, jobId, null, reviewers, null, 0);
 }
 
 /**
@@ -251,12 +265,17 @@ async function runBudgetedAggregation(
   if (over) {
     if (budget.behavior === "fail") throw new Error(`profile budget exceeded — ${over}`);
     store.log(job.id, `Aggregator model skipped: ${over}`, "warn");
-    patchBudgetWarning(store, job.id, over);
-    return degradedAggregation(deps, job.id, reviewers, over);
+    return degradedAggregation(store, job.id, reviewers, over);
   }
-  const aggregated = await runAggregator(deps, job, reviewers, cwd, files, signal);
-  const after = store.getJob(job.id);
-  budget.record(after?.aggregator_cost, after?.aggregator_total_tokens);
+  const aggregated = await runAggregator(deps, job, reviewers, cwd, files, signal, budget);
+  // A stage that spent while the tracker had room can spill past a ceiling on
+  // its own usage; surface the latch immediately (fail mode aborts downstream
+  // anyway; degrade records the warning and publishes partials).
+  const spilled = budget.check();
+  if (spilled && budget.behavior === "degrade") {
+    patchBudgetWarning(store, job.id, spilled);
+    store.log(job.id, `Profile budget exceeded after aggregation: ${spilled}`, "warn");
+  }
   return aggregated;
 }
 
@@ -421,12 +440,7 @@ async function runJob(deps: PipelineDeps, jobId: number, signal: AbortSignal): P
         });
         store.log(jobId, `Internal poison-alert pass skipped: ${internalOver}`, "warn");
       } else {
-        aggregated = await runInternalEscalation(deps, afterReviewers, aggregated, diff, workspace.repoDir, signal);
-        const afterInternal = store.getJob(jobId);
-        profileBudget.record(
-          afterInternal?.internal_escalation_cost,
-          afterInternal?.internal_escalation_total_tokens,
-        );
+        aggregated = await runInternalEscalation(deps, afterReviewers, aggregated, diff, workspace.repoDir, signal, profileBudget);
       }
       throwIfStale(store, jobId, signal);
     }
@@ -1135,6 +1149,7 @@ async function runAggregator(
   cwd: string,
   files: string[],
   signal: AbortSignal,
+  profileBudget?: ProfileBudget,
 ): Promise<AggregatorResult> {
   const model = deps.config.opencode.aggregatorModel || deps.config.opencode.reviewerModel;
   const started = Date.now();
@@ -1173,22 +1188,23 @@ async function runAggregator(
       aggregator_duration_ms: Date.now() - started,
       ...aggregatorUsagePersistence(result.usage),
     });
+    profileBudget?.record(result.usage.cost, result.usage.totalTokens);
     return parsed;
   } catch (error) {
-    const fallback = fallbackAggregator(reviewers);
     const message = formatError(error);
     deps.store.log(job.id, `Aggregator OpenCode run failed (${message}); using deterministic fallback`, "warn");
-    deps.store.patchJob(job.id, {
+    // A run that executed but failed to parse still spent usage; the columns are
+    // not persisted on this path, so account the spend straight from the result.
+    if (result) profileBudget?.record(result.usage.cost, result.usage.totalTokens);
+    return applyAggregatorFallback(
+      deps.store,
+      job.id,
+      model || null,
+      reviewers,
       // Preserve the model's output for debugging; the reason is in the log above.
-      aggregator_raw: truncate(result?.text || result?.stdout || "", 200_000),
-      aggregator_normalized: JSON.stringify(fallback, null, 2),
-      aggregator_model: model || null,
-      aggregator_state: "done",
-      aggregator_fallback: 1,
-      aggregator_finished_at: nowIso(),
-      aggregator_duration_ms: Date.now() - started,
-    });
-    return fallback;
+      truncate(result?.text || result?.stdout || "", 200_000),
+      Date.now() - started,
+    );
   }
 }
 
@@ -1199,6 +1215,7 @@ async function runInternalEscalation(
   diff: string,
   cwd: string,
   signal: AbortSignal,
+  profileBudget?: ProfileBudget,
 ): Promise<AggregatorResult> {
   const internal = deps.config.poisonAlert.internal;
   if (!internal.model) {
@@ -1226,11 +1243,14 @@ async function runInternalEscalation(
   const hunks = relevantDiffHunks(diff, files, deps.config.routing.maxContextChars);
   const retries = Math.max(0, internal.retries);
   let lastError = "unknown error";
+  // Hoisted so the catch can account usage from a run that executed but threw.
+  let result: Awaited<ReturnType<OpenCodePort["run"]>> | undefined;
 
   for (let attempt = 1; attempt <= retries + 1; attempt++) {
     throwIfStale(deps.store, job.id, signal);
+    result = undefined;
     try {
-      const result = await deps.opencode.run({
+      result = await deps.opencode.run({
         cwd,
         model: internal.model,
         prompt: buildInternalEscalationPrompt({
@@ -1264,6 +1284,8 @@ async function runInternalEscalation(
         internal_escalation_model: internal.model,
         internal_escalation_provider: internal.model.includes("/") ? internal.model.split("/")[0] : null,
       });
+      // Count the spend whether the pass clears the alert or breaks on its own cap.
+      profileBudget?.record(usage.cost, usage.total_tokens);
       if (over) {
         deps.store.log(job.id, over, "warn");
         lastError = over;
@@ -1287,6 +1309,9 @@ async function runInternalEscalation(
       return merged;
     } catch (error) {
       lastError = formatError(error);
+      // The attempt executed and may have spent on the profile budget even
+      // though its output was unusable.
+      if (result) profileBudget?.record(result.usage.cost, result.usage.totalTokens);
       deps.store.log(job.id, `Internal poison-alert attempt ${attempt} failed: ${lastError}`, "warn");
       if (attempt <= retries) await sleep(500 * attempt, signal);
     }
