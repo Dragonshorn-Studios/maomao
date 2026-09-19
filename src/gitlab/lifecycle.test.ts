@@ -195,7 +195,7 @@ function fakeOpencode(mode: "resolved" | "still_valid", calls: { verifier: numbe
           usage: { promptTokens: 1, completionTokens: 1 },
         };
       }
-      if (input.title.includes("aggregator")) {
+      if (input.title?.includes("aggregator")) {
         const text = JSON.stringify({ verdict: "clean", summary: "the prior finding is gone", findings: [] });
         return { stdout: text, stderr: "", exitCode: 0, text, usage: { promptTokens: 1, completionTokens: 1 } };
       }
