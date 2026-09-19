@@ -151,6 +151,13 @@ export class ChatStore {
       .run(message.slice(0, 500), nowIso(), conversationId);
   }
 
+  /** A later successful send recovers the conversation; the banner clears. */
+  clearError(conversationId: number): void {
+    this.db
+      .prepare(`UPDATE chat_conversations SET state = 'active', last_error = NULL, updated_at = ? WHERE id = ?`)
+      .run(nowIso(), conversationId);
+  }
+
   /** Budget check inputs: message count and accumulated cost for one conversation. */
   usage(conversationId: number): { messages: number; cost: number } {
     const row = this.db

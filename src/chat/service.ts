@@ -191,6 +191,7 @@ export class ChatService {
         totalTokens: usage.totalTokens,
         durationMs: Date.now() - started,
       });
+      chatStore.clearError(conversation.id);
       return { reply, sessionId: sessionId ?? "" };
     } catch (error) {
       if (input.signal?.aborted || (error instanceof Error && error.message === "aborted")) {
