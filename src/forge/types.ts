@@ -60,6 +60,7 @@ export function forgeTargetOf(row: {
   repo_name: string;
   repo_full_name: string;
   pr_number: number;
+  installation_id?: number;
 }): ForgeRepoTarget {
   return {
     provider: row.provider,
@@ -68,6 +69,7 @@ export function forgeTargetOf(row: {
     repoName: row.repo_name,
     repoFullName: row.repo_full_name,
     changeNumber: row.pr_number,
+    ...(row.installation_id != null ? { nativeProjectId: row.installation_id } : {}),
   };
 }
 
@@ -78,6 +80,12 @@ export interface ForgeRepoTarget extends ForgeScope {
   repoFullName: string;
   /** Pull number (GitHub) or merge-request iid (GitLab) — project-local. */
   changeNumber: number;
+  /**
+   * The provider's native numeric project/repository id where one exists
+   * (GitLab project id; GitHub carries it in repositoryId instead). Optional
+   * because not every caller needs API addressing.
+   */
+  nativeProjectId?: number;
 }
 
 /**

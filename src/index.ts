@@ -53,6 +53,7 @@ const pipeline = createPipeline({
   config,
   store,
   github,
+  connections: forgeConnections,
   checkout: createCheckout(config.workspaceRoot),
   opencode,
 });

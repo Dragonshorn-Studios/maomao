@@ -211,8 +211,16 @@ describe("ForgeRegistry", () => {
     ).toThrow(/no forge connection configured for github:github.enterprise.test/);
   });
 
-  it("fails closed while non-default connections are unresolvable", () => {
+  it("fails closed while no connection store can resolve non-github scopes", () => {
     const registry = new ForgeRegistry(fakeGithub(), "maomao");
+    expect(() =>
+      registry.forJob({
+        provider: "gitlab",
+        provider_instance: "gitlab.corp.internal",
+        forge_connection_id: "conn-7",
+        installation_id: 1,
+      }),
+    ).toThrow(/no forge connection configured/);
     expect(() =>
       registry.forJob({
         provider: "github",
@@ -220,7 +228,7 @@ describe("ForgeRegistry", () => {
         forge_connection_id: "conn-7",
         installation_id: 1,
       }),
-    ).toThrow(/non-default connections are not resolvable/);
+    ).toThrow(/use the environment connection/);
   });
 });
 

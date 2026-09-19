@@ -3,6 +3,7 @@ import type { JobStore, JobRow, ReviewerRunRow, NewJobInput } from "./store.js";
 import type { GithubPort } from "../github/client.js";
 import type { ForgePort } from "../forge/port.js";
 import { ForgeRegistry } from "../forge/registry.js";
+import type { ForgeConnectionStore } from "../forge/connections.js";
 import type { ForgeDiscussion, ForgeInlineComment, ForgeRepoTarget, ForgeSummary, ForgeVerdict } from "../forge/types.js";
 import { forgeTargetOf, scopeOf } from "../forge/types.js";
 import { buildReviewBody, findExistingReview, selectInlineComments, inlineCommentFingerprints } from "../forge/review-text.js";
@@ -80,6 +81,8 @@ export interface PipelineDeps {
   github: GithubPort;
   /** Registry resolving each job's forge port; defaults to a registry over `github`. */
   forge?: ForgeRegistry;
+  /** Persisted forge connections backing the default registry's GitLab bindings. */
+  connections?: ForgeConnectionStore;
   checkout: CheckoutPort;
   opencode: OpenCodePort;
   getInstallationToken?: (installationId: number) => Promise<string>;
@@ -95,8 +98,7 @@ export function abortJob(jobId: number): void {
 
 export function createPipeline(deps: PipelineDeps) {
   const forge =
-    deps.forge ??
-    new ForgeRegistry(deps.github, deps.config.github.appSlug, deps.getInstallationToken);
+    deps.forge ?? new ForgeRegistry(deps.github, deps.config.github.appSlug, deps.getInstallationToken, deps.connections);
   return {
     abortJob,
     async run(jobId: number): Promise<void> {
@@ -317,11 +319,17 @@ async function runJob(deps: PipelineDeps, forge: ForgeRegistry, jobId: number, s
     return;
   }
 
-  const auth = authorizeGithubTarget(config, {
-    installationId: job.installation_id,
-    accountId: job.github_account_id ?? undefined,
-    repositoryId: job.github_repository_id ?? undefined,
-  });
+  const auth =
+    job.provider === "github"
+      ? authorizeGithubTarget(config, {
+          installationId: job.installation_id,
+          accountId: job.github_account_id ?? undefined,
+          repositoryId: job.github_repository_id ?? undefined,
+        })
+      : // Non-GitHub jobs were authorized by their connection binding at the
+        // webhook (scope + secret + enabled checks); GitHub allowlists do not
+        // apply to them.
+        { ok: true as const };
   if (!auth.ok) {
     const subject = {
       installationId: job.installation_id,
