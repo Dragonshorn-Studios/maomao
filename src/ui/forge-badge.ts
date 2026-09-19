@@ -43,6 +43,18 @@ export function forgeBadgeTitle(fields: ForgeBadgeFields, repoFullName: string, 
   return `[${provider}${hostSuffix}] ${repoFullName} ${changeIdentifier(fields.provider, changeNumber)}`;
 }
 
+/**
+ * Filter-chip label: collapses the canonical public instances to the
+ * provider name and qualifies everything else with its hostname.
+ */
+export function forgeChipLabel(scope: ForgeBadgeFields): string {
+  const instance = scope.provider_instance.toLowerCase();
+  if (instance === "github.com" || instance === "gitlab.com" || instance === "") {
+    return providerLabel(scope.provider);
+  }
+  return `${providerLabel(scope.provider)} · ${scope.provider_instance}`;
+}
+
 /** Escaped HTML form of {@link forgeBadgeTitle}. */
 export function forgeBadgeTitleHtml(fields: ForgeBadgeFields, repoFullName: string, changeNumber: number): string {
   return escapeHtml(forgeBadgeTitle(fields, repoFullName, changeNumber));

@@ -3932,3 +3932,90 @@ describe("gitlab webhook route", () => {
     expect(response.status).toBe(401);
   });
 });
+describe("home forge filter", () => {
+  function enqueueForge(store: JobStore, overrides: Record<string, unknown> = {}) {
+    return store.enqueue({
+      repoFullName: "acme/widgets",
+      repoOwner: "acme",
+      repoName: "widgets",
+      installationId: 42,
+      prNumber: 7,
+      prTitle: "t",
+      prBody: "",
+      prHtmlUrl: "",
+      prAuthor: "a",
+      baseSha: "b",
+      headSha: "h",
+      baseRef: "main",
+      headRef: "feature",
+      reviewers: [],
+      ...overrides,
+    }).job;
+  }
+
+  it("filters the home page by forge and marks the active chip", async () => {
+    const { app, store } = testApp(
+      {
+        GITHUB_WEBHOOK_SECRET: "s3cret",
+        GITHUB_APP_ID: "1",
+        GITHUB_APP_PRIVATE_KEY: "k",
+        REVIEWER_ROLES: "correctness,security",
+      },
+      undefined,
+      undefined,
+      {},
+    );
+    enqueueForge(store);
+    enqueueForge(store, { provider: "gitlab", providerInstance: "gitlab.com", headSha: "gl-head" });
+    const filtered = await app.request("/?forge=gitlab:gitlab.com");
+    const html = await filtered.text();
+    expect(html).toContain('data-forge="gitlab:gitlab.com"');
+    expect(html).toContain('aria-current="true"');
+    expect(html).toContain("All forges");
+    // Only the GitLab job card renders under the filter.
+    expect(html).toContain("[GitLab] acme/widgets !7");
+    expect(html).not.toContain("[GitHub] acme/widgets #7");
+  });
+
+  it("keeps the filter when the filtered page is exhausted", async () => {
+    const { app, store } = testApp(
+      {
+        GITHUB_WEBHOOK_SECRET: "s3cret",
+        GITHUB_APP_ID: "1",
+        GITHUB_APP_PRIVATE_KEY: "k",
+        REVIEWER_ROLES: "correctness,security",
+      },
+      undefined,
+      undefined,
+      {},
+    );
+    enqueueForge(store);
+    const gitlab = enqueueForge(store, { provider: "gitlab", providerInstance: "gitlab.com", headSha: "gl-head" });
+    const exhausted = await app.request(`/?forge=gitlab:gitlab.com&before=${gitlab.id}`);
+    const html = await exhausted.text();
+    // Refill respects the filter: still exactly the GitLab job.
+    expect(html).toContain("[GitLab] acme/widgets !7");
+    expect(html).not.toContain("[GitHub] acme/widgets #7");
+    expect(html).toContain('aria-current="true"');
+  });
+
+  it("hides the chips on single-forge stores and ignores stale forge params", async () => {
+    const { app, store } = testApp(
+      {
+        GITHUB_WEBHOOK_SECRET: "s3cret",
+        GITHUB_APP_ID: "1",
+        GITHUB_APP_PRIVATE_KEY: "k",
+        REVIEWER_ROLES: "correctness,security",
+      },
+      undefined,
+      undefined,
+      {},
+    );
+    enqueueForge(store);
+    const home = await app.request("/?forge=gitlab:gitlab.com");
+    const html = await home.text();
+    expect(html).not.toContain('role="navigation" aria-label="Filter by forge"');
+    // Both jobs render unfiltered on a single-scope store.
+    expect(home.text ? html.match(/#7/g)?.length ?? 0 : 0).toBeGreaterThanOrEqual(1);
+  });
+});

@@ -712,9 +712,11 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
     // first page and say why instead of a dead end.
     let staleCursorNotice: string | undefined;
     if (page.jobs.length === 0) {
-      page = ctx.store.listJobsPage({});
+      page = ctx.store.listJobsPage({ forge });
       if (page.jobs.length > 0 && (cursor.before != null || cursor.after != null)) {
-        staleCursorNotice = "That page no longer exists — showing the newest jobs instead.";
+        staleCursorNotice = forge
+          ? "That page no longer exists — showing the newest matching jobs instead."
+          : "That page no longer exists — showing the newest jobs instead.";
       }
     }
     return c.html(

@@ -209,7 +209,7 @@ In GitLab (project or group → Settings → Webhooks), point the webhook at:
 https://<your-host>/webhooks/gitlab/<connection-id>
 ```
 
-The connection id is shown on the connections page. Subscribe **Merge request events** and **Note events**. Maomao handles `open`, `reopen`, source-branch `update` (title-only edits never enqueue), and `merge` (cancels in-flight reviews and permanently gates the MR). Notes inside Maomao finding discussions accept `@maomao ignore`, `@maomao bury`, `@maomao reopen`, and `🌱`; commands are authorized by project/group membership (Maintainer+). Notes authored by the connection's bot are ignored.
+The connection id is shown on the connections page. Subscribe **Merge request events** and **Note events**. Maomao handles `open`, `reopen`, source-branch `update` (title-only edits never enqueue), and `merge` (cancels in-flight reviews and permanently gates the MR). Notes inside Maomao finding discussions accept `@maomao ignore`, `@maomao bury`, `@maomao reopen`, and `🌱`; commands are authorized by project/group membership (Developer or above). Notes authored by the connection's bot are ignored.
 
 ### Minimum roles
 
@@ -218,7 +218,7 @@ The connection id is shown on the connections page. Subscribe **Merge request ev
 | Review summary + inline discussions | Developer (project token with `api` + `read_repository`) |
 | Resolve/reopen finding discussions | Developer |
 | Approve clean reviews (opt-in per connection) | Maintainer, and the bot must be allowed to approve |
-| `@maomao` commands | Maintainer+ (project/group membership) |
+| `@maomao` commands | Developer or above (project/group membership) |
 
 ### Rotation and troubleshooting
 

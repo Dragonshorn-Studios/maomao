@@ -431,41 +431,44 @@ export class JobStore {
   } {
     const requested = input.limit ?? JOBS_PAGE_SIZE_DEFAULT;
     const limit = Math.min(Number.isFinite(requested) ? Math.max(1, requested) : JOBS_PAGE_SIZE_DEFAULT, JOBS_PAGE_SIZE_MAX);
-    // Forge filter values come from code-validated scopes; quote-escape so a
-    // crafted instance name cannot break out of the literal.
-    const escape = (value: string) => value.replaceAll("'", "''");
-    const forgeWhere = input.forge
-      ? `WHERE provider = '${escape(input.forge.provider)}' AND provider_instance = '${escape(input.forge.instance)}'`
-      : "";
-    const withId = (comparator: string) => (forgeWhere ? `${forgeWhere} AND id ${comparator} ?` : `WHERE id ${comparator} ?`);
+    const whereParts: string[] = [];
+    const whereParams: unknown[] = [];
+    if (input.forge) {
+      whereParts.push("provider = ?", "provider_instance = ?");
+      whereParams.push(input.forge.provider, input.forge.instance);
+    }
+    const whereSql = whereParts.length > 0 ? `WHERE ${whereParts.join(" AND ")}` : "";
+    // Cursor filters must ride the same WHERE as the page itself.
+    const withId = (comparator: string) =>
+      whereSql ? `${whereSql} AND id ${comparator} ?` : `WHERE id ${comparator} ?`;
     if (input.after != null) {
       const probed = this.db
         .prepare(`SELECT * FROM jobs ${withId(">")} ORDER BY id ASC LIMIT ?`)
-        .all(input.after, limit + 1) as JobRow[];
+        .all(...whereParams, input.after, limit + 1) as JobRow[];
       // Rows arrive oldest→newest; reverse into the page's newest-first order.
       const jobs = probed.slice(0, limit).reverse();
       const hasNewer = probed.length > limit;
       const oldestOnPage = jobs[jobs.length - 1]?.id ?? input.after;
       const hasOlder = Boolean(
-        this.db.prepare(`SELECT id FROM jobs ${withId("<")} LIMIT 1`).get(oldestOnPage),
+        this.db.prepare(`SELECT id FROM jobs ${withId("<")} LIMIT 1`).get(...whereParams, oldestOnPage),
       );
       return { jobs, hasOlder, hasNewer };
     }
     if (input.before != null) {
       const probed = this.db
         .prepare(`SELECT * FROM jobs ${withId("<")} ORDER BY id DESC LIMIT ?`)
-        .all(input.before, limit + 1) as JobRow[];
+        .all(...whereParams, input.before, limit + 1) as JobRow[];
       const jobs = probed.slice(0, limit);
       const hasOlder = probed.length > limit;
       const newestOnPage = jobs[0]?.id ?? input.before;
       const hasNewer = Boolean(
-        this.db.prepare(`SELECT id FROM jobs ${withId(">")} LIMIT 1`).get(newestOnPage),
+        this.db.prepare(`SELECT id FROM jobs ${withId(">")} LIMIT 1`).get(...whereParams, newestOnPage),
       );
       return { jobs, hasOlder, hasNewer };
     }
     const probed = this.db
-      .prepare(`SELECT * FROM jobs ${forgeWhere} ORDER BY id DESC LIMIT ?`)
-      .all(limit + 1) as JobRow[];
+      .prepare(`SELECT * FROM jobs ${whereSql} ORDER BY id DESC LIMIT ?`)
+      .all(...whereParams, limit + 1) as JobRow[];
     const jobs = probed.slice(0, limit);
     return { jobs, hasOlder: probed.length > limit, hasNewer: false };
   }
