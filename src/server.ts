@@ -178,7 +178,10 @@ interface ScanIssueEntry {
 function scanOpenFindings(store: JobStore, job: JobRow): ScanIssueEntry[] {
   const aggregated = parseAggregatedFindings(job.aggregator_normalized, `job ${job.id} (${job.repo_full_name})`);
   return store
-    .listFindings(job.repo_full_name, job.pr_number)
+    .listFindings(job.repo_full_name, job.pr_number, {
+      provider: job.provider,
+      instance: job.provider_instance,
+    })
     .filter((row) => row.status === "open" && row.last_job_id === job.id)
     .map((row) => {
       const aggregatedFinding = aggregated.get(row.fingerprint);
@@ -693,7 +696,10 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
         prHeadSha: latest?.head_sha ?? job.head_sha,
         notice: noticeText(c.req.query("notice"), job.repo_full_name, job.pr_number, job.head_sha),
         error: c.req.query("error") || undefined,
-        prFindings: ctx.store.listFindings(job.repo_full_name, job.pr_number),
+        prFindings: ctx.store.listFindings(job.repo_full_name, job.pr_number, {
+          provider: job.provider,
+          instance: job.provider_instance,
+        }),
         scanIssueCreation: scanIssueCreationData(job),
         scanIssues: job.job_type === "health_scan" ? ctx.store.listScanIssues(job.id) : undefined,
       }),
@@ -1540,7 +1546,10 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
       let skip: { reason: string; url?: string } | undefined;
       // Repo-scoped on purpose: an issue recorded by an earlier scan of the same
       // repository still tracks this fingerprint. issue_number 0 = pending claim.
-      const local = ctx.store.getScanIssue(job.repo_full_name, entry.row.fingerprint);
+      const local = ctx.store.getScanIssue(job.repo_full_name, entry.row.fingerprint, {
+        provider: job.provider,
+        instance: job.provider_instance,
+      });
       if (local) {
         skip = {
           reason: local.issue_number === 0 ? "a publication claim for this finding is already in flight" : "a Maomao issue already tracks this finding",
@@ -1628,7 +1637,10 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
       const finding = entry.row;
       const markerBase = scanIssueMarkerBase(finding.fingerprint);
       try {
-        const existingLocal = ctx.store.hasScanIssue(job.repo_full_name, finding.fingerprint);
+        const existingLocal = ctx.store.hasScanIssue(job.repo_full_name, finding.fingerprint, {
+          provider: job.provider,
+          instance: job.provider_instance,
+        });
         if (existingLocal) {
           skipped += 1;
           continue;
@@ -1639,6 +1651,7 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
           repoFullName: job.repo_full_name,
           fingerprint: finding.fingerprint,
           title: finding.summary ?? finding.fingerprint,
+          scope: { provider: job.provider, instance: job.provider_instance },
         });
         if (!claimed) {
           skipped += 1;
@@ -1650,6 +1663,7 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
             jobId: job.id,
             repoFullName: job.repo_full_name,
             fingerprint: finding.fingerprint,
+            scope: { provider: job.provider, instance: job.provider_instance },
             issueNumber: remote[0].number,
             issueUrl: remote[0].url,
             title: `maomao: ${finding.summary ?? finding.fingerprint}`,
@@ -1668,6 +1682,7 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
             jobId: job.id,
             repoFullName: job.repo_full_name,
             fingerprint: finding.fingerprint,
+            scope: { provider: job.provider, instance: job.provider_instance },
             issueNumber: issue.number,
             issueUrl: issue.url,
             title,
@@ -1690,7 +1705,10 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
         // must not throw out of the handler: an orphaned pending claim would
         // make every future attempt see this finding as already tracked.
         try {
-          ctx.store.clearScanIssue(job.repo_full_name, finding.fingerprint);
+          ctx.store.clearScanIssue(job.repo_full_name, finding.fingerprint, {
+            provider: job.provider,
+            instance: job.provider_instance,
+          });
         } catch (cleanupError) {
           ctx.store.log(
             job.id,
@@ -1813,7 +1831,10 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
       job,
       reviewers: ctx.store.listReviewerRuns(id),
       logs: ctx.store.listLogs(id),
-      findings: ctx.store.listFindings(job.repo_full_name, job.pr_number),
+      findings: ctx.store.listFindings(job.repo_full_name, job.pr_number, {
+        provider: job.provider,
+        instance: job.provider_instance,
+      }),
       ...ctx.store.jobSummary(job),
     });
   });

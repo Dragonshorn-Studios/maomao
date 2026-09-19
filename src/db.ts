@@ -505,7 +505,12 @@ function rebuildTableScoped(db: SqliteDb, rebuild: ScopedRebuild): void {
   // Table not present at all: the base CREATE above already made it at v2.
   if (!row?.sql) return;
   const pattern = new RegExp(
-    rebuild.from.replace(/[()]/g, (match) => `\\${match}`).replace(/\s+/g, "\\s+"),
+    rebuild.from
+      .replace(/[()]/g, (match) => `\\${match}`)
+      // Tolerate reformatted whitespace (e.g. "UNIQUE(a,b)") around commas so
+      // an externally pretty-printed legacy schema still migrates.
+      .replace(/,/g, ",\\s*")
+      .replace(/\s+/g, "\\s+"),
   );
   if (!pattern.test(row.sql)) {
     throw new Error(

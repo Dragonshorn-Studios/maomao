@@ -951,20 +951,6 @@ export class JobStore {
       .get(resolved.provider, resolved.instance, repoFullName, prNumber, fingerprint) as FindingRow | undefined;
   }
 
-  getFindingByThreadId(threadId: string, scope?: Partial<ForgeScope>): FindingRow | undefined {
-    const resolved = normalizeScope(scope);
-    return this.db
-      .prepare(`SELECT * FROM findings WHERE provider = ? AND provider_instance = ? AND github_thread_id = ?`)
-      .get(resolved.provider, resolved.instance, threadId) as FindingRow | undefined;
-  }
-
-  getFindingByCommentId(commentId: string, scope?: Partial<ForgeScope>): FindingRow | undefined {
-    const resolved = normalizeScope(scope);
-    return this.db
-      .prepare(`SELECT * FROM findings WHERE provider = ? AND provider_instance = ? AND github_comment_id = ?`)
-      .get(resolved.provider, resolved.instance, commentId) as FindingRow | undefined;
-  }
-
   upsertFinding(input: {
     repoFullName: string;
     prNumber: number;
