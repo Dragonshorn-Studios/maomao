@@ -138,6 +138,13 @@ describe("isPrivateAddress", () => {
     expect(isPrivateAddress("0:0:0:0:0:ffff:127.0.0.1")).toBe(true);
     expect(isPrivateAddress("::ffff:7f00:1")).toBe(true);
     expect(isPrivateAddress("fec0::1")).toBe(true);
+    expect(isPrivateAddress("fed0::1")).toBe(true);
+    expect(isPrivateAddress("feff::1")).toBe(true);
+    expect(isPrivateAddress("::ffff:0:127.0.0.1")).toBe(true);
+    expect(isPrivateAddress("64:ff9b:7f00:1::1")).toBe(true);
+    expect(isPrivateAddress("2002:7f00:1::1")).toBe(true);
+    expect(isPrivateAddress("2001:db8::1")).toBe(true);
+    expect(isPrivateAddress("100::1")).toBe(true);
     expect(isPrivateAddress("2606:4700::1")).toBe(false);
     expect(isPrivateAddress("fd00::1")).toBe(true);
     expect(isPrivateAddress("fe80::1")).toBe(true);
@@ -356,6 +363,19 @@ describe("ForgeConnectionStore", () => {
     const row = store.create(input());
     expect(store.delete(row.id)).toBe(true);
     expect(store.get(row.id)).toBeUndefined();
+  });
+
+  it("enforces create()-time invariants across updates", () => {
+    const store = newStore();
+    const row = store.create(input());
+    store.create(input({ label: "other", scopeType: "instance" as const, scopePath: "" }));
+    // Rename colliding with an existing label on the same origin is refused.
+    expect(() => store.update(row.id, { label: "other" })).toThrow(/already exists/);
+    // Clearing the scope path while scope stays group-scoped is refused.
+    expect(() => store.update(row.id, { scopePath: "" })).toThrow(/scope type group/);
+    // A consistent combined patch passes.
+    store.update(row.id, { scopeType: "instance", scopePath: "" });
+    expect(store.get(row.id)!.scope_type).toBe("instance");
   });
 });
 

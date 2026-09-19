@@ -822,7 +822,13 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
       });
       const probe = await probeConnection(ctx.forgeConnections, row.id, { timeoutMs: 10_000 });
       if (probe.ok) {
-        return redirect(`?notice=${encodeURIComponent(`Connection created and validated as ${probe.botUsername} on ${row.instance_base_url}.`)}`);
+        const caveats = [
+          probe.scopesError ? `scopes unavailable (${probe.scopesError})` : undefined,
+          probe.versionError ? `version unavailable (${probe.versionError})` : undefined,
+        ].filter(Boolean);
+        return redirect(
+          `?notice=${encodeURIComponent(`Connection created and validated as ${probe.botUsername} on ${row.instance_base_url}.${caveats.length ? ` ${caveats.join("; ")}.` : ""}`)}`,
+        );
       }
       return redirect(
         `?error=${encodeURIComponent(`Connection created, but validation failed: ${probe.error} The token or URL can be corrected after deleting and re-adding the connection.`)}`,
@@ -834,7 +840,7 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
           : error instanceof Error
             ? error.message
             : String(error);
-      console.warn(`connections: create failed: ${message}`);
+      console.warn(`connections: create failed: ${message.replace(/[\x00-\x1f]/g, " ")}`);
       return redirect(`?error=${encodeURIComponent(message)}`);
     }
   });

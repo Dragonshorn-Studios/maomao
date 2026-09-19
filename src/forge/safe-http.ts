@@ -115,7 +115,7 @@ function isPrivateV6(ip: string): boolean {
   if (normalized === "::" || normalized === "::1") return true;
   if (/^f[cd]/.test(normalized)) return true; // unique local fc00::/7
   if (/^fe[89ab]/.test(normalized)) return true; // link-local fe80::/10
-  if (/^fec0/.test(normalized)) return true; // deprecated site-local fec0::/10
+  if (/^fe[c-f]/.test(normalized)) return true; // deprecated site-local fec0::/10
   const mapped = normalized.match(/^::ffff:(\d+\.\d+\.\d+\.\d+)$/);
   if (mapped) return isPrivateV4(mapped[1]!);
   // Hex-form IPv4-mapped addresses (::ffff:7f00:1) share the v4 verdict.
@@ -125,6 +125,25 @@ function isPrivateV6(ip: string): boolean {
     const lo = parseInt(mappedHex[2]!, 16);
     return isPrivateV4(`${hi >> 8}.${hi & 0xff}.${lo >> 8}.${lo & 0xff}`);
   }
+  // SIIT ::ffff:0:0/96 (three-group form) reaches IPv4 through translation.
+  const siit = normalized.match(/^::ffff:0:([0-9a-f]{1,4}):([0-9a-f]{1,4})$/);
+  if (siit) {
+    const hi = parseInt(siit[1]!, 16);
+    const lo = parseInt(siit[2]!, 16);
+    return isPrivateV4(`${hi >> 8}.${hi & 0xff}.${lo >> 8}.${lo & 0xff}`);
+  }
+  // NAT64 well-known prefix: the embedded IPv4 sits behind a translator, so
+  // the verdict is unknowable here — fail closed.
+  if (normalized.startsWith("64:ff9b:")) return true;
+  // 6to4 (2002::/16): the embedded IPv4 decides, including private targets.
+  const sixToFour = normalized.match(/^2002:([0-9a-f]{1,4}):([0-9a-f]{1,4})/);
+  if (sixToFour) {
+    const hi = parseInt(sixToFour[1]!, 16);
+    const lo = parseInt(sixToFour[2]!, 16);
+    return isPrivateV4(`${hi >> 8}.${hi & 0xff}.${lo >> 8}.${lo & 0xff}`);
+  }
+  // IANA special-purpose: documentation (2001:db8::/32) and discard-only (100::/64).
+  if (normalized.startsWith("2001:db8:") || normalized.startsWith("100:")) return true;
   return false;
 }
 
@@ -152,18 +171,23 @@ export async function assertResolvesWithinPolicy(
   if (opts.allowPrivateNetwork) return;
   const bare = hostname.replace(/^\[|\]$/g, "");
   const timeoutMs = opts.timeoutMs ?? 15_000;
-  const timer = new Promise<never>((_, reject) => {
-    setTimeout(() => reject(new SafeHttpError(`DNS resolution of ${bare} timed out`)), timeoutMs);
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new SafeHttpError(`DNS resolution of ${bare} timed out`)), timeoutMs);
   });
-  const lookupAddresses = Promise.resolve(
-    isIP(bare) ? [{ address: bare }] : lookup(bare, { all: true }),
-  );
-  const records = await Promise.race([lookupAddresses, timer]);
-  const offenders = records.map((record) => record.address).filter((address) => isPrivateAddress(address));
-  if (offenders.length > 0) {
-    throw new InstanceUrlError(
-      `instance host ${bare} resolves to a private address (${offenders.join(", ")}); private network access needs the connection's explicit opt-in`,
+  try {
+    const lookupAddresses = Promise.resolve(
+      isIP(bare) ? [{ address: bare }] : lookup(bare, { all: true }),
     );
+    const records = await Promise.race([lookupAddresses, timeout]);
+    const offenders = records.map((record) => record.address).filter((address) => isPrivateAddress(address));
+    if (offenders.length > 0) {
+      throw new InstanceUrlError(
+        `instance host ${bare} resolves to a private address (${offenders.join(", ")}); private network access needs the connection's explicit opt-in`,
+      );
+    }
+  } finally {
+    if (timer != null) clearTimeout(timer);
   }
 }
 

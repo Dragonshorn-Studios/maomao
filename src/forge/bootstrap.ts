@@ -8,7 +8,7 @@
 import type { Config } from "../config.js";
 import type { ForgeConnectionStore } from "./connections.js";
 import { canonicalizeInstanceUrl } from "./safe-http.js";
-import { secretFingerprint } from "./secretbox.js";
+import { openSecret, secretFingerprint } from "./secretbox.js";
 
 export const ENV_CONNECTION_LABEL = "env";
 
@@ -31,12 +31,13 @@ export function ensureEnvGitLabConnection(
   for (const stale of store.list("gitlab")) {
     if (stale.label === ENV_CONNECTION_LABEL && stale.instance_base_url !== origin && stale.enabled === 1) {
       store.update(stale.id, { enabled: false });
+      console.log(`Disabled stale env GitLab connection ${stale.id} (instance ${stale.instance_base_url})`);
     }
   }
   if (existing) {
-    const unchanged =
-      existing.token_fingerprint === secretFingerprint(bootstrap.token) &&
-      existing.webhook_secret_fingerprint === secretFingerprint(bootstrap.webhookSecret);
+    // Exact comparison: last-4 fingerprints are display hints and collide.
+    const opened = store.open(existing.id);
+    const unchanged = opened.token === bootstrap.token && opened.webhookSecret === bootstrap.webhookSecret;
     if (!unchanged) {
       store.update(existing.id, { token: bootstrap.token, webhookSecret: bootstrap.webhookSecret });
     }

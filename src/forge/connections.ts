@@ -194,6 +194,27 @@ export class ForgeConnectionStore {
     if (patch.allowApprove != null) set("allow_approve", patch.allowApprove ? 1 : 0);
     if (patch.enabled != null) set("enabled", patch.enabled ? 1 : 0);
     if (assignments.length === 0) return;
+    // The create()-time invariants hold after any update: validate the
+    // merged post-patch row before writing.
+    const projected: ForgeConnectionRow = {
+      ...row,
+      label: patch.label != null ? patch.label.trim() : row.label,
+      token_type: patch.tokenType ?? row.token_type,
+      scope_type: patch.scopeType ?? row.scope_type,
+      scope_path: patch.scopePath != null ? patch.scopePath.trim() : row.scope_path,
+    };
+    if ((projected.scope_type === "group" || projected.scope_type === "project") && !projected.scope_path) {
+      throw new Error(`a group/project path is required for scope type ${projected.scope_type}`);
+    }
+    const duplicate = this.list("gitlab").find(
+      (candidate) =>
+        candidate.id !== id &&
+        candidate.instance_base_url === row.instance_base_url &&
+        candidate.label === projected.label,
+    );
+    if (duplicate) {
+      throw new Error(`a connection labeled "${projected.label}" already exists for ${row.instance_base_url} (${duplicate.id})`);
+    }
     set("updated_at", nowIso());
     this.db.prepare(`UPDATE forge_connections SET ${assignments.join(", ")} WHERE id = ?`).run(...values, id);
   }

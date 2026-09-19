@@ -6,7 +6,7 @@
  * endpoints are best-effort by design — their failures are reported per-field
  * in the result, never fatal to the probe.
  */
-import { SafeHttpError, safeHttpRequest } from "./safe-http.js";
+import { SafeHttpError, safeHttpRequest, type SafeHttpRequest } from "./safe-http.js";
 import type { ForgeConnectionStore } from "./connections.js";
 
 export type ProbeResult =
@@ -33,7 +33,7 @@ export async function probeConnection(
     return { ok: false, error: error instanceof Error ? error.message : String(error) };
   }
   const base = connection.instance.apiBaseUrl;
-  const requestBase = {
+  const requestBase: Pick<SafeHttpRequest, "bearerToken" | "instance" | "allowPrivateNetwork" | "caPem" | "timeoutMs"> = {
     bearerToken: connection.token,
     instance: connection.instance,
     allowPrivateNetwork: connection.row.allow_private_network === 1,
@@ -105,11 +105,11 @@ export async function probeConnection(
 
 async function bestEffort<T>(
   url: string,
-  requestBase: Record<string, unknown>,
+  requestBase: Pick<SafeHttpRequest, "bearerToken" | "instance" | "allowPrivateNetwork" | "caPem" | "timeoutMs">,
   parse: (body: string) => T | undefined,
 ): Promise<{ value?: T; error?: string }> {
   try {
-    const response = await safeHttpRequest({ ...requestBase, url } as Parameters<typeof safeHttpRequest>[0]);
+    const response = await safeHttpRequest({ ...requestBase, url });
     if (response.status !== 200) {
       return { error: `status ${response.status}` };
     }
