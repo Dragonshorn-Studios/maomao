@@ -4,7 +4,7 @@ import { deleteCookie, getCookie, setCookie } from "hono/cookie";
 import type { Config } from "./config.js";
 import type { JobStore } from "./jobs/store.js";
 import { handleGithubWebhook } from "./github/webhooks.js";
-import { ForgeConnectionStore, type ForgeConnectionRow } from "./forge/connections.js";
+import { ForgeConnectionStore, countConnections, toView } from "./forge/connections.js";
 import { probeConnection } from "./forge/probe.js";
 import { InstanceUrlError } from "./forge/safe-http.js";
 import type { ManualTriggerPort, GithubPort } from "./github/client.js";
@@ -778,10 +778,11 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
   // ---- Forge connections (GitLab) ----
 
   app.get("/connections", (c) => {
+    if (!gateOn) return c.redirect("/", 302);
     if (!ctx.forgeConnections) {
       return c.text("Forge connections require MAOMAO_FORGE_KEY", 503);
     }
-    const rows = ctx.forgeConnections.list();
+    const rows = ctx.forgeConnections.list().map(toView);
     return c.html(
       renderConnectionsPage({
         connections: rows,
@@ -792,6 +793,7 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
   });
 
   app.post("/connections", async (c) => {
+    if (!gateOn) return c.redirect("/", 302);
     if (!ctx.forgeConnections) {
       return c.text("Forge connections require MAOMAO_FORGE_KEY", 503);
     }
@@ -838,6 +840,7 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
   });
 
   app.post("/connections/:id/probe", async (c) => {
+    if (!gateOn) return c.redirect("/", 302);
     if (!ctx.forgeConnections) return c.text("Forge connections require MAOMAO_FORGE_KEY", 503);
     const id = c.req.param("id");
     const probe = await probeConnection(ctx.forgeConnections, id, { timeoutMs: 10_000 });
@@ -848,6 +851,7 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
   });
 
   app.post("/connections/:id/toggle", (c) => {
+    if (!gateOn) return c.redirect("/", 302);
     if (!ctx.forgeConnections) return c.text("Forge connections require MAOMAO_FORGE_KEY", 503);
     const id = c.req.param("id");
     const row = ctx.forgeConnections.get(id);
@@ -857,8 +861,11 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
   });
 
   app.post("/connections/:id/delete", (c) => {
+    if (!gateOn) return c.redirect("/", 302);
     if (!ctx.forgeConnections) return c.text("Forge connections require MAOMAO_FORGE_KEY", 503);
-    ctx.forgeConnections.delete(c.req.param("id"));
+    if (!ctx.forgeConnections.delete(c.req.param("id"))) {
+      return c.text("Not found", 404);
+    }
     return c.redirect("/connections", 303);
   });
 

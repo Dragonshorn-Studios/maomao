@@ -8,6 +8,8 @@ import type { OpenCodePort } from "./opencode/parse.js";
 
 type OpenCodeLike = OpenCodePort;
 import { createApp } from "./server.js";
+import { ForgeConnectionStore } from "./forge/connections.js";
+import { generateForgeKeyHex } from "./forge/secretbox.js";
 import { fingerprintFinding } from "./findings/identity.js";
 import { SESSION_COOKIE, CSRF_COOKIE, issueCsrfToken } from "./auth.js";
 import type { GithubPort, ManualTriggerPort, ResolvedPull } from "./github/client.js";
@@ -3705,5 +3707,127 @@ describe("structured editor review-bot low fixes", () => {
       }).toString(),
     });
     expect(stale.status).toBe(409);
+  });
+});
+
+describe("forge connection routes", () => {
+  const gateEnv = { UI_PASSWORD: "hunter2", UI_SESSION_SECRET: "session-secret-for-tests" };
+
+  function forgeExtras() {
+    return {
+      forgeConnections: new ForgeConnectionStore(openDb(":memory:"), Buffer.from(generateForgeKeyHex(), "hex")),
+    };
+  }
+
+  it("redirects to home when the UI gate is off", async () => {
+    const { app } = testApp();
+    const response = await app.request("/connections");
+    expect(response.status).toBe(302);
+    expect(response.headers.get("location")).toBe("/");
+  });
+
+  it("serves 503 when the gate is on but the forge key is not configured", async () => {
+    const { app } = testApp(gateEnv);
+    const session = await loginSession(app);
+    const response = await app.request("/connections", { headers: { cookie: session.cookies } });
+    expect(response.status).toBe(503);
+  });
+
+  it("renders the page when the store is configured", async () => {
+    const extras = forgeExtras();
+    const { app } = testApp(gateEnv, undefined, undefined, extras);
+    const session = await loginSession(app);
+    const response = await app.request("/connections", { headers: { cookie: session.cookies } });
+    expect(response.status).toBe(200);
+    const html = await response.text();
+    expect(html).toContain("Forge connections");
+    expect(html).toContain("Add a GitLab connection");
+  });
+
+  it("rejects a connection whose URL violates the policy, without persisting", async () => {
+    const extras = forgeExtras();
+    const { app } = testApp(gateEnv, undefined, undefined, extras);
+    const session = await loginSession(app);
+    const response = await app.request("/connections", {
+      method: "POST",
+      headers: { cookie: session.cookies, "content-type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({
+        label: "acme",
+        instanceUrl: "https://user:pass@gitlab.com",
+        token: "glpat-token-value-1",
+        webhookSecret: "whsec-value-1",
+        csrf_token: session.csrfToken,
+      }).toString(),
+    });
+    expect(response.status).toBe(303);
+    expect(response.headers.get("location")).toContain("error=");
+    expect(extras.forgeConnections!.list("gitlab")).toHaveLength(0);
+  });
+
+  it("creates a connection and reports a failed probe while keeping the row", async () => {
+    const extras = forgeExtras();
+    const { app } = testApp(gateEnv, undefined, undefined, extras);
+    const session = await loginSession(app);
+    // Port 9 (discard) is unreachable in the test environment.
+    const response = await app.request("/connections", {
+      method: "POST",
+      headers: { cookie: session.cookies, "content-type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({
+        label: "acme",
+        instanceUrl: "http://127.0.0.1:9",
+        token: "glpat-token-value-1",
+        webhookSecret: "whsec-value-1",
+        allowPrivateNetwork: "1",
+        allowInsecureHttp: "1",
+        csrf_token: session.csrfToken,
+      }).toString(),
+    });
+    expect(response.status).toBe(303);
+    expect(decodeURIComponent(response.headers.get("location") ?? "")).toContain("validation failed");
+    expect(extras.forgeConnections!.list("gitlab")).toHaveLength(1);
+  });
+
+  it("refuses duplicate label + origin connections", async () => {
+    const extras = forgeExtras();
+    const { app } = testApp(gateEnv, undefined, undefined, extras);
+    const session = await loginSession(app);
+    const post = (body: URLSearchParams) => {
+      body.append("csrf_token", session.csrfToken);
+      return app.request("/connections", {
+        method: "POST",
+        headers: { cookie: session.cookies, "content-type": "application/x-www-form-urlencoded" },
+        body: body.toString(),
+      });
+    };
+    await post(
+      new URLSearchParams({
+        label: "acme",
+        instanceUrl: "https://gitlab.corp.example",
+        token: "glpat-token-value-1",
+        webhookSecret: "whsec-value-1",
+      }),
+    );
+    const second = await post(
+      new URLSearchParams({
+        label: "acme",
+        instanceUrl: "https://gitlab.corp.example",
+        token: "glpat-token-value-2",
+        webhookSecret: "whsec-value-2",
+      }),
+    );
+    expect(decodeURIComponent(second.headers.get("location") ?? "")).toContain("already exists");
+    expect(extras.forgeConnections!.list("gitlab")).toHaveLength(1);
+  });
+
+  it("404s deletion of an unknown connection", async () => {
+    const extras = forgeExtras();
+    const { app } = testApp(gateEnv, undefined, undefined, extras);
+    const session = await loginSession(app);
+    const response = await app.request("/connections/nope/delete", {
+      method: "POST",
+      headers: { cookie: session.cookies, "content-type": "application/x-www-form-urlencoded" },
+      body: `csrf_token=${encodeURIComponent(session.csrfToken)}`,
+    });
+    expect(response.status).toBe(404);
   });
 });

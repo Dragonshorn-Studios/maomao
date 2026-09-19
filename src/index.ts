@@ -10,7 +10,7 @@ import { GithubClient } from "./github/client.js";
 import { createCheckout, sweepWorkspaces } from "./checkout.js";
 import { createOpenCodeRunner } from "./opencode/spawn.js";
 import { oauthCallbackUrl, oauthEnabled } from "./oauth.js";
-import { ForgeConnectionStore } from "./forge/connections.js";
+import { ForgeConnectionStore, countConnections } from "./forge/connections.js";
 import { ensureEnvGitLabConnection } from "./forge/bootstrap.js";
 
 const config = loadConfig();
@@ -30,10 +30,14 @@ if (forgeConnections) {
   bootstrapped = ensureEnvGitLabConnection(forgeConnections, config);
   if (bootstrapped?.created) {
     console.log(`Seeded GitLab connection from environment: ${bootstrapped.id}`);
+  } else if (bootstrapped?.updated) {
+    console.log(`Rotated GitLab connection from environment: ${bootstrapped.id}`);
   }
 }
+// Counted without the key so a connection present but unopenable still
+// produces the right diagnosis (MAOMAO_FORGE_KEY missing), never a GitHub one.
 assertRuntimeConfig(config, {
-  gitlabConnections: forgeConnections?.list("gitlab").length ?? 0,
+  gitlabConnections: countConnections(db, "gitlab"),
   gitlabBootstrap: Boolean(config.gitlabBootstrap),
 });
 const store = new JobStore(db, config.modelCatalog);

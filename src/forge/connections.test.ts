@@ -9,7 +9,7 @@ import {
   SafeHttpError,
   safeHttpRequest,
 } from "./safe-http.js";
-import { generateForgeKeyHex, openSecret, sealSecret, secretFingerprint } from "./secretbox.js";
+import { generateForgeKeyHex, loadForgeKey, openSecret, sealSecret, secretFingerprint } from "./secretbox.js";
 import { ForgeConnectionStore, type ForgeConnectionRow } from "./connections.js";
 import { ensureEnvGitLabConnection, ENV_CONNECTION_LABEL } from "./bootstrap.js";
 import { openDb } from "../db.js";
@@ -55,6 +55,44 @@ describe("connections page", () => {
     expect(html).not.toContain(row.token_sealed);
     expect(html).not.toContain(row.webhook_secret_sealed);
   });
+
+  it("escapes hostile strings in row fields and tolerates corrupt probe JSON", () => {
+    const row = {
+      id: "conn-2",
+      provider: "gitlab",
+      label: '<img src=x onerror=alert(1)>',
+      instance_base_url: "https://gitlab.corp.internal",
+      api_base_url: "https://gitlab.corp.internal/api/v4",
+      token_sealed: "v1.aaa.bbb.ccc",
+      token_fingerprint: "7890",
+      token_type: "project",
+      scope_type: "group",
+      scope_path: '<script>alert(1)</script>',
+      webhook_secret_sealed: "v1.aaa.bbb.ccc",
+      webhook_secret_fingerprint: "b-78",
+      ca_pem: null,
+      allow_private_network: 1,
+      allow_insecure_http: 0,
+      allow_approve: 0,
+      enabled: 1,
+      bot_user_id: 42,
+      bot_username: '"><svg onload=alert(2)>',
+      token_scopes_json: "{corrupt",
+      version_json: '{"version": {"nested": true}}',
+      last_probed_at: null,
+      created_at: "2026-01-01",
+      updated_at: "2026-01-01",
+    } as unknown as ForgeConnectionRow;
+    const html = renderConnectionsPage({ connections: [row], csrfToken: undefined, options: {} });
+    expect(html).not.toContain("<img src=x");
+    expect(html).not.toContain("<script>alert(1)");
+    expect(html).not.toContain("<svg onload=alert(2)");
+    expect(html).toContain("&lt;img src=x onerror=alert(1)&gt;");
+    expect(html).toContain("&lt;script&gt;alert(1)&lt;/script&gt;");
+    // Corrupt or non-string probe JSON omits the pair rather than throwing mid-render.
+    expect(html).not.toContain("Scopes <strong>");
+    expect(html).not.toContain("Version <strong>");
+  });
 });
 
 describe("canonicalizeInstanceUrl", () => {
@@ -95,6 +133,12 @@ describe("isPrivateAddress", () => {
     expect(isPrivateAddress("192.168.1.1")).toBe(true);
     expect(isPrivateAddress("169.254.1.1")).toBe(true);
     expect(isPrivateAddress("::1")).toBe(true);
+    expect(isPrivateAddress("0:0:0:0:0:0:0:1")).toBe(true);
+    expect(isPrivateAddress("[::1]")).toBe(true);
+    expect(isPrivateAddress("0:0:0:0:0:ffff:127.0.0.1")).toBe(true);
+    expect(isPrivateAddress("::ffff:7f00:1")).toBe(true);
+    expect(isPrivateAddress("fec0::1")).toBe(true);
+    expect(isPrivateAddress("2606:4700::1")).toBe(false);
     expect(isPrivateAddress("fd00::1")).toBe(true);
     expect(isPrivateAddress("fe80::1")).toBe(true);
     expect(isPrivateAddress("::ffff:127.0.0.1")).toBe(true);
@@ -176,7 +220,7 @@ describe("safeHttpRequest", () => {
   function requestBase(url: string): Parameters<typeof safeHttpRequest>[0] {
     return {
       url: `${baseUrl}${url}`,
-      instanceOrigin: baseUrl,
+      instance: canonicalizeInstanceUrl(baseUrl, { allowInsecureHttp: true }),
       allowPrivateNetwork: allowPrivate,
       bearerToken: "glpat-test-token-value",
       maxBytes: 512,
@@ -344,9 +388,52 @@ describe("ensureEnvGitLabConnection", () => {
     expect(store.get(rotated!.id)!.label).toBe(ENV_CONNECTION_LABEL);
   });
 
+  it("matches the existing env connection across equivalent origin spellings", () => {
+    const store = new ForgeConnectionStore(openDb(":memory:"), Buffer.from(generateForgeKeyHex(), "hex"));
+    const first = ensureEnvGitLabConnection(
+      store,
+      loadConfig(envWith({ GITLAB_BASE_URL: "https://gitlab.com/" })),
+    );
+    expect(first?.created).toBe(true);
+    const variants = ["https://gitlab.com", "HTTPS://GitLab.com", "https://gitlab.com:443"];
+    for (const baseUrl of variants) {
+      const again = ensureEnvGitLabConnection(store, loadConfig(envWith({ GITLAB_BASE_URL: baseUrl })));
+      expect(again?.created).toBe(false);
+    }
+    expect(store.list("gitlab")).toHaveLength(1);
+  });
+
+  it("disables a stale env connection from a different origin", () => {
+    const store = new ForgeConnectionStore(openDb(":memory:"), Buffer.from(generateForgeKeyHex(), "hex"));
+    const first = ensureEnvGitLabConnection(store, loadConfig(envWith({ GITLAB_BASE_URL: "https://old.gitlab.example" })));
+    expect(first?.created).toBe(true);
+    const second = ensureEnvGitLabConnection(
+      store,
+      loadConfig(envWith({ GITLAB_BASE_URL: "https://new.gitlab.example" })),
+    );
+    expect(second?.created).toBe(true);
+    const stale = store.get(first!.id)!;
+    expect(stale.enabled).toBe(0);
+    expect(store.get(second!.id)!.enabled).toBe(1);
+  });
+
   it("refuses to seed a bootstrap that violates the URL policy", () => {
     const store = new ForgeConnectionStore(openDb(":memory:"), Buffer.from(generateForgeKeyHex(), "hex"));
     const config = loadConfig(envWith({ GITLAB_BASE_URL: "https://user:pass@gitlab.com" }));
     expect(() => ensureEnvGitLabConnection(store, config)).toThrow(InstanceUrlError);
+  });
+});
+
+describe("loadForgeKey", () => {
+  it("accepts 64-char hex keys verbatim and stretches passphrases deterministically", () => {
+    const hex = generateForgeKeyHex();
+    const fromHex = loadForgeKey({ MAOMAO_FORGE_KEY: hex });
+    expect(fromHex?.toString("hex")).toBe(hex);
+    const passphrase = loadForgeKey({ MAOMAO_FORGE_KEY: "op-secret-passphrase" });
+    expect(passphrase?.length).toBe(32);
+    expect(loadForgeKey({ MAOMAO_FORGE_KEY: "op-secret-passphrase" })?.toString("hex")).toBe(
+      passphrase?.toString("hex"),
+    );
+    expect(loadForgeKey({})).toBeUndefined();
   });
 });

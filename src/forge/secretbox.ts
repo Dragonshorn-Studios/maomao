@@ -45,7 +45,14 @@ export function openSecret(key: Buffer, sealed: string): string {
   }
   const decipher = createDecipheriv("aes-256-gcm", key, Buffer.from(ivPart, "base64url"));
   decipher.setAuthTag(Buffer.from(tagPart, "base64url"));
-  return Buffer.concat([decipher.update(Buffer.from(dataPart, "base64url")), decipher.final()]).toString("utf8");
+  try {
+    return Buffer.concat([decipher.update(Buffer.from(dataPart, "base64url")), decipher.final()]).toString("utf8");
+  } catch (error) {
+    throw new Error(
+      "forge credential could not be unsealed — MAOMAO_FORGE_KEY does not match the key that sealed this connection",
+      { cause: error },
+    );
+  }
 }
 
 /** Non-reversible display hint for the UI: the last 4 characters of the secret. */

@@ -6,25 +6,36 @@
  */
 import { escapeHtml } from "../util.js";
 import { csrfInput, layout, type PageOptions } from "./layout.js";
-import type { ForgeConnectionRow } from "../forge/connections.js";
+import type { ForgeConnectionView } from "../forge/connections.js";
+import { safeJsonParse } from "../util.js";
 
 export interface ConnectionsPageData {
-  connections: ForgeConnectionRow[];
+  connections: ForgeConnectionView[];
   csrfToken?: string;
   options: PageOptions;
+}
+
+function parseScopes(raw: string | null): string[] | undefined {
+  const parsed = safeJsonParse(raw ?? "");
+  return Array.isArray(parsed) && parsed.every((item) => typeof item === "string") ? (parsed as string[]) : undefined;
+}
+
+function parseVersion(raw: string | null): string | undefined {
+  const parsed = safeJsonParse(raw ?? "");
+  return typeof parsed === "string" ? parsed : undefined;
 }
 
 function flag(value: number | undefined): string {
   return value ? "yes" : "no";
 }
 
-function connectionCard(row: ForgeConnectionRow, csrfToken?: string): string {
+function connectionCard(row: ForgeConnectionView, csrfToken?: string): string {
   const csrf = csrfInput(csrfToken);
   const enabled = row.enabled === 1;
-  const scopes = row.token_scopes_json ? JSON.parse(row.token_scopes_json) : undefined;
-  const version = row.version_json ? (JSON.parse(row.version_json) as string | undefined) : undefined;
+  const scopes = parseScopes(row.token_scopes_json);
+  const version = parseVersion(row.version_json);
   const identity = row.bot_username
-    ? `${escapeHtml(row.bot_username)}${row.bot_user_id != null ? ` (${row.bot_user_id})` : ""}`
+    ? `${escapeHtml(row.bot_username)}${row.bot_user_id != null ? ` (${escapeHtml(String(row.bot_user_id))})` : ""}`
     : '<span class="muted">not probed</span>';
   return `
   <article class="specimen" data-connection="${escapeHtml(row.id)}">

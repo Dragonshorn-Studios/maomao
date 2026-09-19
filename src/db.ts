@@ -332,6 +332,7 @@ function migrate(db: SqliteDb): void {
       scope_type TEXT NOT NULL DEFAULT 'instance',
       scope_path TEXT NOT NULL DEFAULT '',
       webhook_secret_sealed TEXT NOT NULL,
+      webhook_secret_fingerprint TEXT NOT NULL DEFAULT '',
       ca_pem TEXT,
       allow_private_network INTEGER NOT NULL DEFAULT 0,
       allow_insecure_http INTEGER NOT NULL DEFAULT 0,
@@ -341,6 +342,7 @@ function migrate(db: SqliteDb): void {
       bot_username TEXT,
       token_scopes_json TEXT,
       version_json TEXT,
+      last_probed_at TEXT,
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL
     );

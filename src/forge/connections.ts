@@ -26,17 +26,27 @@ export interface ForgeConnectionRow {
   scope_type: "instance" | "group" | "project";
   scope_path: string;
   webhook_secret_sealed: string;
+  webhook_secret_fingerprint: string;
   ca_pem: string | null;
-  allow_private_network: number;
-  allow_insecure_http: number;
-  allow_approve: number;
-  enabled: number;
+  allow_private_network: 0 | 1;
+  allow_insecure_http: 0 | 1;
+  allow_approve: 0 | 1;
+  enabled: 0 | 1;
   bot_user_id: number | null;
   bot_username: string | null;
   token_scopes_json: string | null;
   version_json: string | null;
+  last_probed_at: string | null;
   created_at: string;
   updated_at: string;
+}
+
+/** Row as the UI may see it: sealed credential material structurally removed. */
+export type ForgeConnectionView = Omit<ForgeConnectionRow, "token_sealed" | "webhook_secret_sealed">;
+
+export function toView(row: ForgeConnectionRow): ForgeConnectionView {
+  const { token_sealed: _token, webhook_secret_sealed: _webhook, ...view } = row;
+  return view;
 }
 
 export interface ForgeConnectionInput {
@@ -103,9 +113,21 @@ export class ForgeConnectionStore {
     if (!input.token || input.token.length < 8) {
       throw new Error("an access token of at least 8 characters is required");
     }
+    if (!input.webhookSecret) {
+      throw new Error("a webhook secret is required");
+    }
+    if ((input.scopeType === "group" || input.scopeType === "project") && !input.scopePath.trim()) {
+      throw new Error(`a group/project path is required for scope type ${input.scopeType}`);
+    }
     const instance = canonicalizeInstanceUrl(input.instanceUrl, {
       allowInsecureHttp: input.allowInsecureHttp,
     });
+    const duplicate = this.list("gitlab").find(
+      (row) => row.instance_base_url === instance.origin && row.label === input.label.trim(),
+    );
+    if (duplicate) {
+      throw new Error(`a connection labeled "${input.label.trim()}" already exists for ${instance.origin} (${duplicate.id})`);
+    }
     const id = randomUUID();
     const now = nowIso();
     this.db
@@ -113,9 +135,9 @@ export class ForgeConnectionStore {
         `INSERT INTO forge_connections (
           id, provider, label, instance_base_url, api_base_url,
           token_sealed, token_fingerprint, token_type, scope_type, scope_path,
-          webhook_secret_sealed, ca_pem, allow_private_network, allow_insecure_http,
+          webhook_secret_sealed, webhook_secret_fingerprint, ca_pem, allow_private_network, allow_insecure_http,
           allow_approve, enabled, created_at, updated_at
-        ) VALUES (?, 'gitlab', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)`,
+        ) VALUES (?, 'gitlab', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)`,
       )
       .run(
         id,
@@ -128,6 +150,7 @@ export class ForgeConnectionStore {
         input.scopeType,
         input.scopePath.trim(),
         sealSecret(this.key, input.webhookSecret),
+        secretFingerprint(input.webhookSecret),
         input.caPem?.trim() || null,
         input.allowPrivateNetwork ? 1 : 0,
         input.allowInsecureHttp ? 1 : 0,
@@ -140,7 +163,12 @@ export class ForgeConnectionStore {
     return row;
   }
 
-  update(id: string, patch: Partial<Omit<ForgeConnectionInput, "provider">> & { enabled?: boolean }): void {
+  /**
+   * The instance identity (URL and HTTP policy) is deliberately immutable:
+   * it defines the connection, and mutating it would silently move every
+   * job and webhook bound to the id. Create a new connection instead.
+   */
+  update(id: string, patch: ForgeConnectionUpdate): void {
     const row = this.get(id);
     if (!row) throw new Error(`forge connection ${id} does not exist`);
     const assignments: string[] = [];
@@ -156,6 +184,7 @@ export class ForgeConnectionStore {
     }
     if (patch.webhookSecret != null && patch.webhookSecret !== "") {
       set("webhook_secret_sealed", sealSecret(this.key, patch.webhookSecret));
+      set("webhook_secret_fingerprint", secretFingerprint(patch.webhookSecret));
     }
     if (patch.tokenType != null) set("token_type", patch.tokenType);
     if (patch.scopeType != null) set("scope_type", patch.scopeType);
@@ -169,13 +198,20 @@ export class ForgeConnectionStore {
     this.db.prepare(`UPDATE forge_connections SET ${assignments.join(", ")} WHERE id = ?`).run(...values, id);
   }
 
-  /** Stores the probe results (bot identity, token scopes, instance version). */
-  recordProbe(id: string, probe: { botUserId?: number; botUsername?: string; scopes?: string[]; version?: string }): void {
+  /**
+   * Stores the probe results (bot identity, token scopes, instance version).
+   * Returns false when the row vanished mid-probe so callers can surface the
+   * race instead of reporting success for a deleted connection.
+   */
+  recordProbe(
+    id: string,
+    probe: { botUserId?: number; botUsername?: string; scopes?: string[]; version?: string },
+  ): boolean {
     const row = this.get(id);
-    if (!row) return;
+    if (!row) return false;
     this.db
       .prepare(
-        `UPDATE forge_connections SET bot_user_id = ?, bot_username = ?, token_scopes_json = ?, version_json = ?, updated_at = ? WHERE id = ?`,
+        `UPDATE forge_connections SET bot_user_id = ?, bot_username = ?, token_scopes_json = ?, version_json = ?, last_probed_at = ?, updated_at = ? WHERE id = ?`,
       )
       .run(
         probe.botUserId ?? row.bot_user_id,
@@ -183,12 +219,38 @@ export class ForgeConnectionStore {
         probe.scopes ? JSON.stringify(probe.scopes) : row.token_scopes_json,
         probe.version ? JSON.stringify(probe.version) : row.version_json,
         nowIso(),
+        nowIso(),
         id,
       );
+    return true;
   }
 
   delete(id: string): boolean {
     const result = this.db.prepare(`DELETE FROM forge_connections WHERE id = ?`).run(id);
     return (result as { changes?: number }).changes != null && (result as { changes: number }).changes > 0;
   }
+}
+
+/** Mutable fields; everything else requires creating a new connection. */
+export type ForgeConnectionUpdate = Partial<
+  Pick<
+    ForgeConnectionInput,
+    | "label"
+    | "token"
+    | "webhookSecret"
+    | "tokenType"
+    | "scopeType"
+    | "scopePath"
+    | "caPem"
+    | "allowPrivateNetwork"
+    | "allowApprove"
+  >
+> & { enabled?: boolean };
+
+/** Non-key-requiring connection count for boot validation. */
+export function countConnections(db: SqliteDb, provider: string): number {
+  const row = db.prepare(`SELECT COUNT(*) AS n FROM forge_connections WHERE provider = ?`).get(provider) as {
+    n: number;
+  };
+  return row.n;
 }
