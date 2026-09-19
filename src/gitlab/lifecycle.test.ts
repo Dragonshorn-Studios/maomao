@@ -39,7 +39,6 @@ const FINDING = {
 const FP = fingerprintFinding({
   category: FINDING.category,
   file: FINDING.file,
-  line: FINDING.line,
   summary: FINDING.summary,
   body: FINDING.body,
 });
