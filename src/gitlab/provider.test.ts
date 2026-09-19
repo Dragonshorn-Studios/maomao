@@ -107,7 +107,7 @@ function startGitLabMock(state: ReturnType<typeof gitlabFixture>["state"]): Prom
         return;
       }
       if (url.startsWith("/api/v4/projects/42/merge_requests/7/versions")) {
-        const page = Number(url.match(/page=(\d+)/)?.[1] ?? "1");
+        const page = Number(url.match(/[?&]page=(\d+)/)?.[1] ?? "1");
         // Exercise the pagination loop: page 1 returns a full page without the
         // reviewed SHA, page 2 carries it.
         if (state.versionsPaged) {
