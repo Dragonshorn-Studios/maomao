@@ -99,6 +99,7 @@ export interface JobRow {
   external_dispatch_reason: string | null;
   external_dispatch_targets: string | null;
   external_dispatch_error: string | null;
+  budget_exceeded_warning: string | null;
   escalation_id: string | null;
   poison_alert_policy: string | null;
   manual_escalate_requested: number | null;
@@ -273,6 +274,7 @@ const JOB_PATCH_KEYS = new Set<string>([
   "external_dispatch_reason",
   "external_dispatch_targets",
   "external_dispatch_error",
+  "budget_exceeded_warning",
   "escalation_id",
   "poison_alert_policy",
   "manual_escalate_requested",

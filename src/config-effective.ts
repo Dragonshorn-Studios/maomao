@@ -140,9 +140,18 @@ export function effectiveConfigEntries(
           .join(", "),
         source: "profile",
         sourceDetail: profileDetail,
-        notEnforced: true,
       });
     }
+    add({
+      group: "Budgets",
+      label: "Profile budget behavior",
+      value:
+        activeRevision.definition.onBudgetExceeded === "fail"
+          ? "fail the job when a ceiling is hit"
+          : "degrade — skip remaining paid stages and publish partial results",
+      source: "profile",
+      sourceDetail: profileDetail,
+    });
   }
 
   // --- Models ---
@@ -350,7 +359,6 @@ export function effectiveConfigEntries(
       value: `$${activeRevision.definition.maxTotalCostUsd.toFixed(2)}`,
       source: "profile",
       sourceDetail: `#${activeRevision.id} (${activeRevision.name})`,
-      notEnforced: true,
     });
   }
   if (activeRevision?.definition.maxTotalTokens != null) {
@@ -360,7 +368,6 @@ export function effectiveConfigEntries(
       value: String(activeRevision.definition.maxTotalTokens),
       source: "profile",
       sourceDetail: `#${activeRevision.id} (${activeRevision.name})`,
-      notEnforced: true,
     });
   }
 

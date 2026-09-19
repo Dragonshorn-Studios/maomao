@@ -27,6 +27,7 @@ import {
  *   min_severity           severity enum value
  *   max_cost_usd           optional positive number
  *   max_tokens             optional positive integer
+ *   budget_behavior        degrade | fail (what a hit ceiling does)
  *
  * Action decoding never falls back to "save": valid-shaped but out-of-range
  * or malformed actions decode to "noop" (a re-render with no persistence),
@@ -47,6 +48,7 @@ export interface ProfileFormValues {
   minSeverity: string;
   maxCostUsd: string;
   maxTokens: string;
+  budgetBehavior: string;
 }
 
 export type ProfileFormAction =
@@ -66,7 +68,8 @@ export type ProfileFieldKey =
   | "router_model"
   | "min_severity"
   | "max_cost_usd"
-  | "max_tokens";
+  | "max_tokens"
+  | "budget_behavior";
 
 export type ProfileFieldErrors = { form?: string } & {
   [key: string]: string | undefined;
@@ -82,8 +85,12 @@ export function initialProfileFormValues(): ProfileFormValues {
     minSeverity: "info",
     maxCostUsd: "",
     maxTokens: "",
+    budgetBehavior: "degrade",
   };
 }
+
+/** Schema values the behavior select accepts; unknown input degrades. */
+export const PROFILE_BUDGET_BEHAVIORS = ["degrade", "fail"] as const;
 
 const asString = (value: unknown): string => (typeof value === "string" ? value : "");
 const asIndex = (value: unknown): number => {
@@ -112,7 +119,13 @@ export function decodeProfileForm(body: Record<string, unknown>): ProfileFormVal
     minSeverity: asString(body.min_severity) || "info",
     maxCostUsd: asString(body.max_cost_usd).trim(),
     maxTokens: asString(body.max_tokens).trim(),
+    budgetBehavior: normalizeBudgetBehavior(asString(body.budget_behavior)),
   };
+}
+
+/** Keeps only schema-valid behaviors; anything else falls back to "degrade". */
+function normalizeBudgetBehavior(raw: string): string {
+  return (PROFILE_BUDGET_BEHAVIORS as readonly string[]).includes(raw) ? raw : "degrade";
 }
 
 /**
@@ -243,6 +256,7 @@ export function profileFormToDefinition(
   const tokens = optionalPositiveInteger(values.maxTokens);
   if (tokens === "invalid") errors.max_tokens = "must be a positive whole number of tokens";
   else if (tokens !== undefined) definition.maxTotalTokens = tokens;
+  definition.onBudgetExceeded = normalizeBudgetBehavior(values.budgetBehavior);
 
   const check = profileDefinitionSchema.safeParse(definition);
   if (!check.success) {
@@ -274,6 +288,7 @@ function zodPathToFieldKey(path: PropertyKey[], formIndices: readonly number[]):
   if (head === "minPublishableSeverity") return "min_severity";
   if (head === "maxTotalCostUsd") return "max_cost_usd";
   if (head === "maxTotalTokens") return "max_tokens";
+  if (head === "onBudgetExceeded") return "budget_behavior";
   if (head === "reviewers" && typeof index === "number") {
     const formIndex = formIndices[index];
     if (formIndex == null) return null;
@@ -301,6 +316,7 @@ export function profileFormValuesFromDefinition(
     minPublishableSeverity?: string;
     maxTotalCostUsd?: number;
     maxTotalTokens?: number;
+    onBudgetExceeded?: string;
   };
   return {
     name: def.name ?? "",
@@ -315,5 +331,6 @@ export function profileFormValuesFromDefinition(
     minSeverity: def.minPublishableSeverity ?? "info",
     maxCostUsd: def.maxTotalCostUsd != null ? String(def.maxTotalCostUsd) : "",
     maxTokens: def.maxTotalTokens != null ? String(def.maxTotalTokens) : "",
+    budgetBehavior: normalizeBudgetBehavior(def.onBudgetExceeded ?? ""),
   };
 }

@@ -132,6 +132,7 @@ describe("profileFormToDefinition", () => {
       routerModel: "test/router",
       maxTotalCostUsd: 1.5,
       maxTotalTokens: 500000,
+      onBudgetExceeded: "degrade",
     });
   });
 
@@ -153,6 +154,7 @@ describe("profileFormToDefinition", () => {
       name: "default",
       reviewers: [{ role: "correctness" }],
       minPublishableSeverity: "info",
+      onBudgetExceeded: "degrade",
     });
   });
 
@@ -184,6 +186,14 @@ describe("profileFormToDefinition", () => {
     const tooBig = profileFormToDefinition(decodeProfileForm(formBody({ reviewer_timeout_0: "1801" })));
     expect(tooBig.ok).toBe(false);
     if (!tooBig.ok) expect(tooBig.errors.reviewer_timeout_0).toBeTruthy();
+  });
+
+  it("maps the budget behavior select onto the schema (unknown values degrade)", () => {
+    const fail = profileFormToDefinition(decodeProfileForm(formBody({ budget_behavior: "fail" })));
+    expect(fail).toMatchObject({ ok: true });
+    if (fail.ok) expect(fail.definition).toMatchObject({ onBudgetExceeded: "fail" });
+    const unknown = decodeProfileForm(formBody({ budget_behavior: "explode" }));
+    expect(unknown.budgetBehavior).toBe("degrade");
   });
 });
 
@@ -223,6 +233,7 @@ describe("review-pass fixes", () => {
       name: "default",
       reviewers: [{ role: "correctness", timeoutMs: 901234 }],
       minPublishableSeverity: "info",
+      onBudgetExceeded: "degrade",
     };
     const form = profileFormValuesFromDefinition(definition, null);
     // Exact decimal seconds, never rounded.

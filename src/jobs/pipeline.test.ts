@@ -4005,3 +4005,117 @@ describe("sentinel normalization review fixes", () => {
     expect(logs).toContain("Internal escalation dropped 1 placeholder finding(s)");
   });
 });
+
+describe("profile budget ceilings and per-reviewer timeouts", () => {
+  function profileConfig() {
+    return loadConfig({
+      REVIEWER_ROUTING: "fixed",
+      REVIEWER_ROLES: "correctness,security",
+      OPENCODE_REVIEWER_CONCURRENCY: "1",
+      OPENCODE_REVIEWER_MODEL: "test/model",
+      OPENCODE_TIMEOUT_MS: "5000",
+      POST_EMPTY_REVIEW: "true",
+      GITHUB_APP_ID: "1",
+      GITHUB_WEBHOOK_SECRET: "s",
+      GITHUB_APP_PRIVATE_KEY: "k",
+    });
+  }
+
+  async function activateProfile(store: JobStore, definition: unknown) {
+    const draft = store.configs.createDraft({ definition, createdBy: "octocat" });
+    if (!("revision" in draft)) throw new Error("draft failed");
+    store.configs.activateRevision(draft.revision.id, "octocat");
+    return draft.revision;
+  }
+
+  function pipelineFixture(overrides: { onRun?: (input: { role?: string; timeoutMs?: number }) => void } = {}) {
+    const seen: { key: string; timeoutMs?: number }[] = [];
+    const opencode: OpenCodePort = {
+      async run(input) {
+        const roleMatch = input.prompt.match(/Role id: (\w+)/);
+        seen.push({ key: roleMatch?.[1] ?? `model:${input.model ?? "default"}`, timeoutMs: input.timeoutMs });
+        const text = roleMatch
+          ? reviewerJson(roleMatch[1], "clean")
+          : JSON.stringify({ schema_version: 1, verdict: "clean", summary: "clean", findings: [] });
+        // Every reviewer emits 2 units of usage cost so ceilings can trip mid-run.
+        return { stdout: text, stderr: "", exitCode: 0, text, usage: roleMatch ? { cost: 2, totalTokens: 10_000 } : {} };
+      },
+    };
+    return {
+      seen,
+      opencode,
+      github: githubPort({
+        getPullDiff: async () => "diff --git a/example.ts b/example.ts\n",
+        listReviews: async () => [],
+        createCommentReview: async () => ({ id: "5", url: "u" }),
+      }),
+    };
+  }
+
+  it("applies the per-reviewer profile timeout, falling back to the env timeout", async () => {
+    const config = profileConfig();
+    const store = new JobStore(openDb(":memory:"));
+    await activateProfile(store, {
+      name: "default",
+      reviewers: [{ role: "correctness", timeoutMs: 60_000 }, { role: "security" }],
+      minPublishableSeverity: "medium",
+    });
+    const { seen, opencode, github } = pipelineFixture();
+    const created = store.enqueue({ ...jobInput("timeoutsha"), reviewers: [] });
+    await createPipeline({ config, store, github, checkout: await fixtureCheckout(), opencode }).run(created.job.id);
+
+    const correctness = seen.find((entry) => entry.key === "correctness");
+    const security = seen.find((entry) => entry.key === "security");
+    const aggregator = seen.filter((entry) => entry.key.startsWith("model:"));
+    expect(correctness?.timeoutMs).toBe(60_000);
+    expect(security?.timeoutMs).toBe(5_000);
+    expect(aggregator.every((entry) => entry.timeoutMs === 5_000)).toBe(true);
+    expect(store.getJob(created.job.id)?.state).toBe("completed");
+  });
+
+  it("degrades predictably when the cost ceiling is hit: skips remaining reviewers and aggregates deterministically", async () => {
+    const config = profileConfig();
+    const store = new JobStore(openDb(":memory:"));
+    await activateProfile(store, {
+      name: "default",
+      reviewers: [{ role: "correctness" }, { role: "security" }],
+      minPublishableSeverity: "medium",
+      maxTotalCostUsd: 1,
+    });
+    const { opencode, github } = pipelineFixture();
+    const created = store.enqueue({ ...jobInput("budgetsha"), reviewers: [] });
+    await createPipeline({ config, store, github, checkout: await fixtureCheckout(), opencode }).run(created.job.id);
+
+    const job = store.getJob(created.job.id);
+    expect(job?.state).toBe("completed");
+    const runs = store.listReviewerRuns(created.job.id);
+    expect(runs.find((run) => run.role === "correctness")?.state).toBe("done");
+    const security = runs.find((run) => run.role === "security");
+    expect(security?.state).toBe("failed");
+    expect(security?.validation_error).toContain("profile budget exceeded");
+    expect(job?.aggregator_fallback).toBe(1);
+    expect(job?.budget_exceeded_warning).toContain("profile total cost 2 exceeded cap 1");
+    const logs = store.listLogs(created.job.id).map((row) => row.message).join("\n");
+    expect(logs).toContain("Reviewer security skipped");
+  });
+
+  it("fails the job without retries when the ceiling hit is configured to fail", async () => {
+    const config = profileConfig();
+    const store = new JobStore(openDb(":memory:"));
+    await activateProfile(store, {
+      name: "default",
+      reviewers: [{ role: "correctness" }, { role: "security" }],
+      minPublishableSeverity: "medium",
+      maxTotalCostUsd: 1,
+      onBudgetExceeded: "fail",
+    });
+    const { opencode, github } = pipelineFixture();
+    const created = store.enqueue({ ...jobInput("budgetfailsha"), reviewers: [] });
+    await createPipeline({ config, store, github, checkout: await fixtureCheckout(), opencode }).run(created.job.id);
+
+    const job = store.getJob(created.job.id);
+    expect(job?.state).toBe("failed");
+    expect(job?.failure_reason).toContain("profile budget exceeded — profile total cost 2 exceeded cap 1");
+    expect(store.listReviewerRuns(created.job.id).find((run) => run.role === "correctness")?.state).toBe("done");
+  });
+});

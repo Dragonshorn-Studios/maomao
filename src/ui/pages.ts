@@ -272,6 +272,7 @@ export function renderJob(
         }
           ${usageBreakdownHtml(metrics)}
           ${metrics.usageComplete ? "" : `<div class="usage-incomplete">${escapeHtml(metrics.usageWarning || usageIncompleteCopy())}</div>`}
+          ${job.budget_exceeded_warning ? `<div class="usage-incomplete" role="alert">Profile budget exceeded — ${escapeHtml(job.budget_exceeded_warning)}</div>` : ""}
           <div class="muted usage-note">${escapeHtml(usageReportedCopy())}</div>
         </dd>
       </div>
@@ -1117,7 +1118,7 @@ export function renderProfileForm(
           <input list="profile-model-catalog" name="${key("model")}" value="${escapeHtml(row.model)}" placeholder="provider/model"
             ${modelError ? `aria-invalid="true" aria-describedby="reviewer_row_${index}-error"` : ""}/>
         </label>
-        <label>Timeout in seconds (optional, decimals allowed — <span title="Stored in the profile schema but not yet consumed by the pipeline">not enforced at runtime</span>)
+        <label>Timeout in seconds (optional, decimals allowed — caps this reviewer's run time; falls back to OPENCODE_TIMEOUT_MS)
           <input type="number" step="any" min="0" name="${key("timeout")}" value="${escapeHtml(row.timeoutSeconds)}"
             ${timeoutError ? `aria-invalid="true" aria-describedby="reviewer_row_${index}-error"` : ""}/>
         </label>
@@ -1180,14 +1181,20 @@ export function renderProfileForm(
           <input name="router_model" value="${escapeHtml(values.routerModel)}" list="profile-model-catalog" ${invalidAttr("router_model")} ${describedBy("router_model")}/>
         </label>
         ${err("router_model")}
-        <label>Total cost ceiling in USD (optional — <span title="Stored in the profile schema but not yet consumed by the pipeline">not enforced at runtime</span>)
+        <label>Total cost ceiling in USD (optional — enforced per job across reviewer, aggregation, and verification spend)
           <input type="number" step="0.01" min="0" name="max_cost_usd" value="${escapeHtml(values.maxCostUsd)}" ${invalidAttr("max_cost_usd")} ${describedBy("max_cost_usd")}/>
         </label>
         ${err("max_cost_usd")}
-        <label>Total token ceiling (optional — <span title="Stored in the profile schema but not yet consumed by the pipeline">not enforced at runtime</span>)
+        <label>Total token ceiling (optional — enforced per job across reviewer, aggregation, and verification spend)
           <input type="number" min="0" name="max_tokens" value="${escapeHtml(values.maxTokens)}" ${invalidAttr("max_tokens")} ${describedBy("max_tokens")}/>
         </label>
         ${err("max_tokens")}
+        <label>When a budget ceiling is hit
+          <select name="budget_behavior">
+            <option value="degrade"${values.budgetBehavior === "degrade" ? " selected" : ""}>Degrade — skip remaining paid stages, publish partial results</option>
+            <option value="fail"${values.budgetBehavior === "fail" ? " selected" : ""}>Fail — abort the job</option>
+          </select>
+        </label>
       </fieldset>
       <button type="submit" name="action" value="save">Save draft</button>
       <a href="/config">Cancel</a>
