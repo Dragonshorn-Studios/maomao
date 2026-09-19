@@ -181,7 +181,7 @@ async function fixtureCheckout(): Promise<CheckoutPort> {
  * prior and the specialist reports clean. `refinds`: the specialist re-finds
  * the finding on the new head so publication filters are exercised.
  */
-function fakeOpencode(mode: "resolved" | "refinds", calls: { verifier: number }, findOnHead?: string): OpenCodePort {
+function fakeOpencode(mode: "resolved" | "refinds", calls: { verifier: number }): OpenCodePort {
   return {
     async run(input) {
       if (input.title?.includes("verifier") || input.prompt.includes("finding verifier")) {
@@ -476,8 +476,6 @@ describe("GitLab finding lifecycle parity", () => {
     const created = enqueueJob("head777");
     state.versions = [{ base_sha: "base111", start_sha: "start222", head_sha: "head777" }];
     await (await pipeline("resolved")).run(created.job.id);
-    const snap = JSON.parse(store.getJob(created.job.id)?.reconciliation_json ?? "{}") as { items: Array<{ fingerprint: string; status: string; reason: string }> };
-    console.log("CLASSIFIED", snap.items.map((item) => `${item.fingerprint}:${item.status}:${item.reason}`));
     // The forge-resolved discussion settled without a verifier spend.
     expect(verifierCalls.verifier).toBe(before);
     const row = store.getFinding("acme/widgets", 7, otherFp, { provider: "gitlab", instance: "127.0.0.1" });
