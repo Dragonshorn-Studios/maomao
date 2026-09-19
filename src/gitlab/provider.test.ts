@@ -310,12 +310,113 @@ describe("GitLabProvider against the API v4 mock", () => {
     expect(state.approved).toBe(1);
   });
 
-  it("builds clone material with a Bearer header and the MR refspec", async () => {
+  it("anchors LEFT-side comments on the old line", async () => {
+    state.notes = [];
+    state.discussions = [];
+    const result = await provider().publishReview({
+      target: TARGET,
+      commitId: "head333",
+      body: "<!-- maomao-review sha=head333 -->\nsummary",
+      comments: [{ path: "src/app.ts", body: "old-side finding", line: 1, side: "LEFT" }],
+      verdict: "COMMENT",
+    });
+    expect(result.postedComments).toHaveLength(1);
+    expect(state.discussions[0]?.position).toMatchObject({
+      old_path: "src/app.ts",
+      old_line: 1,
+      head_sha: "head333",
+    });
+    expect(state.discussions[0]?.position).not.toHaveProperty("new_line");
+  });
+
+  it("refuses to anchor when the MR moved past the reviewed SHA", async () => {
+    state.notes = [];
+    state.discussions = [];
+    state.versions = [{ base_sha: "base999", start_sha: "start999", head_sha: "head999" }];
+    try {
+      const result = await provider().publishReview({
+        target: TARGET,
+        commitId: "head333",
+        body: "<!-- maomao-review sha=head333 -->\nsummary",
+        comments: [
+          {
+            path: "src/app.ts",
+            body: "<!-- maomao-finding id=fp111 sha=head333 -->\n**medium**: finding",
+            line: 2,
+            side: "RIGHT",
+          },
+        ],
+        verdict: "COMMENT",
+      });
+      // The degrade path kept the finding content visible and the summary posted.
+      expect(result.postedComments).toEqual([]);
+      const degrade = state.notes.find((note) => note.body.includes("could not be anchored inline"));
+      expect(degrade?.body).toContain("src/app.ts:2");
+      expect(degrade?.body).toContain("maomao-finding");
+      expect(degrade?.body).not.toMatch(/https:\/\//);
+    } finally {
+      state.versions = [{ base_sha: "base111", start_sha: "start222", head_sha: "head333" }];
+    }
+  });
+
+  it("resolves a permission from the exact username and propagates transport failures", async () => {
+    const usersSeen: string[] = [];
+    const permissions = createServer((req, res) => {
+      const url = req.url ?? "";
+      if (url.startsWith("/api/v4/users?username=")) {
+        usersSeen.push(url);
+        const wanted = decodeURIComponent(url.split("username=")[1] ?? "");
+        if (wanted === "broken") {
+          // Transport failure: the instance itself is unhealthy.
+          res.writeHead(500);
+          res.end("boom");
+          return;
+        }
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify(wanted === "maintainer" ? [{ id: 7, username: "maintainer" }] : []));
+        return;
+      }
+      if (url.startsWith("/api/v4/projects/42/members/all/7")) {
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify({ access_level: 50 }));
+        return;
+      }
+      if (url.startsWith("/api/v4/projects/42/members/all/8")) {
+        res.writeHead(404);
+        res.end();
+        return;
+      }
+      res.writeHead(500);
+      res.end("boom");
+    });
+    await new Promise<void>((resolve) => permissions.listen(0, "127.0.0.1", resolve));
+    const address = permissions.address() as AddressInfo;
+    const permStore = new ForgeConnectionStore(openDb(":memory:"), Buffer.from(generateForgeKeyHex(), "hex"));
+    const row = connectionOn(permStore, `http://127.0.0.1:${address.port}`, { label: "perm" });
+    const forge = new GitLabProvider(permStore.open(row.id));
+    try {
+      expect(await forge.getActorPermission(TARGET, "maintainer")).toBe("admin");
+      expect(await forge.getActorPermission(TARGET, "nobody")).toBe("none");
+      // Transport failures rethrow instead of silently demoting to none.
+      await expect(forge.getActorPermission(TARGET, "broken")).rejects.toThrow(/status 500/);
+      expect(usersSeen.some((url) => url.includes("username=maintainer"))).toBe(true);
+    } finally {
+      await new Promise<void>((resolve) => permissions.close(() => resolve()));
+    }
+  });
+
+  it("builds clone material with Basic oauth2 auth and the MR refspec", async () => {
     const spec = await provider().cloneSpec(TARGET);
     expect(spec.cloneUrl).toBe("https://127.0.0.1/acme/widgets.git");
     expect(spec.remoteRef).toBe("refs/merge-requests/7/head");
-    expect(spec.gitAuthArgs.join(" ")).toContain("Authorization: Bearer glpat-provider-token-value");
+    // GitLab documents token-as-password (Basic oauth2:<token>) for git;
+    // Bearer is REST-only.
+    expect(spec.gitAuthArgs.join(" ")).toContain("Authorization: Basic ");
+    expect(spec.gitAuthArgs.join(" ")).not.toContain("Bearer");
     expect(spec.secrets.some((secret) => secret.includes("glpat-provider-token-value"))).toBe(true);
+    const basic = spec.secrets.find((secret) => !secret.startsWith("glpat-") && secret !== spec.gitAuthArgs[1]);
+    expect(spec.gitAuthArgs.join(" ")).not.toContain("glpat-provider-token-value");
+    void basic;
   });
 
   it("maps bot identity from the probed username", () => {
@@ -404,8 +505,8 @@ describe("pipeline over a GitLab job (end-to-end)", () => {
                     severity: "medium",
                     confidence: 0.9,
                     category: "correctness",
-                    file: "example.ts",
-                    line: 1,
+                    file: "src/app.ts",
+                    line: 2,
                     summary: "gitlab finding",
                     reason: "because the diff says so",
                   },
@@ -419,8 +520,8 @@ describe("pipeline over a GitLab job (end-to-end)", () => {
                     severity: "medium",
                     confidence: 0.9,
                     category: "correctness",
-                    file: "example.ts",
-                    line: 1,
+                    file: "src/app.ts",
+                    line: 2,
                     summary: "gitlab finding",
                     body: "because the diff says so",
                     reviewers_agreed: ["correctness"],
@@ -442,16 +543,23 @@ describe("pipeline over a GitLab job (end-to-end)", () => {
 
       await pipeline.run(created.job.id);
       const job = store.getJob(created.job.id);
-      if (job?.state !== "completed") {
-        console.log("JOB STATE", job?.state, "REASON", job?.failure_reason);
-        console.log("LOGS", store.listLogs(created.job.id).map((line) => `${line.level}: ${line.message.slice(0, 160)}`).join("\n"));
-      }
       expect(job?.state).toBe("completed");
-      // The summary note carries the review marker for the exact head SHA,
-      // and the finding landed as an inline discussion with a position.
+      expect(job?.review_event).toBe("COMMENT");
+      expect(job?.github_review_id).toBeTruthy();
+      // The summary note carries the review marker for the exact head SHA.
       const summary = state.notes.find((note) => note.body.includes("maomao-review sha=head333"));
       expect(summary).toBeTruthy();
-      expect(state.discussions.length).toBeGreaterThanOrEqual(0);
+      // The finding anchored inline on the reviewed SHA's diff version.
+      expect(state.discussions).toHaveLength(1);
+      const position = state.discussions[0]?.position;
+      expect(position).toMatchObject({
+        position_type: "text",
+        base_sha: "base111",
+        head_sha: "head333",
+        new_path: "src/app.ts",
+        new_line: 2,
+      });
+      expect(state.discussions[0]?.body).toContain("maomao-finding");
     } finally {
       await new Promise<void>((resolve) => started.server.close(() => resolve()));
     }

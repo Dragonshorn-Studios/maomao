@@ -54,12 +54,13 @@ export class ForgeRegistry {
       throw new Error(`no forge connection configured for ${scope.provider}:${scope.instance}`);
     }
     if (!job.forge_connection_id) {
-      throw new Error(`gitlab-scoped job is missing its forge connection binding`);
+      throw new Error(`${scope.provider}-scoped job is missing its forge connection binding`);
+    }
+    const raw = this.connections.get(job.forge_connection_id);
+    if (!raw || raw.provider !== scope.provider || raw.enabled !== 1) {
+      throw new Error(`forge connection ${job.forge_connection_id} is not available for ${scope.provider}:${scope.instance}`);
     }
     const opened = this.connections.open(job.forge_connection_id);
-    if (opened.row.provider !== scope.provider || opened.row.enabled !== 1) {
-      throw new Error(`forge connection ${opened.row.id} is not available for ${scope.provider}:${scope.instance}`);
-    }
     if (opened.instance.hostname !== scope.instance) {
       throw new Error(
         `forge connection ${opened.row.id} serves ${opened.instance.hostname}, not ${scope.instance}`,

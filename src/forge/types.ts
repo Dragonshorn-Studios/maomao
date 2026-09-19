@@ -160,6 +160,8 @@ export interface ForgePublishResult {
   url: string;
   /** Inline comments the forge actually accepted; empty when the publish degraded to summary-only. */
   postedComments?: ForgeInlineComment[];
+  /** Non-fatal degradation outcomes the pipeline should log for operators. */
+  warnings?: string[];
 }
 
 export interface ForgeSummary {

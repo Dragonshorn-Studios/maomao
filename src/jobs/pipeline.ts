@@ -598,6 +598,15 @@ async function runScanJob(deps: PipelineDeps, forge: ForgeRegistry, jobId: numbe
   const job = store.getJob(jobId);
   if (!job) return;
   try {
+    // Health scans are a GitHub feature; non-github scan jobs fail with an
+    // honest reason instead of a confusing cross-forge allowlist failure.
+    if (job.provider !== "github") {
+      store.setJobState(jobId, "failed", {
+        failure_reason: `health scans are not available for ${job.provider}:${job.provider_instance}`,
+        finished_at: nowIso(),
+      });
+      return;
+    }
     // Allowlists can change after enqueue; re-check before doing any work.
     const auth = authorizeGithubTarget(config, {
       installationId: job.installation_id,
@@ -1475,6 +1484,9 @@ async function publishReview(
   // Fingerprints of what the forge actually accepted, not what we intended:
   // publishReview degrades to a body-only review when inline locations are rejected.
   const postedFingerprints = inlineCommentFingerprints(posted.postedComments ?? comments);
+  for (const warning of posted.warnings ?? []) {
+    deps.store.log(job.id, warning, "warn");
+  }
   return { ...posted, postedFingerprints };
 }
 

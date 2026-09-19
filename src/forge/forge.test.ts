@@ -7,6 +7,9 @@ import { openDb } from "../db.js";
 import { JobStore } from "../jobs/store.js";
 import type { SqliteDb } from "../db.js";
 import { ForgeRegistry } from "./registry.js";
+import { ForgeConnectionStore } from "./connections.js";
+import { generateForgeKeyHex } from "./secretbox.js";
+import { GitLabProvider } from "../gitlab/provider.js";
 import { GitHubProvider } from "./github-provider.js";
 import type { ForgeRepoTarget } from "./types.js";
 import type { GithubPort } from "../github/client.js";
@@ -659,5 +662,53 @@ describe("cross-connection storage isolation", () => {
     );
     expect(cancelled).toEqual([gitlabJob.id]);
     expect(store.getJob(gitlabJob.id)?.state).toBe("cancelled");
+  });
+});
+describe("gitlab registry binding", () => {
+  function forgeStoreWith(origin: string) {
+    const store = new ForgeConnectionStore(openDb(":memory:"), Buffer.from(generateForgeKeyHex(), "hex"));
+    const row = store.create({
+      provider: "gitlab",
+      label: "acme",
+      instanceUrl: origin,
+      token: "glpat-binding-token-value",
+      tokenType: "group",
+      scopeType: "group",
+      scopePath: "acme",
+      webhookSecret: "whsec-binding-value",
+      allowPrivateNetwork: true,
+      allowInsecureHttp: true,
+      allowApprove: false,
+    });
+    return { store, id: row.id, hostname: new URL(origin).hostname };
+  }
+
+  it("binds a gitlab job to its connection and returns a GitLabProvider", () => {
+    const { store, id, hostname } = forgeStoreWith("https://gitlab.corp.example");
+    const registry = new ForgeRegistry(fakeGithub(), "maomao", undefined, store);
+    const forge = registry.forJob({
+      provider: "gitlab",
+      provider_instance: hostname,
+      forge_connection_id: id,
+      installation_id: 42,
+    });
+    expect(forge).toBeInstanceOf(GitLabProvider);
+    expect(forge.instance).toBe(hostname);
+  });
+
+  it("fails closed on a disabled connection, an instance mismatch, and a missing binding", () => {
+    const { store, id, hostname } = forgeStoreWith("https://gitlab.corp.example");
+    const registry = new ForgeRegistry(fakeGithub(), "maomao", undefined, store);
+    store.update(id, { enabled: false });
+    expect(() =>
+      registry.forJob({ provider: "gitlab", provider_instance: hostname, forge_connection_id: id, installation_id: 42 }),
+    ).toThrow(/not available/);
+    store.update(id, { enabled: true });
+    expect(() =>
+      registry.forJob({ provider: "gitlab", provider_instance: "other.example", forge_connection_id: id, installation_id: 42 }),
+    ).toThrow(/serves/);
+    expect(() =>
+      registry.forJob({ provider: "gitlab", provider_instance: hostname, installation_id: 42 }),
+    ).toThrow(/missing its forge connection binding/);
   });
 });
