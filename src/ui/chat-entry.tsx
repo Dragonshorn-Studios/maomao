@@ -15,12 +15,13 @@ import {
   type ChatModelAdapter,
 } from "@assistant-ui/react";
 import { createRoot } from "react-dom/client";
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import { sseDataEvents } from "./sse.js";
 
 interface ChatConfig {
   streamUrl: string;
   csrfToken?: string;
+  suggestions?: string[];
 }
 
 const FALLBACK = "The explainer could not answer. Check the server logs or try again.";
@@ -131,14 +132,34 @@ const Composer = () => (
   </ComposerPrimitive.Root>
 );
 
-const Thread = () => (
-  <ThreadPrimitive.Root className="chat-thread">
-    <ThreadPrimitive.Viewport className="chat-viewport" autoScroll>
-      <ThreadPrimitive.Messages components={{ UserMessage, AssistantMessage }} />
-    </ThreadPrimitive.Viewport>
-    <Composer />
-  </ThreadPrimitive.Root>
-);
+const Thread = ({ config }: { config: ChatConfig }) => {
+  const [usedSuggestions, setUsedSuggestions] = useState<ReadonlySet<string>>(new Set());
+  const toggle = (suggestion: string) => {
+    setUsedSuggestions((previous) => new Set(previous).add(suggestion));
+  };
+  const chips = (config.suggestions ?? [])
+    .filter((suggestion) => !usedSuggestions.has(suggestion))
+    .map((suggestion) => (
+      <ThreadPrimitive.Suggestion
+        key={suggestion}
+        prompt={suggestion}
+        autoSend
+        className="chat-suggestion"
+        onClick={() => toggle(suggestion)}
+      >
+        {suggestion}
+      </ThreadPrimitive.Suggestion>
+    ));
+  return (
+    <ThreadPrimitive.Root className="chat-thread">
+      <ThreadPrimitive.Viewport className="chat-viewport" autoScroll>
+        <ThreadPrimitive.Messages components={{ UserMessage, AssistantMessage }} />
+      </ThreadPrimitive.Viewport>
+      {chips.length > 0 ? <div className="chat-suggestions" role="list">{chips}</div> : ""}
+      <Composer />
+    </ThreadPrimitive.Root>
+  );
+};
 
 function ChatApp({ config }: { config: ChatConfig }): React.ReactElement {
   const runtime = useLocalRuntime(createAdapter(config));
@@ -148,7 +169,7 @@ function ChatApp({ config }: { config: ChatConfig }): React.ReactElement {
   }, []);
   return (
     <AssistantRuntimeProvider runtime={runtime}>
-      <Thread />
+      <Thread config={config} />
     </AssistantRuntimeProvider>
   );
 }

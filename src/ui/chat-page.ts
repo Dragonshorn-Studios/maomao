@@ -12,6 +12,7 @@ export interface ChatPageData {
   job: { id: number; repo_full_name: string; head_sha: string; pr_number: number };
   conversation: ChatConversationRow | undefined;
   messages: ChatMessageRow[];
+  findings: Array<{ severity: string | null; summary: string }>;
   enabled: boolean;
   maxMessages: number;
   usedCost: number;

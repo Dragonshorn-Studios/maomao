@@ -422,6 +422,16 @@ Merged pull requests are terminal review targets: once the merge is recorded, Ma
 - **Audit trail.** Cancellation is a terminal state, never a hard delete: reviewed SHA, prior progress, logs, cancellation reason, and actor are preserved, and the job page shows the reason ("Cancelled — PR merged" with a link to the merged pull request, "Dequeued by …", "Review cancelled by …"). One honest edge: a cancel landing while a review POST was already in flight cannot recall it — for a manual cancel the banner then says the posted review may be stale and links to it; for a merge cancel the same fact appears in the job log and the GitHub review link. Manual actions never touch GitHub: dequeue/cancel does not close or comment on the pull request.
 - **Note.** `PULL_REQUEST_ACTIONS` keeps controlling which actions enqueue reviews (default `opened`/`reopened`/`synchronize`/`ready_for_review`); merge handling of `closed` is always on and cannot be configured away.
 
+## Ask Maomao (code explainer chat)
+
+Set `MAOMAO_EXPLAIN_ENABLED=true` and each job page gains an **Ask Maomao** chat. The explainer is a read-only agent grounded in the reviewed change: it sees the exact head SHA, the diff, and Maomao's own findings, and can read/grep the checked-out repository to answer "what does this change do", "why is this finding severe", or "walk me through `src/app.ts`".
+
+- **Read-only, enforced in depth**: the agent's tool permissions deny bash/edit/write/webfetch (same deny-by-default config the reviewers run under), the checkout is mounted read-only (`0555`), and chat runs in its own workspace root — it can never modify the repository or Maomao's environment.
+- **Model**: `MAOMAO_EXPLAIN_MODEL` (falls back to your reviewer model).
+- **Budgets**: `MAOMAO_EXPLAIN_MAX_MESSAGES` (per conversation, default 20), `MAOMAO_EXPLAIN_MAX_COST_USD` (per conversation, default $1), `MAOMAO_EXPLAIN_TIMEOUT_MS` (default 180000). Resetting a conversation starts a fresh budget.
+- **Session continuity**: follow-up questions continue the same opencode session; a failed answer leaves the question in the transcript and the next send retries the same session.
+- The chat UI is an assistant-ui island over Maomao's own streaming endpoint (`/jobs/:id/chat/stream`) — the browser never reaches opencode, and requests are session/CSRF-gated like the rest of the UI. Without JavaScript, the page falls back to a plain round-trip form.
+
 ## Repository health scans (manual, `Sniff sniff`)
 
 `/scan` (operator UI) runs a one-off **health scan** of an allowlisted repository's default branch at its exact head SHA. It is manual only — there is no scheduler — and read-only: nothing is published to GitHub and no issue is created automatically.
