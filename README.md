@@ -439,13 +439,15 @@ Dismissal is scoped to that **finding fingerprint on that pull request**, not th
 
 Who may issue commands: repository `write`, `maintain`, or `admin`. A personal-repository `OWNER` association is accepted only when the collaborator API reports `none` (GitHub 404s some owners); it never upgrades an explicit `read`/`triage` permission. Org members who 404 the collaborator API are ignored (fail closed). Webhook signatures are verified. Duplicate deliveries and repeated commands are no-ops.
 
+On each (re)review Maomao also **reads** PR conversation comments and inline review comments it did not author (same job path as webhook / paste-URL enqueue; no extra pipeline). Allowlisted maintainers (`MAOMAO_OVERRIDE_AUTHORS`, or write/maintain/admin collaborators when that list is empty) can dismiss a **specific** non-security finding by replying on that Maomao review thread with an explicit phrase such as `rejected by design` or `by design`. Matching is by finding fingerprint (the thread), not by file path — a comment that only names a file does not dismiss every finding on that path. Security, authz, secret-exposure, and data-loss findings are never suppressed this way. Comment text is untrusted input: it is bounded and quoted into the OpenCode prompt as data, never as system/tool instructions (`ignore findings`, `approve`, `print secrets` do not change policy).
+
 The fingerprint is based on normalized path, category, and code identifiers (camelCase / snake_case) in the finding text — not solely the line number. When no code identifiers are present it falls back to normalized summary wording.
 
 The verifier only receives the prior finding plus nearby current file/diff context, and it finishes before risk routing so a buried or already-fixed finding cannot inflate the next review into `poison-alert`.
 
 ## Configuration reference
 
-See `.env.example`. Notable knobs: `ALLOWED_GITHUB_ACCOUNT_IDS`, `ALLOWED_GITHUB_REPOSITORY_IDS`, `MAX_DIFF_BYTES`, `REPO_RATE_LIMIT_PER_WINDOW`, `REPO_RATE_WINDOW_MS`, `OPENCODE_MAX_RETRIES`, `REVIEW_DRAFTS`, `POST_EMPTY_REVIEW`, `JOB_CONCURRENCY`, `WORKSPACE_ROOT`, `DATABASE_PATH`, `MAX_INLINE_COMMENTS`, `PULL_REQUEST_ACTIONS`, `OPENCODE_VERIFIER_MODEL`, `RECONCILE_MIN_CONFIDENCE`, `GITHUB_OAUTH_CLIENT_ID`, `GITHUB_OAUTH_CLIENT_SECRET`, `MAOMAO_ADMIN_GITHUB_IDS`, `MAOMAO_PUBLIC_URL`, `UI_LOCAL_LOGIN`, `UI_PASSWORD`, `UI_SESSION_SECRET`, `REVIEWER_ROUTING`, `POISON_ALERT_POLICY`.
+See `.env.example`. Notable knobs: `ALLOWED_GITHUB_ACCOUNT_IDS`, `ALLOWED_GITHUB_REPOSITORY_IDS`, `MAOMAO_OVERRIDE_AUTHORS`, `MAX_DIFF_BYTES`, `REPO_RATE_LIMIT_PER_WINDOW`, `REPO_RATE_WINDOW_MS`, `OPENCODE_MAX_RETRIES`, `REVIEW_DRAFTS`, `POST_EMPTY_REVIEW`, `JOB_CONCURRENCY`, `WORKSPACE_ROOT`, `DATABASE_PATH`, `MAX_INLINE_COMMENTS`, `PULL_REQUEST_ACTIONS`, `OPENCODE_VERIFIER_MODEL`, `RECONCILE_MIN_CONFIDENCE`, `GITHUB_OAUTH_CLIENT_ID`, `GITHUB_OAUTH_CLIENT_SECRET`, `MAOMAO_ADMIN_GITHUB_IDS`, `MAOMAO_PUBLIC_URL`, `UI_LOCAL_LOGIN`, `UI_PASSWORD`, `UI_SESSION_SECRET`, `REVIEWER_ROUTING`, `POISON_ALERT_POLICY`.
 
 ## Follow-ups (not in this MVP)
 

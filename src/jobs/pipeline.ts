@@ -1,6 +1,6 @@
 import type { Config } from "../config.js";
 import type { JobStore, JobRow, ReviewerRunRow, NewJobInput } from "./store.js";
-import type { GithubPort } from "../github/client.js";
+import type { GithubPort, ReviewThread } from "../github/client.js";
 import { buildReviewBody, findExistingReview, selectInlineComments, inlineCommentFingerprints } from "../github/client.js";
 import type { CheckoutPort } from "../checkout.js";
 import {
@@ -24,6 +24,13 @@ import {
   type Severity,
 } from "../schema.js";
 import { classifyPriorFindings, collectPriorFindings, findingsForPublish } from "../findings/reconcile.js";
+import {
+  collectHumanOverrides,
+  emptyOverrideContext,
+  isProtectedFinding,
+  omitOverriddenFindings,
+  type HumanOverrideContext,
+} from "../findings/overrides.js";
 import { resolveReviewEvent } from "./verdict.js";
 import { applyReconciliationThreads, attachStoredThreadIds, closeResolvedScanIssues, findingDiffContext, persistClassifications, persistThreadsAsFindings } from "../findings/apply.js";
 import { githubRetryReason } from "../github/errors.js";
@@ -214,7 +221,7 @@ async function runJob(deps: PipelineDeps, jobId: number, signal: AbortSignal): P
     const runs = store.listReviewerRuns(jobId).filter((run) => run.state !== "done");
     await mapLimit(runs, config.opencode.reviewerConcurrency, async (run) => {
       throwIfStale(store, jobId, signal);
-      await runReviewer(deps, job, run, workspace.repoDir, [workspace.diffPath, workspace.metaPath], signal);
+      await runReviewer(deps, job, run, workspace.repoDir, [workspace.diffPath, workspace.metaPath], signal, snapshot.humanOverrides);
     });
     throwIfStale(store, jobId, signal);
 
@@ -235,7 +242,7 @@ async function runJob(deps: PipelineDeps, jobId: number, signal: AbortSignal): P
       aggregator_model: config.opencode.aggregatorModel || config.opencode.reviewerModel || null,
     });
     store.log(jobId, `Aggregating ${parsedReviewers.length} reviewer result(s)`);
-    let aggregated = await runAggregator(deps, job, parsedReviewers, workspace.repoDir, [workspace.diffPath], signal);
+    let aggregated = await runAggregator(deps, job, parsedReviewers, workspace.repoDir, [workspace.diffPath], signal, snapshot.humanOverrides);
     throwIfStale(store, jobId, signal);
 
     const afterReviewers = store.getJob(jobId);
@@ -761,6 +768,14 @@ async function reconcileAndRoute(
     job.repo_name,
     job.pr_number,
   );
+  const humanOverrides = await loadHumanOverrides(deps, job, threads);
+  persistFingerprintOverrides(deps, job, humanOverrides);
+  if (humanOverrides.commentCount > 0 || humanOverrides.overrides.length > 0) {
+    deps.store.log(
+      job.id,
+      `Human discussion: ${humanOverrides.commentCount} non-Maomao comment(s), ${humanOverrides.overrides.length} allowlisted dismiss signal(s)`,
+    );
+  }
   const stored = deps.store.listFindings(job.repo_full_name, job.pr_number);
   const priors = collectPriorFindings({ threads, stored });
   deps.store.log(
@@ -778,7 +793,7 @@ async function reconcileAndRoute(
     priors,
     signal,
   });
-  const snapshot: ReconciliationSnapshot = { headSha: job.head_sha, items };
+  const snapshot: ReconciliationSnapshot = { headSha: job.head_sha, items, humanOverrides };
   for (const item of items) {
     deps.store.log(
       job.id,
@@ -798,6 +813,7 @@ async function runReviewer(
   cwd: string,
   files: string[],
   signal: AbortSignal,
+  humanOverrides?: HumanOverrideContext,
 ): Promise<void> {
   const role = deps.config.reviewers.find((item) => item.id === run.role);
   // The run's stored model (profile revision / enqueue spec) wins over config defaults.
@@ -834,6 +850,7 @@ async function runReviewer(
         headSha: job.head_sha,
         author: job.pr_author,
         promptBody: promptRevision?.body,
+        humanOverrideDigest: humanOverrides?.digest,
       });
       result = await deps.opencode.run({
         cwd,
@@ -906,6 +923,7 @@ async function runAggregator(
   cwd: string,
   files: string[],
   signal: AbortSignal,
+  humanOverrides?: HumanOverrideContext,
 ): Promise<AggregatorResult> {
   const model = deps.config.opencode.aggregatorModel || deps.config.opencode.reviewerModel;
   const started = Date.now();
@@ -922,6 +940,7 @@ async function runAggregator(
         baseSha: job.base_sha,
         headSha: job.head_sha,
         reviewerEvidence: reviewers,
+        humanOverrideDigest: humanOverrides?.digest,
       }),
       files,
       timeoutMs: deps.config.opencode.timeoutMs,
@@ -1096,6 +1115,28 @@ async function publishReview(
   }
 
   let publishable = findingsForPublish(aggregated.findings, snapshot);
+  const overridden = omitOverriddenFindings(publishable, snapshot.humanOverrides?.overrides ?? []);
+  for (const entry of overridden.suppressed) {
+    deps.store.dismissFinding({
+      repoFullName: job.repo_full_name,
+      prNumber: job.pr_number,
+      fingerprint: entry.finding.fingerprint,
+      actor: entry.override.author,
+      command: entry.override.signal,
+      reviewedSha: job.head_sha,
+      summary: entry.finding.summary,
+      path: entry.finding.file,
+      line: entry.finding.line,
+      category: entry.finding.category,
+      severity: entry.finding.severity,
+      body: entry.finding.body,
+    });
+    deps.store.log(
+      job.id,
+      `Omitting ${entry.finding.category ?? "finding"} ${entry.finding.fingerprint} (${entry.finding.file ?? "?"}:${entry.finding.line ?? "?"}): ${entry.override.signal} by ${entry.override.author}`,
+    );
+  }
+  publishable = overridden.kept;
   // severityRank is inverted (blocker=0), so "at or above" the minimum means rank <= threshold.
   const profileRevision = job.profile_revision_id
     ? deps.store.configs.getRevision(job.profile_revision_id)
@@ -1421,4 +1462,61 @@ function formatError(error: unknown): string {
   // ZodError.message is an unbounded multi-line JSON dump; formatSchemaError
   // keeps validation_error/failure_reason to bounded field paths.
   return formatSchemaError(error);
+}
+
+async function loadHumanOverrides(
+  deps: PipelineDeps,
+  job: JobRow,
+  threads: ReviewThread[],
+): Promise<HumanOverrideContext> {
+  try {
+    return await collectHumanOverrides({
+      github: deps.github,
+      config: deps.config,
+      job,
+      threads,
+    });
+  } catch (error) {
+    deps.store.log(job.id, `Could not load PR comments for overrides: ${formatError(error)}`, "warn");
+    return emptyOverrideContext();
+  }
+}
+
+function persistFingerprintOverrides(
+  deps: PipelineDeps,
+  job: JobRow,
+  context: HumanOverrideContext,
+): void {
+  if (context.overrides.length === 0) return;
+  const stored = deps.store.listFindings(job.repo_full_name, job.pr_number);
+  const byFingerprint = new Map(stored.map((row) => [row.fingerprint, row]));
+  for (const override of context.overrides) {
+    if (!override.fingerprint) continue;
+    const row = byFingerprint.get(override.fingerprint);
+    if (
+      isProtectedFinding({
+        category: row?.category ?? undefined,
+        summary: row?.summary || override.quote,
+        body: row?.body ?? undefined,
+      })
+    ) {
+      continue;
+    }
+    deps.store.dismissFinding({
+      repoFullName: job.repo_full_name,
+      prNumber: job.pr_number,
+      fingerprint: override.fingerprint,
+      actor: override.author,
+      command: override.signal,
+      reviewedSha: job.head_sha,
+      summary: row?.summary || override.quote || override.fingerprint,
+      path: override.path ?? row?.current_path,
+      line: override.line ?? row?.current_line,
+      category: row?.category,
+      severity: row?.severity,
+      body: row?.body,
+      githubThreadId: row?.github_thread_id,
+      githubCommentId: row?.github_comment_id,
+    });
+  }
 }

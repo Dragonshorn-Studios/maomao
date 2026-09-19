@@ -22,6 +22,7 @@ describe("loadConfig", () => {
     expect(config.pullRequestActions).toContain("ready_for_review");
     expect(config.allowedGithubAccountIds).toEqual([]);
     expect(config.allowedGithubRepositoryIds).toEqual([]);
+    expect(config.overrideAuthors).toEqual([]);
     expect(config.maxDiffBytes).toBe(1_048_576);
     expect(config.repoRateLimitPerWindow).toBe(6);
     expect(config.opencode.maxRetries).toBe(1);
@@ -48,6 +49,11 @@ describe("loadConfig", () => {
     expect(config.repoRateLimitPerWindow).toBe(3);
     expect(config.repoRateWindowMs).toBe(1000);
     expect(config.opencode.maxRetries).toBe(5);
+  });
+
+  it("parses maintainer override logins case-insensitively", () => {
+    const config = loadConfig({ MAOMAO_OVERRIDE_AUTHORS: "Szefowo, octocat" });
+    expect(config.overrideAuthors).toEqual(["szefowo", "octocat"]);
   });
 
   it("fails fast when an allowlist contains non-numeric tokens", () => {
