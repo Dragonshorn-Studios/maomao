@@ -1368,6 +1368,22 @@ describe("mixed-forge dashboard (issue #18)", () => {
     expect(rows).toHaveLength(2);
   });
 
+  it("keeps the forge filter across pagination links", () => {
+    enqueue({ provider: "gitlab", providerInstance: "gitlab.com", prNumber: 10 });
+    const jobs = store.listJobsPage({ forge: { provider: "gitlab", instance: "gitlab.com" } });
+    const html = renderHome(jobs.jobs, store, {
+      pagination: { hasOlder: true, hasNewer: false },
+      forgeScopes: [
+        { provider: "github", instance: "github.com" },
+        { provider: "gitlab", instance: "gitlab.com" },
+      ],
+      activeForge: "gitlab:gitlab.com",
+    });
+    expect(html).toContain('/?before=');
+    expect(html).toContain(`forge=${encodeURIComponent("gitlab:gitlab.com")}`);
+    expect(html).toContain("All forges");
+  });
+
   it("carries the forge identity into the job page heading", () => {
     const job = enqueue({ provider: "gitlab", providerInstance: "gitlab.corp.internal", prNumber: 9 });
     const html = renderJob(job, store.listReviewerRuns(job.id), store.listLogs(job.id), {});

@@ -110,7 +110,7 @@ export function renderHome(jobs: JobRow[], store: JobStore, options: PageOptions
   // data-forge is scaffolding for future client-side filtering; nothing
   // consumes it yet. An explicit All chip clears the active filter.
   const allChip = options.activeForge
-    ? `<a class="top-link" href="/" aria-current="true">All forges</a>`
+    ? `<a class="top-link" href="/">All forges</a>`
     : "";
   const forgeChips = (options.forgeScopes ?? [])
     .map((scope) => {
