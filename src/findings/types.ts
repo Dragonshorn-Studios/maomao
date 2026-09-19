@@ -14,6 +14,9 @@ export interface FindingRow {
   id: number;
   repo_full_name: string;
   pr_number: number;
+  /** Forge identity of the connection this finding belongs to (issue #18). */
+  provider: string;
+  provider_instance: string;
   fingerprint: string;
   status: FindingStatus;
   reviewed_sha: string;

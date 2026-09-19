@@ -1,7 +1,8 @@
 import type { Config } from "../config.js";
-import type { GithubPort, ReviewThread } from "../github/client.js";
-import { isMaomaoLogin, isMaomaoThread, parseThreadFindingMarker } from "../github/client.js";
-import type { JobRow } from "../jobs/store.js";
+import type { ForgePort } from "../forge/port.js";
+import type { ForgeDiscussion, ForgeRepoTarget } from "../forge/types.js";
+import { isMaomaoDiscussion, parseDiscussionFindingMarker } from "../forge/discussions.js";
+import { isMaomaoLogin } from "../github/client.js";
 import type { AggregatorFinding } from "../schema.js";
 import { canIssueOverride } from "./commands.js";
 import { fingerprintFinding, normalizePath } from "./identity.js";
@@ -216,11 +217,11 @@ export function buildHumanOverrideDigest(comments: PrDiscussionComment[], overri
 }
 
 /** Map Maomao-thread comments (including replies) onto that thread's finding fingerprint. */
-export function threadFingerprintIndex(threads: ReviewThread[]): Map<string, string> {
+export function threadFingerprintIndex(threads: ForgeDiscussion[]): Map<string, string> {
   const index = new Map<string, string>();
   for (const thread of threads) {
-    if (!isMaomaoThread(thread)) continue;
-    const marker = parseThreadFindingMarker(thread);
+    if (!isMaomaoDiscussion(thread)) continue;
+    const marker = parseDiscussionFindingMarker(thread);
     if (!marker) continue;
     for (const comment of thread.comments) {
       if (comment.databaseId == null) continue;
@@ -235,15 +236,26 @@ export function threadFingerprintIndex(threads: ReviewThread[]): Map<string, str
  * author, bound them, and turn allowlisted explicit dismissals into overrides.
  */
 export async function collectHumanOverrides(input: {
-  github: GithubPort;
+  forge: ForgePort;
   config: Config;
-  job: Pick<JobRow, "installation_id" | "repo_owner" | "repo_name" | "pr_number">;
-  threads: ReviewThread[];
+  job: Pick<
+    JobRowFields,
+    "provider" | "provider_instance" | "repo_owner" | "repo_name" | "repo_full_name" | "pr_number"
+  >;
+  threads: ForgeDiscussion[];
 }): Promise<HumanOverrideContext> {
-  const comments = await loadDiscussionComments(input);
+  const target: ForgeRepoTarget = {
+    provider: input.job.provider,
+    instance: input.job.provider_instance,
+    repoOwner: input.job.repo_owner,
+    repoName: input.job.repo_name,
+    repoFullName: input.job.repo_full_name,
+    changeNumber: input.job.pr_number,
+  };
+  const comments = await loadDiscussionComments(input, target);
   const humans = comments.filter((comment) => {
     if (!comment.body.trim()) return false;
-    return !isMaomaoLogin(comment.login, input.config.github.appSlug);
+    return !input.forge.isBotLogin(comment.login);
   });
   const fingerprints = threadFingerprintIndex(input.threads);
   const withPaths = humans.map((comment) => {
@@ -257,9 +269,9 @@ export async function collectHumanOverrides(input: {
   const overrides = await resolveOverrideSignals({
     comments: withPaths,
     fingerprints,
-    github: input.github,
+    forge: input.forge,
     config: input.config,
-    job: input.job,
+    target,
   });
   return {
     digest: buildHumanOverrideDigest(withPaths, overrides),
@@ -268,48 +280,34 @@ export async function collectHumanOverrides(input: {
   };
 }
 
-async function loadDiscussionComments(input: {
-  github: GithubPort;
-  job: Pick<JobRow, "installation_id" | "repo_owner" | "repo_name" | "pr_number">;
-  threads: ReviewThread[];
-}): Promise<PrDiscussionComment[]> {
+/** Structural subset of JobRow; keeps this module decoupled from the store. */
+interface JobRowFields {
+  provider: string;
+  provider_instance: string;
+  repo_owner: string;
+  repo_name: string;
+  repo_full_name: string;
+  pr_number: number;
+}
+
+async function loadDiscussionComments(
+  input: { forge: ForgePort; threads: ForgeDiscussion[] },
+  target: ForgeRepoTarget,
+): Promise<PrDiscussionComment[]> {
   const comments: PrDiscussionComment[] = [];
-  if (input.github.listIssueComments) {
-    const issue = await input.github.listIssueComments(
-      input.job.installation_id,
-      input.job.repo_owner,
-      input.job.repo_name,
-      input.job.pr_number,
-    );
-    for (const comment of issue.slice(-MAX_OVERRIDE_COMMENTS)) {
+  if (input.forge.listConversationComments) {
+    const forgeComments = await input.forge.listConversationComments(target);
+    for (const comment of forgeComments) {
       comments.push({
-        id: String(comment.id),
-        source: "issue",
+        id: comment.id,
+        source: comment.source === "inline" ? "review" : "issue",
         body: comment.body ?? "",
-        login: comment.userLogin,
-        userType: comment.userType,
-        authorAssociation: comment.authorAssociation,
-      });
-    }
-  }
-  if (input.github.listPullReviewComments) {
-    const review = await input.github.listPullReviewComments(
-      input.job.installation_id,
-      input.job.repo_owner,
-      input.job.repo_name,
-      input.job.pr_number,
-    );
-    for (const comment of review.slice(-MAX_OVERRIDE_COMMENTS)) {
-      comments.push({
-        id: String(comment.id),
-        source: "review",
-        body: comment.body ?? "",
-        login: comment.userLogin,
+        login: comment.login,
         userType: comment.userType,
         authorAssociation: comment.authorAssociation,
         path: comment.path,
         line: comment.line,
-        inReplyToId: comment.inReplyToId,
+        inReplyToId: comment.inReplyToId != null ? Number(comment.inReplyToId) : undefined,
       });
     }
     return comments;
@@ -333,9 +331,9 @@ async function loadDiscussionComments(input: {
 async function resolveOverrideSignals(input: {
   comments: PrDiscussionComment[];
   fingerprints: Map<string, string>;
-  github: GithubPort;
+  forge: ForgePort;
   config: Config;
-  job: Pick<JobRow, "installation_id" | "repo_owner" | "repo_name" | "pr_number">;
+  target: ForgeRepoTarget;
 }): Promise<HumanOverride[]> {
   const allowlist = input.config.overrideAuthors;
   const appSlug = input.config.github.appSlug;
@@ -348,17 +346,12 @@ async function resolveOverrideSignals(input: {
     const login = comment.login;
     if (!login) continue;
     if (allowlist.length > 0 && !allowlist.includes(login.toLowerCase())) continue;
-    if (isMaomaoLogin(login, appSlug) || (comment.userType ?? "").toLowerCase() === "bot") continue;
+    if (input.forge.isBotLogin(login) || (comment.userType ?? "").toLowerCase() === "bot") continue;
 
     let permission = permissionCache.get(login.toLowerCase());
     if (permission == null) {
       try {
-        permission = await input.github.getCollaboratorPermission(
-          input.job.installation_id,
-          input.job.repo_owner,
-          input.job.repo_name,
-          login,
-        );
+        permission = await input.forge.getActorPermission(input.target, login);
       } catch {
         permission = "none";
       }

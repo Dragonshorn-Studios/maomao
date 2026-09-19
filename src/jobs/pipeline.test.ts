@@ -2114,7 +2114,7 @@ describe("finding reconciliation", () => {
     expect(store.getJob(created.job.id)?.state).toBe("completed");
     const row = store.getFinding("acme/widgets", 4, fingerprint);
     expect(row?.status).toBe("resolved");
-    expect(row?.reconciliation_reason).toBe("GitHub thread already resolved");
+    expect(row?.reconciliation_reason).toBe("Forge thread already resolved");
     expect(store.listLogs(created.job.id).map((line) => line.message).join("\n")).toContain(
       "classified resolved",
     );
@@ -2178,7 +2178,7 @@ describe("finding reconciliation", () => {
       "Did not close thread",
     );
     expect(store.listLogs(created.job.id).map((line) => line.message).join("\n")).toContain(
-      "no GitHub thread id",
+      "no forge thread id",
     );
   });
 

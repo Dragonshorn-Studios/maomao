@@ -43,7 +43,8 @@ export async function execFile(
       options.timeoutMs && options.timeoutMs > 0
         ? setTimeout(() => {
             child.kill("SIGKILL");
-            reject(new Error(`timed out after ${options.timeoutMs}ms: ${command} ${args.join(" ")}`));
+            const commandLine = redactSecrets(`${command} ${args.join(" ")}`, options.secrets ?? []);
+            reject(new Error(`timed out after ${options.timeoutMs}ms: ${commandLine}`));
           }, options.timeoutMs)
         : undefined;
     const onAbort = () => child.kill("SIGKILL");
@@ -113,18 +114,29 @@ export interface Workspace {
 }
 
 export interface CheckoutPort {
+  /**
+   * Fetches and checks out the exact head SHA of the change under review.
+   * All forge specifics (clone URL, auth arguments, head refspec, secret
+   * material) are supplied by the provider through `ForgeCloneSpec` fields —
+   * this boundary never learns which forge it is talking to.
+   */
   prepare(input: {
     jobId: number;
-    installationId: number;
-    owner: string;
-    repo: string;
-    prNumber: number;
+    cloneUrl: string;
+    /** `git -c …` authentication arguments from the provider; must also appear in `secrets`. */
+    gitAuthArgs?: string[];
+    /**
+     * The provider's native head ref (e.g. refs/pull/7/head). prepare pins it
+     * to the local refs/maomao/pr itself — that local-ref name is a contract:
+     * the anti-drift check resolves exactly that ref and falls back to
+     * detaching `headSha` directly when it is absent.
+     */
+    remoteRef: string;
+    /** Secret material to redact from subprocess output. */
+    secrets?: string[];
     baseSha: string;
     headSha: string;
-    token?: string;
-    cloneUrl?: string;
     signal?: AbortSignal;
-    secrets?: string[];
     fetchDiff: () => Promise<string>;
     metadata: Record<string, unknown>;
   }): Promise<Workspace>;
@@ -159,8 +171,8 @@ export function createCheckout(workspaceRoot: string, gitBin = "git"): CheckoutP
         GIT_CONFIG_VALUE_0: "/dev/null",
         LC_ALL: "C",
       });
-      const secrets = [...(input.secrets ?? []), ...gitAuthSecrets(input.token)];
-      const extraHeader = gitHttpAuthArgs(input.token);
+      const secrets = [...(input.secrets ?? [])];
+      const extraHeader = input.gitAuthArgs ?? [];
       const git = (args: string[]) =>
         execFile(gitBin, args, { env, timeoutMs: 120_000, signal: input.signal, secrets });
 
@@ -169,8 +181,7 @@ export function createCheckout(workspaceRoot: string, gitBin = "git"): CheckoutP
       await git(["-C", repoDir, "config", "core.hooksPath", "/dev/null"]);
       await git(["-C", repoDir, "config", "advice.detachedHead", "false"]);
 
-      const origin = input.cloneUrl ?? `https://github.com/${input.owner}/${input.repo}.git`;
-      const addRemote = await git(["-C", repoDir, "remote", "add", "origin", origin]);
+      const addRemote = await git(["-C", repoDir, "remote", "add", "origin", input.cloneUrl]);
       if (addRemote.exitCode !== 0) throw new Error(`git remote add failed: ${addRemote.stderr}`);
 
       const fetchPr = await git([
@@ -182,7 +193,7 @@ export function createCheckout(workspaceRoot: string, gitBin = "git"): CheckoutP
         "--no-tags",
         "--no-recurse-submodules",
         "origin",
-        `+refs/pull/${input.prNumber}/head:refs/maomao/pr`,
+        `+${input.remoteRef}:refs/maomao/pr`,
       ]);
       if (fetchPr.exitCode !== 0) {
         const fetchSha = await git([

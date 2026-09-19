@@ -1,4 +1,5 @@
 import type { CancelReason } from "../config.js";
+import { scopeOf } from "../forge/types.js";
 import { publish } from "../events.js";
 import type { JobStore } from "./store.js";
 
@@ -93,7 +94,13 @@ export function cancelJob(store: JobStore, jobId: number, input: CancelInput): C
   const job = store.getJob(jobId);
   if (!job) return { ok: false, error: "job not found" };
   if (job.state === "cancelled") return { ok: true, already: true };
-  const cancelled = store.cancelJobs({ jobId }, input.reason, input.actor ?? null);
+  // Scope from the row itself: cancelling by id must hit the connection the
+  // job actually belongs to, never the default one.
+  const cancelled = store.cancelJobs(
+    { jobId, scope: scopeOf(job) },
+    input.reason,
+    input.actor ?? null,
+  );
   if (cancelled.length === 0) {
     // Re-read so the error names the state that actually won the race.
     const current = store.getJob(jobId);
