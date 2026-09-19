@@ -4015,7 +4015,7 @@ describe("home forge filter", () => {
     const home = await app.request("/?forge=gitlab:gitlab.com");
     const html = await home.text();
     expect(html).not.toContain('role="navigation" aria-label="Filter by forge"');
-    // Both jobs render unfiltered on a single-scope store.
-    expect((html.match(/acme\/widgets/g) ?? []).length).toBeGreaterThanOrEqual(2);
+    // The single job renders unfiltered despite the bogus forge param.
+    expect(html).toContain("[GitHub] acme/widgets #7");
   });
 });
