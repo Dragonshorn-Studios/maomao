@@ -225,3 +225,19 @@ describe("removeTree", () => {
     }
   });
 });
+
+describe("execFile timeout redaction", () => {
+  it("redacts secret-bearing args from timeout messages", async () => {
+    const secret = "super-secret-header-value";
+    const message: string = await execFile("bash", ["-c", `sleep 5; echo ${secret}`], {
+      timeoutMs: 50,
+      secrets: [secret],
+    }).then(
+      () => "",
+      (error: unknown) => (error instanceof Error ? error.message : String(error)),
+    );
+    expect(message).toContain("timed out");
+    expect(message).not.toContain(secret);
+    expect(message).toContain("[redacted]");
+  });
+});

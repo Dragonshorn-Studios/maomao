@@ -126,21 +126,23 @@ export class ChatService {
       );
     }
 
-    const workspace = await this.ensureWorkspace(conversation, input.job);
-    const repoDir = join(workspace, REPO_DIR);
-
-    chatStore.appendMessage({ conversationId: conversation.id, role: "user", content: input.question });
-
-    const firstMessage = budget.messages === 0;
-    const prompt = firstMessage ? this.seedPrompt(input.job, input.question) : input.question;
-    const started = Date.now();
-    const parser = new ExplainerEventParser();
-    let lastDeltaIndex = 0;
-
     const redactAll = (text: string) =>
       redactSecrets(text, [...githubSecrets(config), ...opencodeEnvSecrets(process.env)]);
 
     try {
+      // Checkout failures are conversation failures too: inside the try so
+      // their (redacted) errors set the banner instead of escaping unredacted.
+      const workspace = await this.ensureWorkspace(conversation, input.job);
+      const repoDir = join(workspace, REPO_DIR);
+
+      chatStore.appendMessage({ conversationId: conversation.id, role: "user", content: input.question });
+
+      const firstMessage = budget.messages === 0;
+      const prompt = firstMessage ? this.seedPrompt(input.job, input.question) : input.question;
+      const started = Date.now();
+      const parser = new ExplainerEventParser();
+      let lastDeltaIndex = 0;
+
       const result = await this.deps.opencode.run({
         cwd: repoDir,
         model: this.model() ?? "",
