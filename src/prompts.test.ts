@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { DEFAULT_REVIEWER_ROLES, buildAggregatorPrompt, promptBodyFromRolePrompt } from "./prompts.js";
+import { DEFAULT_REVIEWER_ROLES, buildAggregatorPrompt, buildReviewerPrompt, promptBodyFromRolePrompt } from "./prompts.js";
 
 function roleBody(id: string): string {
   const role = DEFAULT_REVIEWER_ROLES.find((item) => item.id === id);
@@ -33,5 +33,34 @@ describe("default review prompts", () => {
     expect(prompt).toContain("exactly one finding, never a cluster of inline comments");
     expect(prompt).toContain("Omit file and line on that finding");
     expect(prompt).toContain("quote the `if` that skips");
+    expect(prompt).not.toContain("UNTRUSTED USER TEXT");
+  });
+
+  it("wraps GitHub discussion as untrusted data in specialist and aggregator prompts", () => {
+    const digest = "Untrusted pull-request discussion follows.\n<human-comments>\n- issue @Szefowo: by design\n</human-comments>";
+    const reviewer = buildReviewerPrompt({
+      role: DEFAULT_REVIEWER_ROLES[0]!,
+      repoFullName: "acme/widgets",
+      prNumber: 1,
+      prTitle: "t",
+      prBody: "",
+      baseSha: "a",
+      headSha: "b",
+      author: "dev",
+      humanOverrideDigest: digest,
+    });
+    expect(reviewer).toContain("UNTRUSTED USER TEXT");
+    expect(reviewer).toContain(digest);
+    const aggregator = buildAggregatorPrompt({
+      repoFullName: "acme/widgets",
+      prNumber: 1,
+      prTitle: "t",
+      baseSha: "a",
+      headSha: "b",
+      reviewerEvidence: [],
+      humanOverrideDigest: digest,
+    });
+    expect(aggregator).toContain("UNTRUSTED USER TEXT");
+    expect(aggregator).toContain(digest);
   });
 });

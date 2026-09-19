@@ -269,6 +269,14 @@ export function effectiveConfigEntries(
       : "(empty — any repository on an allowed account)",
     source: src("ALLOWED_GITHUB_REPOSITORY_IDS"),
   });
+  add({
+    group: "Webhooks and access",
+    label: "Comment override authors",
+    value: config.overrideAuthors.length > 0
+      ? config.overrideAuthors.join(", ")
+      : "(empty — write/maintain/admin collaborators)",
+    source: src("MAOMAO_OVERRIDE_AUTHORS"),
+  });
   row(
     "Webhooks and access",
     "Repository rate limit",

@@ -1,3 +1,5 @@
+import type { HumanOverrideContext } from "./overrides.js";
+
 export type FindingStatus =
   | "open"
   | "resolved"
@@ -75,6 +77,8 @@ export interface ClassifiedFinding {
 export interface ReconciliationSnapshot {
   headSha: string;
   items: ClassifiedFinding[];
+  /** Sanitized human-comment digest + matched dismissals for this run. */
+  humanOverrides?: HumanOverrideContext;
 }
 
 export function currentFindingsForRisk(items: ClassifiedFinding[]): ClassifiedFinding[] {
