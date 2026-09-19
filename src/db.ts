@@ -16,14 +16,35 @@ export function openDb(path: string): SqliteDb {
   return db;
 }
 
+/**
+ * Table identity columns for multi-forge storage (issue #18). Every row is
+ * scoped to a provider + instance so credentials, deduplication keys, and
+ * finding fingerprints can never collide across GitHub / GitLab.com /
+ * self-managed GitLab connections. Legacy databases are rebuilt in place by
+ * `migrate` with the columns defaulted to the GitHub connection.
+ */
+const PROVIDER_COLUMNS = "provider TEXT NOT NULL DEFAULT 'github', provider_instance TEXT NOT NULL DEFAULT 'github.com'";
+
 function migrate(db: SqliteDb): void {
-  db.exec(`
+  // The rebuild below renames tables. With foreign keys on, SQLite would also
+  // rewrite the REFERENCES clauses in escalation_dispatches and orphan them;
+  // and even with FK off, modern ALTER TABLE RENAME rewrites references to the
+  // renamed name. legacy_alter_table restores the old rename semantics (leave
+  // references untouched) so the surviving tables keep pointing at "jobs".
+  db.pragma("foreign_keys = OFF");
+  db.pragma("legacy_alter_table = ON");
+  try {
+    db.exec(`
     CREATE TABLE IF NOT EXISTS jobs (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       repo_full_name TEXT NOT NULL,
       repo_owner TEXT NOT NULL,
       repo_name TEXT NOT NULL,
       installation_id INTEGER NOT NULL,
+      ${PROVIDER_COLUMNS},
+      forge_connection_id TEXT,
+      github_account_id INTEGER,
+      github_repository_id INTEGER,
       pr_number INTEGER NOT NULL,
       pr_title TEXT NOT NULL DEFAULT '',
       pr_body TEXT NOT NULL DEFAULT '',
@@ -61,8 +82,6 @@ function migrate(db: SqliteDb): void {
       updated_at TEXT NOT NULL,
       started_at TEXT,
       finished_at TEXT,
-      github_account_id INTEGER,
-      github_repository_id INTEGER,
       routing_state TEXT NOT NULL DEFAULT 'queued',
       routing_mode TEXT,
       routing_profile TEXT,
@@ -102,7 +121,7 @@ function migrate(db: SqliteDb): void {
       escalation_id TEXT,
       poison_alert_policy TEXT,
       manual_escalate_requested INTEGER NOT NULL DEFAULT 0,
-      UNIQUE (repo_full_name, pr_number, head_sha)
+      UNIQUE (provider, provider_instance, repo_full_name, pr_number, head_sha)
     );
 
     CREATE TABLE IF NOT EXISTS escalation_dispatches (
@@ -163,15 +182,11 @@ function migrate(db: SqliteDb): void {
       created_at TEXT NOT NULL
     );
 
-    CREATE INDEX IF NOT EXISTS idx_jobs_created ON jobs(created_at DESC);
-    CREATE INDEX IF NOT EXISTS idx_jobs_state ON jobs(state);
-    CREATE INDEX IF NOT EXISTS idx_logs_job ON job_logs(job_id, id);
-    CREATE INDEX IF NOT EXISTS idx_runs_job ON reviewer_runs(job_id);
-
     CREATE TABLE IF NOT EXISTS findings (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       repo_full_name TEXT NOT NULL,
       pr_number INTEGER NOT NULL,
+      ${PROVIDER_COLUMNS},
       fingerprint TEXT NOT NULL,
       status TEXT NOT NULL,
       reviewed_sha TEXT NOT NULL,
@@ -200,34 +215,35 @@ function migrate(db: SqliteDb): void {
       last_job_id INTEGER,
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL,
-      UNIQUE (repo_full_name, pr_number, fingerprint)
+      UNIQUE (provider, provider_instance, repo_full_name, pr_number, fingerprint)
     );
 
-    CREATE INDEX IF NOT EXISTS idx_findings_pr ON findings(repo_full_name, pr_number, status);
-    CREATE INDEX IF NOT EXISTS idx_findings_thread ON findings(github_thread_id);
-    CREATE INDEX IF NOT EXISTS idx_findings_comment ON findings(github_comment_id);
-
     CREATE TABLE IF NOT EXISTS webhook_deliveries (
-      delivery_id TEXT PRIMARY KEY,
+      ${PROVIDER_COLUMNS},
+      delivery_id TEXT NOT NULL,
       event TEXT NOT NULL,
       result TEXT NOT NULL,
-      created_at TEXT NOT NULL
+      created_at TEXT NOT NULL,
+      PRIMARY KEY (provider, provider_instance, delivery_id)
     );
 
     CREATE TABLE IF NOT EXISTS merged_pulls (
       repo_full_name TEXT NOT NULL,
       pr_number INTEGER NOT NULL,
+      ${PROVIDER_COLUMNS},
       merged_at TEXT NOT NULL,
       delivery_id TEXT,
-      PRIMARY KEY (repo_full_name, pr_number)
+      PRIMARY KEY (provider, provider_instance, repo_full_name, pr_number)
     );
 
     CREATE TABLE IF NOT EXISTS processed_review_commands (
-      comment_id TEXT PRIMARY KEY,
+      ${PROVIDER_COLUMNS},
+      comment_id TEXT NOT NULL,
       delivery_id TEXT,
       command TEXT NOT NULL,
       result TEXT NOT NULL,
-      created_at TEXT NOT NULL
+      created_at TEXT NOT NULL,
+      PRIMARY KEY (provider, provider_instance, comment_id)
     );
 
     CREATE TABLE IF NOT EXISTS profile_revisions (
@@ -243,8 +259,6 @@ function migrate(db: SqliteDb): void {
       updated_at TEXT NOT NULL,
       activated_at TEXT
     );
-
-    CREATE INDEX IF NOT EXISTS idx_profile_revisions_name ON profile_revisions(name, status);
 
     CREATE TABLE IF NOT EXISTS config_audit (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -269,18 +283,17 @@ function migrate(db: SqliteDb): void {
       activated_at TEXT
     );
 
-    CREATE INDEX IF NOT EXISTS idx_prompt_revisions_role ON prompt_revisions(role_id, status);
-
     CREATE TABLE IF NOT EXISTS scan_issues (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       job_id INTEGER NOT NULL,
       repo_full_name TEXT NOT NULL,
+      ${PROVIDER_COLUMNS},
       fingerprint TEXT NOT NULL,
       issue_number INTEGER NOT NULL,
       issue_url TEXT NOT NULL,
       title TEXT NOT NULL,
       created_at TEXT NOT NULL,
-      UNIQUE (repo_full_name, fingerprint)
+      UNIQUE (provider, provider_instance, repo_full_name, fingerprint)
     );
 
     CREATE TABLE IF NOT EXISTS eval_fixtures (
@@ -307,81 +320,219 @@ function migrate(db: SqliteDb): void {
       created_at TEXT NOT NULL
     );
   `);
-  ensureColumn(db, "jobs", "review_event", "TEXT");
-  ensureColumn(db, "jobs", "review_event_reason", "TEXT");
-  ensureColumn(db, "jobs", "aggregator_fallback", "INTEGER");
-  ensureColumn(db, "jobs", "github_account_id", "INTEGER");
-  ensureColumn(db, "jobs", "github_repository_id", "INTEGER");
-  ensureColumn(db, "jobs", "reconciliation_json", "TEXT");
-  ensureColumn(db, "jobs", "risk_profile", "TEXT");
-  ensureColumn(db, "jobs", "risk_reason", "TEXT");
-  ensureColumn(db, "jobs", "aggregator_reasoning_tokens", "INTEGER");
-  ensureColumn(db, "jobs", "aggregator_cache_read_tokens", "INTEGER");
-  ensureColumn(db, "jobs", "aggregator_cache_write_tokens", "INTEGER");
-  ensureColumn(db, "jobs", "aggregator_total_tokens", "INTEGER");
-  ensureColumn(db, "jobs", "aggregator_usage_complete", "INTEGER");
-  ensureColumn(db, "jobs", "aggregator_usage_warning", "TEXT");
-  ensureColumn(db, "reviewer_runs", "reasoning_tokens", "INTEGER");
-  ensureColumn(db, "reviewer_runs", "cache_read_tokens", "INTEGER");
-  ensureColumn(db, "reviewer_runs", "cache_write_tokens", "INTEGER");
-  ensureColumn(db, "reviewer_runs", "total_tokens", "INTEGER");
-  ensureColumn(db, "reviewer_runs", "usage_complete", "INTEGER");
-  ensureColumn(db, "reviewer_runs", "usage_warning", "TEXT");
-  ensureColumn(db, "reviewer_runs", "prompt_revision_id", "INTEGER");
-  ensureColumn(db, "jobs", "cancelled_reason", "TEXT");
-  ensureColumn(db, "jobs", "cancelled_by", "TEXT");
-  const jobColumns: Array<[string, string]> = [
-    ["routing_state", "TEXT NOT NULL DEFAULT 'queued'"],
-    ["routing_mode", "TEXT"],
-    ["routing_profile", "TEXT"],
-    ["routing_reason", "TEXT"],
-    ["routing_confidence", "REAL"],
-    ["routing_signals", "TEXT"],
-    ["routing_reviewers", "TEXT"],
-    ["routing_source", "TEXT"],
-    ["routing_model", "TEXT"],
-    ["routing_provider", "TEXT"],
-    ["routing_raw", "TEXT"],
-    ["routing_prompt_tokens", "INTEGER"],
-    ["routing_completion_tokens", "INTEGER"],
-    ["routing_cost", "REAL"],
-    ["routing_total_tokens", "INTEGER"],
-    ["routing_usage_complete", "INTEGER"],
-    ["routing_usage_warning", "TEXT"],
-    ["routing_duration_ms", "INTEGER"],
-    ["internal_escalation_state", "TEXT NOT NULL DEFAULT 'not_requested'"],
-    ["internal_escalation_reason", "TEXT"],
-    ["internal_escalation_model", "TEXT"],
-    ["internal_escalation_provider", "TEXT"],
-    ["internal_escalation_raw", "TEXT"],
-    ["internal_escalation_normalized", "TEXT"],
-    ["internal_escalation_prompt_tokens", "INTEGER"],
-    ["internal_escalation_completion_tokens", "INTEGER"],
-    ["internal_escalation_cost", "REAL"],
-    ["internal_escalation_total_tokens", "INTEGER"],
-    ["internal_escalation_usage_complete", "INTEGER"],
-    ["internal_escalation_usage_warning", "TEXT"],
-    ["internal_escalation_duration_ms", "INTEGER"],
-    ["internal_escalation_alert_cleared", "INTEGER"],
-    ["external_dispatch_status", "TEXT NOT NULL DEFAULT 'not_requested'"],
-    ["external_dispatch_reason", "TEXT"],
-    ["external_dispatch_targets", "TEXT"],
-    ["external_dispatch_error", "TEXT"],
-    ["escalation_id", "TEXT"],
-    ["budget_exceeded_warning", "TEXT"],
-    ["poison_alert_policy", "TEXT"],
-    ["manual_escalate_requested", "INTEGER NOT NULL DEFAULT 0"],
-    ["profile_revision_id", "INTEGER"],
-    ["job_type", "TEXT NOT NULL DEFAULT 'pr_review'"],
-    ["scan_branch", "TEXT"],
-  ];
-  for (const [name, ddl] of jobColumns) ensureColumn(db, "jobs", name, ddl);
 
-  const findingColumns: [string, string][] = [
-    ["diff_hunk", "TEXT"],
-    ["diff_note", "TEXT"],
-  ];
-  for (const [name, ddl] of findingColumns) ensureColumn(db, "findings", name, ddl);
+    // Legacy (pre-multi-forge) databases: rebuild the provider-scoped tables so
+    // the scoped keys replace the repo-name-only ones. `rebuildTableScoped`
+    // skips tables that already carry the provider columns (fresh databases).
+    for (const rebuild of SCOPED_REBUILDS) {
+      rebuildTableScoped(db, rebuild);
+    }
+
+    db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_jobs_created ON jobs(created_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_jobs_state ON jobs(state);
+    CREATE INDEX IF NOT EXISTS idx_logs_job ON job_logs(job_id, id);
+    CREATE INDEX IF NOT EXISTS idx_runs_job ON reviewer_runs(job_id);
+
+    CREATE INDEX IF NOT EXISTS idx_findings_pr ON findings(repo_full_name, pr_number, status);
+    CREATE INDEX IF NOT EXISTS idx_findings_thread ON findings(github_thread_id);
+    CREATE INDEX IF NOT EXISTS idx_findings_comment ON findings(github_comment_id);
+
+    CREATE INDEX IF NOT EXISTS idx_profile_revisions_name ON profile_revisions(name, status);
+    CREATE INDEX IF NOT EXISTS idx_prompt_revisions_role ON prompt_revisions(role_id, status);
+  `);
+
+    ensureColumn(db, "jobs", "review_event", "TEXT");
+    ensureColumn(db, "jobs", "review_event_reason", "TEXT");
+    ensureColumn(db, "jobs", "aggregator_fallback", "INTEGER");
+    ensureColumn(db, "jobs", "github_account_id", "INTEGER");
+    ensureColumn(db, "jobs", "github_repository_id", "INTEGER");
+    ensureColumn(db, "jobs", "reconciliation_json", "TEXT");
+    ensureColumn(db, "jobs", "risk_profile", "TEXT");
+    ensureColumn(db, "jobs", "risk_reason", "TEXT");
+    ensureColumn(db, "jobs", "aggregator_reasoning_tokens", "INTEGER");
+    ensureColumn(db, "jobs", "aggregator_cache_read_tokens", "INTEGER");
+    ensureColumn(db, "jobs", "aggregator_cache_write_tokens", "INTEGER");
+    ensureColumn(db, "jobs", "aggregator_total_tokens", "INTEGER");
+    ensureColumn(db, "jobs", "aggregator_usage_complete", "INTEGER");
+    ensureColumn(db, "jobs", "aggregator_usage_warning", "TEXT");
+    ensureColumn(db, "reviewer_runs", "reasoning_tokens", "INTEGER");
+    ensureColumn(db, "reviewer_runs", "cache_read_tokens", "INTEGER");
+    ensureColumn(db, "reviewer_runs", "cache_write_tokens", "INTEGER");
+    ensureColumn(db, "reviewer_runs", "total_tokens", "INTEGER");
+    ensureColumn(db, "reviewer_runs", "usage_complete", "INTEGER");
+    ensureColumn(db, "reviewer_runs", "usage_warning", "TEXT");
+    ensureColumn(db, "reviewer_runs", "prompt_revision_id", "INTEGER");
+    ensureColumn(db, "jobs", "cancelled_reason", "TEXT");
+    ensureColumn(db, "jobs", "cancelled_by", "TEXT");
+    ensureColumn(db, "jobs", "forge_connection_id", "TEXT");
+    const jobColumns: Array<[string, string]> = [
+      ["routing_state", "TEXT NOT NULL DEFAULT 'queued'"],
+      ["routing_mode", "TEXT"],
+      ["routing_profile", "TEXT"],
+      ["routing_reason", "TEXT"],
+      ["routing_confidence", "REAL"],
+      ["routing_signals", "TEXT"],
+      ["routing_reviewers", "TEXT"],
+      ["routing_source", "TEXT"],
+      ["routing_model", "TEXT"],
+      ["routing_provider", "TEXT"],
+      ["routing_raw", "TEXT"],
+      ["routing_prompt_tokens", "INTEGER"],
+      ["routing_completion_tokens", "INTEGER"],
+      ["routing_cost", "REAL"],
+      ["routing_total_tokens", "INTEGER"],
+      ["routing_usage_complete", "INTEGER"],
+      ["routing_usage_warning", "TEXT"],
+      ["routing_duration_ms", "INTEGER"],
+      ["internal_escalation_state", "TEXT NOT NULL DEFAULT 'not_requested'"],
+      ["internal_escalation_reason", "TEXT"],
+      ["internal_escalation_model", "TEXT"],
+      ["internal_escalation_provider", "TEXT"],
+      ["internal_escalation_raw", "TEXT"],
+      ["internal_escalation_normalized", "TEXT"],
+      ["internal_escalation_prompt_tokens", "INTEGER"],
+      ["internal_escalation_completion_tokens", "INTEGER"],
+      ["internal_escalation_cost", "REAL"],
+      ["internal_escalation_total_tokens", "INTEGER"],
+      ["internal_escalation_usage_complete", "INTEGER"],
+      ["internal_escalation_usage_warning", "TEXT"],
+      ["internal_escalation_duration_ms", "INTEGER"],
+      ["internal_escalation_alert_cleared", "INTEGER"],
+      ["external_dispatch_status", "TEXT NOT NULL DEFAULT 'not_requested'"],
+      ["external_dispatch_reason", "TEXT"],
+      ["external_dispatch_targets", "TEXT"],
+      ["external_dispatch_error", "TEXT"],
+      ["escalation_id", "TEXT"],
+      ["budget_exceeded_warning", "TEXT"],
+      ["poison_alert_policy", "TEXT"],
+      ["manual_escalate_requested", "INTEGER NOT NULL DEFAULT 0"],
+      ["profile_revision_id", "INTEGER"],
+      ["job_type", "TEXT NOT NULL DEFAULT 'pr_review'"],
+      ["scan_branch", "TEXT"],
+    ];
+    for (const [name, ddl] of jobColumns) ensureColumn(db, "jobs", name, ddl);
+
+    const findingColumns: [string, string][] = [
+      ["diff_hunk", "TEXT"],
+      ["diff_note", "TEXT"],
+    ];
+    for (const [name, ddl] of findingColumns) ensureColumn(db, "findings", name, ddl);
+  } finally {
+    db.pragma("foreign_keys = ON");
+    db.pragma("legacy_alter_table = OFF");
+  }
+  db.pragma(`user_version = 2`);
+}
+
+/**
+ * One legacy-table rebuild: the exact constraint fragment from the shipped v1
+ * schema and its provider-scoped replacement (which also injects the two
+ * identity columns). `appendPk` tables move a column-level PRIMARY KEY to a
+ * scoped table constraint, so the replacement adds the PK separately.
+ */
+interface ScopedRebuild {
+  table: string;
+  from: string;
+  to: string;
+  appendPk?: string;
+}
+
+const SCOPED_REBUILDS: ScopedRebuild[] = [
+  {
+    table: "jobs",
+    from: "UNIQUE (repo_full_name, pr_number, head_sha)",
+    to: `${PROVIDER_COLUMNS},\n      UNIQUE (provider, provider_instance, repo_full_name, pr_number, head_sha)`,
+  },
+  {
+    table: "findings",
+    from: "UNIQUE (repo_full_name, pr_number, fingerprint)",
+    to: `${PROVIDER_COLUMNS},\n      UNIQUE (provider, provider_instance, repo_full_name, pr_number, fingerprint)`,
+  },
+  {
+    table: "merged_pulls",
+    from: "PRIMARY KEY (repo_full_name, pr_number)",
+    to: `${PROVIDER_COLUMNS},\n      PRIMARY KEY (provider, provider_instance, repo_full_name, pr_number)`,
+  },
+  {
+    table: "scan_issues",
+    from: "UNIQUE (repo_full_name, fingerprint)",
+    to: `${PROVIDER_COLUMNS},\n      UNIQUE (provider, provider_instance, repo_full_name, fingerprint)`,
+  },
+  {
+    table: "webhook_deliveries",
+    from: "delivery_id TEXT PRIMARY KEY",
+    to: `${PROVIDER_COLUMNS},\n      delivery_id TEXT NOT NULL`,
+    appendPk: "PRIMARY KEY (provider, provider_instance, delivery_id)",
+  },
+  {
+    table: "processed_review_commands",
+    from: "comment_id TEXT PRIMARY KEY",
+    to: `${PROVIDER_COLUMNS},\n      comment_id TEXT NOT NULL`,
+    appendPk: "PRIMARY KEY (provider, provider_instance, comment_id)",
+  },
+];
+
+interface ColumnInfo {
+  name: string;
+  type: string;
+  notnull: number;
+  dflt_value: string | null;
+  pk: number;
+}
+
+/**
+ * In-place legacy migration of one table: rename → recreate from the stored
+ * CREATE statement with the scoped constraint → carry over columns that were
+ * added by earlier `ensureColumn` migrations (they are absent from the stored
+ * SQL) → copy rows → drop the legacy table. Preserves row ids and all data;
+ * indexes die with the rename and are recreated by `migrate` afterwards.
+ */
+function rebuildTableScoped(db: SqliteDb, rebuild: ScopedRebuild): void {
+  // Already scoped (fresh v2 database, or rebuilt in an earlier pass).
+  if (columnNames(db, rebuild.table).has("provider")) return;
+  const legacyName = `${rebuild.table}__maomao_migrate`;
+  const row = db
+    .prepare(`SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?`)
+    .get(rebuild.table) as { sql: string } | undefined;
+  // Table not present at all: the base CREATE above already made it at v2.
+  if (!row?.sql) return;
+  const pattern = new RegExp(
+    rebuild.from.replace(/[()]/g, (match) => `\\${match}`).replace(/\s+/g, "\\s+"),
+  );
+  if (!pattern.test(row.sql)) {
+    throw new Error(
+      `Cannot migrate ${rebuild.table}: expected the legacy constraint \`${rebuild.from}\` in the stored schema; refusing to rebuild.`,
+    );
+  }
+  let newSql = row.sql.replace(pattern, rebuild.to);
+  if (rebuild.appendPk) {
+    const closeIndex = newSql.lastIndexOf(")");
+    if (closeIndex < 0) throw new Error(`Cannot migrate ${rebuild.table}: malformed stored schema`);
+    const before = newSql.slice(0, closeIndex).trimEnd();
+    newSql = `${before},\n      ${rebuild.appendPk}\n    ${newSql.slice(closeIndex)}`;
+  }
+
+  const legacyColumns = columnNames(db, rebuild.table);
+  db.exec(`ALTER TABLE ${rebuild.table} RENAME TO ${legacyName}`);
+  try {
+    db.exec(newSql);
+    // Columns ensured after v1 shipped exist only in table_info, not in the
+    // stored CREATE text; re-add them before copying so no data is lost.
+    const recreated = columnNames(db, rebuild.table);
+    const legacyInfo = db.prepare(`PRAGMA table_info(${legacyName})`).all() as ColumnInfo[];
+    for (const info of legacyInfo) {
+      if (recreated.has(info.name)) continue;
+      const ddl = `${info.type}${info.notnull ? " NOT NULL" : ""}${info.dflt_value != null ? ` DEFAULT ${info.dflt_value}` : ""}`;
+      db.exec(`ALTER TABLE ${rebuild.table} ADD COLUMN "${info.name}" ${ddl}`);
+    }
+    const columnList = [...legacyColumns].map((name) => `"${name}"`).join(", ");
+    db.exec(
+      `INSERT INTO ${rebuild.table} (${columnList}) SELECT ${columnList} FROM ${legacyName}`,
+    );
+  } finally {
+    db.exec(`DROP TABLE IF EXISTS ${legacyName}`);
+  }
 }
 
 function columnNames(db: SqliteDb, table: string): Set<string> {

@@ -1,7 +1,10 @@
 import type { Config } from "../config.js";
 import type { JobStore, JobRow, ReviewerRunRow, NewJobInput } from "./store.js";
-import type { GithubPort, ReviewThread } from "../github/client.js";
-import { buildReviewBody, findExistingReview, selectInlineComments, inlineCommentFingerprints } from "../github/client.js";
+import type { GithubPort } from "../github/client.js";
+import type { ForgePort } from "../forge/port.js";
+import { ForgeRegistry } from "../forge/registry.js";
+import type { ForgeDiscussion, ForgeInlineComment, ForgeRepoTarget, ForgeSummary, ForgeVerdict } from "../forge/types.js";
+import { buildReviewBody, findExistingReview, selectInlineComments, inlineCommentFingerprints } from "../forge/review-text.js";
 import type { CheckoutPort } from "../checkout.js";
 import {
   aggregatorUsagePersistence,
@@ -72,7 +75,10 @@ import {
 export interface PipelineDeps {
   config: Config;
   store: JobStore;
+  /** GitHub client for GitHub-only features (health scans, issue creation). */
   github: GithubPort;
+  /** Forge adapters for the review pipeline; defaults to a registry over `github`. */
+  forge?: ForgeRegistry;
   checkout: CheckoutPort;
   opencode: OpenCodePort;
   getInstallationToken?: (installationId: number) => Promise<string>;
@@ -87,6 +93,9 @@ export function abortJob(jobId: number): void {
 }
 
 export function createPipeline(deps: PipelineDeps) {
+  const forge =
+    deps.forge ??
+    new ForgeRegistry(deps.github, deps.config.github.appSlug, deps.getInstallationToken);
   return {
     abortJob,
     async run(jobId: number): Promise<void> {
@@ -97,9 +106,9 @@ export function createPipeline(deps: PipelineDeps) {
       try {
         const job = deps.store.getJob(jobId);
         if (job?.job_type === "health_scan") {
-          await runScanJob(deps, jobId, controller.signal);
+          await runScanJob(deps, forge, jobId, controller.signal);
         } else {
-          await runJob(deps, jobId, controller.signal);
+          await runJob(deps, forge, jobId, controller.signal);
         }
       } finally {
         if (aborts.get(jobId) === controller) aborts.delete(jobId);
@@ -288,7 +297,7 @@ async function runBudgetedAggregation(
   return aggregated;
 }
 
-async function runJob(deps: PipelineDeps, jobId: number, signal: AbortSignal): Promise<void> {
+async function runJob(deps: PipelineDeps, forge: ForgeRegistry, jobId: number, signal: AbortSignal): Promise<void> {
   const { store, config } = deps;
   const job = store.getJob(jobId);
   if (!job) {
@@ -341,30 +350,22 @@ async function runJob(deps: PipelineDeps, jobId: number, signal: AbortSignal): P
     store.log(jobId, `Preparing isolated workspace for ${job.repo_full_name}#${job.pr_number} @ ${job.head_sha}`);
     throwIfStale(store, jobId, signal);
 
-    const token = deps.getInstallationToken
-      ? await deps.getInstallationToken(job.installation_id)
-      : await deps.github.getInstallationToken(job.installation_id);
-    const diff = await deps.github.getPullDiff(
-      job.installation_id,
-      job.repo_owner,
-      job.repo_name,
-      job.pr_number,
-      config.maxDiffBytes,
-    );
+    const target = forgeTargetForJob(job);
+    const provider = forge.forJob(job);
+    const clone = await provider.cloneSpec(target);
+    const diff = await provider.getChangeDiff(target, config.maxDiffBytes);
     const diffBytes = Buffer.byteLength(diff, "utf8");
     if (config.maxDiffBytes > 0 && diffBytes > config.maxDiffBytes) {
       throw new Error(`diff exceeds MAX_DIFF_BYTES (${diffBytes} > ${config.maxDiffBytes})`);
     }
     const workspace = await deps.checkout.prepare({
       jobId,
-      installationId: job.installation_id,
-      owner: job.repo_owner,
-      repo: job.repo_name,
-      prNumber: job.pr_number,
+      cloneUrl: clone.cloneUrl,
+      gitAuthArgs: clone.gitAuthArgs,
+      headRefspec: clone.headRefspec,
+      secrets: [...clone.secrets, ...globalSecrets(config)],
       baseSha: job.base_sha,
       headSha: job.head_sha,
-      token,
-      secrets: token ? [token, ...githubKeySecrets(config)] : githubKeySecrets(config),
       signal,
       fetchDiff: async () => diff,
       metadata: {
@@ -382,7 +383,7 @@ async function runJob(deps: PipelineDeps, jobId: number, signal: AbortSignal): P
     const profileDefinition = profileDefinitionForJob(store, job);
     const reviewerTimeouts = profileReviewerTimeouts(profileDefinition);
     const profileBudget = createProfileBudget(profileDefinition);
-    const snapshot = await reconcileAndRoute(deps, job, workspace.repoDir, workspace.dir, diff, signal, profileBudget);
+    const snapshot = await reconcileAndRoute(deps, provider, job, workspace.repoDir, workspace.dir, diff, signal, profileBudget);
     throwIfStale(store, jobId, signal);
     await routeSpecialists(deps, job, diff, workspace.repoDir, [workspace.diffPath, workspace.metaPath], signal, profileBudget);
     const routed = store.getJob(jobId);
@@ -463,7 +464,7 @@ async function runJob(deps: PipelineDeps, jobId: number, signal: AbortSignal): P
     store.patchJob(jobId, { aggregator_normalized: JSON.stringify(aggregated, null, 2) });
 
     store.setJobState(jobId, "publishing", { aggregator_state: "done" });
-    const posted = await publishReview(deps, job, aggregated, parsedReviewers.length, snapshot, diff, signal);
+    const posted = await publishReview(deps, provider, job, aggregated, parsedReviewers.length, snapshot, diff, signal);
     const afterPublish = store.getJob(jobId) ?? job;
     if (posted) {
       store.patchJob(jobId, { github_review_id: posted.id, github_review_url: posted.url });
@@ -477,12 +478,7 @@ async function runJob(deps: PipelineDeps, jobId: number, signal: AbortSignal): P
     }
     persistClassifications(store, job, snapshot.items, diff);
     try {
-      const threads = await deps.github.listReviewThreads(
-        job.installation_id,
-        job.repo_owner,
-        job.repo_name,
-        job.pr_number,
-      );
+      const threads = await provider.listDiscussions(forgeTargetForJob(job));
       persistThreadsAsFindings({
         store,
         job,
@@ -496,7 +492,7 @@ async function runJob(deps: PipelineDeps, jobId: number, signal: AbortSignal): P
     const closeSnapshot = attachStoredThreadIds(store, job, snapshot);
     try {
       const applied = await applyReconciliationThreads({
-        github: deps.github,
+        forge: provider,
         job,
         snapshot: closeSnapshot,
         postedFingerprints: posted?.postedFingerprints ?? [],
@@ -586,7 +582,7 @@ async function runJob(deps: PipelineDeps, jobId: number, signal: AbortSignal): P
  * checkout + specialists + aggregation, findings persisted locally. Never publishes a
  * GitHub review and never creates issues — issue creation is a separate operator action.
  */
-async function runScanJob(deps: PipelineDeps, jobId: number, signal: AbortSignal): Promise<void> {
+async function runScanJob(deps: PipelineDeps, forge: ForgeRegistry, jobId: number, signal: AbortSignal): Promise<void> {
   const store = deps.store;
   const config = deps.config;
   const job = store.getJob(jobId);
@@ -605,26 +601,22 @@ async function runScanJob(deps: PipelineDeps, jobId: number, signal: AbortSignal
     }
     store.setJobState(jobId, "preparing", { started_at: nowIso() });
     store.log(jobId, `Health scan of ${job.repo_full_name} at ${job.head_sha}`);
-    const token = deps.getInstallationToken
-      ? await deps.getInstallationToken(job.installation_id)
-      : job.installation_id === 0
-        ? undefined
-        : await deps.github.getInstallationToken(job.installation_id);
-    if (!deps.github.getCommitDiff) throw new Error("health scans require a GitHub client with commit diff support");
-    const diff = await deps.github.getCommitDiff(job.installation_id, job.repo_owner, job.repo_name, job.head_sha);
+    const provider = forge.forJob(job);
+    if (!provider.getCommitDiff) throw new Error("health scans require a forge provider with commit diff support");
+    const target = forgeTargetForJob(job);
+    const diff = await provider.getCommitDiff(target, job.head_sha);
     if (config.maxDiffBytes > 0 && diff.length > config.maxDiffBytes) {
       throw new Error(`commit diff exceeds MAX_DIFF_BYTES (${diff.length} > ${config.maxDiffBytes})`);
     }
+    const clone = await provider.cloneSpec(target);
     const workspace = await deps.checkout.prepare({
       jobId,
-      installationId: job.installation_id,
-      owner: job.repo_owner,
-      repo: job.repo_name,
-      prNumber: 0,
+      cloneUrl: clone.cloneUrl,
+      gitAuthArgs: clone.gitAuthArgs,
+      headRefspec: clone.headRefspec,
+      secrets: [...clone.secrets, ...globalSecrets(config)],
       baseSha: job.head_sha,
       headSha: job.head_sha,
-      token,
-      secrets: githubKeySecrets(config),
       signal,
       fetchDiff: async () => diff,
       metadata: {
@@ -808,8 +800,20 @@ async function runScanJob(deps: PipelineDeps, jobId: number, signal: AbortSignal
   }
 }
 
-function githubKeySecrets(config: Config): string[] {
+function globalSecrets(config: Config): string[] {
   return [config.github.privateKey, config.github.webhookSecret].filter((value) => value.length > 4);
+}
+
+/** Storage-scoped target for a job's forge connection. */
+export function forgeTargetForJob(job: JobRow): ForgeRepoTarget {
+  return {
+    provider: job.provider,
+    instance: job.provider_instance,
+    repoOwner: job.repo_owner,
+    repoName: job.repo_name,
+    repoFullName: job.repo_full_name,
+    changeNumber: job.pr_number,
+  };
 }
 
 function throwIfStale(store: JobStore, jobId: number, signal: AbortSignal): void {
@@ -983,6 +987,7 @@ async function routeSpecialists(
 
 async function reconcileAndRoute(
   deps: PipelineDeps,
+  forge: ForgePort,
   job: JobRow,
   repoDir: string,
   workspaceDir: string,
@@ -991,13 +996,8 @@ async function reconcileAndRoute(
   profileBudget?: ProfileBudget,
 ): Promise<ReconciliationSnapshot> {
   deps.store.setJobState(job.id, "reconciling");
-  const threads = await deps.github.listReviewThreads(
-    job.installation_id,
-    job.repo_owner,
-    job.repo_name,
-    job.pr_number,
-  );
-  const humanOverrides = await loadHumanOverrides(deps, job, threads);
+  const threads = await forge.listDiscussions(forgeTargetForJob(job));
+  const humanOverrides = await loadHumanOverrides(deps, forge, job, threads);
   persistFingerprintOverrides(deps, job, humanOverrides);
   if (humanOverrides.commentCount > 0 || humanOverrides.overrides.length > 0) {
     deps.store.log(
@@ -1352,6 +1352,7 @@ async function runInternalEscalation(
 
 async function publishReview(
   deps: PipelineDeps,
+  forge: ForgePort,
   job: JobRow,
   aggregated: AggregatorResult,
   reviewerCount: number,
@@ -1360,8 +1361,9 @@ async function publishReview(
   signal: AbortSignal,
 ): Promise<{ id: string; url: string; postedFingerprints: string[] } | undefined> {
   if (deps.store.isStale(job.id)) return undefined;
+  const target = forgeTargetForJob(job);
 
-  const existing = await deps.github.listReviews(job.installation_id, job.repo_owner, job.repo_name, job.pr_number);
+  const existing: ForgeSummary[] = await forge.listSummaries(target);
   const already = findExistingReview(existing, job.head_sha);
   if (already) {
     deps.store.log(job.id, `Review already exists for ${job.head_sha}; skipping publish`);
@@ -1456,15 +1458,12 @@ async function publishReview(
   });
   // Re-check staleness after the decision: an APPROVE must never land on a superseded SHA.
   throwIfStale(deps.store, job.id, signal);
-  const posted = await deps.github.createCommentReview({
-    installationId: job.installation_id,
-    owner: job.repo_owner,
-    repo: job.repo_name,
-    pullNumber: job.pr_number,
+  const posted = await forge.publishReview({
+    target,
     commitId: job.head_sha,
     body,
     comments,
-    event: decision.event,
+    verdict: decision.event satisfies ForgeVerdict,
   });
   // Record the event only after GitHub accepted the review, so a recorded event
   // always corresponds to a delivered one.
@@ -1537,8 +1536,8 @@ async function dispatchExternalEscalation(
     return;
   }
 
-  const provider = "github";
-  const instance = "github.com";
+  const provider = latest.provider || "github";
+  const instance = latest.provider_instance || "github.com";
   const id = latest.escalation_id || escalationId({
     provider,
     instance,
@@ -1722,12 +1721,13 @@ function formatError(error: unknown): string {
 
 async function loadHumanOverrides(
   deps: PipelineDeps,
+  forge: ForgePort,
   job: JobRow,
-  threads: ReviewThread[],
+  threads: ForgeDiscussion[],
 ): Promise<HumanOverrideContext> {
   try {
     return await collectHumanOverrides({
-      github: deps.github,
+      forge,
       config: deps.config,
       job,
       threads,

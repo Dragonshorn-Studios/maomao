@@ -1,8 +1,8 @@
 import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { Config } from "../config.js";
-import type { ReviewThread } from "../github/client.js";
-import { findingComment, isMaomaoThread, parseThreadFindingMarker } from "../github/client.js";
+import type { ForgeDiscussion } from "../forge/types.js";
+import { findingComment, isMaomaoDiscussion, parseDiscussionFindingMarker } from "../forge/discussions.js";
 import type { JobRow, JobStore } from "../jobs/store.js";
 import type { OpenCodePort, OpenCodeUsage } from "../opencode/parse.js";
 import { buildVerifierPrompt } from "../prompts.js";
@@ -30,7 +30,7 @@ export interface PriorFinding {
 }
 
 export function collectPriorFindings(input: {
-  threads: ReviewThread[];
+  threads: ForgeDiscussion[];
   stored: ReturnType<JobStore["listFindings"]>;
 }): PriorFinding[] {
   const byFingerprint = new Map<string, PriorFinding>();
@@ -54,9 +54,9 @@ export function collectPriorFindings(input: {
   }
 
   for (const thread of input.threads) {
-    if (!isMaomaoThread(thread)) continue;
+    if (!isMaomaoDiscussion(thread)) continue;
     const comment = findingComment(thread);
-    const marker = parseThreadFindingMarker(thread);
+    const marker = parseDiscussionFindingMarker(thread);
     if (!marker) continue;
     const existing = byFingerprint.get(marker.id);
     const dismissed = existing?.dismissed === true;

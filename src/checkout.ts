@@ -113,18 +113,24 @@ export interface Workspace {
 }
 
 export interface CheckoutPort {
+  /**
+   * Fetches and checks out the exact head SHA of the change under review.
+   * All forge specifics (clone URL, auth arguments, head refspec, secret
+   * material) are supplied by the provider through `ForgeCloneSpec` fields —
+   * this boundary never learns which forge it is talking to.
+   */
   prepare(input: {
     jobId: number;
-    installationId: number;
-    owner: string;
-    repo: string;
-    prNumber: number;
+    cloneUrl: string;
+    /** `git -c …` authentication arguments from the provider; never logged. */
+    gitAuthArgs?: string[];
+    /** Refspec pinning the change head, targeting refs/maomao/pr (e.g. +refs/pull/N/head:refs/maomao/pr). */
+    headRefspec: string;
+    /** Secret material to redact from subprocess output. */
+    secrets?: string[];
     baseSha: string;
     headSha: string;
-    token?: string;
-    cloneUrl?: string;
     signal?: AbortSignal;
-    secrets?: string[];
     fetchDiff: () => Promise<string>;
     metadata: Record<string, unknown>;
   }): Promise<Workspace>;
@@ -159,8 +165,8 @@ export function createCheckout(workspaceRoot: string, gitBin = "git"): CheckoutP
         GIT_CONFIG_VALUE_0: "/dev/null",
         LC_ALL: "C",
       });
-      const secrets = [...(input.secrets ?? []), ...gitAuthSecrets(input.token)];
-      const extraHeader = gitHttpAuthArgs(input.token);
+      const secrets = [...(input.secrets ?? [])];
+      const extraHeader = input.gitAuthArgs ?? [];
       const git = (args: string[]) =>
         execFile(gitBin, args, { env, timeoutMs: 120_000, signal: input.signal, secrets });
 
@@ -169,8 +175,7 @@ export function createCheckout(workspaceRoot: string, gitBin = "git"): CheckoutP
       await git(["-C", repoDir, "config", "core.hooksPath", "/dev/null"]);
       await git(["-C", repoDir, "config", "advice.detachedHead", "false"]);
 
-      const origin = input.cloneUrl ?? `https://github.com/${input.owner}/${input.repo}.git`;
-      const addRemote = await git(["-C", repoDir, "remote", "add", "origin", origin]);
+      const addRemote = await git(["-C", repoDir, "remote", "add", "origin", input.cloneUrl]);
       if (addRemote.exitCode !== 0) throw new Error(`git remote add failed: ${addRemote.stderr}`);
 
       const fetchPr = await git([
@@ -182,7 +187,7 @@ export function createCheckout(workspaceRoot: string, gitBin = "git"): CheckoutP
         "--no-tags",
         "--no-recurse-submodules",
         "origin",
-        `+refs/pull/${input.prNumber}/head:refs/maomao/pr`,
+        input.headRefspec,
       ]);
       if (fetchPr.exitCode !== 0) {
         const fetchSha = await git([

@@ -1,6 +1,8 @@
-import type { GithubPort, ReviewThread } from "../github/client.js";
-import { findingComment, isMaomaoThread, parseThreadFindingMarker } from "../github/client.js";
+import type { GithubPort } from "../github/client.js";
 import { describeGithubError, isMissingGithubNodeError } from "../github/errors.js";
+import type { ForgePort } from "../forge/port.js";
+import type { ForgeDiscussion } from "../forge/types.js";
+import { findingComment, isMaomaoDiscussion, parseDiscussionFindingMarker } from "../forge/discussions.js";
 import type { JobRow, JobStore } from "../jobs/store.js";
 import { anchoredDiffHunk } from "./context.js";
 import { scanIssueMarkerBase, stripHtmlComments } from "./identity.js";
@@ -43,7 +45,7 @@ export interface ThreadCloseSkip {
 }
 
 export async function applyReconciliationThreads(input: {
-  github: GithubPort;
+  forge: ForgePort;
   job: JobRow;
   snapshot: ReconciliationSnapshot;
   postedFingerprints?: Iterable<string>;
@@ -52,11 +54,19 @@ export async function applyReconciliationThreads(input: {
   const resolved: string[] = [];
   const skipped: ThreadCloseSkip[] = [];
   const failed: Array<{ fingerprint: string; reason: string }> = [];
+  const target = {
+    provider: input.job.provider,
+    instance: input.job.provider_instance,
+    repoOwner: input.job.repo_owner,
+    repoName: input.job.repo_name,
+    repoFullName: input.job.repo_full_name,
+    changeNumber: input.job.pr_number,
+  };
   for (const item of input.snapshot.items) {
     if (item.githubAlreadyResolved) {
       skipped.push({
         fingerprint: item.fingerprint,
-        reason: item.reason || "GitHub thread already resolved",
+        reason: item.reason || "Forge thread already resolved",
         wantedClose: false,
       });
       continue;
@@ -66,8 +76,8 @@ export async function applyReconciliationThreads(input: {
       skipped.push({
         fingerprint: item.fingerprint,
         reason: wantedClose
-          ? `classified ${item.status} but no GitHub thread id; cannot close the review conversation`
-          : item.reason || `classified ${item.status}; no GitHub thread to update`,
+          ? `classified ${item.status} but no forge thread id; cannot close the review conversation`
+          : item.reason || `classified ${item.status}; no forge thread to update`,
         wantedClose,
       });
       continue;
@@ -83,13 +93,13 @@ export async function applyReconciliationThreads(input: {
     if (item.status === "resolved" || item.status === "dismissed" || item.status === "moved") {
       // Isolate failures: one bad thread id must not leave the other threads open.
       try {
-        await input.github.resolveReviewThread(input.job.installation_id, item.threadId);
+        await input.forge.resolveDiscussion(target, item.threadId);
         resolved.push(item.fingerprint);
       } catch (error) {
         if (isMissingGithubNodeError(error)) {
           skipped.push({
             fingerprint: item.fingerprint,
-            reason: `GitHub thread ${item.threadId} no longer exists; nothing left to resolve`,
+            reason: `Forge thread ${item.threadId} no longer exists; nothing left to resolve`,
             wantedClose: true,
           });
           continue;
@@ -188,15 +198,15 @@ export function persistClassifications(
 export function persistThreadsAsFindings(input: {
   store: JobStore;
   job: JobRow;
-  threads: ReviewThread[];
+  threads: ForgeDiscussion[];
   postedFingerprints: string[];
   diff?: string;
 }): void {
   const published = new Set(input.postedFingerprints);
   for (const thread of input.threads) {
-    if (!isMaomaoThread(thread)) continue;
+    if (!isMaomaoDiscussion(thread)) continue;
     const comment = findingComment(thread);
-    const marker = parseThreadFindingMarker(thread);
+    const marker = parseDiscussionFindingMarker(thread);
     if (!marker || !comment) continue;
     const existing = input.store.getFinding(input.job.repo_full_name, input.job.pr_number, marker.id);
     if (existing?.status === "dismissed") continue;

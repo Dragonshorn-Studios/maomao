@@ -2178,7 +2178,7 @@ describe("finding reconciliation", () => {
       "Did not close thread",
     );
     expect(store.listLogs(created.job.id).map((line) => line.message).join("\n")).toContain(
-      "no GitHub thread id",
+      "no forge thread id",
     );
   });
 

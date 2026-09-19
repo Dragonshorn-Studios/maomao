@@ -49,11 +49,11 @@ describe("GitHub review payload", () => {
 
   it("detects an already posted Maomao review for the SHA", () => {
     const existing = findExistingReview(
-      [{ id: 9, body: `${reviewMarker("deadbeef")}\nhello`, htmlUrl: "https://example.test/r" }],
+      [{ id: "9", body: `${reviewMarker("deadbeef")}\nhello`, htmlUrl: "https://example.test/r" }],
       "deadbeef",
     );
     expect(existing?.id).toBe("9");
-    expect(findExistingReview([{ id: 1, body: "unrelated" }], "deadbeef")).toBeUndefined();
+    expect(findExistingReview([{ id: "1", body: "unrelated" }], "deadbeef")).toBeUndefined();
   });
 });
 

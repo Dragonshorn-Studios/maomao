@@ -321,8 +321,22 @@ describe("finding store dismiss vs resolved", () => {
   });
 });
 
+const job = { installation_id: 1 } as JobRow;
+
+/** Adapts the historical resolveReviewThread fakes to the forge port shape. */
+function forgeWithFakes(github: {
+  resolveReviewThread?: (installationId: number, threadId: string) => Promise<void>;
+  unresolveReviewThread?: (installationId: number, threadId: string) => Promise<void>;
+}) {
+  return {
+    resolveDiscussion: async (_target: unknown, threadId: string) =>
+      github.resolveReviewThread?.(0, threadId),
+    unresolveDiscussion: async (_target: unknown, threadId: string) =>
+      github.unresolveReviewThread?.(0, threadId),
+  };
+}
+
 describe("thread apply", () => {
-  const job = { installation_id: 1 } as JobRow;
 
   it("does not resolve a moved thread unless a replacement comment was posted", async () => {
     const resolved: string[] = [];
@@ -353,7 +367,7 @@ describe("thread apply", () => {
       ],
     };
     const skipped = await applyReconciliationThreads({
-      github: github as never,
+      forge: forgeWithFakes(github) as never,
       job,
       snapshot,
       postedFingerprints: [],
@@ -364,7 +378,7 @@ describe("thread apply", () => {
 
     resolved.length = 0;
     const posted = await applyReconciliationThreads({
-      github: github as never,
+      forge: forgeWithFakes(github) as never,
       job,
       snapshot,
       postedFingerprints: ["moved1"],
@@ -691,7 +705,7 @@ describe("marker hygiene and resolve retries", () => {
         },
       ],
     };
-    const applied = await applyReconciliationThreads({ github: github as never, job, snapshot });
+    const applied = await applyReconciliationThreads({ forge: forgeWithFakes(github) as never, job, snapshot });
     // The bad thread id did not abort the loop.
     expect(resolved).toEqual(["PRRT_good"]);
     expect(applied.resolved).toEqual(["fpgood0000000001"]);
@@ -726,14 +740,14 @@ describe("marker hygiene and resolve retries", () => {
         },
       ],
     };
-    const applied = await applyReconciliationThreads({ github: github as never, job, snapshot });
+    const applied = await applyReconciliationThreads({ forge: forgeWithFakes(github) as never, job, snapshot });
     expect(applied.resolved).toEqual([]);
     expect(applied.failed).toEqual([]);
     expect(applied.skipped).toEqual([
       {
         fingerprint: "fpgone00000000001",
         wantedClose: true,
-        reason: "GitHub thread PRRT_gone no longer exists; nothing left to resolve",
+        reason: "Forge thread PRRT_gone no longer exists; nothing left to resolve",
       },
     ]);
   });
@@ -791,8 +805,8 @@ describe("marker hygiene and resolve retries", () => {
   it("does not call resolveReviewThread for a GitHub-already-resolved classification", async () => {
     const resolved: string[] = [];
     const applied = await applyReconciliationThreads({
-      github: {
-        resolveReviewThread: async (_installationId: number, threadId: string) => {
+      forge: {
+        resolveDiscussion: async (_target: unknown, threadId: string) => {
           resolved.push(threadId);
         },
       } as never,
@@ -821,7 +835,7 @@ describe("marker hygiene and resolve retries", () => {
 
   it("explains when a resolved finding cannot be closed because the thread id is missing", async () => {
     const applied = await applyReconciliationThreads({
-      github: { resolveReviewThread: async () => {} } as never,
+      forge: { resolveDiscussion: async () => {} } as never,
       job,
       snapshot: {
         headSha: "sha123",
@@ -840,7 +854,7 @@ describe("marker hygiene and resolve retries", () => {
       expect.objectContaining({
         fingerprint: "fpnothread000001",
         wantedClose: true,
-        reason: expect.stringContaining("no GitHub thread id"),
+        reason: expect.stringContaining("no forge thread id"),
       }),
     ]);
   });
