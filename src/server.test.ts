@@ -1,10 +1,14 @@
 import { createHmac } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
 import { loadConfig } from "./config.js";
+import { mkdirSync } from "node:fs";
+import { join } from "node:path";
 import { openDb } from "./db.js";
 import { JobStore } from "./jobs/store.js";
 import type { JobQueue } from "./jobs/queue.js";
 import type { OpenCodePort } from "./opencode/parse.js";
+import { ChatService } from "./chat/service.js";
+import { ChatStore } from "./chat/store.js";
 
 type OpenCodeLike = OpenCodePort;
 import { createApp } from "./server.js";
@@ -4017,5 +4021,142 @@ describe("home forge filter", () => {
     expect(html).not.toContain('role="navigation" aria-label="Filter by forge"');
     // The single job renders unfiltered despite the bogus forge param.
     expect(html).toContain("[GitHub] acme/widgets #7");
+  });
+});
+
+describe("ask-maomao chat routes", () => {
+  const chatEnv = {
+    GITHUB_WEBHOOK_SECRET: "s3cret",
+    GITHUB_APP_ID: "1",
+    GITHUB_APP_PRIVATE_KEY: "k",
+    REVIEWER_ROLES: "correctness",
+    MAOMAO_EXPLAIN_ENABLED: "true",
+    MAOMAO_EXPLAIN_MAX_MESSAGES: "2",
+  };
+
+  function chatContextExtras() {
+    const store = new ChatStore(openDb(":memory:"));
+    const service = new ChatService({
+      config: loadConfig(chatEnv),
+      chatStore: store,
+      jobStore: new JobStore(openDb(":memory:")),
+      github: { getInstallationToken: async () => "t" } as never,
+      checkout: {
+        async prepare(input) {
+          const dir = join("/tmp", `chat-route-${input.jobId}-${Date.now()}`, "repo");
+          mkdirSync(dir, { recursive: true });
+          return { dir: join(dir, ".."), repoDir: dir, diffPath: join(dir, "d"), metaPath: join(dir, "m") };
+        },
+        async cleanup() {},
+      },
+      opencode: {
+        async run(input) {
+          const text = `answer to: ${input.prompt.slice(-20)}`;
+          input.onStdout?.(`{"type":"step_start","sessionID":"ses_route","part":{}}\n`);
+          input.onStdout?.(`{"type":"text","part":{"id":"p1","text":${JSON.stringify(text)}}}\n`);
+          return { stdout: "s", stderr: "", exitCode: 0, text, usage: { totalTokens: 5, cost: 0.001, complete: true } };
+        },
+      },
+    });
+    return { chat: { service, store }, chatStore: store };
+  }
+
+  function seedJob(store: JobStore): number {
+    return store.enqueue({
+      repoFullName: "acme/widgets",
+      repoOwner: "acme",
+      repoName: "widgets",
+      installationId: 9,
+      prNumber: 4,
+      prTitle: "Change example",
+      prBody: "",
+      prHtmlUrl: "",
+      prAuthor: "dev",
+      baseSha: "base111",
+      headSha: "head999",
+      baseRef: "main",
+      headRef: "feat",
+      reviewers: [],
+    }).job.id;
+  }
+
+  it("404s when the explainer is disabled", async () => {
+    const { app, store } = testApp();
+    const jobId = seedJob(store);
+    expect((await app.request(`/jobs/${jobId}/chat`)).status).toBe(404);
+    expect((await app.request(`/jobs/${jobId}/chat/messages`, { method: "POST", body: "question=x", headers: { "content-type": "application/x-www-form-urlencoded" } })).status).toBe(404);
+  });
+
+  it("answers a message and renders the transcript", async () => {
+    const extras = chatContextExtras();
+    const { app, store } = testApp(chatEnv, undefined, undefined, extras);
+    const jobId = seedJob(store);
+    const post = await app.request(`/jobs/${jobId}/chat/messages`, {
+      method: "POST",
+      headers: { "content-type": "application/x-www-form-urlencoded" },
+      body: "question=What+does+this+change+do%3F",
+    });
+    expect(post.status).toBe(303);
+    const page = await app.request(`/jobs/${jobId}/chat`);
+    const html = await page.text();
+    expect(html).toContain("What does this change do?");
+    expect(html).toContain("answer to:");
+    expect(html).toContain("Messages left");
+    // Session bound for follow-ups.
+    const conversation = extras.chatStore.activeConversationForJob(jobId);
+    expect(conversation?.opencode_session_id).toBe("ses_route");
+  });
+
+  it("starts a new conversation on reset", async () => {
+    const extras = chatContextExtras();
+    const { app, store } = testApp(chatEnv, undefined, undefined, extras);
+    const jobId = seedJob(store);
+    await app.request(`/jobs/${jobId}/chat/messages`, {
+      method: "POST",
+      headers: { "content-type": "application/x-www-form-urlencoded" },
+      body: "question=hi",
+    });
+    const before = extras.chatStore.activeConversationForJob(jobId);
+    const reset = await app.request(`/jobs/${jobId}/chat/reset`, { method: "POST" });
+    expect(reset.status).toBe(303);
+    const after = extras.chatStore.activeConversationForJob(jobId);
+    expect(after?.id).not.toBe(before?.id);
+    expect(extras.chatStore.listMessages(after!.id)).toHaveLength(0);
+  });
+
+  it("surfaces budget exhaustion as a notice", async () => {
+    const extras = chatContextExtras();
+    const { app, store } = testApp(chatEnv, undefined, undefined, extras);
+    const jobId = seedJob(store);
+    for (let index = 0; index < 2; index += 1) {
+      await app.request(`/jobs/${jobId}/chat/messages`, {
+        method: "POST",
+        headers: { "content-type": "application/x-www-form-urlencoded" },
+        body: "question=again",
+      });
+    }
+    const refused = await app.request(`/jobs/${jobId}/chat/messages`, {
+      method: "POST",
+      headers: { "content-type": "application/x-www-form-urlencoded" },
+      body: "question=one more",
+    });
+    expect(refused.status).toBe(303);
+    const page = await app.request(`/jobs/${jobId}/chat?error=${encodeURIComponent("This conversation reached its message limit (2); reset it to start a new one.")}`);
+    const html = await page.text();
+
+    expect(html).toContain("Message limit reached");
+    expect(html).toContain("reset it to start a new one");
+  });
+
+  it("shows the Ask Maomao link on the job page only when enabled", async () => {
+    const enabled = testApp(chatEnv, undefined, undefined, chatContextExtras());
+    const jobId = seedJob(enabled.store);
+    const on = await (await enabled.app.request(`/jobs/${jobId}`)).text();
+    expect(on).toContain("/jobs/" + jobId + "/chat");
+
+    const off = testApp();
+    const offJob = seedJob(off.store);
+    const page = await (await off.app.request(`/jobs/${offJob}`)).text();
+    expect(page).not.toContain("/jobs/" + offJob + "/chat");
   });
 });

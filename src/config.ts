@@ -136,6 +136,14 @@ export interface Config {
     token: string;
     webhookSecret: string;
   };
+  /** "Ask Maomao" code-explainer chat on the job page. Disabled by default. */
+  chat: {
+    enabled: boolean;
+    model: string;
+    maxMessages: number;
+    maxCostUsd: number;
+    timeoutMs: number;
+  };
 }
 
 const DEFAULT_ACTIONS: PullRequestAction[] = [
@@ -313,6 +321,13 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     repoRateWindowMs: Math.max(0, parseInteger(env.REPO_RATE_WINDOW_MS, 60 * 60 * 1000)),
     forgeKey: loadForgeKey(env),
     gitlabBootstrap: parseGitLabBootstrap(env),
+    chat: {
+      enabled: parseBoolean(env.MAOMAO_EXPLAIN_ENABLED, false),
+      model: env.MAOMAO_EXPLAIN_MODEL?.trim() || "",
+      maxMessages: clamp(parseInteger(env.MAOMAO_EXPLAIN_MAX_MESSAGES, 20), 1, 200),
+      maxCostUsd: Math.max(0, parseNumber(env.MAOMAO_EXPLAIN_MAX_COST_USD, 1)),
+      timeoutMs: clamp(parseInteger(env.MAOMAO_EXPLAIN_TIMEOUT_MS, 180_000), 5_000, 600_000),
+    },
   };
 }
 

@@ -1,5 +1,6 @@
 import { serve } from "@hono/node-server";
 import { mkdirSync } from "node:fs";
+import { join } from "node:path";
 import { assertRuntimeConfig, loadConfig } from "./config.js";
 import { openDb } from "./db.js";
 import { JobStore } from "./jobs/store.js";
@@ -9,6 +10,8 @@ import { createApp } from "./server.js";
 import { GithubClient } from "./github/client.js";
 import { createCheckout, sweepWorkspaces } from "./checkout.js";
 import { createOpenCodeRunner } from "./opencode/spawn.js";
+import { ChatService } from "./chat/service.js";
+import { ChatStore } from "./chat/store.js";
 import { oauthCallbackUrl, oauthEnabled } from "./oauth.js";
 import { ForgeConnectionStore, countConnections } from "./forge/connections.js";
 import { ensureEnvGitLabConnection } from "./forge/bootstrap.js";
@@ -60,7 +63,22 @@ const pipeline = createPipeline({
 const queue = new JobQueue(store, config.jobConcurrency, (jobId) => pipeline.run(jobId));
 queue.start();
 
-const app = createApp({ config, store, queue, github, opencode, forgeConnections, startedAt: Date.now(), env: process.env });
+const chatStore = config.chat.enabled ? new ChatStore(db) : undefined;
+const chat = chatStore
+  ? {
+      store: chatStore,
+      service: new ChatService({
+        config,
+        chatStore,
+        jobStore: store,
+        github,
+        checkout: createCheckout(join(config.workspaceRoot, "chat")),
+        opencode,
+      }),
+    }
+  : undefined;
+
+const app = createApp({ config, store, queue, github, opencode, forgeConnections, chat, startedAt: Date.now(), env: process.env });
 
 serve({ fetch: app.fetch, hostname: config.host, port: config.port }, (info) => {
   console.log(`Maomao listening on http://${info.address}:${info.port}`);

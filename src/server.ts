@@ -8,6 +8,10 @@ import { handleGitLabWebhook } from "./gitlab/webhooks.js";
 import { ForgeConnectionStore, countConnections, toView } from "./forge/connections.js";
 import { probeConnection } from "./forge/probe.js";
 import { InstanceUrlError } from "./forge/safe-http.js";
+import { ChatService } from "./chat/service.js";
+import { ChatStore } from "./chat/store.js";
+import { renderChatPage } from "./ui/chat-page.js";
+import { ChatBudgetError } from "./chat/service.js";
 import type { ManualTriggerPort, GithubPort } from "./github/client.js";
 import type { OpenCodePort } from "./opencode/parse.js";
 import { authorizeGithubAccount, authorizeGithubRepository, authorizeGithubTarget, logAuthorizationRejection, logRateLimited, rejectUnauthorized } from "./github/authorize.js";
@@ -97,6 +101,8 @@ export interface ServerContext {
   opencode?: OpenCodePort;
   /** Persisted forge connections (GitLab). Undefined until MAOMAO_FORGE_KEY is set. */
   forgeConnections?: ForgeConnectionStore;
+  /** "Ask Maomao" explainer backend; undefined until MAOMAO_EXPLAIN_ENABLED. */
+  chat?: { service: ChatService; store: ChatStore };
   /** The environment loadConfig consumed; defaults to process.env. Injectable for tests. */
   env?: NodeJS.ProcessEnv;
 }
@@ -733,6 +739,71 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
     );
   });
 
+
+  app.post("/jobs/:id/chat/messages", async (c) => {
+    if (!ctx.config.chat.enabled || !ctx.chat) return c.text("Not found", 404);
+    const jobId = Number(c.req.param("id"));
+    const job = ctx.store.getJob(jobId);
+    if (!job) return c.text("Not found", 404);
+    const body = await c.req.parseBody();
+    const question = typeof body.question === "string" ? body.question.trim().slice(0, 4_000) : "";
+    if (!question) return c.redirect(`/jobs/${jobId}/chat?notice=${encodeURIComponent("Write a question first.")}`, 303);
+    const conversation =
+      ctx.chat.store.activeConversationForJob(jobId) ?? ctx.chat.store.createConversation(jobId, actionActor(c) ?? null);
+    try {
+      await ctx.chat.service.send({
+        job,
+        conversation,
+        question,
+        signal: c.req.raw.signal,
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      const friendly =
+        error instanceof ChatBudgetError
+          ? message
+          : `The explainer could not answer: ${message.slice(0, 300)}`;
+      return c.redirect(`/jobs/${jobId}/chat?error=${encodeURIComponent(friendly)}`, 303);
+    }
+    return c.redirect(`/jobs/${jobId}/chat`, 303);
+  });
+
+  app.post("/jobs/:id/chat/reset", (c) => {
+    if (!ctx.config.chat.enabled || !ctx.chat) return c.text("Not found", 404);
+    const jobId = Number(c.req.param("id"));
+    if (!ctx.store.getJob(jobId)) return c.text("Not found", 404);
+    ctx.chat.store.createConversation(jobId, actionActor(c) ?? null);
+    return c.redirect(`/jobs/${jobId}/chat`, 303);
+  });
+
+  app.get("/jobs/:id/chat", (c) => {
+    if (!ctx.config.chat.enabled || !ctx.chat) return c.text("Not found", 404);
+    const jobId = Number(c.req.param("id"));
+    const job = ctx.store.getJob(jobId);
+    if (!job) return c.text("Not found", 404);
+    const conversation = ctx.chat.store.activeConversationForJob(jobId);
+    const messages = conversation ? ctx.chat.store.listMessages(conversation.id) : [];
+    return c.html(
+      renderChatPage({
+        job,
+        conversation,
+        messages,
+        enabled: true,
+        maxMessages: ctx.config.chat.maxMessages,
+        usedCost: ctx.chat.store.usage(conversation?.id ?? 0).cost,
+        maxCostUsd: ctx.config.chat.maxCostUsd,
+        model: ctx.config.chat.model || ctx.config.opencode.reviewerModel || "",
+        options: {
+          ...pageOpts,
+          identity: c.get("identity"),
+          csrfToken: gateOn ? ensureCsrfToken(c, ctx.config.uiSessionSecret) : undefined,
+          notice: noticeText(c.req.query("notice")) ?? undefined,
+          error: c.req.query("error") || undefined,
+        },
+      }),
+    );
+  });
+
   app.get("/jobs/:id", (c) => {
     const id = Number(c.req.param("id"));
     const job = ctx.store.getJob(id);
@@ -747,6 +818,7 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
         identity: c.get("identity"),
         csrfToken: gateOn ? ensureCsrfToken(c, ctx.config.uiSessionSecret) : undefined,
         prHeadSha: latest?.head_sha ?? job.head_sha,
+        chatEnabled: ctx.config.chat.enabled && ctx.chat != null,
         notice: noticeText(c.req.query("notice"), job.repo_full_name, job.pr_number, job.head_sha),
         error: c.req.query("error") || undefined,
         prFindings: ctx.store.listFindings(job.repo_full_name, job.pr_number, {

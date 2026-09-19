@@ -246,6 +246,32 @@ function migrate(db: SqliteDb): void {
       PRIMARY KEY (provider, provider_instance, comment_id)
     );
 
+    CREATE TABLE IF NOT EXISTS chat_conversations (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      job_id INTEGER NOT NULL,
+      created_by TEXT,
+      opencode_session_id TEXT,
+      workspace_path TEXT,
+      state TEXT NOT NULL DEFAULT 'active',
+      last_error TEXT,
+      message_count INTEGER NOT NULL DEFAULT 0,
+      cost REAL,
+      total_tokens INTEGER,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS chat_messages (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      conversation_id INTEGER NOT NULL REFERENCES chat_conversations(id) ON DELETE CASCADE,
+      role TEXT NOT NULL,
+      content TEXT NOT NULL,
+      cost REAL,
+      total_tokens INTEGER,
+      duration_ms INTEGER,
+      created_at TEXT NOT NULL
+    );
+
     CREATE TABLE IF NOT EXISTS profile_revisions (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       name TEXT NOT NULL,
@@ -259,6 +285,9 @@ function migrate(db: SqliteDb): void {
       updated_at TEXT NOT NULL,
       activated_at TEXT
     );
+
+    CREATE INDEX IF NOT EXISTS idx_chat_conversations_job ON chat_conversations(job_id, id);
+    CREATE INDEX IF NOT EXISTS idx_chat_messages_conversation ON chat_messages(conversation_id, id);
 
     CREATE TABLE IF NOT EXISTS config_audit (
       id INTEGER PRIMARY KEY AUTOINCREMENT,

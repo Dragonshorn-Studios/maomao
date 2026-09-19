@@ -195,6 +195,7 @@ function renderJobsPagination(
 }
 
 export type JobPageOptions = PageOptions & {
+  chatEnabled?: boolean;
   scanIssueCreation?: ScanIssueCreationData;
   /** Provenance rows for a health-scan job (fingerprints → GitHub issues). */
   scanIssues?: Array<{ fingerprint: string; issue_number: number; issue_url: string; title: string }>;
@@ -244,6 +245,7 @@ export function renderJob(
     ${stale ? `<p class="warn" role="status">${escapeHtml(staleBanner())}</p>` : ""}
     <h1>${heading}</h1>
     <p class="lede">${escapeHtml(job.pr_title || "")}${flavor ? ` · ${escapeHtml(flavor)}` : ""}</p>
+    ${options.chatEnabled ? `<p><a href="/jobs/${job.id}/chat">Ask Maomao about this change →</a></p>` : ""}
     ${jobActions}
     ${
       job.state === "completed"
