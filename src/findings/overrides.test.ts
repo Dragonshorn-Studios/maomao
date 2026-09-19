@@ -54,7 +54,7 @@ function securityFinding(file = "src/auth.ts") {
   };
 }
 
-function override(partial: Partial<HumanOverride> & Pick<HumanOverride, "path" | "author">): HumanOverride {
+function override(partial: Partial<HumanOverride> & Pick<HumanOverride, "author">): HumanOverride {
   return {
     commentId: "1",
     signal: "rejected by design",
@@ -138,24 +138,48 @@ describe("author allowlist", () => {
 });
 
 describe("override matching against findings", () => {
-  it("allowlisted rejected-by-design suppresses a non-security finding", () => {
+  it("allowlisted rejected-by-design suppresses a non-security finding by fingerprint", () => {
     const finding = architectureFinding();
-    const matched = override({ author: "Szefowo", path: finding.file });
+    const matched = override({ author: "Szefowo", fingerprint: finding.fingerprint, path: finding.file });
     expect(findingMatchesOverride(finding, matched)).toBe(true);
     expect(omitOverriddenFindings([finding], [matched]).kept).toEqual([]);
   });
 
-  it("still raises a security finding even with a by-design comment", () => {
+  it("still raises a security finding even with a by-design comment on that fingerprint", () => {
     const finding = securityFinding();
-    const matched = override({ author: "Szefowo", path: finding.file, signal: "by design" });
+    const matched = override({
+      author: "Szefowo",
+      fingerprint: finding.fingerprint,
+      path: finding.file,
+      signal: "by design",
+    });
     expect(findingMatchesOverride(finding, matched)).toBe(false);
     expect(omitOverriddenFindings([finding], [matched]).kept).toEqual([finding]);
   });
 
-  it("does not suppress when the comment has no matching path or fingerprint", () => {
+  it("does not suppress every non-security finding on a file from a path-only dismiss", () => {
     const finding = architectureFinding("src/api.ts");
-    const otherFile = override({ author: "Szefowo", path: "src/other.ts" });
-    expect(omitOverriddenFindings([finding], [otherFile]).kept).toEqual([finding]);
+    const other = architectureFinding("src/api.ts");
+    const pathOnly = override({ author: "Szefowo", path: "src/api.ts" });
+    expect(findingMatchesOverride(finding, pathOnly)).toBe(false);
+    expect(omitOverriddenFindings([finding, other], [pathOnly]).kept).toEqual([finding, other]);
+  });
+
+  it("suppresses only the fingerprinted finding when two non-security findings share a file", () => {
+    const layering = architectureFinding("src/api.ts");
+    const naming = {
+      ...architectureFinding("src/api.ts"),
+      summary: "duplicated abstraction in the handler",
+      fingerprint: fingerprintFinding({
+        category: "architecture",
+        file: "src/api.ts",
+        summary: "duplicated abstraction in the handler",
+      }),
+    };
+    const matched = override({ author: "Szefowo", fingerprint: layering.fingerprint, path: "src/api.ts" });
+    const { kept, suppressed } = omitOverriddenFindings([layering, naming], [matched]);
+    expect(suppressed.map((entry) => entry.finding.fingerprint)).toEqual([layering.fingerprint]);
+    expect(kept).toEqual([naming]);
   });
 });
 
@@ -200,7 +224,7 @@ describe("collectHumanOverrides", () => {
     };
   }
 
-  it("allowlisted rejected-by-design suppresses the matching non-security finding class", async () => {
+  it("does not record a path-only rejected-by-design as a suppress override", async () => {
     const config = loadConfig({ MAOMAO_OVERRIDE_AUTHORS: "Szefowo", GITHUB_APP_SLUG: "maomao" });
     const context = await collectHumanOverrides({
       github: github({
@@ -217,10 +241,11 @@ describe("collectHumanOverrides", () => {
       job,
       threads: [],
     });
-    expect(context.overrides).toEqual([
-      expect.objectContaining({ author: "Szefowo", signal: "rejected by design", path: architecture.file }),
+    expect(context.overrides).toEqual([]);
+    expect(omitOverriddenFindings([architecture, security], context.overrides).kept).toEqual([
+      architecture,
+      security,
     ]);
-    expect(omitOverriddenFindings([architecture, security], context.overrides).kept).toEqual([security]);
   });
 
   it("does not create an override from a non-allowlisted commenter", async () => {
@@ -243,6 +268,23 @@ describe("collectHumanOverrides", () => {
     });
     expect(context.overrides).toEqual([]);
     expect(omitOverriddenFindings([architecture], context.overrides).kept).toEqual([architecture]);
+  });
+
+  it("skips a dismiss phrase that has no fingerprint and no path target", async () => {
+    const config = loadConfig({ MAOMAO_OVERRIDE_AUTHORS: "Szefowo", GITHUB_APP_SLUG: "maomao" });
+    const context = await collectHumanOverrides({
+      github: github({
+        issue: [{ id: 3, body: "rejected by design", userLogin: "Szefowo" }],
+      }),
+      config,
+      job,
+      threads: [],
+    });
+    expect(context.overrides).toEqual([]);
+    expect(omitOverriddenFindings([architecture, security], context.overrides).kept).toEqual([
+      architecture,
+      security,
+    ]);
   });
 
   it("does not let an injection-like comment change policy or suppress findings", async () => {
@@ -309,6 +351,19 @@ describe("collectHumanOverrides", () => {
     });
     expect(context.overrides[0]?.fingerprint).toBe(fingerprint);
     expect(findingMatchesOverride(architecture, context.overrides[0]!)).toBe(true);
+    const naming = {
+      ...architecture,
+      summary: "duplicated abstraction in the handler",
+      fingerprint: fingerprintFinding({
+        category: "architecture",
+        file: architecture.file,
+        summary: "duplicated abstraction in the handler",
+      }),
+    };
+    expect(omitOverriddenFindings([architecture, naming, security], context.overrides).kept).toEqual([
+      naming,
+      security,
+    ]);
   });
 });
 

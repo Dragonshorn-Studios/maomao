@@ -165,11 +165,9 @@ export function findingMatchesOverride(
   override: HumanOverride,
 ): boolean {
   if (isProtectedFinding(finding)) return false;
+  if (!override.fingerprint) return false;
   const fingerprint = finding.fingerprint ?? fingerprintFinding(finding);
-  if (override.fingerprint && override.fingerprint === fingerprint) return true;
-  const findingPath = normalizePath(finding.file);
-  if (override.path && findingPath && findingPath === normalizePath(override.path)) return true;
-  return false;
+  return override.fingerprint === fingerprint;
 }
 
 export function omitOverriddenFindings<T extends AggregatorFinding & { fingerprint: string }>(
@@ -379,9 +377,14 @@ async function resolveOverrideSignals(input: {
       continue;
     }
 
-    const fingerprint = input.fingerprints.get(comment.id);
+    const fingerprint =
+      input.fingerprints.get(comment.id) ??
+      (comment.inReplyToId != null ? input.fingerprints.get(String(comment.inReplyToId)) : undefined);
     const mentioned = extractMentionedPaths(comment.body);
     const path = comment.path || mentioned[0];
+    // Suppress targets are Maomao-thread fingerprints. Path is metadata only —
+    // a dismiss with no fingerprint (even if it names a file) is not recorded.
+    if (!fingerprint) continue;
     overrides.push({
       commentId: comment.id,
       author: login,
@@ -392,20 +395,6 @@ async function resolveOverrideSignals(input: {
       fingerprint,
       quote: sanitizeCommentText(comment.body),
     });
-    for (const extra of mentioned) {
-      if (!extra || extra === path) continue;
-      overrides.push({
-        commentId: `${comment.id}:${extra}`,
-        author: login,
-        signal,
-        source: comment.source,
-        path: extra,
-        fingerprint,
-        quote: sanitizeCommentText(comment.body),
-      });
-    }
   }
   return overrides;
 }
-
-/** Prompt appendix: empty when there is no human discussion to quote. */
