@@ -56,6 +56,11 @@ interface GitLabNote {
   author?: { username?: string };
 }
 
+interface GitLabDiscussionPage {
+  id: string;
+  notes: Array<{ id: number; body: string; system?: boolean; resolvable?: boolean; resolved?: boolean; author?: { username?: string } }>;
+}
+
 /** GitLab truncates notes well below this; chunks stay readable and accepted. */
 const MAX_DEGRADE_NOTE_CHARS = 30_000;
 
@@ -315,24 +320,34 @@ export class GitLabProvider implements ForgePort {
     );
   }
 
+  /**
+   * GitLab returns a BARE ARRAY from the discussions endpoint (not a
+   * wrapper object); bounded pagination follows while full pages come back.
+   */
   async listDiscussions(target: ForgeRepoTarget): Promise<ForgeDiscussion[]> {
-    const page = await this.request<{ discussions?: Array<{ id: string; notes: Array<{ id: number; body: string; system?: boolean; resolvable?: boolean; resolved?: boolean; author?: { username?: string } }> }> }>(
-      "GET",
-      `${this.mrPath(this.projectIdOf(target), target.changeNumber)}/discussions?per_page=100`,
-      { maxBytes: 8 * 1024 * 1024 },
-    );
-    return (page.discussions ?? []).map((discussion) => ({
-      id: discussion.id,
-      isResolved: discussion.notes.some((note) => note.resolvable === true && note.resolved === true),
-      comments: discussion.notes
-        .filter((note) => !note.system)
-        .map((note) => ({
-          id: String(note.id),
-          databaseId: note.id,
-          body: note.body,
-          authorLogin: note.author?.username,
-        })),
-    }));
+    const discussions: ForgeDiscussion[] = [];
+    for (let page = 1; page <= 5; page += 1) {
+      const page_ = await this.request<GitLabDiscussionPage[]>(
+        "GET",
+        `${this.mrPath(this.projectIdOf(target), target.changeNumber)}/discussions?per_page=100&page=${page}`,
+        { maxBytes: 8 * 1024 * 1024 },
+      );
+      if (!Array.isArray(page_)) break;
+      discussions.push(...page_.map((discussion) => ({
+        id: discussion.id,
+        isResolved: discussion.notes.some((note) => note.resolvable === true && note.resolved === true),
+        comments: discussion.notes
+          .filter((note) => !note.system)
+          .map((note) => ({
+            id: String(note.id),
+            databaseId: note.id,
+            body: note.body,
+            authorLogin: note.author?.username,
+          })),
+      })));
+      if (page_.length < 100) break;
+    }
+    return discussions;
   }
 
   async resolveDiscussion(target: ForgeRepoTarget, discussionId: string): Promise<void> {
