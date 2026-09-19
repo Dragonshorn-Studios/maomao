@@ -6,8 +6,9 @@
 import { escapeHtml } from "../util.js";
 import type { ChatConversationRow, ChatMessageRow } from "../chat/store.js";
 import { layout, csrfInput, type PageOptions } from "./layout.js";
-import { severityRank } from "../schema.js";
 import { CHAT_BUNDLE_HREF } from "./paths.js";
+
+const SEVERITY_ORDER: readonly string[] = ["blocker", "high", "medium", "low", "info"];
 
 export interface ChatPageData {
   job: { id: number; repo_full_name: string; head_sha: string; pr_number: number };
@@ -39,10 +40,19 @@ function bubble(message: ChatMessageRow): string {
 export function renderChatPage(data: ChatPageData): string {
   const csrf = csrfInput(data.options.csrfToken);
   const exhaustedByBudget = data.maxMessages - (data.conversation?.message_count ?? 0) <= 0;
+  const suggestions = [
+    "What does this change do overall?",
+    ...data.findings
+      .slice()
+      .sort((a, b) => SEVERITY_ORDER.indexOf(a.severity ?? "info") - SEVERITY_ORDER.indexOf(b.severity ?? "info"))
+      .slice(0, 3)
+      .map((finding) => `Explain the ${finding.severity ?? "info"} finding: ${finding.summary}`.replace("the  finding", "the finding")),
+  ];
   const islandConfig = JSON.stringify({
     streamUrl: `/jobs/${data.job.id}/chat/stream`,
     csrfToken: data.options.csrfToken ?? null,
     exhausted: exhaustedByBudget,
+    suggestions,
   }).replaceAll("</", "<\\/");
   const budgetLeft = Math.max(0, data.maxMessages - (data.conversation?.message_count ?? 0));
   const errorNotice = data.conversation?.state === "error" && data.conversation.last_error

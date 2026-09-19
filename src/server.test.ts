@@ -4119,9 +4119,10 @@ describe("ask-maomao chat routes", () => {
     expect(html).toContain('/jobs/' + jobId + '/chat/stream');
     expect(html).toContain(CHAT_BUNDLE_HREF);
     // The island's suggestion chips carry the job's findings.
-    const configMatch = html.match(/<script id="maomao-chat-config" type="application\/json">([^<]+)<\/script>/);
+    const configMatch = html.match(/<script id="maomao-chat-config" type="application\/json">([\s\S]*?)<\/script>/);
     expect(configMatch).toBeTruthy();
-    const config = JSON.parse(configMatch![1].replaceAll("<\\/", "</")) as { suggestions?: string[] };
+    const config = JSON.parse(configMatch![1].replaceAll("<\\/", "<")) as { suggestions?: string[] };
+    console.log("SUGGESTIONS:", JSON.stringify(config.suggestions));
     expect(Array.isArray(config.suggestions)).toBe(true);
     expect(config.suggestions?.some((suggestion) => suggestion.startsWith("What does this change do"))).toBe(true);
     // Session bound for follow-ups.
