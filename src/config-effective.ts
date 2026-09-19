@@ -421,12 +421,7 @@ export function effectiveConfigEntries(
     source: "environment",
   });
 
-    row(
-    "Ask Maomao",
-    "Explainer enabled",
-    "MAOMAO_EXPLAIN_ENABLED",
-    String(config.chat.enabled),
-  );
+  row("Ask Maomao", "Explainer enabled", "MAOMAO_EXPLAIN_ENABLED", String(config.chat.enabled));
   row(
     "Ask Maomao",
     "Explainer model",
