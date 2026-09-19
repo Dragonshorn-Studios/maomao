@@ -6,6 +6,7 @@
 import { escapeHtml } from "../util.js";
 import type { ChatConversationRow, ChatMessageRow } from "../chat/store.js";
 import { layout, csrfInput, type PageOptions } from "./layout.js";
+import { CHAT_BUNDLE_HREF } from "./paths.js";
 
 export interface ChatPageData {
   job: { id: number; repo_full_name: string; head_sha: string; pr_number: number };
@@ -35,6 +36,12 @@ function bubble(message: ChatMessageRow): string {
 
 export function renderChatPage(data: ChatPageData): string {
   const csrf = csrfInput(data.options.csrfToken);
+  const exhaustedByBudget = data.maxMessages - (data.conversation?.message_count ?? 0) <= 0;
+  const islandConfig = JSON.stringify({
+    streamUrl: `/jobs/${data.job.id}/chat/stream`,
+    csrfToken: data.options.csrfToken ?? null,
+    exhausted: exhaustedByBudget,
+  }).replaceAll("</", "<\\/");
   const budgetLeft = Math.max(0, data.maxMessages - (data.conversation?.message_count ?? 0));
   const errorNotice = data.conversation?.state === "error" && data.conversation.last_error
     ? `<p class="error" role="alert">Last message failed: ${escapeHtml(data.conversation.last_error)}</p>`
@@ -58,7 +65,10 @@ export function renderChatPage(data: ChatPageData): string {
       <span class="pair">Messages left <strong>${budgetLeft}</strong> of ${data.maxMessages}</span>
       <span class="pair">Spent <strong>$${data.usedCost.toFixed(4)}</strong> of $${data.maxCostUsd.toFixed(2)}</span>
     </div>
-    <form class="trigger" method="post" action="/jobs/${data.job.id}/chat/messages">
+    ${exhausted ? "" : '<div id="maomao-chat-root"></div>'}
+    <script id="maomao-chat-config" type="application/json">${islandConfig}</script>
+    <script src="${CHAT_BUNDLE_HREF}" defer></script>
+    <form id="maomao-chat-form" class="trigger" method="post" action="/jobs/${data.job.id}/chat/messages">
       ${csrf}
       <label>
         Ask about this change

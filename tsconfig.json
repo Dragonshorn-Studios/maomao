@@ -23,6 +23,7 @@
     "src/**/*.ts"
   ],
   "exclude": [
-    "src/ui/pierre-entry.ts"
+    "src/ui/pierre-entry.ts",
+    "src/ui/chat-entry.tsx"
   ]
 }

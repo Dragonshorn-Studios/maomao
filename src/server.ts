@@ -42,6 +42,7 @@ import {
   renderPromptConfigPage,
   THEME_CSS,
   PIERRE_DIFFS_HREF,
+  CHAT_BUNDLE_HREF,
   TYPEAHEAD_HREF,
   TYPEAHEAD_JS,
   FAVICON_SVG,
@@ -449,6 +450,22 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
   // once from disk and cached; 404 before the first build so pages fall back
   // to the server-rendered diff markup.
   const vendorDir = ctx.vendorAssetsDir ?? resolve(process.cwd(), "dist/assets/vendor");
+  const assetsDir = ctx.vendorAssetsDir ? resolve(ctx.vendorAssetsDir, "..") : resolve(process.cwd(), "dist/assets");
+  let chatBundle: string | null | undefined;
+  app.get(CHAT_BUNDLE_HREF, (c) => {
+    if (chatBundle === undefined) {
+      try {
+        chatBundle = readFileSync(resolve(assetsDir, "chat.js"), "utf8");
+      } catch {
+        console.warn("assets: chat bundle not built; run npm run build:vendor");
+        return c.text("Not found", 404);
+      }
+    }
+    return c.newResponse(chatBundle, 200, {
+      "content-type": "text/javascript; charset=utf-8",
+      "cache-control": "public, max-age=3600",
+    });
+  });
   let pierreBundle: string | null | undefined;
   app.get(PIERRE_DIFFS_HREF, (c) => {
     // Only successful reads are cached: a server started before the vendor
@@ -739,6 +756,49 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
     );
   });
 
+
+
+  app.post("/jobs/:id/chat/stream", async (c) => {
+    if (!ctx.config.chat.enabled || !ctx.chat) return c.text("Not found", 404);
+    const jobId = Number(c.req.param("id"));
+    const job = ctx.store.getJob(jobId);
+    if (!job) return c.text("Not found", 404);
+    const body = await c.req.parseBody();
+    const question = typeof body.question === "string" ? body.question.trim().slice(0, 4_000) : "";
+    if (!question) {
+      return c.json({ error: "Write a question first." }, 400);
+    }
+    const chat = ctx.chat;
+    const conversation = chat.store.getOrCreateConversation(jobId, actionActor(c) ?? null);
+    const encoder = new TextEncoder();
+    const stream = new ReadableStream<Uint8Array>({
+      async start(controller) {
+        const send = (payload: Record<string, unknown>) =>
+          controller.enqueue(encoder.encode(`data: ${JSON.stringify(payload)}\n\n`));
+        try {
+          await chat.service.send({
+            job,
+            conversation,
+            question,
+            signal: c.req.raw.signal,
+            onDelta: (delta) => send({ delta }),
+          });
+          send({ done: true });
+        } catch (error) {
+          if (!(error instanceof Error && error.name === "AbortError")) {
+            const raw = error instanceof Error ? error.message : String(error);
+            send({ error: redactSecrets(raw, githubSecrets(ctx.config)).slice(0, 300) });
+          }
+        } finally {
+          controller.close();
+        }
+      },
+    });
+    return c.newResponse(stream, 200, {
+      "content-type": "text/event-stream; charset=utf-8",
+      "cache-control": "no-store",
+    });
+  });
 
   app.post("/jobs/:id/chat/messages", async (c) => {
     if (!ctx.config.chat.enabled || !ctx.chat) return c.text("Not found", 404);

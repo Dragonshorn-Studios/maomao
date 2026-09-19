@@ -4,3 +4,4 @@
  * tests — missing the whitelist copy yields a redirect-to-login.
  */
 export const PIERRE_DIFFS_HREF = "/assets/vendor/pierre-diffs.js";
+export const CHAT_BUNDLE_HREF = "/assets/chat.js";

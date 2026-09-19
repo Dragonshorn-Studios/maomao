@@ -9,6 +9,7 @@ import type { JobQueue } from "./jobs/queue.js";
 import type { OpenCodePort } from "./opencode/parse.js";
 import { ChatService } from "./chat/service.js";
 import { ChatStore } from "./chat/store.js";
+import { CHAT_BUNDLE_HREF } from "./ui/paths.js";
 
 type OpenCodeLike = OpenCodePort;
 import { createApp } from "./server.js";
@@ -4114,6 +4115,9 @@ describe("ask-maomao chat routes", () => {
     expect(html).toContain("What does this change do?");
     expect(html).toContain("answer to:");
     expect(html).toContain("Messages left");
+    expect(html).toContain('id="maomao-chat-config"');
+    expect(html).toContain('/jobs/' + jobId + '/chat/stream');
+    expect(html).toContain(CHAT_BUNDLE_HREF);
     // Session bound for follow-ups.
     const conversation = extras.chatStore.activeConversationForJob(jobId);
     expect(conversation?.opencode_session_id).toBe("ses_route");
@@ -4192,6 +4196,15 @@ describe("ask-maomao chat routes", () => {
     expect(html).toContain("Last message failed");
     const crafted = await (await app.request(`/jobs/${jobId}/chat?error=${encodeURIComponent("sk-ant-secret-should-not-reach-url")}`)).text();
     expect(crafted).not.toContain("sk-ant-secret-should-not-reach-url");
+  });
+
+  it("serves the chat bundle from the build output", async () => {
+    const { app } = testApp(chatEnv, undefined, undefined, chatContextExtras());
+    const response = await app.request(CHAT_BUNDLE_HREF);
+    expect([200, 404]).toContain(response.status); // 404 pre-build is the documented fallback
+    if (response.status === 404) {
+      expect(await response.text()).toContain("not built");
+    }
   });
 
   it("shows the Ask Maomao link on the job page only when enabled", async () => {
