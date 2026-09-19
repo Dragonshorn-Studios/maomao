@@ -181,7 +181,7 @@ async function fixtureCheckout(): Promise<CheckoutPort> {
 function fakeOpencode(mode: "resolved" | "still_valid", calls: { verifier: number }): OpenCodePort {
   return {
     async run(input) {
-      if (input.title.includes("verifier") || input.prompt.includes("finding verifier")) {
+      if (input.title?.includes("verifier") || input.prompt.includes("finding verifier")) {
         calls.verifier += 1;
         console.log("VERIFIER CALL for", input.title);
         const status = mode === "resolved" ? "resolved" : "still_valid";
