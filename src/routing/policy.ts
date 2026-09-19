@@ -105,8 +105,10 @@ export function profileBudgetExceeded(input: {
   maxCostUsd?: number;
   maxTokens?: number;
 }): string | undefined {
-  if (input.maxCostUsd != null && input.maxCostUsd > 0 && input.cost != null && input.cost > input.maxCostUsd) {
-    return `profile total cost ${input.cost} exceeded cap ${input.maxCostUsd}`;
+  // Usage accumulates by adding; trim binary float noise so reports read $1.2, not $1.2000000000000002.
+  const cost = input.cost == null ? null : Math.round(input.cost * 100) / 100;
+  if (input.maxCostUsd != null && input.maxCostUsd > 0 && cost != null && cost > input.maxCostUsd) {
+    return `profile total cost ${cost} exceeded cap ${input.maxCostUsd}`;
   }
   if (input.maxTokens != null && input.maxTokens > 0 && input.tokens != null && input.tokens > input.maxTokens) {
     return `profile total tokens ${input.tokens} exceeded cap ${input.maxTokens}`;
