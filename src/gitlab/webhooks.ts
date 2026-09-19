@@ -217,7 +217,7 @@ function enqueueMergeRequestJob(input: {
   }
   // Claim the delivery only after handling: a crash before here lets the
   // redelivery retry instead of reporting duplicate.
-  store.claimWebhookDelivery(input.deliveryId, "merge_request", enqueue.created ? "enqueued" : "skipped", {
+  store.claimWebhookDelivery(input.deliveryId, input.event, enqueue.created ? "enqueued" : "skipped", {
     provider: "gitlab",
     instance: connection.instance.hostname,
   });
@@ -355,7 +355,12 @@ async function handleNoteEvent(input: {
     const listed = await input.gitlab.listDiscussions(projectId!, mrIid!);
     if (listed.truncated) {
       // A truncated listing cannot prove the note is outside a Maomao
-      // discussion; leave the delivery unclaimed so a retry can try again.
+      // discussion; leave the delivery unclaimed so a redelivery can try
+      // again. GitLab never shows response bodies, so the log is the only
+      // human-visible trace of the dropped command.
+      console.error(
+        `gitlab webhook: discussion listing exceeded the processing cap for connection ${connection.row.id} project ${projectId} MR ${mrIid} note ${noteId}; command not applied`,
+      );
       return {
         status: 200,
         body: { ok: true, warning: "discussion list exceeded the processing cap; command not applied" },
@@ -545,11 +550,11 @@ export async function handleGitLabWebhook(input: {
     `${connection.row.id}:${request.rawBody}`,
   );
   const scope = { provider: "gitlab", instance: connection.instance.hostname };
-  if (deliveryId && store.hasWebhookDelivery(deliveryId, scope)) {
-    return { status: 200, body: { ok: true, duplicate: true, reason: "duplicate delivery" } };
-  }
-
   try {
+    if (deliveryId && store.hasWebhookDelivery(deliveryId, scope)) {
+      return { status: 200, body: { ok: true, duplicate: true, reason: "duplicate delivery" } };
+    }
+
     if (parsed.object_kind === "merge_request") {
       return await handleMergeRequestEvent({
         store,
@@ -572,9 +577,13 @@ export async function handleGitLabWebhook(input: {
   } catch (error) {
     // An escaped API failure would otherwise become Hono's bare 500 with no
     // log at all; log it so the operator can see GitLab delivery failures.
-    const message = error instanceof Error ? error.message : String(error);
+    // Permanent upstream failures (expired/rotated tokens answering 401)
+    // ride this same path: GitLab retries 5xx with backoff and eventually
+    // auto-disables the webhook, which is the operator-visible signal.
+    const sanitize = (value: string) => value.replace(/[\x00-\x1f\x7f]/g, " ");
+    const message = sanitize(error instanceof Error ? error.message : String(error));
     console.error(
-      `gitlab webhook: handling failed for ${request.event} delivery ${deliveryId || "unknown"}: ${message.replace(/[\x00-\x1f]/g, " ")}`,
+      `gitlab webhook: handling failed for ${sanitize(request.event)} delivery ${sanitize(deliveryId || "unknown")}: ${message}`,
     );
     return { status: 500, body: { error: "webhook handling failed; see server logs" } };
   }

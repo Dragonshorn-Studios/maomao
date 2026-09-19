@@ -484,6 +484,47 @@ describe("GitLab note events", () => {
     expect(edited.body.reason).toMatch(/ignored note action edited/);
   });
 
+  it("answers a truncated discussion listing with an unclaimed warning", async () => {
+    const connections = newConnections();
+    const { id, secret } = createConnection(connections);
+    const input = baseInput(connections, id, signedRequest(secret, "note", JSON.stringify(notePayload())));
+    const result = await handleGitLabWebhook({
+      ...input,
+      request: signedRequest(secret, "note", JSON.stringify(notePayload())),
+      gitlabFactory: () => ({
+        listDiscussions: async () => ({ discussions: maomaoDiscussions(), truncated: true }),
+        getAccessLevel: async () => 40,
+        resolveDiscussion: async () => {},
+      }),
+    });
+    expect(result.status).toBe(200);
+    expect(result.body.warning).toMatch(/processing cap/);
+    // Unclaimed: a redelivery can try again once the listing fits.
+    expect(input.store.hasWebhookDelivery(input.request.webhookId!, { provider: "gitlab", instance: "gitlab.com" })).toBe(false);
+  });
+
+  it("never fetches discussions for escalate commands", async () => {
+    const connections = newConnections();
+    const { id, secret } = createConnection(connections);
+    const input = baseInput(connections, id, signedRequest(secret, "merge_request", JSON.stringify(mrPayload())));
+    const opened = await handleGitLabWebhook(input);
+    expect(opened.enqueue?.created).toBe(true);
+    const result = await handleGitLabWebhook({
+      ...input,
+      request: signedRequest(secret, "note", JSON.stringify(notePayload({
+        object_attributes: { id: 9002, note: "@maomao escalate", noteable_type: "MergeRequest", action: "created" },
+      }))),
+      gitlabFactory: () => ({
+        listDiscussions: async () => {
+          throw new Error("escalate must not list discussions");
+        },
+        getAccessLevel: async () => 40,
+        resolveDiscussion: async () => {},
+      }),
+    });
+    expect(result.dispatchJobId).toBe(opened.enqueue?.job.id);
+  });
+
   it("drops Maomao marker comments even without a probed bot identity", async () => {
     const connections = newConnections();
     const { id, secret } = createConnection(connections);
