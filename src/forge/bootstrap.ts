@@ -8,7 +8,7 @@
 import type { Config } from "../config.js";
 import type { ForgeConnectionStore } from "./connections.js";
 import { canonicalizeInstanceUrl } from "./safe-http.js";
-import { openSecret, secretFingerprint } from "./secretbox.js";
+import { openSecret } from "./secretbox.js";
 
 export const ENV_CONNECTION_LABEL = "env";
 

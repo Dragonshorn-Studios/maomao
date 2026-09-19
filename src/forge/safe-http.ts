@@ -136,10 +136,11 @@ function isPrivateV6(ip: string): boolean {
   // the verdict is unknowable here — fail closed.
   if (normalized.startsWith("64:ff9b:")) return true;
   // 6to4 (2002::/16): the embedded IPv4 decides, including private targets.
-  const sixToFour = normalized.match(/^2002:([0-9a-f]{1,4}):([0-9a-f]{1,4})/);
+  // The second group may be swallowed by :: compression (x.y.0.0 forms).
+  const sixToFour = normalized.match(/^2002:([0-9a-f]{1,4})(?::([0-9a-f]{1,4}))?/);
   if (sixToFour) {
     const hi = parseInt(sixToFour[1]!, 16);
-    const lo = parseInt(sixToFour[2]!, 16);
+    const lo = sixToFour[2] != null ? parseInt(sixToFour[2], 16) : 0;
     return isPrivateV4(`${hi >> 8}.${hi & 0xff}.${lo >> 8}.${lo & 0xff}`);
   }
   // IANA special-purpose: documentation (2001:db8::/32) and discard-only (100::/64).

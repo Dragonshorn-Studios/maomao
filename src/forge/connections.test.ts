@@ -143,6 +143,9 @@ describe("isPrivateAddress", () => {
     expect(isPrivateAddress("::ffff:0:127.0.0.1")).toBe(true);
     expect(isPrivateAddress("64:ff9b:7f00:1::1")).toBe(true);
     expect(isPrivateAddress("2002:7f00:1::1")).toBe(true);
+    expect(isPrivateAddress("2002:7f00::1")).toBe(true);
+    expect(isPrivateAddress("2002:ac10::")).toBe(true);
+    expect(isPrivateAddress("2002:8080:8080::1")).toBe(false);
     expect(isPrivateAddress("2001:db8::1")).toBe(true);
     expect(isPrivateAddress("100::1")).toBe(true);
     expect(isPrivateAddress("2606:4700::1")).toBe(false);
