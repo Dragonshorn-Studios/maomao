@@ -20,3 +20,13 @@ export function roleGlyph(role: string): string {
 export function brandMark(): string {
   return GLYPHS.mark;
 }
+
+/** Pancake stack with a butter pat: the easter-egg treat for completed reviews. */
+export function pancakeMark(): string {
+  return `<svg ${SIZE}>
+    <path d="M2 13c0-1.2 2.7-2.2 6-2.2s6 1 6 2.2c0 1.2-2.7 2.2-6 2.2s-6-1-6-2.2Z" fill="none" stroke="currentColor" stroke-width="1.2"/>
+    <path d="M2 10c0-1.2 2.7-2.2 6-2.2S14 8.8 14 10" fill="none" stroke="currentColor" stroke-width="1.2"/>
+    <path d="M2 7c0-1.2 2.7-2.2 6-2.2S14 5.8 14 7" fill="none" stroke="currentColor" stroke-width="1.2"/>
+    <rect x="6.4" y="1.6" width="3.2" height="2" fill="currentColor"/>
+  </svg>`.replace(/\n\s+/g, "");
+}

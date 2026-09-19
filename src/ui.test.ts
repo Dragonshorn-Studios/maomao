@@ -653,6 +653,63 @@ describe("cat-hunt flavor", () => {
   });
 });
 
+describe("pancake easter egg", () => {
+  const HEAD = "head222head222head222head222head22222";
+
+  function enqueue(store: JobStore, prNumber: number) {
+    return store.enqueue({
+      repoFullName: "acme/pancakes",
+      repoOwner: "acme",
+      repoName: "pancakes",
+      installationId: 42,
+      prNumber,
+      prTitle: `PR ${prNumber}`,
+      prBody: "",
+      prHtmlUrl: "https://github.com/acme/pancakes",
+      prAuthor: "octocat",
+      baseSha: HEAD,
+      headSha: HEAD,
+      baseRef: "main",
+      headRef: `pr-${prNumber}`,
+      reviewers: [],
+    });
+  }
+
+  it("counts one pancake per completed job, derived from the store", () => {
+    const store = new JobStore(openDb(":memory:"));
+    expect(store.pancakeStats()).toEqual({ count: 0, latestId: 0 });
+    const first = enqueue(store, 1);
+    store.setJobState(first.job.id, "completed", { finished_at: new Date().toISOString() });
+    const second = enqueue(store, 2);
+    expect(store.pancakeStats()).toEqual({ count: 1, latestId: first.job.id });
+    store.setJobState(second.job.id, "completed", { finished_at: new Date().toISOString() });
+    expect(store.pancakeStats()).toEqual({ count: 2, latestId: second.job.id });
+    // Terminal but not success: cancelled and failed jobs earn no pancake.
+    const third = enqueue(store, 3);
+    store.setJobState(third.job.id, "failed", { failure_reason: "boom", finished_at: new Date().toISOString() });
+    expect(store.pancakeStats()).toEqual({ count: 2, latestId: second.job.id });
+  });
+
+  it("renders an apothecary chip with the count and trigger attributes", () => {
+    const store = seededStore();
+    const html = renderHome(store.listJobs(50), store);
+    expect(html).toContain("pancake-chip");
+    expect(html).toContain("pancakes earned");
+    expect(html).toMatch(/data-pancake-latest="\d+"/);
+    expect(html).toContain('data-pancake-latest="' + store.pancakeStats().latestId + '"');
+  });
+
+  it("stays hidden at zero completions and in plain flavor", () => {
+    const store = new JobStore(openDb(":memory:"));
+    expect(renderHome([], store)).not.toContain("pancakes earned");
+    const earned = enqueue(store, 1).job.id;
+    store.setJobState(earned, "completed", { finished_at: new Date().toISOString() });
+    expect(renderHome(store.listJobs(5), store, { uiFlavor: "plain" })).not.toContain("pancakes earned");
+    const html = renderHome(store.listJobs(5), store, { uiFlavor: "apothecary" });
+    expect(html).toContain("1 pancake earned");
+  });
+});
+
 describe("repository health scan UI", () => {
   const HEAD = "head111head111head111head111head11111";
 
