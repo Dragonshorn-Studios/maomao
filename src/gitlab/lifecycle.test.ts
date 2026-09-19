@@ -176,13 +176,16 @@ async function fixtureCheckout(): Promise<CheckoutPort> {
   };
 }
 
-/** Fake OpenCode: verifier resolves or keeps the prior finding; reviewers re-find it; aggregator echoes. */
-function fakeOpencode(mode: "resolved" | "still_valid", calls: { verifier: number }): OpenCodePort {
+/**
+ * Fake OpenCode. `resolved`: the issue is fixed — the verifier resolves the
+ * prior and the specialist reports clean. `refinds`: the specialist re-finds
+ * the finding on the new head so publication filters are exercised.
+ */
+function fakeOpencode(mode: "resolved" | "refinds", calls: { verifier: number }, findOnHead?: string): OpenCodePort {
   return {
     async run(input) {
       if (input.title?.includes("verifier") || input.prompt.includes("finding verifier")) {
         calls.verifier += 1;
-        console.log("VERIFIER CALL for", input.title);
         const status = mode === "resolved" ? "resolved" : "still_valid";
         return {
           stdout: JSON.stringify({
@@ -194,8 +197,25 @@ function fakeOpencode(mode: "resolved" | "still_valid", calls: { verifier: numbe
           usage: { promptTokens: 1, completionTokens: 1 },
         };
       }
+      if (mode === "refinds" && input.title?.includes("aggregator")) {
+        const text = JSON.stringify({
+          verdict: "comment",
+          summary: "one finding",
+          findings: [{ ...FINDING, body: FINDING.body, reviewers_agreed: ["correctness"] }],
+        });
+        return { stdout: text, stderr: "", exitCode: 0, text, usage: { promptTokens: 1, completionTokens: 1 } };
+      }
       if (input.title?.includes("aggregator")) {
         const text = JSON.stringify({ verdict: "clean", summary: "the prior finding is gone", findings: [] });
+        return { stdout: text, stderr: "", exitCode: 0, text, usage: { promptTokens: 1, completionTokens: 1 } };
+      }
+      if (mode === "refinds") {
+        const text = JSON.stringify({
+          schema_version: 1,
+          reviewer: "correctness",
+          verdict: "findings",
+          findings: [{ ...FINDING, reason: FINDING.reason }],
+        });
         return { stdout: text, stderr: "", exitCode: 0, text, usage: { promptTokens: 1, completionTokens: 1 } };
       }
       // The issue was fixed: the specialist no longer re-finds it.
@@ -241,7 +261,7 @@ describe("GitLab finding lifecycle parity", () => {
     });
   }
 
-  async function pipeline() {
+  async function pipeline(mode: "resolved" | "refinds") {
     const config = loadConfig({
       REVIEWER_ROLES: "correctness",
       OPENCODE_REVIEWER_MODEL: "test/model",
@@ -264,7 +284,7 @@ describe("GitLab finding lifecycle parity", () => {
       github,
       forge: new ForgeRegistry(github, "maomao", undefined, connections),
       checkout: await fixtureCheckout(),
-      opencode: fakeOpencode("resolved", verifierCalls),
+      opencode: fakeOpencode(mode, verifierCalls),
     });
   }
 
@@ -317,14 +337,10 @@ describe("GitLab finding lifecycle parity", () => {
     });
 
     const created = enqueueJob(HEAD);
-    const runner = await pipeline();
+    const runner = await pipeline("resolved");
     await runner.run(created.job.id);
 
     const job = store.getJob(created.job.id);
-    if (job?.state !== "completed") {
-      console.log("STATE", job?.state, "REASON", job?.failure_reason);
-      console.log(store.listLogs(created.job.id).map((l) => `${l.level}: ${l.message.slice(0, 200)}`).join("\n"));
-    }
     expect(job?.state).toBe("completed");
     // The fixed finding resolved through the Discussions API…
     expect(state.resolutions).toContainEqual({ id: "disc-prior", resolved: true });
@@ -402,17 +418,23 @@ describe("GitLab finding lifecycle parity", () => {
     const created = enqueueJob(nextHead);
     const notesBefore = state.notes.length;
     const discussionsBefore = state.discussions.length;
-    const nextPipeline = pipeline();
-    void nextPipeline;
-    await (await pipeline()).run(created.job.id);
+    const summaryRunner = await pipeline("refinds");
+    await summaryRunner.run(created.job.id);
     const job = store.getJob(created.job.id);
     expect(job?.state).toBe("completed");
-    // No new discussion and no new summary mention of the buried finding.
+    // The specialist re-found the issue, so a summary WAS posted — and it
+    // does not carry the buried finding, and no new discussion was opened.
+    const summary = state.notes
+      .slice(notesBefore)
+      .find((note) => note.body.includes(`maomao-review sha=${nextHead}`));
+    expect(summary).toBeDefined();
+    expect(summary?.body).not.toContain(FINDING.summary);
     expect(state.discussions.length).toBe(discussionsBefore);
-    const summary = state.notes.slice(notesBefore).find((note) => note.body.includes(`maomao-review sha=${nextHead}`));
-    if (summary) {
-      expect(summary.body).not.toContain(FINDING.summary);
-    }
+    // Reconciliation recorded the dismissal for this run.
+    const snap = JSON.parse(job?.reconciliation_json ?? "{}") as {
+      items: Array<{ fingerprint: string; status: string }>;
+    };
+    expect(snap.items.find((item) => item.fingerprint === FP)?.status).toBe("dismissed");
     // Dismissed is preserved as a human override, distinct from resolved.
     const row = store.listFindings("acme/widgets", 7, { provider: "gitlab", instance: "127.0.0.1" })[0];
     expect(row?.status).toBe("dismissed");
@@ -451,18 +473,9 @@ describe("GitLab finding lifecycle parity", () => {
       githubThreadId: "disc-prior-2",
     });
     const before = verifierCalls.verifier;
-    const probeConnections = connections;
-    const probeRow = probeConnections.get(connectionId)!;
-    const probeProvider = new (await import("./provider.js")).GitLabProvider(probeConnections.open(probeRow.id));
-    const probeDiscussions = await probeProvider.listDiscussions({
-      provider: "gitlab", instance: "127.0.0.1", repoOwner: "acme", repoName: "widgets", repoFullName: "acme/widgets", changeNumber: 7, nativeProjectId: 42,
-    });
-    console.log("PROBE DISCUSSIONS", JSON.stringify(probeDiscussions));
-    console.log("STORED ROWS", store.listFindings("acme/widgets", 7, { provider: "gitlab", instance: "127.0.0.1" }).map((r) => `${r.fingerprint}/${r.status}/thread=${r.github_thread_id}`));
-    console.log("STATE DISCUSSIONS", state.discussions.map((d) => `${d.id}:${d.notes.map((n) => `${n.id}:resolvable=${n.resolvable}:resolved=${n.resolved}`).join(",")}`));
     const created = enqueueJob("head777");
     state.versions = [{ base_sha: "base111", start_sha: "start222", head_sha: "head777" }];
-    await (await pipeline()).run(created.job.id);
+    await (await pipeline("resolved")).run(created.job.id);
     const snap = JSON.parse(store.getJob(created.job.id)?.reconciliation_json ?? "{}") as { items: Array<{ fingerprint: string; status: string; reason: string }> };
     console.log("CLASSIFIED", snap.items.map((item) => `${item.fingerprint}:${item.status}:${item.reason}`));
     // The forge-resolved discussion settled without a verifier spend.
