@@ -92,6 +92,24 @@ describe("GitHubProvider", () => {
     ]);
   });
 
+  it("forwards discussion resolution to the client thread ops", async () => {
+    const resolved: string[] = [];
+    const unresolved: string[] = [];
+    const client = fakeGithub({
+      resolveReviewThread: async (_installationId: number, threadId: string) => {
+        resolved.push(threadId);
+      },
+      unresolveReviewThread: async (_installationId: number, threadId: string) => {
+        unresolved.push(threadId);
+      },
+    });
+    const provider = new GitHubProvider(client, 42, "maomao");
+    await provider.resolveDiscussion(scopedTarget(), "PRRT_1");
+    await provider.unresolveDiscussion(scopedTarget(), "PRRT_2");
+    expect(resolved).toEqual(["PRRT_1"]);
+    expect(unresolved).toEqual(["PRRT_2"]);
+  });
+
   it("recognizes the app bot identity for loop prevention", () => {
     const provider = new GitHubProvider(fakeGithub(), 42, "maomao");
     expect(provider.isBotLogin("maomao[bot]")).toBe(true);
