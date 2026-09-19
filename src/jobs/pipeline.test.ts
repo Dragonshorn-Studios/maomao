@@ -4077,10 +4077,11 @@ describe("profile budget ceilings and per-reviewer timeouts", () => {
 
     const correctness = seen.find((entry) => entry.key === "correctness");
     const security = seen.find((entry) => entry.key === "security");
-    const aggregator = seen.filter((entry) => entry.key.startsWith("model:"));
     expect(correctness?.timeoutMs).toBe(60_000);
     expect(security?.timeoutMs).toBe(5_000);
-    expect(aggregator.every((entry) => entry.timeoutMs === 5_000)).toBe(true);
+    const nonReviewerCalls = seen.filter((entry) => entry.key.startsWith("model:"));
+    expect(nonReviewerCalls.length).toBeGreaterThan(0);
+    expect(nonReviewerCalls.every((entry) => entry.timeoutMs === 5_000)).toBe(true);
     expect(store.getJob(created.job.id)?.state).toBe("completed");
   });
 
@@ -4255,5 +4256,134 @@ describe("profile budget ceilings and per-reviewer timeouts", () => {
     // $0.80 (failed attempt) + $0.40 (success) = $1.20 crosses the $1.00 cap at aggregation.
     expect(job?.budget_exceeded_warning).toContain("profile total cost 1.2 exceeded cap 1");
     expect(job?.aggregator_fallback).toBe(1);
+  });
+
+  it("fails at the aggregation stage in fail mode when reviewer spend already tripped the ceiling", async () => {
+    const config = profileConfig();
+    const store = new JobStore(openDb(":memory:"));
+    await activateProfile(store, {
+      name: "default",
+      reviewers: [{ role: "correctness" }],
+      minPublishableSeverity: "medium",
+      maxTotalCostUsd: 1,
+      onBudgetExceeded: "fail",
+    });
+    const { opencode, github } = pipelineFixture();
+    const created = store.enqueue({ ...jobInput("aggfailsha"), reviewers: [] });
+    await createPipeline({ config, store, github, checkout: await fixtureCheckout(), opencode }).run(created.job.id);
+
+    const job = store.getJob(created.job.id);
+    expect(job?.state).toBe("failed");
+    expect(job?.failure_reason).toContain("profile budget exceeded — profile total cost 2 exceeded cap 1");
+    // The reviewer itself completed; only the follow-up spend stages were refused.
+    expect(store.listReviewerRuns(created.job.id).find((run) => run.role === "correctness")?.state).toBe("done");
+  });
+
+  it("stops an over-budget reviewer from respending on retries", async () => {
+    const config = profileConfig();
+    const store = new JobStore(openDb(":memory:"));
+    await activateProfile(store, {
+      name: "default",
+      reviewers: [{ role: "correctness" }],
+      minPublishableSeverity: "medium",
+      maxTotalCostUsd: 0.5,
+      onBudgetExceeded: "degrade",
+    });
+    let calls = 0;
+    const opencode: OpenCodePort = {
+      async run(input) {
+        calls += 1;
+        // One attempt: fails the parse but burns $0.60, tripping the $0.50 cap.
+        // The retry loop must re-check the budget and never run attempt 2.
+        const text = "not json";
+        return { stdout: text, stderr: "", exitCode: 0, text, usage: { cost: 0.6, totalTokens: 3000 } };
+      },
+    };
+    const created = store.enqueue({ ...jobInput("retrystopsha"), reviewers: [] });
+    await createPipeline({
+      config,
+      store,
+      github: githubPort({
+        getPullDiff: async () => "diff --git a/example.ts b/example.ts\n",
+        listReviews: async () => [],
+        createCommentReview: async () => ({ id: "5", url: "u" }),
+      }),
+      checkout: await fixtureCheckout(),
+      opencode,
+    }).run(created.job.id);
+    expect(calls).toBe(1);
+    const job = store.getJob(created.job.id);
+    // Degrade with zero surviving reviewer output fails with the explicit reason.
+    expect(job?.state).toBe("failed");
+    expect(job?.failure_reason).toContain("profile budget exceeded — profile total cost 0.6 exceeded cap 0.5");
+  });
+
+  it("blocks the scan verifier once the budget latches, leaving prior findings open", async () => {
+    const config = loadConfig({
+      REVIEWER_ROUTING: "fixed",
+      REVIEWER_ROLES: "correctness,security",
+      OPENCODE_REVIEWER_CONCURRENCY: "1",
+      OPENCODE_REVIEWER_MODEL: "test/model",
+      OPENCODE_VERIFIER_MODEL: "test/verifier",
+      POST_EMPTY_REVIEW: "true",
+      GITHUB_APP_ID: "1",
+      GITHUB_WEBHOOK_SECRET: "s",
+      GITHUB_APP_PRIVATE_KEY: "k",
+    });
+    const store = new JobStore(openDb(":memory:"));
+    await activateProfile(store, {
+      name: "default",
+      reviewers: [{ role: "correctness" }, { role: "security" }],
+      minPublishableSeverity: "info",
+      maxTotalCostUsd: 1,
+    });
+    const verifierCalls: string[] = [];
+    const base = pipelineFixture();
+    const gatedOpencode: OpenCodePort = {
+      async run(input) {
+        if (input.model === "test/verifier") verifierCalls.push("verifier");
+        return base.opencode.run(input);
+      },
+    };
+    // A prior open finding from an older reviewed SHA would normally be
+    // re-verified, but reviewer spend already exhausted the profile budget.
+    store.upsertFinding({
+      repoFullName: "acme/widgets",
+      prNumber: 0,
+      fingerprint: "prior-finding-fixed",
+      status: "open",
+      reviewedSha: "oldshaoldshaoldshaoldshaoldshaoldsha12",
+      originalPath: "src/billing.ts",
+      originalLine: 1,
+      summary: "old bug from a previous scan",
+      severity: "high",
+      lastJobId: 0,
+    });
+    const created = store.enqueue({
+      ...jobInput("scanverifiersha"),
+      reviewers: [],
+      jobType: "health_scan",
+      scanBranch: "main",
+      prNumber: 0,
+    });
+    const github = githubPort({ getCommitDiff: async () => "diff --git a/src/billing.ts b/src/billing.ts\n" });
+    await createPipeline({
+      config,
+      store,
+      github,
+      checkout: await fixtureCheckout(),
+      opencode: gatedOpencode,
+    }).run(created.job.id);
+
+    const job = store.getJob(created.job.id);
+    expect(job?.state).toBe("completed");
+    // Wiring guard: with budgetBlock dropped, the verifier would have run here.
+    expect(verifierCalls).toHaveLength(0);
+    const logs = store.listLogs(created.job.id).map((row) => row.message).join("\n");
+    expect(logs).toContain("Verifier failed: profile total cost 2 exceeded cap 1");
+    // The prior finding stays visible: uncertain, never auto-resolved.
+    const prior = store.getFinding("acme/widgets", 0, "prior-finding-fixed");
+    expect(prior?.status).toBe("uncertain");
+    expect(prior?.reconciliation_reason).toContain("verifier skipped: profile total cost 2 exceeded cap 1");
   });
 });

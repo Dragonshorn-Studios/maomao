@@ -133,7 +133,11 @@ function patchBudgetWarning(store: JobStore, jobId: number, message: string): vo
  * routing, reviewer, aggregation, and internal stages; `check()` returns and
  * latches the ceiling message once accumulated usage exceeds either optional
  * cap, so every later spend stage sees the same violation. Jobs without a
- * profile (or without ceilings) never trip it.
+ * profile (or without ceilings) never trip it. Ceilings enforce at run
+ * boundaries: runs already in flight when a cap trips still finish (the same
+ * semantics as the poison-alert cap), so concurrent reviewers may collectively
+ * overshoot by up to one in-flight batch — the retry loop also re-checks so
+ * failed attempts cannot respend past a latched ceiling.
  */
 interface ProfileBudget {
   behavior: "degrade" | "fail";
@@ -352,9 +356,8 @@ async function runJob(deps: PipelineDeps, jobId: number, signal: AbortSignal): P
     const profileBudget = createProfileBudget(profileDefinition);
     const snapshot = await reconcileAndRoute(deps, job, workspace.repoDir, workspace.dir, diff, signal, profileBudget);
     throwIfStale(store, jobId, signal);
-    await routeSpecialists(deps, job, diff, workspace.repoDir, [workspace.diffPath, workspace.metaPath], signal);
+    await routeSpecialists(deps, job, diff, workspace.repoDir, [workspace.diffPath, workspace.metaPath], signal, profileBudget);
     const routed = store.getJob(jobId);
-    profileBudget.record(routed?.routing_cost, routed?.routing_total_tokens);
     const currentFindings = currentFindingsForRisk(snapshot.items);
     store.patchJob(jobId, {
       risk_profile: routed?.routing_profile ?? null,
@@ -388,6 +391,8 @@ async function runJob(deps: PipelineDeps, jobId: number, signal: AbortSignal): P
       }
     }
     if (parsedReviewers.length === 0) {
+      // Degrade cannot rescue zero output: with no reviewer results there is nothing
+      // to publish, so this path still fails — but with an explicit budget reason.
       const over = profileBudget.check();
       if (over) throw new Error(`profile budget exceeded — ${over}`);
       throw new Error("all specialist reviewers failed or produced invalid JSON");
@@ -612,9 +617,7 @@ async function runScanJob(deps: PipelineDeps, jobId: number, signal: AbortSignal
     const reviewerTimeouts = profileReviewerTimeouts(profileDefinition);
     const profileBudget = createProfileBudget(profileDefinition);
 
-    await routeSpecialists(deps, job, diff, workspace.repoDir, [], signal);
-    const routed = store.getJob(jobId);
-    profileBudget.record(routed?.routing_cost, routed?.routing_total_tokens);
+    await routeSpecialists(deps, job, diff, workspace.repoDir, [], signal, profileBudget);
     store.setJobState(jobId, "reviewing");
     const runs = store.listReviewerRuns(jobId);
     store.log(jobId, `Running ${runs.length} specialist(s)`);
@@ -633,6 +636,8 @@ async function runScanJob(deps: PipelineDeps, jobId: number, signal: AbortSignal
       .filter((entry): entry is { run: ReviewerRunRow; role: string } => entry.run?.state === "done")
       .map((entry) => ({ ...entry, parsed: parseReviewerResult(entry.run.normalized_json ?? "") }));
     if (parsedReviewers.length === 0) {
+      // Degrade cannot rescue zero output: with no reviewer results there is nothing
+      // to publish, so this path still fails — but with an explicit budget reason.
       const over = profileBudget.check();
       if (over) throw new Error(`profile budget exceeded — ${over}`);
       throw new Error("all specialist reviewers failed or produced invalid JSON");
@@ -821,6 +826,7 @@ async function routeSpecialists(
   cwd: string,
   files: string[],
   signal: AbortSignal,
+  profileBudget?: ProfileBudget,
 ): Promise<void> {
   const { store, config } = deps;
   const existing = store.listReviewerRuns(job.id);
@@ -920,6 +926,7 @@ async function routeSpecialists(
         routing_duration_ms: Date.now() - started,
         routing_raw: truncate(result.text || result.stdout, 20_000),
       });
+      profileBudget?.record(result.usage.cost, result.usage.totalTokens);
     } catch (error) {
       const message = formatError(error);
       store.log(job.id, `Router model failed (${message}); falling back to diagnosis`, "warn");
@@ -1108,7 +1115,15 @@ async function runReviewer(
         "warn",
         run.id,
       );
-      if (attempt <= retries) await sleep(500 * attempt, signal);
+      if (attempt <= retries) {
+        await sleep(500 * attempt, signal);
+        // A spent attempt may have tripped the ceiling; do not respend.
+        const over = profileBudget?.check();
+        if (over) {
+          deps.store.log(job.id, `Reviewer ${run.role} retries stopped: ${over}`, "warn", run.id);
+          break;
+        }
+      }
     }
   }
 }
