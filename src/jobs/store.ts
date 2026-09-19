@@ -424,43 +424,57 @@ export class JobStore {
    * malformed values and re-renders the first page when a cursor yields
    * nothing).
    */
-  listJobsPage(input: { before?: number; after?: number; limit?: number }): {
+  listJobsPage(input: { before?: number; after?: number; limit?: number; forge?: { provider: string; instance: string } }): {
     jobs: JobRow[];
     hasOlder: boolean;
     hasNewer: boolean;
   } {
     const requested = input.limit ?? JOBS_PAGE_SIZE_DEFAULT;
     const limit = Math.min(Number.isFinite(requested) ? Math.max(1, requested) : JOBS_PAGE_SIZE_DEFAULT, JOBS_PAGE_SIZE_MAX);
+    // Forge filter values come from code-validated scopes; quote-escape so a
+    // crafted instance name cannot break out of the literal.
+    const escape = (value: string) => value.replaceAll("'", "''");
+    const forgeWhere = input.forge
+      ? `WHERE provider = '${escape(input.forge.provider)}' AND provider_instance = '${escape(input.forge.instance)}'`
+      : "";
+    const withId = (comparator: string) => (forgeWhere ? `${forgeWhere} AND id ${comparator} ?` : `WHERE id ${comparator} ?`);
     if (input.after != null) {
       const probed = this.db
-        .prepare(`SELECT * FROM jobs WHERE id > ? ORDER BY id ASC LIMIT ?`)
+        .prepare(`SELECT * FROM jobs ${withId(">")} ORDER BY id ASC LIMIT ?`)
         .all(input.after, limit + 1) as JobRow[];
       // Rows arrive oldest→newest; reverse into the page's newest-first order.
       const jobs = probed.slice(0, limit).reverse();
       const hasNewer = probed.length > limit;
       const oldestOnPage = jobs[jobs.length - 1]?.id ?? input.after;
       const hasOlder = Boolean(
-        this.db.prepare(`SELECT id FROM jobs WHERE id < ? LIMIT 1`).get(oldestOnPage),
+        this.db.prepare(`SELECT id FROM jobs ${withId("<")} LIMIT 1`).get(oldestOnPage),
       );
       return { jobs, hasOlder, hasNewer };
     }
     if (input.before != null) {
       const probed = this.db
-        .prepare(`SELECT * FROM jobs WHERE id < ? ORDER BY id DESC LIMIT ?`)
+        .prepare(`SELECT * FROM jobs ${withId("<")} ORDER BY id DESC LIMIT ?`)
         .all(input.before, limit + 1) as JobRow[];
       const jobs = probed.slice(0, limit);
       const hasOlder = probed.length > limit;
       const newestOnPage = jobs[0]?.id ?? input.before;
       const hasNewer = Boolean(
-        this.db.prepare(`SELECT id FROM jobs WHERE id > ? LIMIT 1`).get(newestOnPage),
+        this.db.prepare(`SELECT id FROM jobs ${withId(">")} LIMIT 1`).get(newestOnPage),
       );
       return { jobs, hasOlder, hasNewer };
     }
     const probed = this.db
-      .prepare(`SELECT * FROM jobs ORDER BY id DESC LIMIT ?`)
+      .prepare(`SELECT * FROM jobs ${forgeWhere} ORDER BY id DESC LIMIT ?`)
       .all(limit + 1) as JobRow[];
     const jobs = probed.slice(0, limit);
     return { jobs, hasOlder: probed.length > limit, hasNewer: false };
+  }
+
+  /** Distinct forge scopes present in the jobs table, for dashboard filters. */
+  listForgeScopes(): Array<{ provider: string; instance: string }> {
+    return this.db
+      .prepare(`SELECT DISTINCT provider, provider_instance AS instance FROM jobs ORDER BY provider, provider_instance`)
+      .all() as Array<{ provider: string; instance: string }>;
   }
 
   listInterruptedJobs(): JobRow[] {

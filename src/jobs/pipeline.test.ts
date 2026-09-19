@@ -4844,6 +4844,48 @@ describe("profile budget ceilings and per-reviewer timeouts", () => {
     expect(job?.failure_reason).toContain("profile budget exceeded — profile total cost 0.6 exceeded cap 0.5");
   });
 });
+describe("forge scope listing and filtering", () => {
+  function jobInput(overrides: Record<string, unknown> = {}) {
+    return {
+      repoFullName: "acme/widgets",
+      repoOwner: "acme",
+      repoName: "widgets",
+      installationId: 1,
+      prNumber: 5,
+      prTitle: "t",
+      prBody: "",
+      prHtmlUrl: "",
+      prAuthor: "a",
+      baseSha: "b",
+      headSha: "h",
+      baseRef: "main",
+      headRef: "feature",
+      reviewers: [],
+      ...overrides,
+    };
+  }
+
+  it("lists distinct scopes and filters the page by forge", () => {
+    const store = new JobStore(openDb(":memory:"));
+    const github = store.enqueue(jobInput({ headSha: "gh" })).job;
+    const gitlab = store.enqueue(
+      jobInput({ headSha: "gl", provider: "gitlab", providerInstance: "gitlab.com" }),
+    ).job;
+    const scopes = store.listForgeScopes();
+    expect(scopes).toEqual([
+      { provider: "github", instance: "github.com" },
+      { provider: "gitlab", instance: "gitlab.com" },
+    ]);
+    const githubPage = store.listJobsPage({ forge: { provider: "github", instance: "github.com" } });
+    expect(githubPage.jobs.map((job) => job.id)).toEqual([github.id]);
+    const gitlabPage = store.listJobsPage({ forge: { provider: "gitlab", instance: "gitlab.com" } });
+    expect(gitlabPage.jobs.map((job) => job.id)).toEqual([gitlab.id]);
+    // Keyset pagination respects the filter too.
+    const older = store.listJobsPage({ forge: { provider: "gitlab", instance: "gitlab.com" }, before: gitlab.id });
+    expect(older.jobs).toHaveLength(0);
+  });
+});
+
 describe("non-github health scans", () => {
   it("fails a gitlab scan job with an honest reason instead of a cross-forge allowlist check", async () => {
     const config = loadConfig({ REVIEWER_ROLES: "correctness" });

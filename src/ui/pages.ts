@@ -1,4 +1,5 @@
 import type { JobRow, JobStore, ReviewerRunRow } from "../jobs/store.js";
+import { forgeBadgeTitleHtml, providerLabel } from "./forge-badge.js";
 import type { FindingRow } from "../findings/types.js";
 import { fingerprintFinding, stripHtmlComments } from "../findings/identity.js";
 import { POLICIES_WITH_EXTERNAL, POLICIES_WITH_INTERNAL } from "../routing/types.js";
@@ -106,10 +107,21 @@ export function renderHome(jobs: JobRow[], store: JobStore, options: PageOptions
     .join("");
   const paginationNav = renderJobsPagination(jobs, options.pagination);
   const pancakeChip = pancakeChipFor(store, options.uiFlavor);
+  const forgeChips = (options.forgeScopes ?? [])
+    .map((scope) => {
+      const key = `${scope.provider}:${scope.instance}`;
+      const active = options.activeForge === key;
+      const label = providerLabel(scope.provider) === "GitLab" && scope.instance !== "gitlab.com"
+        ? `GitLab · ${scope.instance}`
+        : providerLabel(scope.provider);
+      return `<a class="top-link" data-forge="${escapeHtml(key)}" href="${active ? "/" : `/?forge=${encodeURIComponent(key)}`}" ${active ? 'aria-current="true"' : ""}>${escapeHtml(label)}</a>`;
+    })
+    .join("\n      ");
 
   const body = `
     <h1>Review jobs</h1>
     <p class="lede">Recent pull request reviews. Each job is anchored to an exact head SHA.${pancakeChip ? ` ${pancakeChip}` : ""}</p>
+    ${forgeChips ? `<div class="meta-row" role="navigation" aria-label="Filter by forge">${forgeChips}</div>` : ""}
     ${options.notice ? `<p class="notice" role="status">${escapeHtml(options.notice)}</p>` : ""}
     ${options.error ? `<p class="error" role="alert">${escapeHtml(options.error)}</p>` : ""}
     <form class="trigger" method="post" action="/reviews">
@@ -213,7 +225,7 @@ export function renderJob(
   const isScan = job.job_type === "health_scan";
   const heading = isScan
     ? `Health scan · ${escapeHtml(job.repo_full_name)} @ ${escapeHtml(shortSha(job.head_sha, 12))}`
-    : `${escapeHtml(job.repo_full_name)}#${job.pr_number}`;
+    : `${forgeBadgeTitleHtml(job, job.repo_full_name, job.pr_number)}`;
   const cancelledBanner =
     job.state === "cancelled"
       ? renderCancelledBanner(job)
@@ -325,7 +337,8 @@ export function renderJob(
       }
     </ol>
   `;
-  return layout(isScan ? `Health scan · ${job.repo_full_name}` : `${job.repo_full_name}#${job.pr_number}`, body, options);
+  const forgeTitle = `[${job.provider === "gitlab" ? "GitLab" : "GitHub"}${job.provider === "gitlab" && job.provider_instance.toLowerCase() !== "gitlab.com" ? ` · ${job.provider_instance}` : ""}] ${job.repo_full_name} ${job.provider === "gitlab" ? "!" : "#"}${job.pr_number}`;
+  return layout(isScan ? `Health scan · ${job.repo_full_name}` : forgeTitle, body, options);
 }
 
 function renderCancelledBanner(job: JobRow): string {
@@ -385,7 +398,7 @@ function renderQueueCard(job: JobRow, metrics: JobMetrics, uiFlavor?: UiFlavor, 
         <span class="specimen-id">Specimen · job ${job.id}</span>
         ${renderState(job.state, state.text, state.hint, state.mark)}
       </div>
-      <p class="specimen-title"><a href="/jobs/${job.id}">${escapeHtml(job.repo_full_name)}#${job.pr_number} · ${escapeHtml(job.pr_title || "(no title)")}</a></p>
+      <p class="specimen-title"><a href="/jobs/${job.id}">${forgeBadgeTitleHtml(job, job.repo_full_name, job.pr_number)} · ${escapeHtml(job.pr_title || "(no title)")}</a></p>
       ${flavor ? `<p class="muted">${escapeHtml(flavor)}</p>` : ""}
       <div class="meta-row">
         <span class="pair">SHA <strong><code class="sha">${escapeHtml(shortSha(job.head_sha, 10))}</code></strong></span>

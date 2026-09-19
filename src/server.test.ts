@@ -159,7 +159,7 @@ describe("HTTP app", () => {
 
     const detail = await app.request(`/jobs/${enqueued[0]}`);
     expect(detail.status).toBe(200);
-    expect(await detail.text()).toContain("acme/widgets#8");
+    expect(await detail.text()).toContain("acme/widgets #8");
   });
 
   it("protects UI/API/events with a session cookie and leaves webhook/health public", async () => {

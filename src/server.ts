@@ -696,7 +696,15 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
 
   app.get("/", (c) => {
     const cursor = jobsPageCursor(c.req.query("before"), c.req.query("after"));
-    let page = ctx.store.listJobsPage(cursor);
+    // Forge filter: `?forge=provider:instance`, validated against the scopes
+    // that actually have jobs so stale links degrade to the unfiltered view.
+    const scopes = ctx.store.listForgeScopes();
+    const requested = c.req.query("forge");
+    const forge =
+      requested && scopes.length > 1
+        ? scopes.find((scope) => `${scope.provider}:${scope.instance}` === requested)
+        : undefined;
+    let page = ctx.store.listJobsPage({ ...cursor, forge });
     // Only out-of-range cursors empty the page: after at/past the newest id,
     // or before at/below the oldest id. (A before cursor past the newest id
     // never gets here empty — the store's id< query already returns the
@@ -717,6 +725,8 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
         notice: noticeText(c.req.query("notice")) ?? staleCursorNotice,
         error: c.req.query("error") || undefined,
         pagination: { hasOlder: page.hasOlder, hasNewer: page.hasNewer },
+        forgeScopes: scopes.length > 1 ? scopes : undefined,
+        activeForge: forge ? `${forge.provider}:${forge.instance}` : undefined,
       }),
     );
   });

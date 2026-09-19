@@ -92,7 +92,7 @@ describe("monitoring pages", () => {
   it("renders scannable specimen cards with SHA, progress, and severity text", () => {
     const store = seededStore();
     const html = renderHome(store.listJobs(20), store);
-    expect(html).toContain("acme/ledger#412");
+    expect(html).toContain("[GitHub] acme/ledger #412");
     expect(html).toContain("c0ffee1a2b");
     expect(html).toContain("HIGH");
     expect(html).toContain("MEDIUM");
@@ -606,7 +606,7 @@ describe("cat-hunt flavor", () => {
     const job = store.listJobs(50).find((row) => row.pr_number === 412)!;
     const html = renderJob(job, store.listReviewerRuns(job.id), store.listLogs(job.id), { uiFlavor: "apothecary" });
     // Technical names and metrics stay first.
-    expect(html).toContain("acme/ledger#412");
+    expect(html).toContain("[GitHub] acme/ledger #412");
     expect(html).toContain("Correctness / regression hunter");
     expect(html).toContain("6 cats returned from the diff · 3 findings");
     // Per-reviewer flavor: done with findings vs done clean.
@@ -1328,5 +1328,49 @@ describe("cancelled demo fixtures", () => {
     expect(store.listJobs(20).find((row) => row.pr_number === 418 && row.state === "stale")).toBeTruthy();
     // Headroom: every seeded fixture fits the listJobs(20) window the pages use.
     expect(store.listJobs(20)).toHaveLength(store.listJobs(100).length);
+  });
+});
+
+describe("mixed-forge dashboard (issue #18)", () => {
+  const store = new JobStore(openDb(":memory:"));
+
+  function enqueue(overrides: Record<string, unknown> = {}) {
+    return store.enqueue({
+      repoFullName: "acme/widgets",
+      repoOwner: "acme",
+      repoName: "widgets",
+      installationId: 42,
+      prNumber: 7,
+      prTitle: "Same name, different forge",
+      prBody: "",
+      prHtmlUrl: "",
+      prAuthor: "octocat",
+      baseSha: "b",
+      headSha: "h",
+      baseRef: "main",
+      headRef: "feature",
+      reviewers: [],
+      ...overrides,
+    }).job;
+  }
+
+  it("distinguishes duplicate project names hosted on different instances", () => {
+    const githubJob = enqueue({ id: 2, prNumber: 8 });
+    const selfManaged = enqueue({ provider: "gitlab", providerInstance: "gitlab.corp.internal" });
+    const gitlabCom = enqueue({ provider: "gitlab", providerInstance: "gitlab.com" });
+    const html = renderHome([githubJob, selfManaged, gitlabCom], store, {});
+    // Identifier semantics: # for GitHub pulls, ! for GitLab MRs; self-managed
+    // instances carry their hostname.
+    expect(html).toContain("[GitHub] acme/widgets #8");
+    expect(html).toContain("[GitLab · gitlab.corp.internal] acme/widgets !7");
+    expect(html).toContain("[GitLab] acme/widgets !7");
+    const rows = html.match(/\[GitLab[^\]]*\] acme\/widgets !7/g) ?? [];
+    expect(rows).toHaveLength(2);
+  });
+
+  it("carries the forge identity into the job page heading", () => {
+    const job = enqueue({ provider: "gitlab", providerInstance: "gitlab.corp.internal", prNumber: 9 });
+    const html = renderJob(job, store.listReviewerRuns(job.id), store.listLogs(job.id), {});
+    expect(html).toContain("[GitLab · gitlab.corp.internal] acme/widgets !9</h1>");
   });
 });
