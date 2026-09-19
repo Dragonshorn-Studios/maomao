@@ -368,6 +368,7 @@ function migrate(db: SqliteDb): void {
     ["external_dispatch_targets", "TEXT"],
     ["external_dispatch_error", "TEXT"],
     ["escalation_id", "TEXT"],
+    ["budget_exceeded_warning", "TEXT"],
     ["poison_alert_policy", "TEXT"],
     ["manual_escalate_requested", "INTEGER NOT NULL DEFAULT 0"],
     ["profile_revision_id", "INTEGER"],

@@ -144,7 +144,12 @@ describe("profile validation and caps", () => {
   });
 
   it("requires at least one specialist role", () => {
-    const issues = validateProfileDefinition({ name: "default", reviewers: [], minPublishableSeverity: "info" });
+    const issues = validateProfileDefinition({
+      name: "default",
+      reviewers: [],
+      minPublishableSeverity: "info",
+      onBudgetExceeded: "degrade",
+    });
     expect(issues).toContain("at least one specialist role is required");
   });
 
@@ -153,6 +158,7 @@ describe("profile validation and caps", () => {
       name: "default",
       reviewers: [{ role: "correctness", model: "openai/gpt-4.1" }],
       minPublishableSeverity: "info" as const,
+      onBudgetExceeded: "degrade" as const,
     };
     expect(validateModelCatalog(definition, ["anthropic/claude-sonnet-4-5"])).toHaveLength(1);
     expect(validateModelCatalog(definition, ["openai/gpt-4.1"])).toHaveLength(0);

@@ -3279,6 +3279,7 @@ describe("structured profile editor", () => {
       routerModel: "test/router",
       maxTotalCostUsd: 1.5,
       maxTotalTokens: 500000,
+      onBudgetExceeded: "degrade",
     });
     expect(revision?.note).toBe("from the editor");
   });
@@ -3380,7 +3381,7 @@ describe("structured profile editor", () => {
     const html = await (await app.request("/config", { headers: { cookie: session } })).text();
     expect(html).toContain('name="editor" value="structured"');
     expect(html).toContain("Minimum publishable severity");
-    expect(html).toContain("not enforced at runtime");
+    expect(html).toContain('name="budget_behavior"');
     expect(html).toContain("Create a draft");
   });
 });

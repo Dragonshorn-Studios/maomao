@@ -89,7 +89,7 @@ describe("effectiveConfigEntries", () => {
     expect(webhook.value).toBe("configured");
   });
 
-  it("labels active-profile overrides with the revision id and flags unenforced fields", () => {
+  it("labels active-profile overrides with the revision id and reports enforced ceilings", () => {
     const config = loadConfig({});
     const revision = fakeRevision();
     const entries = effectiveConfigEntries(config, {}, revision);
@@ -100,11 +100,16 @@ describe("effectiveConfigEntries", () => {
     const severity = find(entries, "Profile minimum publishable severity");
     expect(severity).toMatchObject({ source: "profile", value: "low" });
     const cost = find(entries, "Profile total cost ceiling");
-    expect(cost).toMatchObject({ source: "profile", notEnforced: true });
+    expect(cost).toMatchObject({ source: "profile" });
+    expect(cost.notEnforced).toBeFalsy();
     const tokens = find(entries, "Profile total token ceiling");
-    expect(tokens).toMatchObject({ source: "profile", notEnforced: true });
+    expect(tokens).toMatchObject({ source: "profile" });
+    expect(tokens.notEnforced).toBeFalsy();
     const timeouts = find(entries, "Profile per-reviewer timeouts");
-    expect(timeouts).toMatchObject({ source: "profile", notEnforced: true, value: "correctness: 120s" });
+    expect(timeouts).toMatchObject({ source: "profile", value: "correctness: 120s" });
+    expect(timeouts.notEnforced).toBeFalsy();
+    const behavior = find(entries, "Profile budget behavior");
+    expect(behavior).toMatchObject({ source: "profile", value: expect.stringContaining("degrade") });
     // Profile reviewer selection applies only in fixed routing mode.
     const reviewerSet = find(entries, "Profile reviewer set (effective)");
     expect(reviewerSet.notEnforced).toBe(true);

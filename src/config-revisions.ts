@@ -32,6 +32,8 @@ export const profileDefinitionSchema = z
     minPublishableSeverity: severitySchema.default("info"),
     maxTotalCostUsd: z.number().positive().max(PROFILE_MAX_TOTAL_COST_USD).optional(),
     maxTotalTokens: z.number().int().positive().max(PROFILE_MAX_TOTAL_TOKENS).optional(),
+    /** What happens when a cost/token ceiling is hit mid-pipeline. */
+    onBudgetExceeded: z.enum(["degrade", "fail"]).default("degrade"),
   })
   .strict();
 
@@ -307,7 +309,11 @@ function rowToRevision(row: Record<string, unknown>): ProfileRevisionRow {
       `config: revision #${row.id} has an unreadable definition; treating as empty`,
       error instanceof Error ? error.message : error,
     );
-    definition = { name: String(row.name), reviewers: [], minPublishableSeverity: "info" as Severity } as ProfileDefinition;
+    definition = profileDefinitionSchema.parse({
+      name: String(row.name),
+      reviewers: [],
+      minPublishableSeverity: "info" as Severity,
+    });
   }
   return {
     id: Number(row.id),

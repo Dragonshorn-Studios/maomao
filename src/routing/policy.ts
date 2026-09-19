@@ -93,3 +93,25 @@ export function usageOverBudget(input: {
   }
   return undefined;
 }
+
+/**
+ * Profile job-wide ceiling check: compares accumulated usage against the
+ * profile's optional cost/token ceilings. Missing usage (null) never counts
+ * as over budget. A ceiling of 0/undefined disables that check.
+ */
+export function profileBudgetExceeded(input: {
+  cost?: number | null;
+  tokens?: number | null;
+  maxCostUsd?: number;
+  maxTokens?: number;
+}): string | undefined {
+  // Usage accumulates by adding; trim binary float noise so reports read $1.2, not $1.2000000000000002.
+  const cost = input.cost == null ? null : Math.round(input.cost * 100) / 100;
+  if (input.maxCostUsd != null && input.maxCostUsd > 0 && cost != null && cost > input.maxCostUsd) {
+    return `profile total cost ${cost} exceeded cap ${input.maxCostUsd}`;
+  }
+  if (input.maxTokens != null && input.maxTokens > 0 && input.tokens != null && input.tokens > input.maxTokens) {
+    return `profile total tokens ${input.tokens} exceeded cap ${input.maxTokens}`;
+  }
+  return undefined;
+}

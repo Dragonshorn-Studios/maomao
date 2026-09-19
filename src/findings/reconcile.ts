@@ -4,7 +4,7 @@ import type { Config } from "../config.js";
 import type { ReviewThread } from "../github/client.js";
 import { findingComment, isMaomaoThread, parseThreadFindingMarker } from "../github/client.js";
 import type { JobRow, JobStore } from "../jobs/store.js";
-import type { OpenCodePort } from "../opencode/parse.js";
+import type { OpenCodePort, OpenCodeUsage } from "../opencode/parse.js";
 import { buildVerifierPrompt } from "../prompts.js";
 import type { AggregatorFinding } from "../schema.js";
 import { parseVerifierResult } from "../schema.js";
@@ -117,6 +117,10 @@ export async function classifyPriorFindings(input: {
   workspaceDir: string;
   priors: PriorFinding[];
   signal: AbortSignal;
+  /** Returns a block message when the profile budget forbids a verifier run. */
+  budgetBlock?: () => string | undefined;
+  /** Receives the verifier run's usage so the pipeline can count it against the profile budget. */
+  onVerifierUsage?: (usage: OpenCodeUsage) => void;
 }): Promise<ClassifiedFinding[]> {
   const classified: ClassifiedFinding[] = [];
   const toVerify: PriorFinding[] = [];
@@ -250,9 +254,21 @@ async function runVerifier(
     workspaceDir: string;
     signal: AbortSignal;
     onVerifierError?: (message: string) => void;
+    budgetBlock?: () => string | undefined;
+    onVerifierUsage?: (usage: OpenCodeUsage) => void;
   },
   priors: PriorFinding[],
 ): Promise<Array<{ fingerprint: string; status: FindingClassification; confidence: number; reason: string; file?: string; line?: number }>> {
+  const budgetMessage = input.budgetBlock?.();
+  if (budgetMessage) {
+    input.onVerifierError?.(budgetMessage);
+    return priors.map((prior) => ({
+      fingerprint: prior.fingerprint,
+      status: "uncertain" as const,
+      confidence: 0,
+      reason: `verifier skipped: ${budgetMessage}`,
+    }));
+  }
   if (!input.config.opencode.verifierModel) {
     return priors.map((prior) => ({
       fingerprint: prior.fingerprint,
@@ -304,6 +320,7 @@ async function runVerifier(
       title: `maomao-verifier-${input.job.id}`,
       signal: input.signal,
     });
+    input.onVerifierUsage?.(result.usage);
     const parsed = parseVerifierResult(result.text || result.stdout);
     return parsed.classifications.map((item) => ({
       fingerprint: item.fingerprint,

@@ -11,6 +11,7 @@ import {
 } from "../opencode/parse.js";
 import { buildAggregatorPrompt, buildReviewerPrompt } from "../prompts.js";
 import { applyProfileToSpecs, reviewerSpecs } from "./enqueue.js";
+import type { ProfileDefinition } from "../config-revisions.js";
 import {
   fallbackAggregator,
   parseAggregatorResult,
@@ -65,6 +66,7 @@ import {
   shouldRunExternal,
   shouldRunInternal,
   usageOverBudget,
+  profileBudgetExceeded,
 } from "../routing/policy.js";
 
 export interface PipelineDeps {
@@ -109,6 +111,181 @@ export function createPipeline(deps: PipelineDeps) {
       await dispatchExternalEscalation(deps, job, undefined);
     },
   };
+}
+
+/** Definition of the profile revision snapshotted onto the job, if any. */
+function profileDefinitionForJob(store: JobStore, job: JobRow): ProfileDefinition | null {
+  return job.profile_revision_id ? store.configs.getRevision(job.profile_revision_id)?.definition ?? null : null;
+}
+
+/** Per-role timeout overrides from a profile definition. */
+function profileReviewerTimeouts(definition: ProfileDefinition | null): ReadonlyMap<string, number> {
+  return new Map(
+    (definition?.reviewers ?? [])
+      .filter((reviewer) => reviewer.timeoutMs != null)
+      .map((reviewer) => [reviewer.role, reviewer.timeoutMs as number]),
+  );
+}
+
+/**
+ * Persists the ceiling violation on the job so the UI alert and the logs agree:
+ * every path that skips a paid stage records budget_exceeded_warning once.
+ */
+function patchBudgetWarning(store: JobStore, jobId: number, message: string): void {
+  store.patchJob(jobId, { budget_exceeded_warning: message });
+}
+
+/**
+ * Job-wide profile budget tracker. Usage accumulates across the verifier,
+ * routing, reviewer, aggregation, and internal stages; `check()` returns and
+ * latches the ceiling message once accumulated usage exceeds either optional
+ * cap, so every later spend stage sees the same violation. Jobs without a
+ * profile (or without ceilings) never trip it. Ceilings enforce at run
+ * boundaries: runs already in flight when a cap trips still finish (the same
+ * semantics as the poison-alert cap), so concurrent reviewers may collectively
+ * overshoot by up to one in-flight batch — the retry loop also re-checks so
+ * failed attempts cannot respend past a latched ceiling.
+ */
+interface ProfileBudget {
+  behavior: "degrade" | "fail";
+  check(): string | undefined;
+  record(cost?: number | null, tokens?: number | null): void;
+}
+
+function createProfileBudget(definition: ProfileDefinition | null): ProfileBudget {
+  const state = { cost: 0, tokens: 0 };
+  let exceeded: string | undefined;
+  return {
+    behavior: definition?.onBudgetExceeded ?? "degrade",
+    check(): string | undefined {
+      if (exceeded) return exceeded;
+      exceeded = profileBudgetExceeded({
+        cost: state.cost,
+        tokens: state.tokens,
+        maxCostUsd: definition?.maxTotalCostUsd,
+        maxTokens: definition?.maxTotalTokens,
+      });
+      return exceeded;
+    },
+    record(cost, tokens) {
+      state.cost += cost ?? 0;
+      state.tokens += tokens ?? 0;
+    },
+  };
+}
+
+/**
+ * Canonical degraded-fallback aggregation patch — the single owner of what a
+ * fallback aggregation looks like on the job row, shared by the budget
+ * degradation path (no model output to preserve) and runAggregator's
+ * model-failure catch (which preserves the truncated raw output).
+ */
+function applyAggregatorFallback(
+  store: JobStore,
+  jobId: number,
+  model: string | null,
+  reviewers: ReviewerResult[],
+  raw: string | null,
+  durationMs: number,
+): AggregatorResult {
+  const fallback = fallbackAggregator(reviewers);
+  store.patchJob(jobId, {
+    aggregator_raw: raw,
+    aggregator_normalized: JSON.stringify(fallback, null, 2),
+    aggregator_model: model,
+    aggregator_state: "done",
+    aggregator_fallback: 1,
+    aggregator_finished_at: nowIso(),
+    aggregator_duration_ms: durationMs,
+  });
+  return fallback;
+}
+
+/** Budget degradation: no model run happened, so there is no raw output to preserve. */
+function degradedAggregation(
+  store: JobStore,
+  jobId: number,
+  reviewers: ReviewerResult[],
+  message: string,
+): AggregatorResult {
+  store.patchJob(jobId, { budget_exceeded_warning: message });
+  return applyAggregatorFallback(store, jobId, null, reviewers, null, 0);
+}
+
+/**
+ * Shared reviewer stage with profile budget enforcement: each run is
+ * rescheduled only while the job-wide budget allows; once a ceiling trips,
+ * degrade mode skips the remaining runs and fail mode aborts the job.
+ */
+async function runProfileReviewers(
+  deps: PipelineDeps,
+  job: JobRow,
+  runs: ReviewerRunRow[],
+  repoDir: string,
+  files: string[],
+  signal: AbortSignal,
+  budget: ProfileBudget,
+  timeouts: ReadonlyMap<string, number>,
+  humanOverrides?: HumanOverrideContext,
+): Promise<void> {
+  const store = deps.store;
+  await mapLimit(runs, deps.config.opencode.reviewerConcurrency, async (run) => {
+    throwIfStale(store, job.id, signal);
+    const over = budget.check();
+    if (over) {
+      if (budget.behavior === "fail") throw new Error(`profile budget exceeded — ${over}`);
+      store.patchReviewer(run.id, {
+        state: "failed",
+        validation_error: `skipped: profile budget exceeded — ${over}`,
+        finished_at: nowIso(),
+      });
+      store.log(job.id, `Reviewer ${run.role} skipped: ${over}`, "warn", run.id);
+      patchBudgetWarning(store, job.id, over);
+      return;
+    }
+    await runReviewer(deps, job, run, repoDir, files, signal, timeouts.get(run.role), budget, humanOverrides);
+  });
+}
+
+/**
+ * Shared aggregation stage with profile budget enforcement: a latched budget
+ * violation replaces the aggregator model run with the deterministic fallback
+ * (degrade) or aborts the job (fail); a successful run feeds its usage back
+ * into the tracker.
+ */
+async function runBudgetedAggregation(
+  deps: PipelineDeps,
+  job: JobRow,
+  reviewers: ReviewerResult[],
+  cwd: string,
+  files: string[],
+  signal: AbortSignal,
+  budget: ProfileBudget,
+  humanOverrides?: HumanOverrideContext,
+): Promise<AggregatorResult> {
+  const store = deps.store;
+  store.setJobState(job.id, "aggregating", {
+    aggregator_state: "running",
+    aggregator_started_at: nowIso(),
+    aggregator_model: deps.config.opencode.aggregatorModel || deps.config.opencode.reviewerModel || null,
+  });
+  store.log(job.id, `Aggregating ${reviewers.length} reviewer result(s)`);
+  const over = budget.check();
+  if (over) {
+    if (budget.behavior === "fail") throw new Error(`profile budget exceeded — ${over}`);
+    store.log(job.id, `Aggregator model skipped: ${over}`, "warn");
+    return degradedAggregation(store, job.id, reviewers, over);
+  }
+  const aggregated = await runAggregator(deps, job, reviewers, cwd, files, signal, budget, humanOverrides);
+  // A stage that spent while the tracker had room can spill past a ceiling on
+  // its own usage; surface the latch immediately (fail mode aborts downstream
+  // anyway; degrade records the warning and publishes partials).
+  const spilled = budget.check();
+  if (spilled && budget.behavior === "degrade") {
+    patchBudgetWarning(store, job.id, spilled);
+    store.log(job.id, `Profile budget exceeded after aggregation: ${spilled}`, "warn");
+  }
+  return aggregated;
 }
 
 async function runJob(deps: PipelineDeps, jobId: number, signal: AbortSignal): Promise<void> {
@@ -202,9 +379,12 @@ async function runJob(deps: PipelineDeps, jobId: number, signal: AbortSignal): P
     store.log(jobId, `Checked out ${job.head_sha} into ${workspace.dir}`);
     throwIfStale(store, jobId, signal);
 
-    const snapshot = await reconcileAndRoute(deps, job, workspace.repoDir, workspace.dir, diff, signal);
+    const profileDefinition = profileDefinitionForJob(store, job);
+    const reviewerTimeouts = profileReviewerTimeouts(profileDefinition);
+    const profileBudget = createProfileBudget(profileDefinition);
+    const snapshot = await reconcileAndRoute(deps, job, workspace.repoDir, workspace.dir, diff, signal, profileBudget);
     throwIfStale(store, jobId, signal);
-    await routeSpecialists(deps, job, diff, workspace.repoDir, [workspace.diffPath, workspace.metaPath], signal);
+    await routeSpecialists(deps, job, diff, workspace.repoDir, [workspace.diffPath, workspace.metaPath], signal, profileBudget);
     const routed = store.getJob(jobId);
     const currentFindings = currentFindingsForRisk(snapshot.items);
     store.patchJob(jobId, {
@@ -219,10 +399,17 @@ async function runJob(deps: PipelineDeps, jobId: number, signal: AbortSignal): P
 
     store.setJobState(jobId, "reviewing");
     const runs = store.listReviewerRuns(jobId).filter((run) => run.state !== "done");
-    await mapLimit(runs, config.opencode.reviewerConcurrency, async (run) => {
-      throwIfStale(store, jobId, signal);
-      await runReviewer(deps, job, run, workspace.repoDir, [workspace.diffPath, workspace.metaPath], signal, snapshot.humanOverrides);
-    });
+    await runProfileReviewers(
+      deps,
+      job,
+      runs,
+      workspace.repoDir,
+      [workspace.diffPath, workspace.metaPath],
+      signal,
+      profileBudget,
+      reviewerTimeouts,
+      snapshot.humanOverrides,
+    );
     throwIfStale(store, jobId, signal);
 
     const completedRuns = store.listReviewerRuns(jobId);
@@ -233,21 +420,39 @@ async function runJob(deps: PipelineDeps, jobId: number, signal: AbortSignal): P
       }
     }
     if (parsedReviewers.length === 0) {
+      // Degrade cannot rescue zero output: with no reviewer results there is nothing
+      // to publish, so this path still fails — but with an explicit budget reason.
+      const over = profileBudget.check();
+      if (over) throw new Error(`profile budget exceeded — ${over}`);
       throw new Error("all specialist reviewers failed or produced invalid JSON");
     }
 
-    store.setJobState(jobId, "aggregating", {
-      aggregator_state: "running",
-      aggregator_started_at: nowIso(),
-      aggregator_model: config.opencode.aggregatorModel || config.opencode.reviewerModel || null,
-    });
-    store.log(jobId, `Aggregating ${parsedReviewers.length} reviewer result(s)`);
-    let aggregated = await runAggregator(deps, job, parsedReviewers, workspace.repoDir, [workspace.diffPath], signal, snapshot.humanOverrides);
+    let aggregated = await runBudgetedAggregation(
+      deps,
+      job,
+      parsedReviewers,
+      workspace.repoDir,
+      [workspace.diffPath],
+      signal,
+      profileBudget,
+      snapshot.humanOverrides,
+    );
     throwIfStale(store, jobId, signal);
 
     const afterReviewers = store.getJob(jobId);
     if (afterReviewers && shouldRunInternal(config.poisonAlert.policy, config.poisonAlert.internal.enabled, afterReviewers.routing_profile ?? "")) {
-      aggregated = await runInternalEscalation(deps, afterReviewers, aggregated, diff, workspace.repoDir, signal);
+      const internalOver = profileBudget.check();
+      if (internalOver) {
+        if (profileBudget.behavior === "fail") throw new Error(`profile budget exceeded — ${internalOver}`);
+        patchBudgetWarning(store, jobId, internalOver);
+        store.patchJob(jobId, {
+          internal_escalation_state: "skipped",
+          internal_escalation_reason: `profile budget exceeded — ${internalOver}`,
+        });
+        store.log(jobId, `Internal poison-alert pass skipped: ${internalOver}`, "warn");
+      } else {
+        aggregated = await runInternalEscalation(deps, afterReviewers, aggregated, diff, workspace.repoDir, signal, profileBudget);
+      }
       throwIfStale(store, jobId, signal);
     }
 
@@ -433,32 +638,53 @@ async function runScanJob(deps: PipelineDeps, jobId: number, signal: AbortSignal
     store.patchJob(jobId, { workspace_path: workspace.dir });
     throwIfStale(store, jobId, signal);
 
-    await routeSpecialists(deps, job, diff, workspace.repoDir, [], signal);
+    const profileDefinition = profileDefinitionForJob(store, job);
+    const reviewerTimeouts = profileReviewerTimeouts(profileDefinition);
+    const profileBudget = createProfileBudget(profileDefinition);
+
+    await routeSpecialists(deps, job, diff, workspace.repoDir, [], signal, profileBudget);
     store.setJobState(jobId, "reviewing");
     const runs = store.listReviewerRuns(jobId);
     store.log(jobId, `Running ${runs.length} specialist(s)`);
-    await mapLimit(runs, config.opencode.reviewerConcurrency, (run) => runReviewer(deps, job, run, workspace.repoDir, [workspace.diffPath, workspace.metaPath], signal));
+    await runProfileReviewers(
+      deps,
+      job,
+      runs,
+      workspace.repoDir,
+      [workspace.diffPath, workspace.metaPath],
+      signal,
+      profileBudget,
+      reviewerTimeouts,
+    );
     const parsedReviewers = runs
       .map((run) => ({ run: store.getReviewerRun(run.id), role: run.role }))
       .filter((entry): entry is { run: ReviewerRunRow; role: string } => entry.run?.state === "done")
       .map((entry) => ({ ...entry, parsed: parseReviewerResult(entry.run.normalized_json ?? "") }));
     if (parsedReviewers.length === 0) {
+      // Degrade cannot rescue zero output: with no reviewer results there is nothing
+      // to publish, so this path still fails — but with an explicit budget reason.
+      const over = profileBudget.check();
+      if (over) throw new Error(`profile budget exceeded — ${over}`);
       throw new Error("all specialist reviewers failed or produced invalid JSON");
     }
 
-    store.setJobState(jobId, "aggregating", {
-      aggregator_state: "running",
-      aggregator_started_at: nowIso(),
-      aggregator_model: config.opencode.aggregatorModel || config.opencode.reviewerModel || null,
-    });
-    let aggregated = await runAggregator(deps, job, parsedReviewers.map((entry) => entry.parsed), workspace.repoDir, [workspace.diffPath], signal);
+    let aggregated = await runBudgetedAggregation(
+      deps,
+      job,
+      parsedReviewers.map((entry) => entry.parsed),
+      workspace.repoDir,
+      [workspace.diffPath],
+      signal,
+      profileBudget,
+    );
     throwIfStale(store, jobId, signal);
     aggregated = { ...aggregated, findings: assignFindingIds(aggregated.findings) };
     store.patchJob(jobId, { aggregator_normalized: JSON.stringify(aggregated, null, 2) });
 
     // Persist scan findings locally; issue creation is a separate, explicit operator action.
-    const profileRevision = job.profile_revision_id ? store.configs.getRevision(job.profile_revision_id) : undefined;
-    const threshold = severityRank(profileRevision?.definition.minPublishableSeverity ?? "info");
+    const threshold = severityRank(
+      profileDefinitionForJob(store, job)?.minPublishableSeverity ?? "info",
+    );
     const currentFingerprints = new Set<string>();
     let persisted = 0;
     for (const finding of aggregated.findings) {
@@ -508,6 +734,8 @@ async function runScanJob(deps: PipelineDeps, jobId: number, signal: AbortSignal
       workspaceDir: workspace.dir,
       priors,
       signal,
+      budgetBlock: () => profileBudget.check(),
+      onVerifierUsage: (usage) => profileBudget.record(usage.cost, usage.totalTokens),
     });
     for (const item of items) {
       store.log(
@@ -623,6 +851,7 @@ async function routeSpecialists(
   cwd: string,
   files: string[],
   signal: AbortSignal,
+  profileBudget?: ProfileBudget,
 ): Promise<void> {
   const { store, config } = deps;
   const existing = store.listReviewerRuns(job.id);
@@ -669,9 +898,7 @@ async function routeSpecialists(
   store.setJobState(job.id, "routing", { routing_state: "running", routing_mode: config.routing.mode });
   const signals = scanRoutingSignals({ diff, title: job.pr_title, body: job.pr_body });
   let decision: RoutingDecision;
-  const profileRouterModel = job.profile_revision_id
-    ? store.configs.getRevision(job.profile_revision_id)?.definition.routerModel
-    : undefined;
+  const profileRouterModel = profileDefinitionForJob(store, job)?.routerModel;
   const routerModel = profileRouterModel || config.routing.model || config.opencode.reviewerModel;
   const useModel = (config.routing.mode === "model" || config.routing.mode === "hybrid") && Boolean(routerModel);
 
@@ -724,6 +951,7 @@ async function routeSpecialists(
         routing_duration_ms: Date.now() - started,
         routing_raw: truncate(result.text || result.stdout, 20_000),
       });
+      profileBudget?.record(result.usage.cost, result.usage.totalTokens);
     } catch (error) {
       const message = formatError(error);
       store.log(job.id, `Router model failed (${message}); falling back to diagnosis`, "warn");
@@ -760,6 +988,7 @@ async function reconcileAndRoute(
   workspaceDir: string,
   diff: string,
   signal: AbortSignal,
+  profileBudget?: ProfileBudget,
 ): Promise<ReconciliationSnapshot> {
   deps.store.setJobState(job.id, "reconciling");
   const threads = await deps.github.listReviewThreads(
@@ -792,6 +1021,10 @@ async function reconcileAndRoute(
     workspaceDir,
     priors,
     signal,
+    budgetBlock: profileBudget ? () => profileBudget.check() : undefined,
+    onVerifierUsage: profileBudget
+      ? (usage) => profileBudget.record(usage.cost, usage.totalTokens)
+      : undefined,
   });
   const snapshot: ReconciliationSnapshot = { headSha: job.head_sha, items, humanOverrides };
   for (const item of items) {
@@ -813,6 +1046,8 @@ async function runReviewer(
   cwd: string,
   files: string[],
   signal: AbortSignal,
+  profileTimeoutMs?: number,
+  profileBudget?: ProfileBudget,
   humanOverrides?: HumanOverrideContext,
 ): Promise<void> {
   const role = deps.config.reviewers.find((item) => item.id === run.role);
@@ -857,7 +1092,7 @@ async function runReviewer(
         model,
         prompt,
         files,
-        timeoutMs: deps.config.opencode.timeoutMs,
+        timeoutMs: profileTimeoutMs ?? deps.config.opencode.timeoutMs,
         extraArgs: deps.config.opencode.extraArgs,
         bin: deps.config.opencode.bin,
         title: `maomao-${run.role}-${job.id}`,
@@ -890,10 +1125,14 @@ async function runReviewer(
       if (result.usage.complete === false && result.usage.warning) {
         deps.store.log(job.id, result.usage.warning, "warn", run.id);
       }
+      profileBudget?.record(result.usage.cost, result.usage.totalTokens);
       return;
     } catch (error) {
       lastError = formatError(error);
       const cliDump = result ? truncate(result.stderr.trim() || result.stdout.trim(), 500) : "";
+      // Failed attempts still spent tokens/cost; on a later retry the run row
+      // is overwritten, so the tracker must absorb partial usage per attempt.
+      if (result) profileBudget?.record(result.usage.cost, result.usage.totalTokens);
       deps.store.patchReviewer(run.id, {
         state: "failed",
         validation_error: lastError,
@@ -911,7 +1150,15 @@ async function runReviewer(
         "warn",
         run.id,
       );
-      if (attempt <= retries) await sleep(500 * attempt, signal);
+      if (attempt <= retries) {
+        await sleep(500 * attempt, signal);
+        // A spent attempt may have tripped the ceiling; do not respend.
+        const over = profileBudget?.check();
+        if (over) {
+          deps.store.log(job.id, `Reviewer ${run.role} retries stopped: ${over}`, "warn", run.id);
+          break;
+        }
+      }
     }
   }
 }
@@ -923,6 +1170,7 @@ async function runAggregator(
   cwd: string,
   files: string[],
   signal: AbortSignal,
+  profileBudget?: ProfileBudget,
   humanOverrides?: HumanOverrideContext,
 ): Promise<AggregatorResult> {
   const model = deps.config.opencode.aggregatorModel || deps.config.opencode.reviewerModel;
@@ -963,22 +1211,23 @@ async function runAggregator(
       aggregator_duration_ms: Date.now() - started,
       ...aggregatorUsagePersistence(result.usage),
     });
+    profileBudget?.record(result.usage.cost, result.usage.totalTokens);
     return parsed;
   } catch (error) {
-    const fallback = fallbackAggregator(reviewers);
     const message = formatError(error);
     deps.store.log(job.id, `Aggregator OpenCode run failed (${message}); using deterministic fallback`, "warn");
-    deps.store.patchJob(job.id, {
+    // A run that executed but failed to parse still spent usage; the columns are
+    // not persisted on this path, so account the spend straight from the result.
+    if (result) profileBudget?.record(result.usage.cost, result.usage.totalTokens);
+    return applyAggregatorFallback(
+      deps.store,
+      job.id,
+      model || null,
+      reviewers,
       // Preserve the model's output for debugging; the reason is in the log above.
-      aggregator_raw: truncate(result?.text || result?.stdout || "", 200_000),
-      aggregator_normalized: JSON.stringify(fallback, null, 2),
-      aggregator_model: model || null,
-      aggregator_state: "done",
-      aggregator_fallback: 1,
-      aggregator_finished_at: nowIso(),
-      aggregator_duration_ms: Date.now() - started,
-    });
-    return fallback;
+      truncate(result?.text || result?.stdout || "", 200_000),
+      Date.now() - started,
+    );
   }
 }
 
@@ -989,6 +1238,7 @@ async function runInternalEscalation(
   diff: string,
   cwd: string,
   signal: AbortSignal,
+  profileBudget?: ProfileBudget,
 ): Promise<AggregatorResult> {
   const internal = deps.config.poisonAlert.internal;
   if (!internal.model) {
@@ -1016,11 +1266,14 @@ async function runInternalEscalation(
   const hunks = relevantDiffHunks(diff, files, deps.config.routing.maxContextChars);
   const retries = Math.max(0, internal.retries);
   let lastError = "unknown error";
+  // Hoisted so the catch can account usage from a run that executed but threw.
+  let result: Awaited<ReturnType<OpenCodePort["run"]>> | undefined;
 
   for (let attempt = 1; attempt <= retries + 1; attempt++) {
     throwIfStale(deps.store, job.id, signal);
+    result = undefined;
     try {
-      const result = await deps.opencode.run({
+      result = await deps.opencode.run({
         cwd,
         model: internal.model,
         prompt: buildInternalEscalationPrompt({
@@ -1054,6 +1307,8 @@ async function runInternalEscalation(
         internal_escalation_model: internal.model,
         internal_escalation_provider: internal.model.includes("/") ? internal.model.split("/")[0] : null,
       });
+      // Count the spend whether the pass clears the alert or breaks on its own cap.
+      profileBudget?.record(usage.cost, usage.total_tokens);
       if (over) {
         deps.store.log(job.id, over, "warn");
         lastError = over;
@@ -1077,6 +1332,9 @@ async function runInternalEscalation(
       return merged;
     } catch (error) {
       lastError = formatError(error);
+      // The attempt executed and may have spent on the profile budget even
+      // though its output was unusable.
+      if (result) profileBudget?.record(result.usage.cost, result.usage.totalTokens);
       deps.store.log(job.id, `Internal poison-alert attempt ${attempt} failed: ${lastError}`, "warn");
       if (attempt <= retries) await sleep(500 * attempt, signal);
     }
@@ -1138,11 +1396,9 @@ async function publishReview(
   }
   publishable = overridden.kept;
   // severityRank is inverted (blocker=0), so "at or above" the minimum means rank <= threshold.
-  const profileRevision = job.profile_revision_id
-    ? deps.store.configs.getRevision(job.profile_revision_id)
-    : undefined;
-  if (profileRevision) {
-    const threshold = severityRank(profileRevision.definition.minPublishableSeverity);
+  const profileDefinition = profileDefinitionForJob(deps.store, job);
+  if (profileDefinition) {
+    const threshold = severityRank(profileDefinition.minPublishableSeverity);
     publishable = publishable.filter(
       (finding) => severityRank((finding.severity ?? "info") as Severity) <= threshold,
     );

@@ -443,6 +443,72 @@ describe("settled resolved classification", () => {
   });
 });
 
+describe("verifier budget gate", () => {
+  const job = { id: 1, repo_full_name: "acme/widgets", pr_number: 7, pr_title: "t", head_sha: "h" } as JobRow;
+  const prior = { fingerprint: "abc", summary: "open finding", dismissed: false };
+  const signal = new AbortController().signal;
+
+  function priorWithLocation() {
+    return { ...prior, settledResolved: false, path: "a.ts", line: 1 };
+  }
+
+  it("never runs the verifier and leaves priors open when the budget blocks it", async () => {
+    const errors: string[] = [];
+    const items = await classifyPriorFindings({
+      config: { reconcileMinConfidence: 0.7, opencode: { verifierModel: "test/verifier" } } as Config,
+      opencode: {
+        async run() {
+          throw new Error("verifier must not run when the budget blocks it");
+        },
+      },
+      job,
+      repoDir: "/tmp",
+      diff: "",
+      workspaceDir: "/tmp",
+      priors: [priorWithLocation()],
+      signal,
+      budgetBlock: () => "profile total tokens 10 exceeded cap 5",
+      onVerifierError: (message) => errors.push(message),
+    });
+    expect(items).toEqual([
+      expect.objectContaining({
+        fingerprint: "abc",
+        status: "uncertain",
+        confidence: 0,
+        reason: "verifier skipped: profile total tokens 10 exceeded cap 5",
+      }),
+    ]);
+    expect(errors).toEqual(["profile total tokens 10 exceeded cap 5"]);
+  });
+
+  it("feeds the verifier's usage back to the pipeline when it does run", async () => {
+    const seen: Array<{ cost?: number; totalTokens?: number }> = [];
+    const text = JSON.stringify({
+      schema_version: 1,
+      classifications: [
+        { fingerprint: "abc", status: "resolved", confidence: 0.9, reason: "code is gone" },
+      ],
+    });
+    const items = await classifyPriorFindings({
+      config: { reconcileMinConfidence: 0.7, opencode: { verifierModel: "test/verifier" } } as Config,
+      opencode: {
+        async run() {
+          return { stdout: text, stderr: "", exitCode: 0, text, usage: { cost: 0.5, totalTokens: 100 } };
+        },
+      },
+      job,
+      repoDir: "/tmp",
+      diff: "",
+      workspaceDir: "/tmp",
+      priors: [priorWithLocation()],
+      signal,
+      onVerifierUsage: (usage) => seen.push(usage),
+    });
+    expect(seen).toEqual([{ cost: 0.5, totalTokens: 100 }]);
+    expect(items[0]?.status).toBe("resolved");
+  });
+});
+
 describe("persisting anchored mini diffs", () => {
   const diff = `diff --git a/src/auth.ts b/src/auth.ts
 --- a/src/auth.ts
