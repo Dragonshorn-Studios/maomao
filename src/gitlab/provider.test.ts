@@ -44,6 +44,7 @@ function gitlabFixture() {
     discussions: [] as Array<{ id: string; body: string; position?: Record<string, unknown> }>,
     approved: 0,
     versions: [{ base_sha: "base111", start_sha: "start222", head_sha: "head333" }],
+    versionsPaged: false,
     mr: {
       iid: 7,
       title: "Add frob",
@@ -106,6 +107,18 @@ function startGitLabMock(state: ReturnType<typeof gitlabFixture>["state"]): Prom
         return;
       }
       if (url.startsWith("/api/v4/projects/42/merge_requests/7/versions")) {
+        const page = Number(url.match(/page=(\d+)/)?.[1] ?? "1");
+        // Exercise the pagination loop: page 1 returns a full page without the
+        // reviewed SHA, page 2 carries it.
+        if (state.versionsPaged) {
+          const fullPage = Array.from({ length: 100 }, (_, index) => ({
+            base_sha: `p1base${index}`,
+            start_sha: `p1start${index}`,
+            head_sha: `p1head${index}`,
+          }));
+          respond(200, page === 1 ? fullPage : state.versions);
+          return;
+        }
         respond(200, state.versions);
         return;
       }
@@ -327,6 +340,25 @@ describe("GitLabProvider against the API v4 mock", () => {
       head_sha: "head333",
     });
     expect(state.discussions[0]?.position).not.toHaveProperty("new_line");
+  });
+
+  it("finds the reviewed SHA's version on a later page of the history", async () => {
+    state.notes = [];
+    state.discussions = [];
+    state.versionsPaged = true;
+    try {
+      const result = await provider().publishReview({
+        target: TARGET,
+        commitId: "head333",
+        body: "<!-- maomao-review sha=head333 -->\nsummary",
+        comments: [{ path: "src/app.ts", body: "<!-- maomao-finding id=fp222 sha=head333 -->\n**low**: found", line: 2, side: "RIGHT" }],
+        verdict: "COMMENT",
+      });
+      expect(result.postedComments).toHaveLength(1);
+      expect(state.discussions[0]?.position).toMatchObject({ base_sha: "base111", head_sha: "head333" });
+    } finally {
+      state.versionsPaged = false;
+    }
   });
 
   it("refuses to anchor when the MR moved past the reviewed SHA", async () => {

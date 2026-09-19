@@ -4844,3 +4844,40 @@ describe("profile budget ceilings and per-reviewer timeouts", () => {
     expect(job?.failure_reason).toContain("profile budget exceeded — profile total cost 0.6 exceeded cap 0.5");
   });
 });
+describe("non-github health scans", () => {
+  it("fails a gitlab scan job with an honest reason instead of a cross-forge allowlist check", async () => {
+    const config = loadConfig({ REVIEWER_ROLES: "correctness" });
+    const store = new JobStore(openDb(":memory:"));
+    const created = store.enqueue({
+      repoFullName: "acme/widgets",
+      repoOwner: "acme",
+      repoName: "widgets",
+      installationId: 42,
+      provider: "gitlab",
+      providerInstance: "gitlab.com",
+      forgeConnectionId: "conn-1",
+      jobType: "health_scan",
+      prNumber: 0,
+      prTitle: "scan",
+      prBody: "",
+      prHtmlUrl: "",
+      prAuthor: "",
+      baseSha: "b",
+      headSha: "h",
+      baseRef: "main",
+      headRef: "main",
+      reviewers: [],
+    });
+    const pipeline = createPipeline({
+      config,
+      store,
+      github: githubPort(),
+      checkout: await fixtureCheckout(),
+      opencode: { async run() { throw new Error("should not run"); } },
+    });
+    await pipeline.run(created.job.id);
+    const job = store.getJob(created.job.id);
+    expect(job?.state).toBe("failed");
+    expect(job?.failure_reason).toMatch(/health scans are not available for gitlab:gitlab.com/);
+  });
+});

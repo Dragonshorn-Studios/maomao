@@ -56,6 +56,9 @@ interface GitLabNote {
   author?: { username?: string };
 }
 
+/** GitLab truncates notes well below this; chunks stay readable and accepted. */
+const MAX_DEGRADE_NOTE_CHARS = 30_000;
+
 export class GitLabProvider implements ForgePort {
   readonly provider = "gitlab";
   readonly instance: string;
@@ -210,15 +213,30 @@ export class GitLabProvider implements ForgePort {
     }
     const warnings: string[] = [];
     if (degraded.length > 0) {
-      const body = degraded
-        .map((entry) => `${entry.body}\n\n_${entry.path}:${entry.line} could not be anchored inline (${entry.reason}); listed here instead._`)
-        .join("\n\n");
-      try {
-        await this.request("POST", `${this.mrPath(projectId, input.target.changeNumber)}/notes`, { body: { body } });
-      } catch (error) {
-        warnings.push(
-          `${degraded.length} inline finding(s) could not be posted and the degrade note also failed: ${error instanceof Error ? error.message : String(error)}`,
-        );
+      // Chunked so a long batch cannot exceed GitLab's note size limit.
+      const entries = degraded.map(
+        (entry) => `${entry.body}\n\n_${entry.path}:${entry.line} could not be anchored inline (${entry.reason}); listed here instead._`,
+      );
+      const chunks: string[] = [];
+      let current = "";
+      for (const entry of entries) {
+        if (current.length > 0 && current.length + entry.length > MAX_DEGRADE_NOTE_CHARS) {
+          chunks.push(current);
+          current = "";
+        }
+        current = current.length > 0 ? `${current}\n\n${entry}` : entry;
+      }
+      if (current.length > 0) chunks.push(current);
+      for (const chunk of chunks) {
+        try {
+          await this.request("POST", `${this.mrPath(projectId, input.target.changeNumber)}/notes`, {
+            body: { body: chunk },
+          });
+        } catch (error) {
+          warnings.push(
+            `a degrade note for ${degraded.length} inline finding(s) could not be posted: ${error instanceof Error ? error.message : String(error)}`,
+          );
+        }
       }
     }
 
