@@ -69,6 +69,7 @@ describe("theme tokens", () => {
     expect(THEME_CSS).toContain(".connection-card");
     expect(THEME_CSS).toContain(".chat-reasoning");
     expect(THEME_CSS).toContain("textarea:not(.chat-composer-input)");
+    expect(THEME_CSS).toContain(".forge-mark");
     expect(THEME_CSS).not.toContain("fonts.googleapis.com");
     expect(THEME_CSS).not.toContain("cdn.");
   });
@@ -103,7 +104,9 @@ describe("monitoring pages", () => {
   it("renders scannable specimen cards with SHA, progress, and severity text", () => {
     const store = seededStore();
     const html = renderHome(store.listJobs(20), store);
-    expect(html).toContain("[GitHub] acme/ledger #412");
+    expect(html).toContain("acme/ledger #412");
+    expect(html).toContain("forge-mark");
+    expect(html).not.toContain("[GitHub]");
     expect(html).toContain("c0ffee1a2b");
     expect(html).toContain("HIGH");
     expect(html).toContain("MEDIUM");
@@ -617,7 +620,9 @@ describe("cat-hunt flavor", () => {
     const job = store.listJobs(50).find((row) => row.pr_number === 412)!;
     const html = renderJob(job, store.listReviewerRuns(job.id), store.listLogs(job.id), { uiFlavor: "apothecary" });
     // Technical names and metrics stay first.
-    expect(html).toContain("[GitHub] acme/ledger #412");
+    expect(html).toContain("acme/ledger #412");
+    expect(html).toContain("forge-mark");
+    expect(html).not.toContain("[GitHub]");
     expect(html).toContain("Correctness / regression hunter");
     expect(html).toContain("6 cats returned from the diff · 3 findings");
     // Per-reviewer flavor: done with findings vs done clean.
@@ -1374,11 +1379,15 @@ describe("mixed-forge dashboard (issue #18)", () => {
     const html = renderHome([githubJob, selfManaged, gitlabCom], store, {});
     // Identifier semantics: # for GitHub pulls, ! for GitLab MRs; self-managed
     // instances carry their hostname.
-    expect(html).toContain("[GitHub] acme/widgets #8");
-    expect(html).toContain("[GitLab · gitlab.corp.internal] acme/widgets !7");
-    expect(html).toContain("[GitLab] acme/widgets !7");
-    const rows = html.match(/\[GitLab[^\]]*\] acme\/widgets !7/g) ?? [];
-    expect(rows).toHaveLength(2);
+    expect(html).toContain("acme/widgets #8");
+    expect(html).toContain("acme/widgets !7");
+    expect(html).toContain("gitlab.corp.internal");
+    expect(html).toContain('aria-label="GitHub"');
+    expect(html).toContain('aria-label="GitLab"');
+    expect(html).toContain('aria-label="GitLab · gitlab.corp.internal"');
+    expect(html).not.toContain("[GitHub]");
+    expect(html).not.toContain("[GitLab]");
+    expect((html.match(/aria-label="GitLab/g) ?? []).length).toBe(2);
   });
 
   it("keeps the forge filter across pagination links", () => {
@@ -1400,7 +1409,10 @@ describe("mixed-forge dashboard (issue #18)", () => {
   it("carries the forge identity into the job page heading", () => {
     const job = enqueue({ provider: "gitlab", providerInstance: "gitlab.corp.internal", prNumber: 9 });
     const html = renderJob(job, store.listReviewerRuns(job.id), store.listLogs(job.id), {});
-    expect(html).toContain("[GitLab · gitlab.corp.internal] acme/widgets !9</h1>");
+    expect(html).toContain("acme/widgets !9");
+    expect(html).toContain("gitlab.corp.internal");
+    expect(html).toContain("forge-mark");
+    expect(html).not.toContain("[GitLab");
   });
 });
 
@@ -1412,22 +1424,36 @@ describe("operator chrome (issue #86)", () => {
       identity: { login: "octocat", avatarUrl: "https://avatars.githubusercontent.com/u/1" },
     });
     expect(html).toContain("account-menu");
-    expect(html).toContain('aria-label="Operator menu"');
+    expect(html).toContain('aria-label="Signed in as octocat"');
     expect(html).toContain('href="/connections"');
     expect(html).toContain('href="/config#effective"');
     expect(html).toContain('href="/health"');
     expect(html).toContain('href="/scan"');
     expect(html).toContain("octocat");
+    expect(html).toContain("account-who");
     expect(html).toContain('class="who-avatar"');
     expect(html).toContain('action="/logout"');
     expect(html).not.toContain("signed in as");
   });
 
-  it("renders a Menu button when there is no avatar identity", () => {
+  it("labels a password session as Operator instead of a generic Menu", () => {
     const html = layout("Maomao", "<p>body</p>", { showLogout: true, csrfToken: "tok" });
     expect(html).toContain("account-menu");
-    expect(html).toContain("Menu");
+    expect(html).toContain("Operator");
+    expect(html).toContain('aria-label="Signed in as Operator"');
+    expect(html).toContain("who-glyph");
+    expect(html).toContain("account-who");
     expect(html).toContain('href="/connections"');
+    expect(html).not.toContain(">Menu<");
+  });
+
+  it("keeps a Menu label when the UI is ungated", () => {
+    const html = layout("Maomao", "<p>body</p>", {});
+    expect(html).toContain("account-menu");
+    expect(html).toContain("Menu");
+    expect(html).toContain('aria-label="Operator menu"');
+    expect(html).not.toContain("account-who");
+    expect(html).not.toContain('action="/logout"');
   });
 
   it("does not restyle the dashboard surface", () => {

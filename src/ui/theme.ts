@@ -220,6 +220,11 @@ a:hover { color: var(--herb); }
 }
 .who strong { color: var(--ink); }
 .who-avatar { border-radius: 50%; vertical-align: middle; }
+.who-glyph {
+  display: inline-flex;
+  color: var(--ink-muted);
+}
+.who-glyph svg { display: block; }
 .github-login {
   display: inline-block;
   margin: 0.35rem 0;
@@ -284,8 +289,11 @@ code, .sha, .metric, kbd {
 button, input, textarea {
   font: inherit;
 }
+button, summary {
+  appearance: none;
+}
 
-.btn, .login button, .trigger button, .logout button.primary {
+.btn, .login button, .trigger button, .logout button.primary, .chat-send {
   background: var(--jade);
   color: var(--btn-fg);
   border: 1px solid color-mix(in srgb, var(--jade) 70%, var(--ink));
@@ -294,7 +302,7 @@ button, input, textarea {
   cursor: pointer;
   letter-spacing: 0.02em;
 }
-.btn:hover, .login button:hover, .trigger button:hover {
+.btn:hover, .login button:hover, .trigger button:hover, .chat-send:hover {
   filter: brightness(1.05);
 }
 
@@ -409,6 +417,15 @@ button, input, textarea {
 }
 .specimen-title a { color: var(--ink); text-decoration: none; }
 .specimen-title a:hover { color: var(--jade); text-decoration: underline; }
+.forge-mark {
+  display: inline-flex;
+  vertical-align: -0.12em;
+  margin-right: 0.4rem;
+  color: var(--ink);
+}
+.forge-mark svg { width: 1em; height: 1em; display: block; }
+.forge-mark-text { font-size: 0.85em; color: var(--ink-muted); margin-right: 0.35rem; }
+.forge-host { font-weight: 500; }
 
 .meta-row {
   display: flex;
@@ -1004,28 +1021,33 @@ details summary { cursor: pointer; color: var(--ink-muted); }
 }
 .chat-composer-input:focus-visible { outline: 2px solid var(--focus); outline-offset: 1px; }
 .chat-send, .chat-cancel {
-  border: 1px solid var(--jade);
-  background: var(--jade);
-  color: var(--btn-fg);
-  border-radius: var(--radius);
-  padding: var(--space-2) var(--space-3);
   cursor: pointer;
   font: inherit;
 }
-.chat-cancel { border-color: var(--line-strong); background: var(--surface-2); color: var(--ink); }
+.chat-cancel {
+  background: var(--paper);
+  color: var(--ink);
+  border: 1px solid var(--line-strong);
+  padding: 0.45rem 0.85rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+.chat-cancel:hover { color: var(--jade); border-color: var(--jade); }
 .chat-send:disabled, .chat-cancel:disabled { opacity: 0.5; cursor: default; }
 .chat-error { border: 1px solid var(--cinnabar); background: var(--cinnabar-soft); color: var(--ink); border-radius: var(--radius); padding: var(--space-2); }
 .chat-suggestions { display: flex; flex-wrap: wrap; gap: var(--space-2); }
 .chat-suggestion {
+  appearance: none;
   border: 1px solid var(--line-strong);
-  border-radius: var(--radius);
-  background: var(--surface-2);
+  background: var(--paper);
   color: var(--ink);
   padding: var(--space-1) var(--space-2);
   cursor: pointer;
+  font: inherit;
   font-size: 0.85rem;
+  font-weight: 600;
 }
-.chat-suggestion:hover { border-color: var(--jade); }
+.chat-suggestion:hover { color: var(--jade); border-color: var(--jade); }
 
 /* ---- Operator chrome (header menu + secondary pages) ---- */
 .account-menu { position: relative; }
@@ -1040,8 +1062,7 @@ details summary { cursor: pointer; color: var(--ink-muted); }
   color: var(--ink);
   background: var(--surface);
   border: 1px solid var(--line);
-  border-radius: var(--radius);
-  padding: 0.2rem 0.55rem 0.2rem 0.3rem;
+  padding: 0.1rem 0.5rem 0.1rem 0.28rem;
 }
 .account-menu-summary::-webkit-details-marker,
 .account-menu-summary::marker { display: none; }
@@ -1059,11 +1080,18 @@ details summary { cursor: pointer; color: var(--ink-muted); }
   min-width: 13rem;
   display: grid;
   background: var(--surface);
-  border: 1px solid var(--line-strong);
-  border-radius: var(--radius);
+  border: 1px solid var(--line);
   box-shadow: var(--shadow);
   padding: 0.3rem;
   z-index: 8;
+}
+.account-who {
+  margin: 0 0 0.2rem;
+  padding: 0.25rem 0.55rem 0.4rem;
+  border-bottom: 1px solid var(--line);
+  font-size: 0.78rem;
+  font-weight: 600;
+  color: var(--ink);
 }
 .account-menu-panel a,
 .account-logout button {
@@ -1094,7 +1122,6 @@ body.operator main form:not(.chat-composer) button {
   letter-spacing: 0.02em;
   cursor: pointer;
   padding: 0.45rem 0.85rem;
-  border-radius: var(--radius);
   border: 1px solid color-mix(in srgb, var(--jade) 70%, var(--ink));
   background: var(--jade);
   color: var(--btn-fg);
@@ -1103,13 +1130,13 @@ body.operator main form:not(.chat-composer) button {
 body.operator main form:not(.chat-composer) button.btn-secondary {
   background: var(--paper);
   color: var(--ink);
-  border-color: var(--line-strong);
+  border: 1px solid var(--line-strong);
 }
 .btn-danger,
 body.operator main form:not(.chat-composer) button.btn-danger {
   background: var(--cinnabar);
   color: var(--btn-fg);
-  border-color: color-mix(in srgb, var(--cinnabar) 70%, var(--ink));
+  border: 1px solid color-mix(in srgb, var(--cinnabar) 70%, var(--ink));
 }
 .btn:hover, body.operator main form:not(.chat-composer) button:hover { filter: brightness(1.05); }
 .btn-secondary:hover, body.operator main form:not(.chat-composer) button.btn-secondary:hover {
@@ -1212,15 +1239,15 @@ body.operator main th {
 }
 .chat-action-bar { display: flex; gap: var(--space-2); margin-top: var(--space-2); }
 .chat-action {
+  appearance: none;
   font: inherit;
-  font-size: 0.75rem;
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
-  color: var(--ink-muted);
-  background: transparent;
-  border: 1px solid var(--line);
-  border-radius: var(--radius);
-  padding: 0.15rem 0.45rem;
+  font-size: 0.78rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  color: var(--ink);
+  background: var(--paper);
+  border: 1px solid var(--line-strong);
+  padding: 0.22rem 0.65rem;
   cursor: pointer;
 }
 .chat-action:hover { color: var(--jade); border-color: var(--jade); }
@@ -1228,15 +1255,17 @@ body.operator main th {
 .chat-footer { display: grid; gap: var(--space-3); }
 .chat-scroll-bottom {
   justify-self: center;
+  appearance: none;
   font: inherit;
   font-size: 0.78rem;
-  color: var(--ink-muted);
-  background: var(--surface);
-  border: 1px solid var(--line);
-  border-radius: 999px;
-  padding: 0.15rem 0.6rem;
+  font-weight: 600;
+  color: var(--ink);
+  background: var(--paper);
+  border: 1px solid var(--line-strong);
+  padding: 0.22rem 0.65rem;
   cursor: pointer;
 }
+.chat-scroll-bottom:hover { color: var(--jade); border-color: var(--jade); }
 .chat-indicator { margin: 0; }
 .github-login {
   display: inline-block;
@@ -1247,6 +1276,5 @@ body.operator main th {
   border: 1px solid color-mix(in srgb, var(--jade) 70%, var(--ink));
   padding: 0.45rem 0.85rem;
   text-decoration: none;
-  border-radius: var(--radius);
 }
 `.trim();

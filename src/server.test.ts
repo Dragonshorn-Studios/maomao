@@ -272,7 +272,10 @@ describe("HTTP app", () => {
 
     const home = await app.request("/", { headers: { cookie } });
     expect(home.status).toBe(200);
-    expect(await home.text()).toContain("Review jobs");
+    const homeHtml = await home.text();
+    expect(homeHtml).toContain("Review jobs");
+    expect(homeHtml).toContain("Operator");
+    expect(homeHtml).toContain('aria-label="Signed in as Operator"');
 
     const api = await app.request("/api/jobs", { headers: { cookie } });
     expect(api.status).toBe(200);
@@ -3996,8 +3999,11 @@ describe("home forge filter", () => {
     expect(html).toContain('aria-current="true"');
     expect(html).toContain("All forges");
     // Only the GitLab job card renders under the filter.
-    expect(html).toContain("[GitLab] acme/widgets !7");
-    expect(html).not.toContain("[GitHub] acme/widgets #7");
+    expect(html).toContain("acme/widgets !7");
+    expect(html).toContain('aria-label="GitLab"');
+    expect(html).not.toContain('aria-label="GitHub"');
+    expect(html).not.toContain("[GitLab]");
+    expect(html).not.toContain("[GitHub]");
   });
 
   it("keeps the filter when the filtered page is exhausted", async () => {
@@ -4017,8 +4023,9 @@ describe("home forge filter", () => {
     const exhausted = await app.request(`/?forge=gitlab:gitlab.com&before=${gitlab.id}`);
     const html = await exhausted.text();
     // Refill respects the filter: still exactly the GitLab job.
-    expect(html).toContain("[GitLab] acme/widgets !7");
-    expect(html).not.toContain("[GitHub] acme/widgets #7");
+    expect(html).toContain("acme/widgets !7");
+    expect(html).toContain('aria-label="GitLab"');
+    expect(html).not.toContain('aria-label="GitHub"');
     expect(html).toContain('aria-current="true"');
   });
 
@@ -4039,7 +4046,9 @@ describe("home forge filter", () => {
     const html = await home.text();
     expect(html).not.toContain('role="navigation" aria-label="Filter by forge"');
     // The single job renders unfiltered despite the bogus forge param.
-    expect(html).toContain("[GitHub] acme/widgets #7");
+    expect(html).toContain("acme/widgets #7");
+    expect(html).toContain('aria-label="GitHub"');
+    expect(html).not.toContain("[GitHub]");
   });
 });
 

@@ -2,7 +2,7 @@ import { escapeHtml } from "../util.js";
 import { CSRF_FIELD } from "../auth.js";
 import type { FindingRow } from "../findings/types.js";
 import { PRODUCT_TAGLINE, type UiFlavor } from "./copy.js";
-import { brandMark } from "./glyphs.js";
+import { brandMark, operatorMark } from "./glyphs.js";
 import { THEME_HREF } from "./theme.js";
 import { PIERRE_DIFFS_HREF } from "./paths.js";
 
@@ -137,18 +137,27 @@ const ACCOUNT_BOOT = `
 function accountMenu(options: PageOptions): string {
   if (options.accountMenu === false) return "";
   const identity = options.identity;
+  const signedIn = Boolean(identity) || Boolean(options.showLogout);
+  const label = identity?.login
+    ? escapeHtml(identity.login)
+    : signedIn
+      ? "Operator"
+      : "Menu";
   const avatar = identity?.avatarUrl
     ? `<img class="who-avatar" src="${escapeHtml(identity.avatarUrl)}" alt="" width="28" height="28"/>`
-    : "";
-  const label = identity ? escapeHtml(identity.login) : "Menu";
+    : signedIn
+      ? `<span class="who-glyph" aria-hidden="true">${operatorMark()}</span>`
+      : "";
+  const who = signedIn ? `<p class="account-who">${label}</p>` : "";
   const logout = options.showLogout
     ? `<form method="post" action="/logout" class="account-logout">${csrfInput(options.csrfToken)}<button type="submit">Log out</button></form>`
     : "";
   return `<details class="account-menu">
-      <summary class="account-menu-summary" aria-label="Operator menu">
+      <summary class="account-menu-summary" aria-label="${signedIn ? `Signed in as ${label}` : "Operator menu"}">
         ${avatar}<span class="account-name">${label}</span>
       </summary>
       <nav class="account-menu-panel" aria-label="Operator">
+        ${who}
         <a href="/connections">Connections</a>
         <a href="/config#effective">Configuration</a>
         <a href="/health">Health</a>

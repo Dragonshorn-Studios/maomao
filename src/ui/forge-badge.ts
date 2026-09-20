@@ -1,11 +1,14 @@
 /**
- * Forge identity rendering for the dashboard (issue #18): every job is
- * visually attributed to its forge and instance next to its title, with
+ * Forge identity rendering for the dashboard (issue #18, #86): every job is
+ * visually attributed with a GitHub/GitLab mark next to its title, with
  * provider-native change identifiers (# for GitHub pulls, ! for GitLab
- * merge requests). Text and wordmark only — never color alone — and the
- * full instance hostname stays in the accessible label.
+ * merge requests). Square-bracket prefixes are avoided so a PR titled
+ * `[RFC] …` is not preceded by another `[GitHub]`. Text titles (document
+ * `<title>`) name the provider without brackets. The full instance hostname
+ * stays in the accessible label and, for self-managed hosts, after the id.
  */
 import { escapeHtml } from "../util.js";
+import { forgeMark } from "./glyphs.js";
 
 export interface ForgeBadgeFields {
   provider: string;
@@ -29,18 +32,24 @@ export function changeIdentifier(provider: string, changeNumber: number): string
   return provider.toLowerCase() === "gitlab" ? `!${changeNumber}` : `#${changeNumber}`;
 }
 
+function canonicalInstance(instance: string): boolean {
+  const host = instance.toLowerCase();
+  return host === "github.com" || host === "gitlab.com" || host === "";
+}
+
+function instanceHost(fields: ForgeBadgeFields): string {
+  return canonicalInstance(fields.provider_instance) ? "" : fields.provider_instance;
+}
+
 /**
- * The inline badge + repository + native id, e.g.
- * `[GitHub] acme/widgets #7` or `[GitLab · gitlab.corp.internal] acme/widgets !7`.
- * Self-managed (non-canonical) instances always show the hostname; the
- * canonical public forges collapse to the provider name alone.
+ * Plain-text badge for document titles and copy: no square brackets.
+ * `GitHub · acme/widgets #7` or `GitLab · gitlab.corp.internal · team/project !17`.
  */
 export function forgeBadgeTitle(fields: ForgeBadgeFields, repoFullName: string, changeNumber: number): string {
   const provider = providerLabel(fields.provider);
-  const instance = fields.provider_instance.toLowerCase();
-  const hostSuffix =
-    instance === "github.com" || instance === "gitlab.com" || instance === "" ? "" : ` · ${fields.provider_instance}`;
-  return `[${provider}${hostSuffix}] ${repoFullName} ${changeIdentifier(fields.provider, changeNumber)}`;
+  const host = instanceHost(fields);
+  const id = `${repoFullName} ${changeIdentifier(fields.provider, changeNumber)}`;
+  return host ? `${provider} · ${host} · ${id}` : `${provider} · ${id}`;
 }
 
 /**
@@ -48,14 +57,28 @@ export function forgeBadgeTitle(fields: ForgeBadgeFields, repoFullName: string, 
  * provider name and qualifies everything else with its hostname.
  */
 export function forgeChipLabel(scope: ForgeBadgeFields): string {
-  const instance = scope.provider_instance.toLowerCase();
-  if (instance === "github.com" || instance === "gitlab.com" || instance === "") {
-    return providerLabel(scope.provider);
-  }
-  return `${providerLabel(scope.provider)} · ${scope.provider_instance}`;
+  const host = instanceHost(scope);
+  return host ? `${providerLabel(scope.provider)} · ${host}` : providerLabel(scope.provider);
 }
 
-/** Escaped HTML form of {@link forgeBadgeTitle}. */
+/** Accessible provider + host for the icon `title` / `aria-label`. */
+export function forgeMarkLabel(fields: ForgeBadgeFields): string {
+  const host = instanceHost(fields);
+  return host ? `${providerLabel(fields.provider)} · ${host}` : providerLabel(fields.provider);
+}
+
+/**
+ * Inline mark + repository + native id. Self-managed hosts render after the
+ * identifier so they cannot be mistaken for a `[tag]` on the PR title.
+ */
 export function forgeBadgeTitleHtml(fields: ForgeBadgeFields, repoFullName: string, changeNumber: number): string {
-  return escapeHtml(forgeBadgeTitle(fields, repoFullName, changeNumber));
+  const label = forgeMarkLabel(fields);
+  const mark = forgeMark(fields.provider);
+  const icon = mark
+    ? `<span class="forge-mark" title="${escapeHtml(label)}" aria-label="${escapeHtml(label)}">${mark}</span>`
+    : `<span class="forge-mark forge-mark-text">${escapeHtml(label)}</span> `;
+  const id = `${escapeHtml(repoFullName)} ${escapeHtml(changeIdentifier(fields.provider, changeNumber))}`;
+  const host = instanceHost(fields);
+  const hostBit = host ? ` <span class="muted forge-host">${escapeHtml(host)}</span>` : "";
+  return `${icon}${id}${hostBit}`;
 }
