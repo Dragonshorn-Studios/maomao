@@ -9,6 +9,7 @@ import { initialProfileFormValues, profileFormValuesFromDefinition } from "../co
 import type { EffectiveConfigEntry } from "../config-effective.js";
 import type { Severity } from "../schema.js";
 import { elapsedMs, escapeHtml, formatDuration, shortSha } from "../util.js";
+import { KNOWN_REVIEWER_ROLES, promptBodyFromRolePrompt } from "../prompts.js";
 import {
   cancelledBannerCopy,
   diffUnavailableCopy,
@@ -1036,13 +1037,13 @@ function revisionCard(revision: ConfigRevisionView, data: ConfigPageData): strin
   if (data.canWrite && revision.status === "draft") {
     actions.push(`<form method="post" action="/config/revisions/${revision.id}/activate" class="inline-form">
       ${csrf}
-      <button type="submit">Activate</button>
+      <button type="submit" class="btn">Activate</button>
     </form>`);
   }
   if (data.canWrite && revision.status === "retired") {
     actions.push(`<form method="post" action="/config/revisions/${revision.id}/rollback" class="inline-form">
       ${csrf}
-      <button type="submit">Roll back to this revision</button>
+      <button type="submit" class="btn-secondary">Roll back to this revision</button>
     </form>`);
   }
   const definitionJson = JSON.stringify(revision.definition, null, 2);
@@ -1062,7 +1063,7 @@ function revisionCard(revision: ConfigRevisionView, data: ConfigPageData): strin
         ${csrf}
         <input type="hidden" name="expected_edit_seq" value="${revision.editSeq}"/>
         <textarea name="definition" rows="12" cols="72">${escapeHtml(definitionJson)}</textarea>
-        <button type="submit">Save draft</button>
+        <button type="submit" class="btn">Save draft</button>
       </form>
     </details>` : ""}
     <div class="config-actions">${actions.join("")}</div>
@@ -1220,7 +1221,7 @@ export function renderProfileForm(
           </select>
         </label>
       </fieldset>
-      <button type="submit" name="action" value="save">Save draft</button>
+      <button type="submit" name="action" value="save" class="btn">Save draft</button>
       <a href="/config">Cancel</a>
     </form>
   </section>`;
@@ -1249,10 +1250,10 @@ export function renderConfigPage(data: ConfigPageData): string {
   const importForm = data.canWrite
     ? `<details class="config-import">
         <summary>Import exported configuration</summary>
-        <form method="post" action="/config/import">
+        <form method="post" action="/config/import" class="operator-form">
           ${csrf}
           <textarea name="payload" rows="8" cols="72"></textarea>
-          <button type="submit">Import as drafts</button>
+          <p><button type="submit" class="btn">Import as drafts</button></p>
         </form>
       </details>`
     : "";
@@ -1265,6 +1266,7 @@ export function renderConfigPage(data: ConfigPageData): string {
   const body = `
     <h1>Review configuration</h1>
     <p class="lede">Versioned review profiles and specialist selection. Activation is explicit and audited; credentials are never part of this configuration.</p>
+    <p class="config-nav"><a href="/config/prompts">Specialist prompts</a> — see each role's built-in instructions and manage your overrides.</p>
     ${data.notice ? `<p class="notice" role="status">${escapeHtml(data.notice)}</p>` : ""}
     ${data.error ? `<p class="error" role="alert">${escapeHtml(data.error)}</p>` : ""}
     ${data.effectiveConfig ? renderEffectiveConfigSection(data.effectiveConfig) : ""}
@@ -1358,84 +1360,157 @@ export interface PromptConfigPageData {
   identity?: UiIdentity;
 }
 
+function promptCatalog(): Array<{ id: string; title: string; defaultBody: string }> {
+  return KNOWN_REVIEWER_ROLES.map((role) => ({
+    id: role.id,
+    title: role.title,
+    defaultBody: promptBodyFromRolePrompt(role.prompt),
+  }));
+}
+
+function previewPromptBody(body: string): string {
+  const compact = body.replace(/\s+/g, " ").trim();
+  return compact.length > 180 ? `${compact.slice(0, 180)}…` : compact;
+}
+
 function promptRevisionCard(revision: PromptRevisionView, data: PromptConfigPageData): string {
   const csrf = csrfInput(data.csrfToken);
   const actions: string[] = [];
   if (data.canWrite && revision.status === "draft") {
     actions.push(`<form method="post" action="/config/prompts/${revision.id}/activate" class="inline-form">
       ${csrf}
-      <button type="submit">Activate</button>
+      <button type="submit" class="btn">Activate override</button>
     </form>`);
   }
   if (data.canWrite && revision.status === "retired") {
     actions.push(`<form method="post" action="/config/prompts/${revision.id}/rollback" class="inline-form">
       ${csrf}
-      <button type="submit">Roll back to this revision</button>
+      <button type="submit" class="btn-secondary">Roll back to this revision</button>
     </form>`);
   }
-  return `<article class="card config-revision">
+  return `<article class="card config-revision" data-prompt-revision="${revision.id}">
     <header>
-      <span class="role"><strong>#${revision.id}</strong> ${escapeHtml(revision.role_id)} · ${escapeHtml(revision.status)}</span>
+      <span class="role"><strong>#${revision.id}</strong> ${escapeHtml(revision.status)}</span>
       <span class="muted">by ${escapeHtml(revision.created_by)} · updated ${escapeHtml(revision.updated_at)}</span>
     </header>
     ${revision.note ? `<p class="muted">${escapeHtml(revision.note)}</p>` : ""}
     <details>
-      <summary>Editable instructions (guardrails are composed at runtime and are not editable)</summary>
+      <summary>Editable instructions</summary>
       <pre class="log-panel">${escapeHtml(revision.body)}</pre>
     </details>
     ${revision.status === "draft" && data.canWrite ? `<details>
       <summary>Edit draft</summary>
-      <form method="post" action="/config/prompts/drafts/${revision.id}">
+      <form method="post" action="/config/prompts/drafts/${revision.id}" class="operator-form">
         ${csrf}
         <input type="hidden" name="expected_edit_seq" value="${revision.editSeq}"/>
         <textarea name="body" rows="10" cols="72">${escapeHtml(revision.body)}</textarea>
-        <button type="submit">Save draft</button>
+        <p><button type="submit" class="btn">Save draft</button></p>
       </form>
     </details>` : ""}
     <div class="config-actions">${actions.join("")}</div>
   </article>`;
 }
 
+function promptRoleCard(
+  role: { id: string; title: string; defaultBody: string },
+  revisions: PromptRevisionView[],
+  data: PromptConfigPageData,
+): string {
+  const active = revisions.find((revision) => revision.status === "active");
+  const drafts = revisions.filter((revision) => revision.status === "draft");
+  const retired = revisions.filter((revision) => revision.status === "retired");
+  const currentBody = active?.body ?? role.defaultBody;
+  const source = active
+    ? `<span class="state state-completed">Override #${active.id}</span>`
+    : `<span class="state state-queued">Built-in</span>`;
+  const csrf = csrfInput(data.csrfToken);
+  const overrideForm =
+    data.canWrite && drafts.length === 0
+      ? `<details class="prompt-override">
+          <summary>${active ? "Draft a replacement" : "Override this built-in"}</summary>
+          <form method="post" action="/config/prompts/drafts" class="operator-form">
+            ${csrf}
+            <input type="hidden" name="role_id" value="${escapeHtml(role.id)}"/>
+            <p class="muted">Guardrails are composed at runtime and are not stored here. Activate the draft to make it the live override.</p>
+            <textarea name="body" rows="10" cols="72">${escapeHtml(currentBody)}</textarea>
+            <p><button type="submit" class="btn">Save as draft</button></p>
+          </form>
+        </details>`
+      : "";
+  const history =
+    retired.length > 0
+      ? `<details class="prompt-history">
+          <summary>Retired revisions (${retired.length})</summary>
+          ${retired.map((revision) => promptRevisionCard(revision, data)).join("")}
+        </details>`
+      : "";
+  return `<article class="card prompt-role" data-role="${escapeHtml(role.id)}">
+    <header class="prompt-role-head">
+      <div>
+        <p class="label">${escapeHtml(role.id)}</p>
+        <h3 class="specimen-title">${roleGlyph(role.id)} ${escapeHtml(role.title)}</h3>
+      </div>
+      <div class="connection-chips">${source}</div>
+    </header>
+    <p class="prompt-preview muted">${escapeHtml(previewPromptBody(currentBody))}</p>
+    <details>
+      <summary>${active ? "Current override" : "Built-in instructions"}</summary>
+      <pre class="log-panel">${escapeHtml(currentBody)}</pre>
+    </details>
+    ${overrideForm}
+    ${drafts.map((revision) => promptRevisionCard(revision, data)).join("")}
+    ${history}
+  </article>`;
+}
+
 export function renderPromptConfigPage(data: PromptConfigPageData): string {
   const csrf = csrfInput(data.csrfToken);
-  const createForm = data.canWrite
-    ? `<details class="config-create">
-        <summary>Create a prompt draft</summary>
-        <form method="post" action="/config/prompts/drafts">
-          ${csrf}
-          <label>Role <input name="role_id" required/></label>
-          <textarea name="body" rows="10" cols="72" placeholder="Editable instructions only — guardrails are composed at runtime"></textarea>
-          <button type="submit">Create draft</button>
-        </form>
-      </details>`
-    : `<p class="muted">Writing prompt configuration requires an operator OAuth identity.</p>`;
+  const catalog = promptCatalog();
+  const byRole = new Map<string, PromptRevisionView[]>();
+  for (const revision of data.revisions) {
+    const list = byRole.get(revision.role_id) ?? [];
+    list.push(revision);
+    byRole.set(revision.role_id, list);
+  }
+  const roleCards = catalog
+    .map((role) => `<li>${promptRoleCard(role, byRole.get(role.id) ?? [], data)}</li>`)
+    .join("");
+  const unknown = [...byRole.entries()]
+    .filter(([roleId]) => !catalog.some((role) => role.id === roleId))
+    .map(
+      ([roleId, revisions]) =>
+        `<li>${promptRoleCard({ id: roleId, title: roleId, defaultBody: "" }, revisions, data)}</li>`,
+    )
+    .join("");
   const fixtureForm = data.canWrite
     ? `<details class="config-import">
         <summary>Save an evaluation fixture (explicit sanitize/provenance acknowledgement required)</summary>
-        <form method="post" action="/config/prompts/fixtures">
+        <form method="post" action="/config/prompts/fixtures" class="operator-form">
           ${csrf}
-          <label>Name <input name="name" required/></label>
-          <label>PR metadata (JSON) <input name="pr_meta" value="{}"/></label>
-          <textarea name="diff" rows="8" cols="72" placeholder="Sanitized unified diff"></textarea>
-          <label><input type="checkbox" name="acknowledged"/> I confirm this fixture is sanitized and safe to store</label>
-          <button type="submit">Save fixture</button>
+          <p><label>Name <input name="name" required/></label></p>
+          <p><label>PR metadata (JSON) <input name="pr_meta" value="{}"/></label></p>
+          <p><label>Sanitized unified diff <textarea name="diff" rows="8" cols="72" placeholder="Sanitized unified diff"></textarea></label></p>
+          <p><label><input type="checkbox" name="acknowledged"/> I confirm this fixture is sanitized and safe to store</label></p>
+          <p><button type="submit" class="btn">Save fixture</button></p>
         </form>
       </details>`
     : "";
   const evalForm = data.canWrite
     ? `<details class="config-import">
         <summary>Evaluate a draft prompt against a fixture (offline, never publishes)</summary>
-        <form method="post" action="/config/prompts/evaluate">
+        <form method="post" action="/config/prompts/evaluate" class="operator-form">
           ${csrf}
-          <label>Prompt revision <input name="prompt_revision_id" required/></label>
-          <label>Fixture <input name="fixture_id" required/></label>
-          <label>Model <input name="model"/></label>
-          <label>Max cost (USD) <input name="max_cost_usd"/></label>
-          <button type="submit">Evaluate</button>
+          <p><label>Prompt revision <input name="prompt_revision_id" required/></label></p>
+          <p><label>Fixture <input name="fixture_id" required/></label></p>
+          <p><label>Model <input name="model"/></label></p>
+          <p><label>Max cost (USD) <input name="max_cost_usd"/></label></p>
+          <p><button type="submit" class="btn">Evaluate</button></p>
         </form>
       </details>`
     : "";
-  const revisionCards = data.revisions.map((revision) => promptRevisionCard(revision, data)).join("");
+  const writeGate = data.canWrite
+    ? ""
+    : `<p class="muted">Writing prompt configuration requires an operator OAuth identity.</p>`;
   const fixtureRows = data.fixtures
     .map(
       (fixture) =>
@@ -1449,14 +1524,14 @@ export function renderPromptConfigPage(data: PromptConfigPageData): string {
     })
     .join("");
   const body = `
+    <p class="crumb"><a href="/config">Review configuration</a> / Specialist prompts</p>
     <h1>Specialist prompts</h1>
-    <p class="lede">Versioned prompt revisions with offline fixture evaluation. Security guardrails are composed at runtime and are not editable. Evaluation never publishes to GitHub or activates a prompt.</p>
-    <p><a href="/config">Back to review configuration</a></p>
+    <p class="lede">Each specialist ships with built-in instructions. Override a role when you need different focus; the live override is the active revision, drafts stay private until you activate them. Security guardrails are composed at runtime and are not editable. Evaluation never publishes to GitHub.</p>
     ${data.notice ? `<p class="notice" role="status">${escapeHtml(data.notice)}</p>` : ""}
     ${data.error ? `<p class="error" role="alert">${escapeHtml(data.error)}</p>` : ""}
-    <h2>Revisions</h2>
-    ${createForm}
-    ${revisionCards || `<p class="muted">No prompt revisions — env-authored role prompts apply.</p>`}
+    ${writeGate}
+    <h2>Roles</h2>
+    <ul class="prompt-role-list">${roleCards}${unknown}</ul>
     <h2>Evaluation fixtures</h2>
     ${fixtureForm}
     ${data.fixtures.length > 0 ? `<table class="config-audit"><thead><tr><th>ID</th><th>Name</th><th>Diff chars</th><th>Expectations</th><th>Saved by</th></tr></thead><tbody>${fixtureRows}</tbody></table>` : `<p class="muted">No fixtures saved.</p>`}

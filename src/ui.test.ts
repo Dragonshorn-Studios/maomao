@@ -4,7 +4,7 @@ import { seedDemoJobs } from "./demo/fixtures.js";
 import { JobStore } from "./jobs/store.js";
 import { THEME_CSS } from "./ui/theme.js";
 import { TYPEAHEAD_JS } from "./ui/typeahead.js";
-import { renderConfigPage, renderHome, renderJob, renderLogin, renderScanConfirmPage, renderScanIssuePreviewPage, renderScanPage } from "./ui/pages.js";
+import { renderConfigPage, renderHome, renderJob, renderLogin, renderPromptConfigPage, renderScanConfirmPage, renderScanIssuePreviewPage, renderScanPage } from "./ui/pages.js";
 import { layout } from "./ui/layout.js";
 import { renderConnectionsPage } from "./ui/connections.js";
 import { renderHealthPage } from "./ui/health.js";
@@ -70,6 +70,9 @@ describe("theme tokens", () => {
     expect(THEME_CSS).toContain(".chat-reasoning");
     expect(THEME_CSS).toContain("textarea:not(.chat-composer-input)");
     expect(THEME_CSS).toContain(".forge-mark");
+    expect(THEME_CSS).toContain(".brand-mark");
+    expect(THEME_CSS).toContain(".chat-toolbar");
+    expect(THEME_CSS).toContain(".prompt-role");
     expect(THEME_CSS).not.toContain("fonts.googleapis.com");
     expect(THEME_CSS).not.toContain("cdn.");
   });
@@ -86,6 +89,7 @@ describe("monitoring pages", () => {
     expect(html).toContain('rel="icon" href="/assets/favicon.svg"');
     expect(html).toContain('rel="alternate icon" href="/assets/favicon.png"');
     expect(html).toContain('rel="apple-touch-icon" href="/assets/icon.png"');
+    expect(html).toContain('class="brand-mark" src="/assets/favicon.svg"');
     expect(html).not.toContain("EventSource");
     expect(html).toContain("Skip to content");
     expect(html).toContain('<script src="/assets/vendor/pierre-diffs.js" defer></script>');
@@ -600,6 +604,8 @@ describe("config page", () => {
     };
     const html = renderConfigPage(data);
     expect(html).toContain("Review configuration");
+    expect(html).toContain('href="/config/prompts"');
+    expect(html).toContain("Specialist prompts");
     // The definition JSON is rendered escaped inside the edit textarea.
     expect(html).toContain("&quot;reviewers&quot;");
     expect(html).toContain('name="csrf_token"');
@@ -1501,6 +1507,44 @@ describe("health HTML page", () => {
   });
 });
 
+describe("specialist prompt catalog", () => {
+  it("shows built-in role instructions and an override form without a free-text role id", () => {
+    const html = renderPromptConfigPage({
+      revisions: [
+        {
+          id: 4,
+          role_id: "correctness",
+          status: "draft",
+          body: "Focus: leaked secrets.",
+          note: null,
+          created_by: "octocat",
+          editSeq: 1,
+          created_at: "2026-01-01T00:00:00Z",
+          updated_at: "2026-01-01T00:00:00Z",
+          activated_at: null,
+        },
+      ],
+      fixtures: [],
+      evaluations: [],
+      canWrite: true,
+      csrfToken: "tok",
+    });
+    expect(html).toContain("Specialist prompts");
+    expect(html).toContain('data-role="correctness"');
+    expect(html).toContain('data-role="security"');
+    expect(html).toContain("Built-in");
+    expect(html).toContain("Override this built-in");
+    expect(html).toContain("Correctness / regression hunter");
+    expect(html).toContain('name="role_id" value="security"');
+    expect(html).not.toContain('<input name="role_id"');
+    expect(html).toContain("Focus: leaked secrets.");
+    expect(html).toContain("Activate override");
+    expect(html).toContain("Built-in instructions");
+    expect(html).toContain('class="operator"');
+    expect(html).toContain('href="/config"');
+  });
+});
+
 describe("Ask Maomao page contracts", () => {
   it("seeds the island with suggestions and transcript messages, and keeps the no-JS form", () => {
     const html = renderChatPage({
@@ -1522,6 +1566,10 @@ describe("Ask Maomao page contracts", () => {
     expect(html).toContain("Explain the high finding: cookie flag");
     expect(html).toContain('id="maomao-chat-form"');
     expect(html).toContain('class="operator"');
+    expect(html).toContain('class="chat-toolbar"');
+    expect(html).toContain("New conversation");
+    expect(html).toContain('action="/jobs/9/chat/reset"');
+    expect(html).not.toContain("Start a new conversation");
     const configMatch = html.match(/<script id="maomao-chat-config" type="application\/json">([\s\S]*?)<\/script>/);
     const config = JSON.parse(configMatch![1]) as { messages: Array<{ role: string }>; suggestions: string[] };
     expect(config.messages[0]?.role).toBe("user");

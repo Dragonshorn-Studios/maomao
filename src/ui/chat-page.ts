@@ -74,10 +74,16 @@ export function renderChatPage(data: ChatPageData): string {
     ${data.options.error ? `<p class="error" role="alert">${escapeHtml(data.options.error)}</p>` : ""}
     ${errorNotice}
     <div class="chat-transcript" aria-live="polite">${transcript}</div>
-    <div class="meta-row">
-      <span class="pair">Model <strong>${model}</strong></span>
-      <span class="pair">Messages left <strong>${budgetLeft}</strong> of ${data.maxMessages}</span>
-      <span class="pair">Spent <strong>$${data.usedCost.toFixed(4)}</strong> of $${data.maxCostUsd.toFixed(2)}</span>
+    <div class="chat-toolbar">
+      <div class="meta-row">
+        <span class="pair">Model <strong>${model}</strong></span>
+        <span class="pair">Messages left <strong>${budgetLeft}</strong> of ${data.maxMessages}</span>
+        <span class="pair">Spent <strong>$${data.usedCost.toFixed(4)}</strong> of $${data.maxCostUsd.toFixed(2)}</span>
+      </div>
+      <form method="post" action="/jobs/${data.job.id}/chat/reset" class="chat-reset">
+        ${csrf}
+        <button type="submit" class="btn-secondary">New conversation</button>
+      </form>
     </div>
     ${exhausted ? "" : '<div id="maomao-chat-root"></div>'}
     <script id="maomao-chat-config" type="application/json">${islandConfig}</script>
@@ -89,10 +95,6 @@ export function renderChatPage(data: ChatPageData): string {
         <textarea name="question" rows="3" placeholder="e.g. Walk me through the change in src/app.ts" ${exhausted ? "disabled" : "required"}></textarea>
       </label>
       <button type="submit" class="btn" ${exhausted ? "disabled" : ""}>${exhausted ? "Message limit reached — reset to continue" : "Ask"}</button>
-    </form>
-    <form method="post" action="/jobs/${data.job.id}/chat/reset">
-      ${csrf}
-      <button type="submit" class="btn-secondary">Start a new conversation</button>
     </form>`;
   return layout("Ask Maomao", body, { ...data.options, surface: "operator" });
 }

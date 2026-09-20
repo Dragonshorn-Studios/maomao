@@ -171,6 +171,13 @@ a:hover { color: var(--herb); }
   color: var(--ink);
   text-decoration: none;
 }
+.brand-mark {
+  width: 1.75rem;
+  height: 1.75rem;
+  display: block;
+  flex: none;
+  object-fit: contain;
+}
 .brand svg { width: 1.15rem; height: 1.15rem; color: var(--jade); flex: none; }
 .tag { color: var(--ink-muted); font-size: 0.82rem; }
 .grow { flex: 1 1 6rem; }
@@ -1268,6 +1275,40 @@ body.operator main th {
 }
 .chat-scroll-bottom:hover { color: var(--jade); border-color: var(--jade); }
 .chat-indicator { margin: 0; }
+.chat-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.65rem 1rem;
+  margin: 0.85rem 0;
+}
+.chat-toolbar .meta-row { margin-top: 0; }
+.chat-reset { margin: 0; }
+.config-nav { margin: 0.35rem 0 1rem; }
+.prompt-role-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 0.85rem;
+}
+.prompt-role-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 0.75rem;
+  align-items: flex-start;
+  flex-wrap: wrap;
+}
+.prompt-role h3 { margin: 0.15rem 0 0; }
+.prompt-preview { margin: 0.55rem 0 0.35rem; }
+.config-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.45rem;
+  margin-top: 0.55rem;
+}
+.inline-form { display: inline; margin: 0; }
 .github-login {
   display: inline-block;
   margin: 0.35rem 0;

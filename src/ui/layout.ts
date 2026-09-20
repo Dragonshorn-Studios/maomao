@@ -2,7 +2,7 @@ import { escapeHtml } from "../util.js";
 import { CSRF_FIELD } from "../auth.js";
 import type { FindingRow } from "../findings/types.js";
 import { PRODUCT_TAGLINE, type UiFlavor } from "./copy.js";
-import { brandMark, operatorMark } from "./glyphs.js";
+import { operatorMark } from "./glyphs.js";
 import { THEME_HREF } from "./theme.js";
 import { PIERRE_DIFFS_HREF } from "./paths.js";
 
@@ -230,7 +230,7 @@ export function layout(title: string, body: string, options: PageOptions = {}): 
 <body${options.surface === "operator" ? ' class="operator"' : ""}>
   <a class="skip" href="#main">Skip to content</a>
   <header class="top">
-    <a class="brand" href="/">${brandMark()} Maomao</a>
+    <a class="brand" href="/"><img class="brand-mark" src="/assets/favicon.svg" width="28" height="28" alt=""/> Maomao</a>
     <span class="tag">${escapeHtml(PRODUCT_TAGLINE)}</span>
     <span class="grow"></span>
     <div class="appearance" role="group" aria-label="Appearance">
