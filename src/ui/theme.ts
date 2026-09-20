@@ -291,6 +291,7 @@ button, input, textarea {
 }
 button, summary {
   appearance: none;
+  border-radius: 0;
 }
 
 .btn, .login button, .trigger button, .logout button.primary, .chat-send {
@@ -419,11 +420,11 @@ button, summary {
 .specimen-title a:hover { color: var(--jade); text-decoration: underline; }
 .forge-mark {
   display: inline-flex;
-  vertical-align: -0.12em;
+  vertical-align: -0.2em;
   margin-right: 0.4rem;
   color: var(--ink);
 }
-.forge-mark svg { width: 1em; height: 1em; display: block; }
+.forge-mark svg { width: 1.15em; height: 1.15em; display: block; }
 .forge-mark-text { font-size: 0.85em; color: var(--ink-muted); margin-right: 0.35rem; }
 .forge-host { font-weight: 500; }
 

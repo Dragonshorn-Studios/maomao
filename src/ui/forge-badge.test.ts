@@ -30,6 +30,7 @@ describe("forge badge rendering", () => {
       "team/project",
       17,
     );
+    expect(github).toContain("c4.42 0 8 3.58");
     expect(github).toContain("forge-mark");
     expect(github).toContain("acme/widgets #7");
     expect(github).toContain('aria-label="GitHub"');
