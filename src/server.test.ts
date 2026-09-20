@@ -4034,13 +4034,22 @@ describe("ask-maomao chat routes", () => {
     MAOMAO_EXPLAIN_MAX_MESSAGES: "2",
   };
 
-  function chatContextExtras() {
+  function chatContextExtras(options: { fail?: boolean } = {}) {
     const store = new ChatStore(openDb(":memory:"));
     const service = new ChatService({
       config: loadConfig(chatEnv),
       chatStore: store,
       jobStore: new JobStore(openDb(":memory:")),
-      github: { getInstallationToken: async () => "t" } as never,
+      forge: {
+        forJob: () => ({
+          cloneSpec: async () => ({
+            cloneUrl: "https://example.test/acme/widgets.git",
+            gitAuthArgs: [],
+            remoteRef: "refs/pull/4/head",
+            secrets: [],
+          }),
+        }),
+      },
       checkout: {
         async prepare(input) {
           const dir = join("/tmp", `chat-route-${input.jobId}-${Date.now()}`, "repo");
@@ -4051,6 +4060,9 @@ describe("ask-maomao chat routes", () => {
       },
       opencode: {
         async run(input) {
+          if (options.fail) {
+            return { stdout: "", stderr: "model exploded: provider-key-in-stderr", exitCode: 1, text: "", usage: {} };
+          }
           const text = `answer to: ${input.prompt.slice(-20)}`;
           input.onStdout?.(`{"type":"step_start","sessionID":"ses_route","part":{}}\n`);
           input.onStdout?.(`{"type":"text","part":{"id":"p1","text":${JSON.stringify(text)}}}\n`);
@@ -4141,11 +4153,45 @@ describe("ask-maomao chat routes", () => {
       body: "question=one more",
     });
     expect(refused.status).toBe(303);
-    const page = await app.request(`/jobs/${jobId}/chat?error=${encodeURIComponent("This conversation reached its message limit (2); reset it to start a new one.")}`);
+    expect(refused.headers.get("location")).toBe(`/jobs/${jobId}/chat?error=budget-messages`);
+    const page = await app.request(refused.headers.get("location")!);
     const html = await page.text();
-
     expect(html).toContain("Message limit reached");
-    expect(html).toContain("reset it to start a new one");
+    expect(html).toContain("This conversation reached its message limit (2); reset it to start a new one.");
+  });
+
+  it("redirects a blank question with a code, not the notice text", async () => {
+    const extras = chatContextExtras();
+    const { app, store } = testApp(chatEnv, undefined, undefined, extras);
+    const jobId = seedJob(store);
+    const blank = await app.request(`/jobs/${jobId}/chat/messages`, {
+      method: "POST",
+      headers: { "content-type": "application/x-www-form-urlencoded" },
+      body: "question=",
+    });
+    expect(blank.status).toBe(303);
+    expect(blank.headers.get("location")).toBe(`/jobs/${jobId}/chat?notice=empty`);
+    const html = await (await app.request(blank.headers.get("location")!)).text();
+    expect(html).toContain("Write a question first.");
+  });
+
+  it("does not put raw explainer errors in the redirect URL", async () => {
+    const extras = chatContextExtras({ fail: true });
+    const { app, store } = testApp(chatEnv, undefined, undefined, extras);
+    const jobId = seedJob(store);
+    const failed = await app.request(`/jobs/${jobId}/chat/messages`, {
+      method: "POST",
+      headers: { "content-type": "application/x-www-form-urlencoded" },
+      body: "question=why",
+    });
+    expect(failed.status).toBe(303);
+    expect(failed.headers.get("location")).toBe(`/jobs/${jobId}/chat`);
+    expect(failed.headers.get("location")).not.toContain("provider-key-in-stderr");
+    expect(failed.headers.get("location")).not.toContain("error=");
+    const html = await (await app.request(`/jobs/${jobId}/chat`)).text();
+    expect(html).toContain("Last message failed");
+    const crafted = await (await app.request(`/jobs/${jobId}/chat?error=${encodeURIComponent("sk-ant-secret-should-not-reach-url")}`)).text();
+    expect(crafted).not.toContain("sk-ant-secret-should-not-reach-url");
   });
 
   it("shows the Ask Maomao link on the job page only when enabled", async () => {

@@ -1,6 +1,5 @@
 import { serve } from "@hono/node-server";
 import { mkdirSync } from "node:fs";
-import { join } from "node:path";
 import { assertRuntimeConfig, loadConfig } from "./config.js";
 import { openDb } from "./db.js";
 import { JobStore } from "./jobs/store.js";
@@ -8,13 +7,14 @@ import { JobQueue } from "./jobs/queue.js";
 import { createPipeline } from "./jobs/pipeline.js";
 import { createApp } from "./server.js";
 import { GithubClient } from "./github/client.js";
-import { createCheckout, sweepWorkspaces } from "./checkout.js";
+import { chatWorkspaceRoot, createCheckout, sweepWorkspaces } from "./checkout.js";
 import { createOpenCodeRunner } from "./opencode/spawn.js";
 import { ChatService } from "./chat/service.js";
 import { ChatStore } from "./chat/store.js";
 import { oauthCallbackUrl, oauthEnabled } from "./oauth.js";
 import { ForgeConnectionStore, countConnections } from "./forge/connections.js";
 import { ensureEnvGitLabConnection } from "./forge/bootstrap.js";
+import { ForgeRegistry } from "./forge/registry.js";
 
 const config = loadConfig();
 mkdirSync(config.workspaceRoot, { recursive: true });
@@ -52,13 +52,17 @@ if (orphanedClaims > 0) {
 }
 const github = new GithubClient(config);
 const opencode = createOpenCodeRunner(config.opencode.bin);
+const getInstallationToken = (installationId: number) => github.getInstallationToken(installationId);
+const forge = new ForgeRegistry(github, config.github.appSlug, getInstallationToken, forgeConnections);
 const pipeline = createPipeline({
   config,
   store,
   github,
+  forge,
   connections: forgeConnections,
   checkout: createCheckout(config.workspaceRoot),
   opencode,
+  getInstallationToken,
 });
 const queue = new JobQueue(store, config.jobConcurrency, (jobId) => pipeline.run(jobId));
 queue.start();
@@ -71,8 +75,8 @@ const chat = chatStore
         config,
         chatStore,
         jobStore: store,
-        github,
-        checkout: createCheckout(join(config.workspaceRoot, "chat")),
+        forge,
+        checkout: createCheckout(chatWorkspaceRoot(config.workspaceRoot)),
         opencode,
       }),
     }

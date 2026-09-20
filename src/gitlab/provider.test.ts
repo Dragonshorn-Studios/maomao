@@ -437,6 +437,34 @@ describe("GitLabProvider against the API v4 mock", () => {
     }
   });
 
+  it("lists more than five pages of discussions so late threads are not dropped", async () => {
+    const seenPages: number[] = [];
+    const server = createServer((req, res) => {
+      const url = req.url ?? "";
+      const page = Number(url.match(/[?&]page=(\d+)/)?.[1] ?? "1");
+      seenPages.push(page);
+      const body = Array.from({ length: 100 }, (_, index) => ({
+        id: `d-${page}-${index}`,
+        notes: [{ id: page * 1000 + index, body: `note ${page}-${index}`, author: { username: "octocat" }, resolvable: true, resolved: false }],
+      }));
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify(page <= 6 ? body : []));
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const address = server.address() as AddressInfo;
+    const capStore = new ForgeConnectionStore(openDb(":memory:"), Buffer.from(generateForgeKeyHex(), "hex"));
+    const row = connectionOn(capStore, `http://127.0.0.1:${address.port}`, { label: "disc-cap" });
+    const forge = new GitLabProvider(capStore.open(row.id));
+    try {
+      const listed = await forge.listDiscussions(TARGET);
+      // Five pages used to be the hard stop (500). Six full pages must all land.
+      expect(listed).toHaveLength(600);
+      expect(Math.max(...seenPages)).toBeGreaterThanOrEqual(6);
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
+
   it("builds clone material with Basic oauth2 auth and the MR refspec", async () => {
     const spec = await provider().cloneSpec(TARGET);
     expect(spec.cloneUrl).toBe("https://127.0.0.1/acme/widgets.git");

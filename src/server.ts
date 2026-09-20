@@ -747,7 +747,7 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
     if (!job) return c.text("Not found", 404);
     const body = await c.req.parseBody();
     const question = typeof body.question === "string" ? body.question.trim().slice(0, 4_000) : "";
-    if (!question) return c.redirect(`/jobs/${jobId}/chat?notice=${encodeURIComponent("Write a question first.")}`, 303);
+    if (!question) return c.redirect(`/jobs/${jobId}/chat?notice=empty`, 303);
     const conversation = ctx.chat.store.getOrCreateConversation(jobId, actionActor(c) ?? null);
     try {
       await ctx.chat.service.send({
@@ -762,12 +762,13 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
         // transcript and the conversation is recoverable. Redirect cleanly.
         return c.redirect(`/jobs/${jobId}/chat`, 303);
       }
-      const raw = error instanceof Error ? error.message : String(error);
-      const friendly =
-        error instanceof ChatBudgetError
-          ? raw
-          : `The explainer could not answer: ${redactSecrets(raw, githubSecrets(ctx.config)).slice(0, 300)}`;
-      return c.redirect(`/jobs/${jobId}/chat?error=${encodeURIComponent(friendly)}`, 303);
+      if (error instanceof ChatBudgetError) {
+        const code = error.kind === "cost" ? "budget-cost" : "budget-messages";
+        return c.redirect(`/jobs/${jobId}/chat?error=${code}`, 303);
+      }
+      // Run failures persist last_error on the conversation; do not put raw
+      // model/OpenCode text into the query string (logs, Referer, history).
+      return c.redirect(`/jobs/${jobId}/chat`, 303);
     }
     return c.redirect(`/jobs/${jobId}/chat`, 303);
   });
@@ -802,8 +803,8 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
           ...pageOpts,
           identity: c.get("identity"),
           csrfToken: gateOn ? ensureCsrfToken(c, ctx.config.uiSessionSecret) : undefined,
-          notice: noticeText(c.req.query("notice")) ?? undefined,
-          error: c.req.query("error") || undefined,
+          notice: chatNoticeText(c.req.query("notice")),
+          error: chatErrorText(c.req.query("error"), ctx.config.chat),
         },
       }),
     );
@@ -2114,6 +2115,22 @@ function jobsPageCursor(beforeRaw: string | undefined, afterRaw: string | undefi
   if (before != null) return { before };
   if (after != null) return { after };
   return {};
+}
+
+/** Chat UI flashes: allowlisted codes only — never reflect raw query text. */
+function chatNoticeText(code: string | undefined): string | undefined {
+  if (code === "empty") return "Write a question first.";
+  return noticeText(code);
+}
+
+function chatErrorText(code: string | undefined, chat: Config["chat"]): string | undefined {
+  if (code === "budget-messages") {
+    return `This conversation reached its message limit (${chat.maxMessages}); reset it to start a new one.`;
+  }
+  if (code === "budget-cost") {
+    return `This conversation reached its cost ceiling ($${chat.maxCostUsd.toFixed(2)}); reset it to start a new one.`;
+  }
+  return undefined;
 }
 
 function noticeText(

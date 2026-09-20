@@ -9,20 +9,24 @@ import { join } from "node:path";
 import { existsSync } from "node:fs";
 import type { Config } from "../config.js";
 import { githubSecrets } from "../config.js";
-import type { GithubPort } from "../github/client.js";
 import type { CheckoutPort } from "../checkout.js";
-import { createCheckout } from "../checkout.js";
+import { chatWorkspaceRoot, createCheckout } from "../checkout.js";
 import type { OpenCodePort } from "../opencode/parse.js";
 import { OpenCodeTimeoutError, opencodeEnvSecrets } from "../opencode/spawn.js";
 import { reviewerPermissionConfig } from "../opencode/env.js";
 import { formatDuration, redactSecrets } from "../util.js";
+import type { ForgeJobIdentity } from "../forge/registry.js";
+import type { ForgePort } from "../forge/port.js";
+import { forgeTargetOf } from "../forge/types.js";
 import type { ChatConversationRow, ChatMessageRow, ChatStore } from "./store.js";
 import { ExplainerEventParser } from "./events.js";
 
 export class ChatBudgetError extends Error {
-  constructor(message: string) {
+  readonly kind: "messages" | "cost";
+  constructor(message: string, kind: "messages" | "cost") {
     super(message);
     this.name = "ChatBudgetError";
+    this.kind = kind;
   }
 }
 
@@ -40,24 +44,33 @@ export interface ChatSendResult {
   sessionId: string;
 }
 
+export interface ChatJob {
+  id: number;
+  repo_full_name: string;
+  repo_owner: string;
+  repo_name: string;
+  installation_id: number;
+  provider: string;
+  provider_instance: string;
+  forge_connection_id: string | null;
+  pr_number: number;
+  pr_title: string;
+  pr_author: string;
+  base_sha: string;
+  head_sha: string;
+  job_type: string;
+}
+
 export interface ChatServiceDeps {
   config: Config;
   chatStore: ChatStore;
   jobStore: {
-    getJob(id: number): {
-      id: number;
-      repo_full_name: string;
-      repo_owner: string;
-      repo_name: string;
-      installation_id: number;
-      pr_number: number;
-      pr_title: string;
-      pr_author: string;
-      base_sha: string;
-      head_sha: string;
-      job_type: string;
-    } | undefined;
-    listFindings(repoFullName: string, prNumber: number): Array<{
+    getJob(id: number): ChatJob | undefined;
+    listFindings(
+      repoFullName: string,
+      prNumber: number,
+      scope?: { provider: string; instance: string },
+    ): Array<{
       fingerprint: string;
       severity: string | null;
       category: string | null;
@@ -66,7 +79,8 @@ export interface ChatServiceDeps {
       summary: string;
     }>;
   };
-  github: Pick<GithubPort, "getInstallationToken">;
+  /** Resolves the job's forge so chat checkout uses provider cloneSpec, not GitHub-token-only. */
+  forge: { forJob(job: ForgeJobIdentity): Pick<ForgePort, "cloneSpec"> };
   /** Separate checkout root (`<workspaceRoot>/chat`) so chat can never clobber a pipeline workspace. */
   checkout?: CheckoutPort;
   opencode: OpenCodePort;
@@ -83,11 +97,11 @@ export class ChatService {
   private readonly locks = new Map<number, Promise<unknown>>();
 
   constructor(private readonly deps: ChatServiceDeps) {
-    this.checkout = deps.checkout ?? createCheckout(join(deps.config.workspaceRoot, "chat"));
+    this.checkout = deps.checkout ?? createCheckout(chatWorkspaceRoot(deps.config.workspaceRoot));
   }
 
   async send(input: {
-    job: NonNullable<ReturnType<ChatServiceDeps["jobStore"]["getJob"]>>;
+    job: ChatJob;
     conversation: ChatConversationRow;
     question: string;
     signal?: AbortSignal;
@@ -104,7 +118,7 @@ export class ChatService {
   }
 
   private async sendLocked(input: {
-    job: NonNullable<ReturnType<ChatServiceDeps["jobStore"]["getJob"]>>;
+    job: ChatJob;
     conversation: ChatConversationRow;
     question: string;
     signal?: AbortSignal;
@@ -118,11 +132,13 @@ export class ChatService {
     if (budget.messages >= config.chat.maxMessages) {
       throw new ChatBudgetError(
         `This conversation reached its message limit (${config.chat.maxMessages}); reset it to start a new one.`,
+        "messages",
       );
     }
     if (config.chat.maxCostUsd > 0 && budget.cost >= config.chat.maxCostUsd) {
       throw new ChatBudgetError(
         `This conversation reached its cost ceiling ($${config.chat.maxCostUsd.toFixed(2)}); reset it to start a new one.`,
+        "cost",
       );
     }
 
@@ -220,26 +236,22 @@ export class ChatService {
    * Re-finds the job's workspace when the pipeline left one standing;
    * otherwise prepares a fresh read-only checkout under `<workspaceRoot>/chat`
    * (never the pipeline's own directory — `checkout.prepare` clears its target).
+   * Clone URL, auth args, and head ref come from the job's forge provider.
    */
-  private async ensureWorkspace(
-    conversation: ChatConversationRow,
-    job: NonNullable<ReturnType<ChatServiceDeps["jobStore"]["getJob"]>>,
-  ): Promise<string> {
+  private async ensureWorkspace(conversation: ChatConversationRow, job: ChatJob): Promise<string> {
     if (conversation.workspace_path && existsSync(join(conversation.workspace_path, REPO_DIR))) {
       return conversation.workspace_path;
     }
-    const token =
-      job.installation_id > 0 ? await this.deps.github.getInstallationToken(job.installation_id) : undefined;
+    const provider = this.deps.forge.forJob(job);
+    const clone = await provider.cloneSpec(forgeTargetOf(job), { anonymous: job.installation_id === 0 });
     const workspace = await this.checkout.prepare({
       jobId: job.id,
-      installationId: job.installation_id,
-      owner: job.repo_owner,
-      repo: job.repo_name,
-      prNumber: job.pr_number,
+      cloneUrl: clone.cloneUrl,
+      gitAuthArgs: clone.gitAuthArgs,
+      remoteRef: clone.remoteRef,
+      secrets: [...clone.secrets, ...githubSecrets(this.deps.config)],
       baseSha: job.base_sha,
       headSha: job.head_sha,
-      token,
-      secrets: token ? [token, ...githubSecrets(this.deps.config)] : githubSecrets(this.deps.config),
       fetchDiff: async () => "",
       metadata: {
         repo: job.repo_full_name,
@@ -247,6 +259,7 @@ export class ChatService {
         title: job.pr_title,
         purpose: "chat",
         headSha: job.head_sha,
+        provider: job.provider,
       },
     });
     this.deps.chatStore.setWorkspace(conversation.id, workspace.dir);
@@ -255,11 +268,11 @@ export class ChatService {
   }
 
   /** First-message seed: the review context that makes answers reviewer-shaped. */
-  private seedPrompt(
-    job: NonNullable<ReturnType<ChatServiceDeps["jobStore"]["getJob"]>>,
-    question: string,
-  ): string {
-    const findings = this.deps.jobStore.listFindings(job.repo_full_name, job.pr_number);
+  private seedPrompt(job: ChatJob, question: string): string {
+    const findings = this.deps.jobStore.listFindings(job.repo_full_name, job.pr_number, {
+      provider: job.provider,
+      instance: job.provider_instance,
+    });
     const findingLines = findings
       .map(
         (finding) =>

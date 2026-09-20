@@ -4,8 +4,9 @@ import { openDb } from "../db.js";
 import { JobStore, type JobRow } from "../jobs/store.js";
 import { loadConfig } from "../config.js";
 import type { OpenCodePort } from "../opencode/parse.js";
-import type { GithubPort } from "../github/client.js";
 import type { CheckoutPort } from "../checkout.js";
+import type { ForgeCloneSpec } from "../forge/types.js";
+import type { ForgePort } from "../forge/port.js";
 import { join } from "node:path";
 import { ChatBudgetError, ChatService } from "./service.js";
 import { ChatStore } from "./store.js";
@@ -39,12 +40,22 @@ interface Harness {
   jobStore: JobStore;
   runs: Array<{ cwd: string; prompt: string; extraArgs?: string[]; model?: string }>;
   prepareCount: { count: number };
+  prepares: Array<Parameters<CheckoutPort["prepare"]>[0]>;
+}
+
+function fakeForge(spec: ForgeCloneSpec): { forJob: () => Pick<ForgePort, "cloneSpec"> } {
+  return {
+    forJob: () => ({
+      cloneSpec: async () => spec,
+    }),
+  };
 }
 
 function harness(options: {
   config?: Record<string, string>;
   reply?: string;
   findings?: Array<Record<string, unknown>>;
+  cloneSpec?: ForgeCloneSpec;
 } = {}): Harness {
   const config = loadConfig({
     GITHUB_WEBHOOK_SECRET: "s3cret",
@@ -58,6 +69,13 @@ function harness(options: {
   const chatStore = new ChatStore(openDb(":memory:"));
   const runs: Harness["runs"] = [];
   const prepareCount = { count: 0 };
+  const prepares: Harness["prepares"] = [];
+  const cloneSpec: ForgeCloneSpec = options.cloneSpec ?? {
+    cloneUrl: "https://github.com/acme/widgets.git",
+    gitAuthArgs: ["-c", "http.extraHeader=AUTHORIZATION: basic dG9r"],
+    remoteRef: "refs/pull/4/head",
+    secrets: ["tok"],
+  };
   const opencode: OpenCodePort = {
     async run(input) {
       runs.push({ cwd: input.cwd, prompt: input.prompt, extraArgs: input.extraArgs, model: input.model });
@@ -82,6 +100,7 @@ function harness(options: {
   const checkout: CheckoutPort = {
     async prepare(input) {
       prepareCount.count += 1;
+      prepares.push(input);
       const dir = `/tmp/chat-fixture/job-${input.jobId}-${input.headSha.slice(0, 8)}`;
       mkdirSync(join(dir, "repo"), { recursive: true });
       return { dir, repoDir: join(dir, "repo"), diffPath: join(dir, "pr.diff"), metaPath: join(dir, "pr.json") };
@@ -122,11 +141,11 @@ function harness(options: {
     config,
     chatStore,
     jobStore,
-    github: { getInstallationToken: async () => "tok" } as Pick<GithubPort, "getInstallationToken">,
+    forge: fakeForge(cloneSpec),
     checkout,
     opencode,
   });
-  return { service, chatStore, jobStore, runs, prepareCount };
+  return { service, chatStore, jobStore, runs, prepareCount, prepares };
 }
 
 describe("ChatService", () => {
@@ -288,5 +307,23 @@ describe("ChatService", () => {
     await service.send({ job, conversation, question: "two" });
     expect(runs[0]?.cwd.endsWith("/repo")).toBe(true);
     expect(prepareCount.count).toBe(1);
+  });
+
+  it("prepares the chat checkout from the job's forge cloneSpec, not a GitHub token", async () => {
+    const cloneSpec: ForgeCloneSpec = {
+      cloneUrl: "https://gitlab.example/acme/widgets.git",
+      gitAuthArgs: ["-c", "http.extraHeader=Authorization: Basic oauth2"],
+      remoteRef: "refs/merge-requests/4/head",
+      secrets: ["glpat-chat-secret"],
+    };
+    const { service, chatStore, jobStore, prepares } = harness({ cloneSpec });
+    const job = jobStore.getJob(1)!;
+    const conversation = chatStore.createConversation(1, null);
+    await service.send({ job, conversation, question: "walk me through it" });
+    expect(prepares).toHaveLength(1);
+    expect(prepares[0]?.cloneUrl).toBe(cloneSpec.cloneUrl);
+    expect(prepares[0]?.remoteRef).toBe("refs/merge-requests/4/head");
+    expect(prepares[0]?.gitAuthArgs).toEqual(cloneSpec.gitAuthArgs);
+    expect(prepares[0]?.secrets).toEqual(expect.arrayContaining(["glpat-chat-secret"]));
   });
 });
