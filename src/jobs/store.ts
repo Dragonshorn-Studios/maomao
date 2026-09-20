@@ -1,6 +1,8 @@
 import type { SqliteDb } from "../db.js";
 import type { CancelReason, JobState, ReviewerState } from "../config.js";
 import { JOBS_PAGE_SIZE_DEFAULT, JOBS_PAGE_SIZE_MAX, LIVE_JOB_STATES } from "../config.js";
+import type { ForgeScope } from "../forge/types.js";
+import { normalizeScope } from "../forge/types.js";
 import type { FindingRow, FindingStatus } from "../findings/types.js";
 import { nowIso } from "../util.js";
 import { publish } from "../events.js";
@@ -13,6 +15,11 @@ export interface JobRow {
   repo_owner: string;
   repo_name: string;
   installation_id: number;
+  /** Forge identity of the connection this job belongs to (issue #18). */
+  provider: string;
+  provider_instance: string;
+  /** Connection binding for non-GitHub forges; null for the env-configured GitHub App. */
+  forge_connection_id: string | null;
   github_account_id: number | null;
   github_repository_id: number | null;
   pr_number: number;
@@ -149,6 +156,10 @@ export interface NewJobInput {
   repoOwner: string;
   repoName: string;
   installationId: number;
+  /** Forge identity; defaults to the env-configured GitHub connection. */
+  provider?: string;
+  providerInstance?: string;
+  forgeConnectionId?: string | null;
   githubAccountId?: number;
   githubRepositoryId?: number;
   prNumber: number;
@@ -300,22 +311,25 @@ export class JobStore {
   enqueue(input: NewJobInput & { profileRevisionId?: number }): EnqueueResult {
     const createdAt = nowIso();
     const staleJobIds: number[] = [];
+    const scope = normalizeScope({ provider: input.provider, instance: input.providerInstance });
 
     const result = this.db.transaction(() => {
       const stale = this.db
         .prepare(
           `UPDATE jobs
            SET state = 'stale', updated_at = ?, finished_at = COALESCE(finished_at, ?)
-           WHERE repo_full_name = ? AND pr_number = ? AND head_sha != ?
+           WHERE provider = ? AND provider_instance = ? AND repo_full_name = ? AND pr_number = ? AND head_sha != ?
              AND state NOT IN ('stale', 'cancelled')
            RETURNING id`,
         )
-        .all(createdAt, createdAt, input.repoFullName, input.prNumber, input.headSha) as { id: number }[];
+        .all(createdAt, createdAt, scope.provider, scope.instance, input.repoFullName, input.prNumber, input.headSha) as { id: number }[];
       staleJobIds.push(...stale.map((row) => row.id));
 
       const existing = this.db
-        .prepare(`SELECT * FROM jobs WHERE repo_full_name = ? AND pr_number = ? AND head_sha = ?`)
-        .get(input.repoFullName, input.prNumber, input.headSha) as JobRow | undefined;
+        .prepare(
+          `SELECT * FROM jobs WHERE provider = ? AND provider_instance = ? AND repo_full_name = ? AND pr_number = ? AND head_sha = ?`,
+        )
+        .get(scope.provider, scope.instance, input.repoFullName, input.prNumber, input.headSha) as JobRow | undefined;
 
       if (existing) {
         const skippedReason = skipReason(existing);
@@ -325,16 +339,20 @@ export class JobStore {
       const insert = this.db
         .prepare(
           `INSERT INTO jobs (
-            repo_full_name, repo_owner, repo_name, installation_id, github_account_id, github_repository_id, pr_number,
+            repo_full_name, repo_owner, repo_name, installation_id, provider, provider_instance, forge_connection_id,
+            github_account_id, github_repository_id, pr_number,
             pr_title, pr_body, pr_html_url, pr_author, base_sha, head_sha, base_ref, head_ref,
             webhook_delivery_id, webhook_event, profile_revision_id, job_type, scan_branch, state, created_at, updated_at
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?)`,
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?)`,
         )
         .run(
           input.repoFullName,
           input.repoOwner,
           input.repoName,
           input.installationId,
+          scope.provider,
+          scope.instance,
+          input.forgeConnectionId ?? null,
           input.githubAccountId ?? null,
           input.githubRepositoryId ?? null,
           input.prNumber,
@@ -406,43 +424,60 @@ export class JobStore {
    * malformed values and re-renders the first page when a cursor yields
    * nothing).
    */
-  listJobsPage(input: { before?: number; after?: number; limit?: number }): {
+  listJobsPage(input: { before?: number; after?: number; limit?: number; forge?: { provider: string; instance: string } }): {
     jobs: JobRow[];
     hasOlder: boolean;
     hasNewer: boolean;
   } {
     const requested = input.limit ?? JOBS_PAGE_SIZE_DEFAULT;
     const limit = Math.min(Number.isFinite(requested) ? Math.max(1, requested) : JOBS_PAGE_SIZE_DEFAULT, JOBS_PAGE_SIZE_MAX);
+    const whereParts: string[] = [];
+    const whereParams: unknown[] = [];
+    if (input.forge) {
+      whereParts.push("provider = ?", "provider_instance = ?");
+      whereParams.push(input.forge.provider, input.forge.instance);
+    }
+    const whereSql = whereParts.length > 0 ? `WHERE ${whereParts.join(" AND ")}` : "";
+    // Cursor filters must ride the same WHERE as the page itself.
+    const withId = (comparator: string) =>
+      whereSql ? `${whereSql} AND id ${comparator} ?` : `WHERE id ${comparator} ?`;
     if (input.after != null) {
       const probed = this.db
-        .prepare(`SELECT * FROM jobs WHERE id > ? ORDER BY id ASC LIMIT ?`)
-        .all(input.after, limit + 1) as JobRow[];
+        .prepare(`SELECT * FROM jobs ${withId(">")} ORDER BY id ASC LIMIT ?`)
+        .all(...whereParams, input.after, limit + 1) as JobRow[];
       // Rows arrive oldest→newest; reverse into the page's newest-first order.
       const jobs = probed.slice(0, limit).reverse();
       const hasNewer = probed.length > limit;
       const oldestOnPage = jobs[jobs.length - 1]?.id ?? input.after;
       const hasOlder = Boolean(
-        this.db.prepare(`SELECT id FROM jobs WHERE id < ? LIMIT 1`).get(oldestOnPage),
+        this.db.prepare(`SELECT id FROM jobs ${withId("<")} LIMIT 1`).get(...whereParams, oldestOnPage),
       );
       return { jobs, hasOlder, hasNewer };
     }
     if (input.before != null) {
       const probed = this.db
-        .prepare(`SELECT * FROM jobs WHERE id < ? ORDER BY id DESC LIMIT ?`)
-        .all(input.before, limit + 1) as JobRow[];
+        .prepare(`SELECT * FROM jobs ${withId("<")} ORDER BY id DESC LIMIT ?`)
+        .all(...whereParams, input.before, limit + 1) as JobRow[];
       const jobs = probed.slice(0, limit);
       const hasOlder = probed.length > limit;
       const newestOnPage = jobs[0]?.id ?? input.before;
       const hasNewer = Boolean(
-        this.db.prepare(`SELECT id FROM jobs WHERE id > ? LIMIT 1`).get(newestOnPage),
+        this.db.prepare(`SELECT id FROM jobs ${withId(">")} LIMIT 1`).get(...whereParams, newestOnPage),
       );
       return { jobs, hasOlder, hasNewer };
     }
     const probed = this.db
-      .prepare(`SELECT * FROM jobs ORDER BY id DESC LIMIT ?`)
-      .all(limit + 1) as JobRow[];
+      .prepare(`SELECT * FROM jobs ${whereSql} ORDER BY id DESC LIMIT ?`)
+      .all(...whereParams, limit + 1) as JobRow[];
     const jobs = probed.slice(0, limit);
     return { jobs, hasOlder: probed.length > limit, hasNewer: false };
+  }
+
+  /** Distinct forge scopes present in the jobs table, for dashboard filters. */
+  listForgeScopes(): Array<{ provider: string; instance: string }> {
+    return this.db
+      .prepare(`SELECT DISTINCT provider, provider_instance AS instance FROM jobs ORDER BY provider, provider_instance`)
+      .all() as Array<{ provider: string; instance: string }>;
   }
 
   listInterruptedJobs(): JobRow[] {
@@ -527,13 +562,14 @@ export class JobStore {
    * cancellation unrepresentable.
    */
   cancelJobs(
-    where: { jobId: number } | { repoFullName: string; prNumber: number },
+    where: { jobId: number } | { repoFullName: string; prNumber: number; scope?: Partial<ForgeScope> },
     reason: CancelReason,
     actor: string | null,
   ): number[] {
     const now = nowIso();
-    const clauses = [`state IN (${ACTIVE_STATES_SQL})`];
-    const values: unknown[] = [reason, actor, now, now];
+    const scope = normalizeScope("scope" in where ? where.scope : undefined);
+    const clauses = [`state IN (${ACTIVE_STATES_SQL})`, "provider = ?", "provider_instance = ?"];
+    const values: unknown[] = [reason, actor, now, now, scope.provider, scope.instance];
     if ("jobId" in where) {
       clauses.push("id = ?");
       values.push(where.jobId);
@@ -559,21 +595,30 @@ export class JobStore {
    * cancelled — so the enqueue gate holds even when nothing was running.
    * Merged pulls cannot be reopened, so the record is permanent.
    */
-  markPullMerged(repoFullName: string, prNumber: number, deliveryId: string | null): void {
+  markPullMerged(
+    repoFullName: string,
+    prNumber: number,
+    deliveryId: string | null,
+    scope?: Partial<ForgeScope>,
+  ): void {
+    const resolved = normalizeScope(scope);
     this.db
       .prepare(
-        `INSERT OR IGNORE INTO merged_pulls (repo_full_name, pr_number, merged_at, delivery_id)
-         VALUES (?, ?, ?, ?)`,
+        `INSERT OR IGNORE INTO merged_pulls (repo_full_name, pr_number, provider, provider_instance, merged_at, delivery_id)
+         VALUES (?, ?, ?, ?, ?, ?)`,
       )
-      .run(repoFullName, prNumber, nowIso(), deliveryId);
+      .run(repoFullName, prNumber, resolved.provider, resolved.instance, nowIso(), deliveryId);
   }
 
   /** True once a verified webhook recorded this pull as merged. */
-  hasMergedPull(repoFullName: string, prNumber: number): boolean {
+  hasMergedPull(repoFullName: string, prNumber: number, scope?: Partial<ForgeScope>): boolean {
+    const resolved = normalizeScope(scope);
     return Boolean(
       this.db
-        .prepare(`SELECT repo_full_name FROM merged_pulls WHERE repo_full_name = ? AND pr_number = ?`)
-        .get(repoFullName, prNumber),
+        .prepare(
+          `SELECT repo_full_name FROM merged_pulls WHERE provider = ? AND provider_instance = ? AND repo_full_name = ? AND pr_number = ?`,
+        )
+        .get(resolved.provider, resolved.instance, repoFullName, prNumber),
     );
   }
 
@@ -709,13 +754,20 @@ export class JobStore {
    * Returns true only when this call won the claim: concurrent submits lose the race,
    * and a pending row left by a crashed run is retried by clearing it on failure.
    */
-  claimScanIssue(input: { jobId: number; repoFullName: string; fingerprint: string; title: string }): boolean {
+  claimScanIssue(input: {
+    jobId: number;
+    repoFullName: string;
+    fingerprint: string;
+    title: string;
+    scope?: Partial<ForgeScope>;
+  }): boolean {
+    const scope = normalizeScope(input.scope);
     const result = this.db
       .prepare(
-        `INSERT OR IGNORE INTO scan_issues (job_id, repo_full_name, fingerprint, issue_number, issue_url, title, created_at)
-         VALUES (?, ?, ?, 0, '', ?, ?)`,
+        `INSERT OR IGNORE INTO scan_issues (job_id, repo_full_name, provider, provider_instance, fingerprint, issue_number, issue_url, title, created_at)
+         VALUES (?, ?, ?, ?, ?, 0, '', ?, ?)`,
       )
-      .run(input.jobId, input.repoFullName, input.fingerprint, input.title, nowIso());
+      .run(input.jobId, input.repoFullName, scope.provider, scope.instance, input.fingerprint, input.title, nowIso());
     return ((result as { changes?: number }).changes ?? 0) === 1;
   }
 
@@ -727,18 +779,20 @@ export class JobStore {
     issueNumber: number;
     issueUrl: string;
     title: string;
+    scope?: Partial<ForgeScope>;
   }): void {
+    const scope = normalizeScope(input.scope);
     this.db
       .prepare(
-        `INSERT INTO scan_issues (job_id, repo_full_name, fingerprint, issue_number, issue_url, title, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?)
-         ON CONFLICT(repo_full_name, fingerprint) DO UPDATE SET
+        `INSERT INTO scan_issues (job_id, repo_full_name, provider, provider_instance, fingerprint, issue_number, issue_url, title, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(provider, provider_instance, repo_full_name, fingerprint) DO UPDATE SET
            issue_number = excluded.issue_number,
            issue_url = excluded.issue_url,
            title = excluded.title,
            job_id = excluded.job_id`,
       )
-      .run(input.jobId, input.repoFullName, input.fingerprint, input.issueNumber, input.issueUrl, input.title, nowIso());
+      .run(input.jobId, input.repoFullName, scope.provider, scope.instance, input.fingerprint, input.issueNumber, input.issueUrl, input.title, nowIso());
   }
 
   listScanIssues(jobId: number): Array<{ id: number; job_id: number; repo_full_name: string; fingerprint: string; issue_number: number; issue_url: string; title: string; created_at: string }> {
@@ -747,23 +801,32 @@ export class JobStore {
       .all(jobId) as Array<{ id: number; job_id: number; repo_full_name: string; fingerprint: string; issue_number: number; issue_url: string; title: string; created_at: string }>;
   }
 
-  getScanIssue(repoFullName: string, fingerprint: string): { issue_number: number; issue_url: string; title: string } | undefined {
+  getScanIssue(repoFullName: string, fingerprint: string, scope?: Partial<ForgeScope>): { issue_number: number; issue_url: string; title: string } | undefined {
+    const resolved = normalizeScope(scope);
     return this.db
-      .prepare(`SELECT issue_number, issue_url, title FROM scan_issues WHERE repo_full_name = ? AND fingerprint = ?`)
-      .get(repoFullName, fingerprint) as { issue_number: number; issue_url: string; title: string } | undefined;
+      .prepare(
+        `SELECT issue_number, issue_url, title FROM scan_issues WHERE provider = ? AND provider_instance = ? AND repo_full_name = ? AND fingerprint = ?`,
+      )
+      .get(resolved.provider, resolved.instance, repoFullName, fingerprint) as { issue_number: number; issue_url: string; title: string } | undefined;
   }
 
-  clearScanIssue(repoFullName: string, fingerprint: string): void {
+  clearScanIssue(repoFullName: string, fingerprint: string, scope?: Partial<ForgeScope>): void {
+    const resolved = normalizeScope(scope);
     this.db
-      .prepare(`DELETE FROM scan_issues WHERE repo_full_name = ? AND fingerprint = ? AND issue_number = 0`)
-      .run(repoFullName, fingerprint);
+      .prepare(
+        `DELETE FROM scan_issues WHERE provider = ? AND provider_instance = ? AND repo_full_name = ? AND fingerprint = ? AND issue_number = 0`,
+      )
+      .run(resolved.provider, resolved.instance, repoFullName, fingerprint);
   }
 
-  hasScanIssue(repoFullName: string, fingerprint: string): boolean {
+  hasScanIssue(repoFullName: string, fingerprint: string, scope?: Partial<ForgeScope>): boolean {
+    const resolved = normalizeScope(scope);
     return Boolean(
       this.db
-        .prepare(`SELECT id FROM scan_issues WHERE repo_full_name = ? AND fingerprint = ?`)
-        .get(repoFullName, fingerprint),
+        .prepare(
+          `SELECT id FROM scan_issues WHERE provider = ? AND provider_instance = ? AND repo_full_name = ? AND fingerprint = ?`,
+        )
+        .get(resolved.provider, resolved.instance, repoFullName, fingerprint),
     );
   }
 
@@ -777,13 +840,15 @@ export class JobStore {
     fingerprint: string,
     status: FindingStatus,
     reconciliationReason: string,
+    scope?: Partial<ForgeScope>,
   ): void {
+    const resolved = normalizeScope(scope);
     this.db
       .prepare(
         `UPDATE findings SET status = ?, reconciliation_reason = ?, updated_at = ?
-         WHERE repo_full_name = ? AND pr_number = ? AND fingerprint = ?`,
+         WHERE provider = ? AND provider_instance = ? AND repo_full_name = ? AND pr_number = ? AND fingerprint = ?`,
       )
-      .run(status, reconciliationReason, nowIso(), repoFullName, prNumber, fingerprint);
+      .run(status, reconciliationReason, nowIso(), resolved.provider, resolved.instance, repoFullName, prNumber, fingerprint);
   }
 
   /**
@@ -796,15 +861,20 @@ export class JobStore {
     return (result as { changes?: number }).changes ?? 0;
   }
 
-  findLatestJobForPull(repoFullName: string, prNumber: number, headSha?: string): JobRow | undefined {
+  findLatestJobForPull(repoFullName: string, prNumber: number, headSha?: string, scope?: Partial<ForgeScope>): JobRow | undefined {
+    const resolved = normalizeScope(scope);
     if (headSha) {
       return this.db
-        .prepare(`SELECT * FROM jobs WHERE repo_full_name = ? AND pr_number = ? AND head_sha = ?`)
-        .get(repoFullName, prNumber, headSha) as JobRow | undefined;
+        .prepare(
+          `SELECT * FROM jobs WHERE provider = ? AND provider_instance = ? AND repo_full_name = ? AND pr_number = ? AND head_sha = ?`,
+        )
+        .get(resolved.provider, resolved.instance, repoFullName, prNumber, headSha) as JobRow | undefined;
     }
     return this.db
-      .prepare(`SELECT * FROM jobs WHERE repo_full_name = ? AND pr_number = ? ORDER BY id DESC LIMIT 1`)
-      .get(repoFullName, prNumber) as JobRow | undefined;
+      .prepare(
+        `SELECT * FROM jobs WHERE provider = ? AND provider_instance = ? AND repo_full_name = ? AND pr_number = ? ORDER BY id DESC LIMIT 1`,
+      )
+      .get(resolved.provider, resolved.instance, repoFullName, prNumber) as JobRow | undefined;
   }
 
   listDispatches(jobId: number): EscalationDispatchRow[] {
@@ -880,32 +950,29 @@ export class JobStore {
       .run(status, detail ?? null, nowIso(), id);
   }
 
-  listFindings(repoFullName: string, prNumber: number): FindingRow[] {
+  listFindings(repoFullName: string, prNumber: number, scope?: Partial<ForgeScope>): FindingRow[] {
+    const resolved = normalizeScope(scope);
     return this.db
-      .prepare(`SELECT * FROM findings WHERE repo_full_name = ? AND pr_number = ? ORDER BY id ASC`)
-      .all(repoFullName, prNumber) as FindingRow[];
+      .prepare(
+        `SELECT * FROM findings WHERE provider = ? AND provider_instance = ? AND repo_full_name = ? AND pr_number = ? ORDER BY id ASC`,
+      )
+      .all(resolved.provider, resolved.instance, repoFullName, prNumber) as FindingRow[];
   }
 
-  getFinding(repoFullName: string, prNumber: number, fingerprint: string): FindingRow | undefined {
+  getFinding(repoFullName: string, prNumber: number, fingerprint: string, scope?: Partial<ForgeScope>): FindingRow | undefined {
+    const resolved = normalizeScope(scope);
     return this.db
-      .prepare(`SELECT * FROM findings WHERE repo_full_name = ? AND pr_number = ? AND fingerprint = ?`)
-      .get(repoFullName, prNumber, fingerprint) as FindingRow | undefined;
-  }
-
-  getFindingByThreadId(threadId: string): FindingRow | undefined {
-    return this.db.prepare(`SELECT * FROM findings WHERE github_thread_id = ?`).get(threadId) as FindingRow | undefined;
-  }
-
-  getFindingByCommentId(commentId: string): FindingRow | undefined {
-    return this.db.prepare(`SELECT * FROM findings WHERE github_comment_id = ?`).get(commentId) as
-      | FindingRow
-      | undefined;
+      .prepare(
+        `SELECT * FROM findings WHERE provider = ? AND provider_instance = ? AND repo_full_name = ? AND pr_number = ? AND fingerprint = ?`,
+      )
+      .get(resolved.provider, resolved.instance, repoFullName, prNumber, fingerprint) as FindingRow | undefined;
   }
 
   upsertFinding(input: {
     repoFullName: string;
     prNumber: number;
     fingerprint: string;
+    scope?: Partial<ForgeScope>;
     status: FindingStatus;
     reviewedSha: string;
     currentSha?: string | null;
@@ -932,7 +999,8 @@ export class JobStore {
     diffNote?: string | null;
     lastJobId?: number | null;
   }): FindingRow {
-    const existing = this.getFinding(input.repoFullName, input.prNumber, input.fingerprint);
+    const scope = normalizeScope(input.scope);
+    const existing = this.getFinding(input.repoFullName, input.prNumber, input.fingerprint, scope);
     if (
       existing?.status === "dismissed" &&
       input.status !== "dismissed" &&
@@ -944,13 +1012,13 @@ export class JobStore {
     this.db
       .prepare(
         `INSERT INTO findings (
-          repo_full_name, pr_number, fingerprint, status, reviewed_sha, current_sha,
+          repo_full_name, pr_number, provider, provider_instance, fingerprint, status, reviewed_sha, current_sha,
           github_thread_id, github_comment_id, original_path, original_line, current_path, current_line,
           category, summary, body, severity, confidence,
           dismissed_by, dismissed_at, dismiss_command, reopened_by, reopened_at, reopen_command,
           reconciliation_confidence, reconciliation_reason, diff_hunk, diff_note, last_job_id, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ON CONFLICT(repo_full_name, pr_number, fingerprint) DO UPDATE SET
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(provider, provider_instance, repo_full_name, pr_number, fingerprint) DO UPDATE SET
           status = excluded.status,
           reviewed_sha = excluded.reviewed_sha,
           current_sha = COALESCE(excluded.current_sha, findings.current_sha),
@@ -987,6 +1055,8 @@ export class JobStore {
       .run(
         input.repoFullName,
         input.prNumber,
+        scope.provider,
+        scope.instance,
         input.fingerprint,
         input.status,
         input.reviewedSha,
@@ -1016,7 +1086,7 @@ export class JobStore {
         now,
         now,
       );
-    const row = this.getFinding(input.repoFullName, input.prNumber, input.fingerprint);
+    const row = this.getFinding(input.repoFullName, input.prNumber, input.fingerprint, scope);
     if (!row) throw new Error("failed to upsert finding");
     return row;
   }
@@ -1025,6 +1095,7 @@ export class JobStore {
     repoFullName: string;
     prNumber: number;
     fingerprint: string;
+    scope?: Partial<ForgeScope>;
     actor: string;
     command: string;
     reviewedSha: string;
@@ -1037,7 +1108,8 @@ export class JobStore {
     severity?: string | null;
     body?: string | null;
   }): { finding: FindingRow; changed: boolean } {
-    const existing = this.getFinding(input.repoFullName, input.prNumber, input.fingerprint);
+    const scope = normalizeScope(input.scope);
+    const existing = this.getFinding(input.repoFullName, input.prNumber, input.fingerprint, scope);
     if (existing?.status === "dismissed") {
       return { finding: existing, changed: false };
     }
@@ -1045,6 +1117,7 @@ export class JobStore {
       repoFullName: input.repoFullName,
       prNumber: input.prNumber,
       fingerprint: input.fingerprint,
+      scope,
       status: "dismissed",
       reviewedSha: existing?.reviewed_sha ?? input.reviewedSha,
       currentSha: input.reviewedSha,
@@ -1069,6 +1142,7 @@ export class JobStore {
     repoFullName: string;
     prNumber: number;
     fingerprint: string;
+    scope?: Partial<ForgeScope>;
     actor: string;
     command: string;
     reviewedSha: string;
@@ -1076,7 +1150,8 @@ export class JobStore {
     githubCommentId?: string | null;
     summary: string;
   }): { finding: FindingRow; changed: boolean } {
-    const existing = this.getFinding(input.repoFullName, input.prNumber, input.fingerprint);
+    const scope = normalizeScope(input.scope);
+    const existing = this.getFinding(input.repoFullName, input.prNumber, input.fingerprint, scope);
     if (existing && existing.status !== "dismissed") {
       return { finding: existing, changed: false };
     }
@@ -1084,6 +1159,7 @@ export class JobStore {
       repoFullName: input.repoFullName,
       prNumber: input.prNumber,
       fingerprint: input.fingerprint,
+      scope,
       status: "open",
       reviewedSha: existing?.reviewed_sha ?? input.reviewedSha,
       currentSha: input.reviewedSha,
@@ -1107,36 +1183,52 @@ export class JobStore {
     return { finding, changed: true };
   }
 
-  claimWebhookDelivery(deliveryId: string, event: string, result: string): boolean {
+  claimWebhookDelivery(deliveryId: string, event: string, result: string, scope?: Partial<ForgeScope>): boolean {
     if (!deliveryId) return true;
+    const resolved = normalizeScope(scope);
     const insert = this.db
-      .prepare(`INSERT OR IGNORE INTO webhook_deliveries (delivery_id, event, result, created_at) VALUES (?, ?, ?, ?)`)
-      .run(deliveryId, event, result, nowIso());
+      .prepare(
+        `INSERT OR IGNORE INTO webhook_deliveries (delivery_id, event, result, created_at, provider, provider_instance) VALUES (?, ?, ?, ?, ?, ?)`,
+      )
+      .run(deliveryId, event, result, nowIso(), resolved.provider, resolved.instance);
     return insert.changes > 0;
   }
 
-  hasWebhookDelivery(deliveryId: string): boolean {
+  hasWebhookDelivery(deliveryId: string, scope?: Partial<ForgeScope>): boolean {
     if (!deliveryId) return false;
-    const row = this.db.prepare(`SELECT delivery_id FROM webhook_deliveries WHERE delivery_id = ?`).get(deliveryId) as
-      | { delivery_id: string }
-      | undefined;
+    const resolved = normalizeScope(scope);
+    const row = this.db
+      .prepare(
+        `SELECT delivery_id FROM webhook_deliveries WHERE provider = ? AND provider_instance = ? AND delivery_id = ?`,
+      )
+      .get(resolved.provider, resolved.instance, deliveryId) as { delivery_id: string } | undefined;
     return Boolean(row);
   }
 
-  claimReviewCommand(commentId: string, deliveryId: string, command: string, result: string): boolean {
+  claimReviewCommand(
+    commentId: string,
+    deliveryId: string,
+    command: string,
+    result: string,
+    scope?: Partial<ForgeScope>,
+  ): boolean {
+    const resolved = normalizeScope(scope);
     const insert = this.db
       .prepare(
-        `INSERT OR IGNORE INTO processed_review_commands (comment_id, delivery_id, command, result, created_at)
-         VALUES (?, ?, ?, ?, ?)`,
+        `INSERT OR IGNORE INTO processed_review_commands (comment_id, delivery_id, command, result, created_at, provider, provider_instance)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`,
       )
-      .run(commentId, deliveryId, command, result, nowIso());
+      .run(commentId, deliveryId, command, result, nowIso(), resolved.provider, resolved.instance);
     return insert.changes > 0;
   }
 
-  hasReviewCommand(commentId: string): boolean {
+  hasReviewCommand(commentId: string, scope?: Partial<ForgeScope>): boolean {
+    const resolved = normalizeScope(scope);
     const row = this.db
-      .prepare(`SELECT comment_id FROM processed_review_commands WHERE comment_id = ?`)
-      .get(commentId) as { comment_id: string } | undefined;
+      .prepare(
+        `SELECT comment_id FROM processed_review_commands WHERE provider = ? AND provider_instance = ? AND comment_id = ?`,
+      )
+      .get(resolved.provider, resolved.instance, commentId) as { comment_id: string } | undefined;
     return Boolean(row);
   }
 }

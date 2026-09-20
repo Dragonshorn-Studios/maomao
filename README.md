@@ -184,6 +184,49 @@ Valid signatures for an unauthorized installation or repository receive **`202`*
 
 Events handled by default: `opened`, `reopened`, `synchronize`, `ready_for_review`. Draft PRs are ignored unless `REVIEW_DRAFTS=true`. Also subscribe the app to **Pull request review comment** so thread replies can bury or reopen findings.
 
+
+## Configure GitLab (GitLab.com and self-managed)
+
+Maomao reviews merge requests on GitLab.com and self-managed instances through **forge connections**. Each connection carries its own base URL, token, webhook secret, and policy; jobs, findings, dedup keys, and rate limits are isolated per connection, so the same deployment can review `gitlab.com/acme/a`, `gitlab.corp.internal/team/b`, and GitHub repositories at the same time.
+
+### Create a connection
+
+Open `/connections` in the Maomao UI (requires `MAOMAO_FORGE_KEY`, see below) and add:
+
+- **Instance URL** — `https://gitlab.com` or your self-managed origin. Embedded credentials, paths, and query strings are rejected; plain HTTP needs an explicit opt-in (discouraged).
+- **Access token** — project access token (one project) or group access token (a group) preferred; a service-account PAT works where those are unavailable. Minimum scopes: **`api`** (read discussions, post notes, resolve threads, read MR diffs) plus **`read_repository`** (clone the reviewed head). Maomao never pushes; do not grant `write_repository`.
+- **Webhook secret** — a long random string. Newer GitLab instances (17.x+) should use a **signing token** (`whsec_...`, shown by GitLab when you create the webhook); older instances use the plain secret token.
+- **Custom CA bundle** (optional, self-managed) — PEM text for private PKI. TLS verification is always on; the bundle only adds a trust anchor. There is no "disable TLS" switch.
+- **Private network access** (self-managed only) — allow Maomao to reach private addresses. Credentials for the connection are encrypted at rest (`MAOMAO_FORGE_KEY`, 64 hex chars; a passphrase works but hex is preferred) and never rendered — the UI shows only the last four characters.
+
+`GITLAB_BASE_URL` + `GITLAB_TOKEN` + `GITLAB_WEBHOOK_SECRET` (all three, set together) seed one `env` connection at boot and rotate it in place when the values change.
+
+### Subscribe webhooks
+
+In GitLab (project or group → Settings → Webhooks), point the webhook at:
+
+```text
+https://<your-host>/webhooks/gitlab/<connection-id>
+```
+
+The connection id is shown on the connections page. Subscribe **Merge request events** and **Note events**. Maomao handles `open`, `reopen`, source-branch `update` (title-only edits never enqueue), and `merge` (cancels in-flight reviews and permanently gates the MR). Notes inside Maomao finding discussions accept `@maomao ignore`, `@maomao bury`, `@maomao reopen`, and `🌱`; commands are authorized by project/group membership (Developer or above). Notes authored by the connection's bot are ignored.
+
+### Minimum roles
+
+| Capability | Minimum role |
+| --- | --- |
+| Review summary + inline discussions | Developer (project token with `api` + `read_repository`) |
+| Resolve/reopen finding discussions | Developer |
+| Approve clean reviews (opt-in per connection) | Maintainer, and the bot must be allowed to approve |
+| `@maomao` commands | Developer or above (project/group membership) |
+
+### Rotation and troubleshooting
+
+- Rotate a token by updating the connection (or re-booting with a new `GITLAB_TOKEN` for the `env` connection); the sealed value is replaced, the connection id stays.
+- "Probe now" validates the token against `GET /api/v4/user` and records the bot identity, token scopes (where the instance exposes them), and instance version. Approval capability and any version-dependent behavior degrade to plain review comments when unsupported — the review never fails because of a missing verdict.
+- Clone failures on self-managed instances: check the private-network opt-in and the CA bundle first; credentials never appear in clone URLs or logs.
+- If every review stops arriving, check that the webhook shows recent deliveries in GitLab (a row of failures usually means the token was rotated without updating the connection) and that the connection is still enabled.
+
 ## Configure OpenCode models
 
 Maomao does not embed a model vendor. It runs:

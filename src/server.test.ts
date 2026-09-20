@@ -8,6 +8,9 @@ import type { OpenCodePort } from "./opencode/parse.js";
 
 type OpenCodeLike = OpenCodePort;
 import { createApp } from "./server.js";
+import { ForgeConnectionStore } from "./forge/connections.js";
+import { generateForgeKeyHex } from "./forge/secretbox.js";
+import { computeSignature } from "./gitlab/signature.js";
 import { fingerprintFinding } from "./findings/identity.js";
 import { SESSION_COOKIE, CSRF_COOKIE, issueCsrfToken } from "./auth.js";
 import type { GithubPort, ManualTriggerPort, ResolvedPull } from "./github/client.js";
@@ -156,7 +159,7 @@ describe("HTTP app", () => {
 
     const detail = await app.request(`/jobs/${enqueued[0]}`);
     expect(detail.status).toBe(200);
-    expect(await detail.text()).toContain("acme/widgets#8");
+    expect(await detail.text()).toContain("acme/widgets #8");
   });
 
   it("protects UI/API/events with a session cookie and leaves webhook/health public", async () => {
@@ -3705,5 +3708,314 @@ describe("structured editor review-bot low fixes", () => {
       }).toString(),
     });
     expect(stale.status).toBe(409);
+  });
+});
+
+describe("forge connection routes", () => {
+  const gateEnv = { UI_PASSWORD: "hunter2", UI_SESSION_SECRET: "session-secret-for-tests" };
+
+  function forgeExtras() {
+    return {
+      forgeConnections: new ForgeConnectionStore(openDb(":memory:"), Buffer.from(generateForgeKeyHex(), "hex")),
+    };
+  }
+
+  it("redirects to home when the UI gate is off", async () => {
+    const { app } = testApp();
+    const response = await app.request("/connections");
+    expect(response.status).toBe(302);
+    expect(response.headers.get("location")).toBe("/");
+  });
+
+  it("serves 503 when the gate is on but the forge key is not configured", async () => {
+    const { app } = testApp(gateEnv);
+    const session = await loginSession(app);
+    const response = await app.request("/connections", { headers: { cookie: session.cookies } });
+    expect(response.status).toBe(503);
+  });
+
+  it("renders the page when the store is configured", async () => {
+    const extras = forgeExtras();
+    const { app } = testApp(gateEnv, undefined, undefined, extras);
+    const session = await loginSession(app);
+    const response = await app.request("/connections", { headers: { cookie: session.cookies } });
+    expect(response.status).toBe(200);
+    const html = await response.text();
+    expect(html).toContain("Forge connections");
+    expect(html).toContain("Add a GitLab connection");
+  });
+
+  it("rejects a connection whose URL violates the policy, without persisting", async () => {
+    const extras = forgeExtras();
+    const { app } = testApp(gateEnv, undefined, undefined, extras);
+    const session = await loginSession(app);
+    const response = await app.request("/connections", {
+      method: "POST",
+      headers: { cookie: session.cookies, "content-type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({
+        label: "acme",
+        instanceUrl: "https://user:pass@gitlab.com",
+        token: "glpat-token-value-1",
+        webhookSecret: "whsec-value-1",
+        csrf_token: session.csrfToken,
+      }).toString(),
+    });
+    expect(response.status).toBe(303);
+    expect(response.headers.get("location")).toContain("error=");
+    expect(extras.forgeConnections!.list("gitlab")).toHaveLength(0);
+  });
+
+  it("creates a connection and reports a failed probe while keeping the row", async () => {
+    const extras = forgeExtras();
+    const { app } = testApp(gateEnv, undefined, undefined, extras);
+    const session = await loginSession(app);
+    // Port 9 (discard) is unreachable in the test environment.
+    const response = await app.request("/connections", {
+      method: "POST",
+      headers: { cookie: session.cookies, "content-type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({
+        label: "acme",
+        instanceUrl: "http://127.0.0.1:9",
+        token: "glpat-token-value-1",
+        webhookSecret: "whsec-value-1",
+        allowPrivateNetwork: "1",
+        allowInsecureHttp: "1",
+        csrf_token: session.csrfToken,
+      }).toString(),
+    });
+    expect(response.status).toBe(303);
+    expect(decodeURIComponent(response.headers.get("location") ?? "")).toContain("validation failed");
+    expect(extras.forgeConnections!.list("gitlab")).toHaveLength(1);
+  });
+
+  it("refuses duplicate label + origin connections", async () => {
+    const extras = forgeExtras();
+    const { app } = testApp(gateEnv, undefined, undefined, extras);
+    const session = await loginSession(app);
+    const post = (body: URLSearchParams) => {
+      body.append("csrf_token", session.csrfToken);
+      return app.request("/connections", {
+        method: "POST",
+        headers: { cookie: session.cookies, "content-type": "application/x-www-form-urlencoded" },
+        body: body.toString(),
+      });
+    };
+    await post(
+      new URLSearchParams({
+        label: "acme",
+        instanceUrl: "https://gitlab.corp.example",
+        token: "glpat-token-value-1",
+        webhookSecret: "whsec-value-1",
+      }),
+    );
+    const second = await post(
+      new URLSearchParams({
+        label: "acme",
+        instanceUrl: "https://gitlab.corp.example",
+        token: "glpat-token-value-2",
+        webhookSecret: "whsec-value-2",
+      }),
+    );
+    expect(decodeURIComponent(second.headers.get("location") ?? "")).toContain("already exists");
+    expect(extras.forgeConnections!.list("gitlab")).toHaveLength(1);
+  });
+
+  it("404s deletion of an unknown connection", async () => {
+    const extras = forgeExtras();
+    const { app } = testApp(gateEnv, undefined, undefined, extras);
+    const session = await loginSession(app);
+    const response = await app.request("/connections/nope/delete", {
+      method: "POST",
+      headers: { cookie: session.cookies, "content-type": "application/x-www-form-urlencoded" },
+      body: `csrf_token=${encodeURIComponent(session.csrfToken)}`,
+    });
+    expect(response.status).toBe(404);
+  });
+});
+describe("gitlab webhook route", () => {
+  function signedHeaders(secret: string, rawBody: string, webhookId: string) {
+    const timestamp = String(Math.floor(Date.now() / 1000));
+    const signature = computeSignature(
+      Buffer.from(secret.replace(/^whsec_/, ""), "base64"),
+      webhookId,
+      timestamp,
+      rawBody,
+    );
+    return {
+      "content-type": "application/json",
+      "x-gitlab-event": "merge_request",
+      "webhook-id": webhookId,
+      "webhook-timestamp": timestamp,
+      "webhook-signature": signature,
+    };
+  }
+
+  it("verifies per-connection secrets and enqueues through the route", async () => {
+    const forgeConnections = new ForgeConnectionStore(openDb(":memory:"), Buffer.from(generateForgeKeyHex(), "hex"));
+    const { app } = testApp(
+      {
+        GITHUB_WEBHOOK_SECRET: "s3cret",
+        GITHUB_APP_ID: "1",
+        GITHUB_APP_PRIVATE_KEY: "k",
+        REVIEWER_ROLES: "correctness,security",
+      },
+      undefined,
+      undefined,
+      { forgeConnections },
+    );
+    const secret = `whsec_${Buffer.from("unit-test-signing-secret-0000000000").toString("base64")}`;
+    const { id } = forgeConnections.create({
+      provider: "gitlab",
+      label: "acme",
+      instanceUrl: "https://gitlab.com",
+      token: "glpat-connection-token",
+      tokenType: "group",
+      scopeType: "group",
+      scopePath: "acme",
+      webhookSecret: secret,
+      allowPrivateNetwork: false,
+      allowInsecureHttp: false,
+      allowApprove: false,
+    });
+    const payload = JSON.stringify({
+      object_kind: "merge_request",
+      user: { id: 111, username: "octocat" },
+      project: { id: 42, path_with_namespace: "acme/widgets" },
+      object_attributes: {
+        iid: 7,
+        action: "open",
+        state: "opened",
+        title: "t",
+        url: "https://gitlab.com/acme/widgets/-/merge_requests/7",
+        source_branch: "feature",
+        target_branch: "main",
+        last_commit: { id: "headroute1" },
+      },
+    });
+    const response = await app.request(`/webhooks/gitlab/${id}`, {
+      method: "POST",
+      headers: signedHeaders(secret, payload, "whid-route-1"),
+      body: payload,
+    });
+    expect(response.status).toBe(202);
+    const body = (await response.json()) as { ok: boolean; jobId: number };
+    expect(body.ok).toBe(true);
+  });
+
+  it("rejects bad secrets with 401 without leaking verification detail shape", async () => {
+    const forgeConnections = new ForgeConnectionStore(openDb(":memory:"), Buffer.from(generateForgeKeyHex(), "hex"));
+    const { app } = testApp(
+      { GITHUB_WEBHOOK_SECRET: "s3cret", GITHUB_APP_ID: "1", GITHUB_APP_PRIVATE_KEY: "k", REVIEWER_ROLES: "correctness" },
+      undefined,
+      undefined,
+      { forgeConnections },
+    );
+    const secret = `whsec_${Buffer.from("unit-test-signing-secret-0000000000").toString("base64")}`;
+    const { id } = forgeConnections.create({
+      provider: "gitlab",
+      label: "acme",
+      instanceUrl: "https://gitlab.com",
+      token: "glpat-connection-token",
+      tokenType: "group",
+      scopeType: "group",
+      scopePath: "acme",
+      webhookSecret: secret,
+      allowPrivateNetwork: false,
+      allowInsecureHttp: false,
+      allowApprove: false,
+    });
+    const response = await app.request(`/webhooks/gitlab/${id}`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-gitlab-event": "merge_request" },
+      body: "{}",
+    });
+    expect(response.status).toBe(401);
+  });
+});
+describe("home forge filter", () => {
+  function enqueueForge(store: JobStore, overrides: Record<string, unknown> = {}) {
+    return store.enqueue({
+      repoFullName: "acme/widgets",
+      repoOwner: "acme",
+      repoName: "widgets",
+      installationId: 42,
+      prNumber: 7,
+      prTitle: "t",
+      prBody: "",
+      prHtmlUrl: "",
+      prAuthor: "a",
+      baseSha: "b",
+      headSha: "h",
+      baseRef: "main",
+      headRef: "feature",
+      reviewers: [],
+      ...overrides,
+    }).job;
+  }
+
+  it("filters the home page by forge and marks the active chip", async () => {
+    const { app, store } = testApp(
+      {
+        GITHUB_WEBHOOK_SECRET: "s3cret",
+        GITHUB_APP_ID: "1",
+        GITHUB_APP_PRIVATE_KEY: "k",
+        REVIEWER_ROLES: "correctness,security",
+      },
+      undefined,
+      undefined,
+      {},
+    );
+    enqueueForge(store);
+    enqueueForge(store, { provider: "gitlab", providerInstance: "gitlab.com", headSha: "gl-head" });
+    const filtered = await app.request("/?forge=gitlab:gitlab.com");
+    const html = await filtered.text();
+    expect(html).toContain('data-forge="gitlab:gitlab.com"');
+    expect(html).toContain('aria-current="true"');
+    expect(html).toContain("All forges");
+    // Only the GitLab job card renders under the filter.
+    expect(html).toContain("[GitLab] acme/widgets !7");
+    expect(html).not.toContain("[GitHub] acme/widgets #7");
+  });
+
+  it("keeps the filter when the filtered page is exhausted", async () => {
+    const { app, store } = testApp(
+      {
+        GITHUB_WEBHOOK_SECRET: "s3cret",
+        GITHUB_APP_ID: "1",
+        GITHUB_APP_PRIVATE_KEY: "k",
+        REVIEWER_ROLES: "correctness,security",
+      },
+      undefined,
+      undefined,
+      {},
+    );
+    enqueueForge(store);
+    const gitlab = enqueueForge(store, { provider: "gitlab", providerInstance: "gitlab.com", headSha: "gl-head" });
+    const exhausted = await app.request(`/?forge=gitlab:gitlab.com&before=${gitlab.id}`);
+    const html = await exhausted.text();
+    // Refill respects the filter: still exactly the GitLab job.
+    expect(html).toContain("[GitLab] acme/widgets !7");
+    expect(html).not.toContain("[GitHub] acme/widgets #7");
+    expect(html).toContain('aria-current="true"');
+  });
+
+  it("hides the chips on single-forge stores and ignores stale forge params", async () => {
+    const { app, store } = testApp(
+      {
+        GITHUB_WEBHOOK_SECRET: "s3cret",
+        GITHUB_APP_ID: "1",
+        GITHUB_APP_PRIVATE_KEY: "k",
+        REVIEWER_ROLES: "correctness,security",
+      },
+      undefined,
+      undefined,
+      {},
+    );
+    enqueueForge(store);
+    const home = await app.request("/?forge=gitlab:gitlab.com");
+    const html = await home.text();
+    expect(html).not.toContain('role="navigation" aria-label="Filter by forge"');
+    // The single job renders unfiltered despite the bogus forge param.
+    expect(html).toContain("[GitHub] acme/widgets #7");
   });
 });

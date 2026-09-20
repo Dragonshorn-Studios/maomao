@@ -25,6 +25,10 @@ export interface PageOptions {
   uiFlavor?: UiFlavor;
   /** Pagination state; only the paginated home renders (including the POST /reviews error re-render) pass it. */
   pagination?: { hasOlder: boolean; hasNewer: boolean };
+  /** Forge scopes with jobs; the filter chips render only when more than one exists. */
+  forgeScopes?: Array<{ provider: string; instance: string }>;
+  /** The active `provider:instance` filter key on the home page. */
+  activeForge?: string;
 }
 
 export function csrfInput(token: string | undefined): string {

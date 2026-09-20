@@ -1,6 +1,7 @@
 import { readFileSync, existsSync } from "node:fs";
 import { resolve } from "node:path";
 import { clamp, parseBoolean, parseCsv, parseIdList, parseInteger, parseNumber, replaceEscapedNewlines } from "./util.js";
+import { loadForgeKey } from "./forge/secretbox.js";
 import { DEFAULT_REVIEWER_ROLES, KNOWN_REVIEWER_ROLES, type ReviewerRole } from "./prompts.js";
 import { parseExternalTargetsJson, validateCommandText } from "./routing/escalation.js";
 import {
@@ -127,6 +128,14 @@ export interface Config {
   /** Max created jobs per repository id inside `repoRateWindowMs` (per process). `0` disables. */
   repoRateLimitPerWindow: number;
   repoRateWindowMs: number;
+  /** Key sealing forge connection tokens at rest. Absent until a forge connection needs one. */
+  forgeKey?: Buffer;
+  /** MVP bootstrap: seed one GitLab connection from env at boot (all three required). */
+  gitlabBootstrap?: {
+    baseUrl: string;
+    token: string;
+    webhookSecret: string;
+  };
 }
 
 const DEFAULT_ACTIONS: PullRequestAction[] = [
@@ -302,14 +311,46 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     maxDiffBytes: clamp(parseInteger(env.MAX_DIFF_BYTES, 1_048_576), 0, 50 * 1024 * 1024),
     repoRateLimitPerWindow: Math.max(0, parseInteger(env.REPO_RATE_LIMIT_PER_WINDOW, 6)),
     repoRateWindowMs: Math.max(0, parseInteger(env.REPO_RATE_WINDOW_MS, 60 * 60 * 1000)),
+    forgeKey: loadForgeKey(env),
+    gitlabBootstrap: parseGitLabBootstrap(env),
   };
 }
 
-export function assertRuntimeConfig(config: Config): void {
+/**
+ * The MVP single-connection GitLab bootstrap. Only complete configurations
+ * count: a partial set is far more likely a typo than an intent, and a
+ * connection without a webhook secret cannot receive events.
+ */
+function parseGitLabBootstrap(env: NodeJS.ProcessEnv): Config["gitlabBootstrap"] {
+  const baseUrl = env.GITLAB_BASE_URL?.trim();
+  const token = env.GITLAB_TOKEN?.trim();
+  const webhookSecret = env.GITLAB_WEBHOOK_SECRET?.trim();
+  if (!baseUrl && !token && !webhookSecret) return undefined;
+  const set = [baseUrl, token, webhookSecret].filter(Boolean).length;
+  if (set < 3) {
+    throw new Error("GITLAB_BASE_URL, GITLAB_TOKEN, and GITLAB_WEBHOOK_SECRET must be set together");
+  }
+  return { baseUrl: baseUrl!, token: token!, webhookSecret: webhookSecret! };
+}
+
+export function assertRuntimeConfig(
+  config: Config,
+  forgeState: { gitlabConnections: number; gitlabBootstrap: boolean } = {
+    gitlabConnections: 0,
+    gitlabBootstrap: Boolean(config.gitlabBootstrap),
+  },
+): void {
+  // The GitHub App is only mandatory while it is the only forge that could
+  // receive events: a GitLab-only deployment (persisted connections or the
+  // env bootstrap) boots without GitHub credentials. Operator OAuth login
+  // still requires them below, since it is GitHub-based.
+  const hasForgePath = forgeState.gitlabConnections > 0 || forgeState.gitlabBootstrap;
   const missing: string[] = [];
-  if (!config.github.appId) missing.push("GITHUB_APP_ID");
-  if (!config.github.privateKey) missing.push("GITHUB_APP_PRIVATE_KEY or GITHUB_APP_PRIVATE_KEY_PATH");
-  if (!config.github.webhookSecret) missing.push("GITHUB_WEBHOOK_SECRET");
+  if (!hasForgePath) {
+    if (!config.github.appId) missing.push("GITHUB_APP_ID");
+    if (!config.github.privateKey) missing.push("GITHUB_APP_PRIVATE_KEY or GITHUB_APP_PRIVATE_KEY_PATH");
+    if (!config.github.webhookSecret) missing.push("GITHUB_WEBHOOK_SECRET");
+  }
   if (missing.length > 0) {
     throw new Error(`Missing required configuration: ${missing.join(", ")}`);
   }
@@ -348,6 +389,9 @@ export function assertRuntimeConfig(config: Config): void {
   }
   if (config.uiLocalLogin && (!passwordSet || !secretSet)) {
     throw new Error("UI_LOCAL_LOGIN requires both UI_PASSWORD and UI_SESSION_SECRET");
+  }
+  if ((forgeState.gitlabConnections > 0 || forgeState.gitlabBootstrap) && !config.forgeKey) {
+    throw new Error("Forge connections require MAOMAO_FORGE_KEY (64 hex chars) or MAOMAO_FORGE_KEY_FILE");
   }
 }
 

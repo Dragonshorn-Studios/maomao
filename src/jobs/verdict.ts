@@ -1,6 +1,9 @@
 import type { Severity } from "../schema.js";
 import { severityRank } from "../schema.js";
-import type { ReviewEvent } from "../github/client.js";
+import type { ForgeVerdict } from "../forge/types.js";
+
+/** Historical name for the persisted verdict vocabulary; forge-neutral since #18. */
+export type ReviewEvent = ForgeVerdict;
 
 export interface ReviewEventInput {
   allowApprove: boolean;

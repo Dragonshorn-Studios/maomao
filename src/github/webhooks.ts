@@ -382,9 +382,13 @@ export async function handleGithubWebhook(input: {
       enqueue,
     };
   } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    console.warn(
+      `webhook: enqueue failed for ${input.request.event}.${payload.action} delivery ${input.request.deliveryId || "unknown"}: ${message}`,
+    );
     return {
       status: 400,
-      body: { error: error instanceof Error ? error.message : String(error) },
+      body: { error: message },
     };
   }
 }

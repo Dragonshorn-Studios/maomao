@@ -15,6 +15,8 @@ import {
   type PrDiscussionComment,
 } from "./overrides.js";
 import type { GithubPort, ReviewThread } from "../github/client.js";
+import { GitHubProvider } from "../forge/github-provider.js";
+import type { ForgePort } from "../forge/port.js";
 
 function architectureFinding(file = "src/api.ts") {
   return {
@@ -188,6 +190,9 @@ describe("collectHumanOverrides", () => {
     installation_id: 1,
     repo_owner: "acme",
     repo_name: "widgets",
+    repo_full_name: "acme/widgets",
+    provider: "github",
+    provider_instance: "github.com",
     pr_number: 7,
   };
   const architecture = architectureFinding();
@@ -224,10 +229,15 @@ describe("collectHumanOverrides", () => {
     };
   }
 
+  /** Exercise the real GitHub adapter over the fake port, like the pipeline does. */
+  function forge(input: Parameters<typeof github>[0]): ForgePort {
+    return new GitHubProvider(github(input), job.installation_id, "maomao");
+  }
+
   it("does not record a path-only rejected-by-design as a suppress override", async () => {
     const config = loadConfig({ MAOMAO_OVERRIDE_AUTHORS: "Szefowo", GITHUB_APP_SLUG: "maomao" });
     const context = await collectHumanOverrides({
-      github: github({
+      forge: forge({
         review: [
           {
             id: 11,
@@ -251,7 +261,7 @@ describe("collectHumanOverrides", () => {
   it("does not create an override from a non-allowlisted commenter", async () => {
     const config = loadConfig({ MAOMAO_OVERRIDE_AUTHORS: "Szefowo", GITHUB_APP_SLUG: "maomao" });
     const context = await collectHumanOverrides({
-      github: github({
+      forge: forge({
         permission: "write",
         review: [
           {
@@ -273,7 +283,7 @@ describe("collectHumanOverrides", () => {
   it("skips a dismiss phrase that has no fingerprint and no path target", async () => {
     const config = loadConfig({ MAOMAO_OVERRIDE_AUTHORS: "Szefowo", GITHUB_APP_SLUG: "maomao" });
     const context = await collectHumanOverrides({
-      github: github({
+      forge: forge({
         issue: [{ id: 3, body: "rejected by design", userLogin: "Szefowo" }],
       }),
       config,
@@ -290,7 +300,7 @@ describe("collectHumanOverrides", () => {
   it("does not let an injection-like comment change policy or suppress findings", async () => {
     const config = loadConfig({ MAOMAO_OVERRIDE_AUTHORS: "Szefowo", GITHUB_APP_SLUG: "maomao" });
     const context = await collectHumanOverrides({
-      github: github({
+      forge: forge({
         issue: [
           {
             id: 99,
@@ -341,7 +351,7 @@ describe("collectHumanOverrides", () => {
       },
     ];
     const context = await collectHumanOverrides({
-      github: github({
+      forge: forge({
         permission: "maintain",
         review: [{ id: 2, body: "by design", userLogin: "Szefowo", path: architecture.file }],
       }),

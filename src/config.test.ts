@@ -1,6 +1,61 @@
 import { describe, expect, it } from "vitest";
 import { assertRuntimeConfig, loadConfig } from "./config.js";
 import { parseBoolean, parseCsv, parseIdList, parseNumber } from "./util.js";
+import { generateForgeKeyHex } from "./forge/secretbox.js";
+
+describe("forge boot validation", () => {
+  const githubEnv = {
+    GITHUB_APP_ID: "1",
+    GITHUB_APP_PRIVATE_KEY: "-----BEGIN KEY-----",
+    GITHUB_WEBHOOK_SECRET: "secret",
+  };
+  const forgeKeyEnv = { MAOMAO_FORGE_KEY: generateForgeKeyHex() };
+
+  it("still requires the GitHub App when no forge path exists", () => {
+    expect(() => assertRuntimeConfig(loadConfig({}))).toThrow(/GITHUB_APP_ID/);
+    expect(() => assertRuntimeConfig(loadConfig({ ...forgeKeyEnv }))).toThrow(/GITHUB_APP_ID/);
+    expect(() =>
+      assertRuntimeConfig(loadConfig(githubEnv), { gitlabConnections: 0, gitlabBootstrap: false }),
+    ).not.toThrow();
+  });
+
+  it("lets a GitLab-only deployment boot without GitHub App credentials", () => {
+    expect(() =>
+      assertRuntimeConfig(loadConfig(forgeKeyEnv), { gitlabConnections: 1, gitlabBootstrap: false }),
+    ).not.toThrow();
+    expect(() =>
+      assertRuntimeConfig(loadConfig(forgeKeyEnv), { gitlabConnections: 0, gitlabBootstrap: true }),
+    ).not.toThrow();
+  });
+
+  it("requires MAOMAO_FORGE_KEY whenever a GitLab forge path exists", () => {
+    expect(() =>
+      assertRuntimeConfig(loadConfig({}), { gitlabConnections: 2, gitlabBootstrap: false }),
+    ).toThrow(/MAOMAO_FORGE_KEY/);
+    expect(() => assertRuntimeConfig(loadConfig({}), { gitlabConnections: 0, gitlabBootstrap: true })).toThrow(
+      /MAOMAO_FORGE_KEY/,
+    );
+  });
+
+  it("rejects a partial GitLab bootstrap", () => {
+    expect(() => loadConfig({ GITLAB_BASE_URL: "https://gitlab.com" })).toThrow(/must be set together/);
+    expect(() => loadConfig({ GITLAB_BASE_URL: "https://gitlab.com", GITLAB_TOKEN: "t" })).toThrow(
+      /must be set together/,
+    );
+    const config = loadConfig({
+      ...githubEnv,
+      ...forgeKeyEnv,
+      GITLAB_BASE_URL: "https://gitlab.com",
+      GITLAB_TOKEN: "glpat-t",
+      GITLAB_WEBHOOK_SECRET: "s",
+    });
+    expect(config.gitlabBootstrap).toEqual({
+      baseUrl: "https://gitlab.com",
+      token: "glpat-t",
+      webhookSecret: "s",
+    });
+  });
+});
 
 describe("loadConfig", () => {
   it("loads defaults and reviewer roles from env", () => {

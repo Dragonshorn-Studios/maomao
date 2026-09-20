@@ -215,3 +215,46 @@ describe("cancellation abort hook", () => {
     expect(seen).toEqual([[job.job.id]]);
   });
 });
+describe("cross-forge cancellation isolation", () => {
+  function jobInput(overrides: Record<string, unknown> = {}) {
+    return {
+      repoFullName: "acme/widgets",
+      repoOwner: "acme",
+      repoName: "widgets",
+      installationId: 1,
+      prNumber: 7,
+      prTitle: "t",
+      prBody: "",
+      prHtmlUrl: "",
+      prAuthor: "a",
+      baseSha: "b",
+      headSha: "h",
+      baseRef: "main",
+      headRef: "feature",
+      reviewers: [],
+      ...overrides,
+    };
+  }
+
+  it("a scoped merge cancellation leaves other forges' jobs for the same repo+PR running", () => {
+    const store = new JobStore(openDb(":memory:"));
+    const githubJob = store.enqueue(jobInput({ headSha: "sha-github" })).job;
+    const gitlabJob = store.enqueue(
+      jobInput({ headSha: "sha-gitlab", provider: "gitlab", providerInstance: "gitlab.example", forgeConnectionId: "conn-1" }),
+    ).job;
+    // The webhook writes the merged marker before cancelling; mirror that.
+    store.markPullMerged("acme/widgets", 7, "delivery-1", { provider: "gitlab", instance: "gitlab.example" });
+
+    const { cancelledJobIds } = cancelJobsForPull(store, {
+      repoFullName: "acme/widgets",
+      prNumber: 7,
+      scope: { provider: "gitlab", instance: "gitlab.example" },
+      reason: "pr_merged",
+    });
+    expect(cancelledJobIds).toEqual([gitlabJob.id]);
+    expect(store.getJob(githubJob.id)?.state).toBe("queued");
+    // The merged marker is scoped the same way: a GitHub open still enqueues.
+    expect(store.hasMergedPull("acme/widgets", 7)).toBe(false);
+    expect(store.hasMergedPull("acme/widgets", 7, { provider: "gitlab", instance: "gitlab.example" })).toBe(true);
+  });
+});

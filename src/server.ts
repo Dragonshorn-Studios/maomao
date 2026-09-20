@@ -4,6 +4,10 @@ import { deleteCookie, getCookie, setCookie } from "hono/cookie";
 import type { Config } from "./config.js";
 import type { JobStore } from "./jobs/store.js";
 import { handleGithubWebhook } from "./github/webhooks.js";
+import { handleGitLabWebhook } from "./gitlab/webhooks.js";
+import { ForgeConnectionStore, countConnections, toView } from "./forge/connections.js";
+import { probeConnection } from "./forge/probe.js";
+import { InstanceUrlError } from "./forge/safe-http.js";
 import type { ManualTriggerPort, GithubPort } from "./github/client.js";
 import type { OpenCodePort } from "./opencode/parse.js";
 import { authorizeGithubAccount, authorizeGithubRepository, authorizeGithubTarget, logAuthorizationRejection, logRateLimited, rejectUnauthorized } from "./github/authorize.js";
@@ -21,6 +25,7 @@ import { redactSecrets } from "./util.js";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import {
+  renderConnectionsPage,
   renderScanConfirmPage,
   renderScanIssuePreviewPage,
   renderScanPage,
@@ -90,6 +95,8 @@ export interface ServerContext {
   oauthFetch?: typeof fetch;
   /** Offline prompt-evaluation runner (never touches GitHub). */
   opencode?: OpenCodePort;
+  /** Persisted forge connections (GitLab). Undefined until MAOMAO_FORGE_KEY is set. */
+  forgeConnections?: ForgeConnectionStore;
   /** The environment loadConfig consumed; defaults to process.env. Injectable for tests. */
   env?: NodeJS.ProcessEnv;
 }
@@ -178,7 +185,10 @@ interface ScanIssueEntry {
 function scanOpenFindings(store: JobStore, job: JobRow): ScanIssueEntry[] {
   const aggregated = parseAggregatedFindings(job.aggregator_normalized, `job ${job.id} (${job.repo_full_name})`);
   return store
-    .listFindings(job.repo_full_name, job.pr_number)
+    .listFindings(job.repo_full_name, job.pr_number, {
+      provider: job.provider,
+      instance: job.provider_instance,
+    })
     .filter((row) => row.status === "open" && row.last_job_id === job.id)
     .map((row) => {
       const aggregatedFinding = aggregated.get(row.fingerprint);
@@ -511,6 +521,40 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
     return c.json(result.body, result.status as 200);
   });
 
+  app.post("/webhooks/gitlab/:connectionId", async (c) => {
+    if (!ctx.forgeConnections) {
+      return c.text("Forge connections require MAOMAO_FORGE_KEY", 503);
+    }
+    const rawBody = await c.req.text();
+    const result = await handleGitLabWebhook({
+      config: ctx.config,
+      store: ctx.store,
+      connections: ctx.forgeConnections,
+      rateLimiter,
+      connectionId: c.req.param("connectionId"),
+      request: {
+        event: c.req.header("x-gitlab-event") ?? "",
+        rawBody,
+        webhookId: c.req.header("webhook-id"),
+        webhookTimestamp: c.req.header("webhook-timestamp"),
+        webhookSignature: c.req.header("webhook-signature"),
+        legacyToken: c.req.header("x-gitlab-token"),
+        eventUuid: c.req.header("x-gitlab-event-uuid"),
+        webhookUuid: c.req.header("x-gitlab-webhook-uuid"),
+      },
+      // Dropped from the in-memory queue inside the handler, before any
+      // post-cancellation logging could fail; abortMany is idempotent.
+      abortJobs: (ids) => ctx.queue.abortMany(ids),
+    });
+    if (result.enqueue) {
+      dispatchEnqueue(ctx.queue, result.enqueue);
+    }
+    if (result.dispatchJobId) {
+      ctx.queue.enqueue(result.dispatchJobId);
+    }
+    return c.json(result.body, result.status as 200);
+  });
+
   app.get("/reviews", (c) => c.redirect("/", 302));
 
   app.post("/reviews", async (c) => {
@@ -652,7 +696,15 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
 
   app.get("/", (c) => {
     const cursor = jobsPageCursor(c.req.query("before"), c.req.query("after"));
-    let page = ctx.store.listJobsPage(cursor);
+    // Forge filter: `?forge=provider:instance`, validated against the scopes
+    // that actually have jobs so stale links degrade to the unfiltered view.
+    const scopes = ctx.store.listForgeScopes();
+    const requested = c.req.query("forge");
+    const forge =
+      requested && scopes.length > 1
+        ? scopes.find((scope) => `${scope.provider}:${scope.instance}` === requested)
+        : undefined;
+    let page = ctx.store.listJobsPage({ ...cursor, forge });
     // Only out-of-range cursors empty the page: after at/past the newest id,
     // or before at/below the oldest id. (A before cursor past the newest id
     // never gets here empty — the store's id< query already returns the
@@ -660,9 +712,11 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
     // first page and say why instead of a dead end.
     let staleCursorNotice: string | undefined;
     if (page.jobs.length === 0) {
-      page = ctx.store.listJobsPage({});
+      page = ctx.store.listJobsPage({ forge });
       if (page.jobs.length > 0 && (cursor.before != null || cursor.after != null)) {
-        staleCursorNotice = "That page no longer exists — showing the newest jobs instead.";
+        staleCursorNotice = forge
+          ? "That page no longer exists — showing the newest matching jobs instead."
+          : "That page no longer exists — showing the newest jobs instead.";
       }
     }
     return c.html(
@@ -673,6 +727,8 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
         notice: noticeText(c.req.query("notice")) ?? staleCursorNotice,
         error: c.req.query("error") || undefined,
         pagination: { hasOlder: page.hasOlder, hasNewer: page.hasNewer },
+        forgeScopes: scopes.length > 1 ? scopes : undefined,
+        activeForge: forge ? `${forge.provider}:${forge.instance}` : undefined,
       }),
     );
   });
@@ -681,7 +737,10 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
     const id = Number(c.req.param("id"));
     const job = ctx.store.getJob(id);
     if (!job) return c.text("Not found", 404);
-    const latest = ctx.store.findLatestJobForPull(job.repo_full_name, job.pr_number);
+    const latest = ctx.store.findLatestJobForPull(job.repo_full_name, job.pr_number, undefined, {
+      provider: job.provider,
+      instance: job.provider_instance,
+    });
     return c.html(
       renderJob(job, ctx.store.listReviewerRuns(id), ctx.store.listLogs(id), {
         ...pageOpts,
@@ -690,7 +749,10 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
         prHeadSha: latest?.head_sha ?? job.head_sha,
         notice: noticeText(c.req.query("notice"), job.repo_full_name, job.pr_number, job.head_sha),
         error: c.req.query("error") || undefined,
-        prFindings: ctx.store.listFindings(job.repo_full_name, job.pr_number),
+        prFindings: ctx.store.listFindings(job.repo_full_name, job.pr_number, {
+          provider: job.provider,
+          instance: job.provider_instance,
+        }),
         scanIssueCreation: scanIssueCreationData(job),
         scanIssues: job.job_type === "health_scan" ? ctx.store.listScanIssues(job.id) : undefined,
       }),
@@ -758,6 +820,107 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
       status,
     );
   };
+
+
+  // ---- Forge connections (GitLab) ----
+
+  app.get("/connections", (c) => {
+    if (!gateOn) return c.redirect("/", 302);
+    if (!ctx.forgeConnections) {
+      return c.text("Forge connections require MAOMAO_FORGE_KEY", 503);
+    }
+    const rows = ctx.forgeConnections.list().map(toView);
+    return c.html(
+      renderConnectionsPage({
+        connections: rows,
+        csrfToken: gateOn ? ensureCsrfToken(c, ctx.config.uiSessionSecret) : undefined,
+        options: { ...pageOpts, notice: c.req.query("notice") ?? undefined, error: c.req.query("error") ?? undefined },
+      }),
+    );
+  });
+
+  app.post("/connections", async (c) => {
+    if (!gateOn) return c.redirect("/", 302);
+    if (!ctx.forgeConnections) {
+      return c.text("Forge connections require MAOMAO_FORGE_KEY", 503);
+    }
+    const body = await c.req.parseBody();
+    const text = (name: string) => (typeof body[name] === "string" ? (body[name] as string).trim() : "");
+    const checked = (name: string) => body[name] === "1";
+    const redirect = (query: string) => c.redirect(`/connections${query}`, 303);
+    try {
+      const row = ctx.forgeConnections.create({
+        provider: "gitlab",
+        label: text("label"),
+        instanceUrl: text("instanceUrl"),
+        token: typeof body.token === "string" ? body.token : "",
+        tokenType: (["project", "group", "pat"] as const).includes(text("tokenType") as "project")
+          ? (text("tokenType") as "project" | "group" | "pat")
+          : "pat",
+        scopeType: (["instance", "group", "project"] as const).includes(text("scopeType") as "instance")
+          ? (text("scopeType") as "instance" | "group" | "project")
+          : "instance",
+        scopePath: text("scopePath"),
+        webhookSecret: typeof body.webhookSecret === "string" ? body.webhookSecret : "",
+        caPem: typeof body.caPem === "string" && body.caPem.trim() ? body.caPem : undefined,
+        allowPrivateNetwork: checked("allowPrivateNetwork"),
+        allowInsecureHttp: checked("allowInsecureHttp"),
+        allowApprove: checked("allowApprove"),
+      });
+      const probe = await probeConnection(ctx.forgeConnections, row.id, { timeoutMs: 10_000 });
+      if (probe.ok) {
+        const caveats = [
+          probe.scopesError ? `scopes unavailable (${probe.scopesError})` : undefined,
+          probe.versionError ? `version unavailable (${probe.versionError})` : undefined,
+        ].filter(Boolean);
+        return redirect(
+          `?notice=${encodeURIComponent(`Connection created and validated as ${probe.botUsername} on ${row.instance_base_url}.${caveats.length ? ` ${caveats.join("; ")}.` : ""}`)}`,
+        );
+      }
+      return redirect(
+        `?error=${encodeURIComponent(`Connection created, but validation failed: ${probe.error} The token or URL can be corrected after deleting and re-adding the connection.`)}`,
+      );
+    } catch (error) {
+      const message =
+        error instanceof InstanceUrlError
+          ? `instance URL rejected: ${error.message}`
+          : error instanceof Error
+            ? error.message
+            : String(error);
+      console.warn(`connections: create failed: ${message.replace(/[\x00-\x1f]/g, " ")}`);
+      return redirect(`?error=${encodeURIComponent(message)}`);
+    }
+  });
+
+  app.post("/connections/:id/probe", async (c) => {
+    if (!gateOn) return c.redirect("/", 302);
+    if (!ctx.forgeConnections) return c.text("Forge connections require MAOMAO_FORGE_KEY", 503);
+    const id = c.req.param("id");
+    const probe = await probeConnection(ctx.forgeConnections, id, { timeoutMs: 10_000 });
+    if (probe.ok) {
+      return c.redirect(`/connections?notice=${encodeURIComponent(`Probe ok: ${probe.botUsername}${probe.version ? ` on GitLab ${probe.version}` : ""}`)}`, 303);
+    }
+    return c.redirect(`/connections?error=${encodeURIComponent(`Probe failed: ${probe.error}`)}`, 303);
+  });
+
+  app.post("/connections/:id/toggle", (c) => {
+    if (!gateOn) return c.redirect("/", 302);
+    if (!ctx.forgeConnections) return c.text("Forge connections require MAOMAO_FORGE_KEY", 503);
+    const id = c.req.param("id");
+    const row = ctx.forgeConnections.get(id);
+    if (!row) return c.text("Not found", 404);
+    ctx.forgeConnections.update(id, { enabled: row.enabled !== 1 });
+    return c.redirect("/connections", 303);
+  });
+
+  app.post("/connections/:id/delete", (c) => {
+    if (!gateOn) return c.redirect("/", 302);
+    if (!ctx.forgeConnections) return c.text("Forge connections require MAOMAO_FORGE_KEY", 503);
+    if (!ctx.forgeConnections.delete(c.req.param("id"))) {
+      return c.text("Not found", 404);
+    }
+    return c.redirect("/connections", 303);
+  });
 
   app.get("/config", (c) => {
     if (!gateOn) return c.redirect("/", 302);
@@ -1537,7 +1700,10 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
       let skip: { reason: string; url?: string } | undefined;
       // Repo-scoped on purpose: an issue recorded by an earlier scan of the same
       // repository still tracks this fingerprint. issue_number 0 = pending claim.
-      const local = ctx.store.getScanIssue(job.repo_full_name, entry.row.fingerprint);
+      const local = ctx.store.getScanIssue(job.repo_full_name, entry.row.fingerprint, {
+        provider: job.provider,
+        instance: job.provider_instance,
+      });
       if (local) {
         skip = {
           reason: local.issue_number === 0 ? "a publication claim for this finding is already in flight" : "a Maomao issue already tracks this finding",
@@ -1625,7 +1791,10 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
       const finding = entry.row;
       const markerBase = scanIssueMarkerBase(finding.fingerprint);
       try {
-        const existingLocal = ctx.store.hasScanIssue(job.repo_full_name, finding.fingerprint);
+        const existingLocal = ctx.store.hasScanIssue(job.repo_full_name, finding.fingerprint, {
+          provider: job.provider,
+          instance: job.provider_instance,
+        });
         if (existingLocal) {
           skipped += 1;
           continue;
@@ -1636,6 +1805,7 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
           repoFullName: job.repo_full_name,
           fingerprint: finding.fingerprint,
           title: finding.summary ?? finding.fingerprint,
+          scope: { provider: job.provider, instance: job.provider_instance },
         });
         if (!claimed) {
           skipped += 1;
@@ -1647,6 +1817,7 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
             jobId: job.id,
             repoFullName: job.repo_full_name,
             fingerprint: finding.fingerprint,
+            scope: { provider: job.provider, instance: job.provider_instance },
             issueNumber: remote[0].number,
             issueUrl: remote[0].url,
             title: `maomao: ${finding.summary ?? finding.fingerprint}`,
@@ -1665,6 +1836,7 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
             jobId: job.id,
             repoFullName: job.repo_full_name,
             fingerprint: finding.fingerprint,
+            scope: { provider: job.provider, instance: job.provider_instance },
             issueNumber: issue.number,
             issueUrl: issue.url,
             title,
@@ -1687,7 +1859,10 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
         // must not throw out of the handler: an orphaned pending claim would
         // make every future attempt see this finding as already tracked.
         try {
-          ctx.store.clearScanIssue(job.repo_full_name, finding.fingerprint);
+          ctx.store.clearScanIssue(job.repo_full_name, finding.fingerprint, {
+            provider: job.provider,
+            instance: job.provider_instance,
+          });
         } catch (cleanupError) {
           ctx.store.log(
             job.id,
@@ -1810,7 +1985,10 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
       job,
       reviewers: ctx.store.listReviewerRuns(id),
       logs: ctx.store.listLogs(id),
-      findings: ctx.store.listFindings(job.repo_full_name, job.pr_number),
+      findings: ctx.store.listFindings(job.repo_full_name, job.pr_number, {
+        provider: job.provider,
+        instance: job.provider_instance,
+      }),
       ...ctx.store.jobSummary(job),
     });
   });
@@ -1950,7 +2128,10 @@ function renderJobError(
   job: JobRow,
   error: string,
 ) {
-  const latest = ctx.store.findLatestJobForPull(job.repo_full_name, job.pr_number);
+  const latest = ctx.store.findLatestJobForPull(job.repo_full_name, job.pr_number, undefined, {
+    provider: job.provider,
+    instance: job.provider_instance,
+  });
   return c.html(
     renderJob(job, ctx.store.listReviewerRuns(job.id), ctx.store.listLogs(job.id), {
       ...pageOpts,
@@ -1958,7 +2139,10 @@ function renderJobError(
       csrfToken: pageOpts.showLogout ? ensureCsrfToken(c, ctx.config.uiSessionSecret) : undefined,
       prHeadSha: latest?.head_sha ?? job.head_sha,
       error,
-      prFindings: ctx.store.listFindings(job.repo_full_name, job.pr_number),
+      prFindings: ctx.store.listFindings(job.repo_full_name, job.pr_number, {
+        provider: job.provider,
+        instance: job.provider_instance,
+      }),
     }),
     400,
   );

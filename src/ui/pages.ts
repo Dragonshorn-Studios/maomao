@@ -1,4 +1,5 @@
 import type { JobRow, JobStore, ReviewerRunRow } from "../jobs/store.js";
+import { forgeBadgeTitle, forgeBadgeTitleHtml, forgeChipLabel } from "./forge-badge.js";
 import type { FindingRow } from "../findings/types.js";
 import { fingerprintFinding, stripHtmlComments } from "../findings/identity.js";
 import { POLICIES_WITH_EXTERNAL, POLICIES_WITH_INTERNAL } from "../routing/types.js";
@@ -104,12 +105,26 @@ export function renderHome(jobs: JobRow[], store: JobStore, options: PageOptions
   const cards = jobs
     .map((job) => renderQueueCard(job, jobMetrics(job, store), options.uiFlavor, options.csrfToken))
     .join("");
-  const paginationNav = renderJobsPagination(jobs, options.pagination);
+  const paginationNav = renderJobsPagination(jobs, options.pagination, options.activeForge);
   const pancakeChip = pancakeChipFor(store, options.uiFlavor);
+  // data-forge is scaffolding for future client-side filtering; nothing
+  // consumes it yet. An explicit All chip clears the active filter.
+  const allChip = options.activeForge
+    ? `<a class="top-link" href="/">All forges</a>`
+    : "";
+  const forgeChips = (options.forgeScopes ?? [])
+    .map((scope) => {
+      const key = `${scope.provider}:${scope.instance}`;
+      const active = options.activeForge === key;
+      return `<a class="top-link" data-forge="${escapeHtml(key)}" href="/?forge=${encodeURIComponent(key)}" ${active ? 'aria-current="true"' : ""}>${escapeHtml(forgeChipLabel({ provider: scope.provider, provider_instance: scope.instance }))}</a>`;
+    })
+    .join("\n      ");
+  const forgeNav = options.forgeScopes && options.forgeScopes.length > 1 ? `${allChip}${forgeChips}` : "";
 
   const body = `
     <h1>Review jobs</h1>
     <p class="lede">Recent pull request reviews. Each job is anchored to an exact head SHA.${pancakeChip ? ` ${pancakeChip}` : ""}</p>
+    ${forgeNav ? `<div class="meta-row" role="navigation" aria-label="Filter by forge">${forgeNav}</div>` : ""}
     ${options.notice ? `<p class="notice" role="status">${escapeHtml(options.notice)}</p>` : ""}
     ${options.error ? `<p class="error" role="alert">${escapeHtml(options.error)}</p>` : ""}
     <form class="trigger" method="post" action="/reviews">
@@ -155,20 +170,22 @@ function pancakeChipFor(store: JobStore, flavor?: UiFlavor): string {
 function renderJobsPagination(
   jobs: JobRow[],
   pagination?: { hasOlder: boolean; hasNewer: boolean },
+  forgeKey?: string,
 ): string {
+  const forgeParam = forgeKey ? `&forge=${encodeURIComponent(forgeKey)}` : "";
   if (!pagination) return "";
   const oldest = jobs[jobs.length - 1];
   const newest = jobs[0];
   const nextLink =
     pagination.hasOlder && oldest
-      ? `<a rel="next" href="/?before=${oldest.id}">Older jobs</a>`
+      ? `<a rel="next" href="/?before=${oldest.id}${forgeParam}">Older jobs</a>`
       : `<span class="muted" aria-disabled="true">Older jobs</span>`;
   const prevLink =
     pagination.hasNewer && newest
-      ? `<a rel="prev" href="/?after=${newest.id}">Newer jobs</a>`
+      ? `<a rel="prev" href="/?after=${newest.id}${forgeParam}">Newer jobs</a>`
       : `<span class="muted" aria-disabled="true">Newer jobs</span>`;
   const olderNote = pagination.hasNewer
-    ? `<p class="jobs-pagination-note" role="status">Viewing older jobs — <a href="/">newest reviews are on the first page</a>.</p>`
+    ? `<p class="jobs-pagination-note" role="status">Viewing older jobs — <a href="${forgeKey ? `/?forge=${encodeURIComponent(forgeKey)}` : "/"}">newest reviews are on the first page</a>.</p>`
     : "";
   return `<nav class="jobs-pagination" aria-label="Review jobs pages">
       ${olderNote}
@@ -213,7 +230,7 @@ export function renderJob(
   const isScan = job.job_type === "health_scan";
   const heading = isScan
     ? `Health scan · ${escapeHtml(job.repo_full_name)} @ ${escapeHtml(shortSha(job.head_sha, 12))}`
-    : `${escapeHtml(job.repo_full_name)}#${job.pr_number}`;
+    : `${forgeBadgeTitleHtml(job, job.repo_full_name, job.pr_number)}`;
   const cancelledBanner =
     job.state === "cancelled"
       ? renderCancelledBanner(job)
@@ -325,7 +342,11 @@ export function renderJob(
       }
     </ol>
   `;
-  return layout(isScan ? `Health scan · ${job.repo_full_name}` : `${job.repo_full_name}#${job.pr_number}`, body, options);
+  return layout(
+    isScan ? `Health scan · ${job.repo_full_name}` : forgeBadgeTitle(job, job.repo_full_name, job.pr_number),
+    body,
+    options,
+  );
 }
 
 function renderCancelledBanner(job: JobRow): string {
@@ -385,7 +406,7 @@ function renderQueueCard(job: JobRow, metrics: JobMetrics, uiFlavor?: UiFlavor, 
         <span class="specimen-id">Specimen · job ${job.id}</span>
         ${renderState(job.state, state.text, state.hint, state.mark)}
       </div>
-      <p class="specimen-title"><a href="/jobs/${job.id}">${escapeHtml(job.repo_full_name)}#${job.pr_number} · ${escapeHtml(job.pr_title || "(no title)")}</a></p>
+      <p class="specimen-title"><a href="/jobs/${job.id}">${forgeBadgeTitleHtml(job, job.repo_full_name, job.pr_number)} · ${escapeHtml(job.pr_title || "(no title)")}</a></p>
       ${flavor ? `<p class="muted">${escapeHtml(flavor)}</p>` : ""}
       <div class="meta-row">
         <span class="pair">SHA <strong><code class="sha">${escapeHtml(shortSha(job.head_sha, 10))}</code></strong></span>

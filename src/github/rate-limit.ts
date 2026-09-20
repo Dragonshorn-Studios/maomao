@@ -1,6 +1,10 @@
-/** In-memory sliding window keyed by stable GitHub repository id. Per-process only. */
+/**
+ * In-memory sliding window keyed by a stable repository identity — GitHub
+ * numeric repository ids, or `provider:instance:project` strings for other
+ * forges (issue #18). Per-process only.
+ */
 export class RepoRateLimiter {
-  private readonly hits = new Map<number, number[]>();
+  private readonly hits = new Map<string, number[]>();
 
   constructor(private readonly clock: () => number = Date.now) {}
 
@@ -16,7 +20,14 @@ export class RepoRateLimiter {
   wouldAllow(repositoryId: number, limit: number, windowMs: number): boolean {
     if (!this.enabled(limit, windowMs)) return true;
     if (!Number.isSafeInteger(repositoryId) || repositoryId <= 0) return false;
-    return this.windowed(repositoryId, windowMs).length < limit;
+    return this.wouldAllowKey(String(repositoryId), limit, windowMs);
+  }
+
+  /** String-keyed variant for forge scopes (e.g. gitlab:gitlab.com:42). */
+  wouldAllowKey(key: string, limit: number, windowMs: number): boolean {
+    if (!this.enabled(limit, windowMs)) return true;
+    if (!key) return false;
+    return this.windowed(key, windowMs).length < limit;
   }
 
   /** Record an accepted event. No-op when limiting is disabled. */
@@ -24,10 +35,16 @@ export class RepoRateLimiter {
     if (!this.enabled(limit, windowMs) || !Number.isSafeInteger(repositoryId) || repositoryId <= 0) {
       return;
     }
+    this.recordKey(String(repositoryId), limit, windowMs);
+  }
+
+  /** String-keyed variant for forge scopes. */
+  recordKey(key: string, limit: number, windowMs: number): void {
+    if (!this.enabled(limit, windowMs) || !key) return;
     const now = this.clock();
-    const prior = this.windowed(repositoryId, windowMs);
+    const prior = this.windowed(key, windowMs);
     prior.push(now);
-    this.hits.set(repositoryId, prior);
+    this.hits.set(key, prior);
   }
 
   /**
@@ -45,10 +62,10 @@ export class RepoRateLimiter {
     return this.hits.size;
   }
 
-  private windowed(repositoryId: number, windowMs: number): number[] {
+  private windowed(key: string, windowMs: number): number[] {
     const now = this.clock();
     this.prune(now, windowMs);
-    return (this.hits.get(repositoryId) ?? []).filter((stamp) => stamp > now - windowMs);
+    return (this.hits.get(key) ?? []).filter((stamp) => stamp > now - windowMs);
   }
 
   private prune(now: number, windowMs: number): void {
