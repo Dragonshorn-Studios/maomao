@@ -877,6 +877,11 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
         usedCost: ctx.chat.store.usage(conversation?.id ?? 0).cost,
         maxCostUsd: ctx.config.chat.maxCostUsd,
         model: ctx.config.chat.model || ctx.config.opencode.reviewerModel || "",
+        findings: ctx.store
+          .listFindings(job.repo_full_name, job.pr_number)
+          .filter((finding) => finding.status === "open" || finding.status === "still_valid")
+          .slice(0, 5)
+          .map((finding) => ({ severity: finding.severity, summary: finding.summary })),
         options: {
           ...pageOpts,
           identity: c.get("identity"),

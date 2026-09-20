@@ -1013,4 +1013,15 @@ details summary { cursor: pointer; color: var(--ink-muted); }
 .chat-cancel { border-color: var(--line-strong); background: var(--surface-2); color: var(--ink); }
 .chat-send:disabled, .chat-cancel:disabled { opacity: 0.5; cursor: default; }
 .chat-error { border: 1px solid var(--cinnabar); background: var(--cinnabar-soft); color: var(--ink); border-radius: var(--radius); padding: var(--space-2); }
+.chat-suggestions { display: flex; flex-wrap: wrap; gap: var(--space-2); }
+.chat-suggestion {
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius);
+  background: var(--surface-2);
+  color: var(--ink);
+  padding: var(--space-1) var(--space-2);
+  cursor: pointer;
+  font-size: 0.85rem;
+}
+.chat-suggestion:hover { border-color: var(--jade); }
 `.trim();

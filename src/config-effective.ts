@@ -421,5 +421,15 @@ export function effectiveConfigEntries(
     source: "environment",
   });
 
+  row("Ask Maomao", "Explainer enabled", "MAOMAO_EXPLAIN_ENABLED", String(config.chat.enabled));
+  row(
+    "Ask Maomao",
+    "Explainer model",
+    "MAOMAO_EXPLAIN_MODEL",
+    config.chat.model || `${config.opencode.reviewerModel} (reviewer fallback)`,
+  );
+  row("Ask Maomao", "Explainer message ceiling", "MAOMAO_EXPLAIN_MAX_MESSAGES", String(config.chat.maxMessages));
+  row("Ask Maomao", "Explainer cost ceiling (USD)", "MAOMAO_EXPLAIN_MAX_COST_USD", String(config.chat.maxCostUsd));
+  row("Ask Maomao", "Explainer timeout (ms)", "MAOMAO_EXPLAIN_TIMEOUT_MS", String(config.chat.timeoutMs));
   return entries;
 }
