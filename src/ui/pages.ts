@@ -97,7 +97,7 @@ export function renderLogin(options: LoginOptions = {}): string {
     ${githubButton}
     ${githubButton && passwordForm ? `<p class="muted">or</p>` : ""}
     ${passwordForm}`;
-  return layout("Maomao sign in", body, { live: false });
+  return layout("Maomao sign in", body, { live: false, accountMenu: false });
 }
 
 export function renderHome(jobs: JobRow[], store: JobStore, options: PageOptions = {}): string {
@@ -984,6 +984,7 @@ export interface ConfigPageData {
     /** A failed save re-renders submitted values with field errors in place. */
     form?: { values: ProfileFormValues; errors?: ProfileFieldErrors; revision?: { id: number; editSeq: number } };
   };
+  identity?: UiIdentity;
 }
 
 /** Env-derived values are operator-controlled but unbounded: clamp length and
@@ -1305,6 +1306,8 @@ export function renderConfigPage(data: ConfigPageData): string {
   return layout("Review configuration", body, {
     showLogout: data.canWrite || Boolean(data.csrfToken),
     csrfToken: data.csrfToken,
+    identity: data.identity,
+    surface: "operator",
   });
 }
 
@@ -1352,6 +1355,7 @@ export interface PromptConfigPageData {
   csrfToken?: string;
   notice?: string;
   error?: string;
+  identity?: UiIdentity;
 }
 
 function promptRevisionCard(revision: PromptRevisionView, data: PromptConfigPageData): string {
@@ -1462,6 +1466,8 @@ export function renderPromptConfigPage(data: PromptConfigPageData): string {
   return layout("Specialist prompts", body, {
     showLogout: data.canWrite || Boolean(data.csrfToken),
     csrfToken: data.csrfToken,
+    identity: data.identity,
+    surface: "operator",
   });
 }
 
@@ -1569,6 +1575,7 @@ export function renderScanConfirmPage(data: ScanConfirmData): string {
     showLogout: Boolean(data.csrfToken),
     csrfToken: data.csrfToken,
     identity: data.identity,
+    surface: "operator",
   });
 }
 
@@ -1613,6 +1620,7 @@ export function renderScanPage(data: ScanPageData): string {
     showLogout: data.canScan || Boolean(data.csrfToken),
     csrfToken: data.csrfToken,
     identity: data.identity,
+    surface: "operator",
   });
 }
 
@@ -1745,6 +1753,7 @@ export function renderScanIssuePreviewPage(data: ScanIssuePreviewData): string {
     showLogout: Boolean(data.csrfToken),
     csrfToken: data.csrfToken,
     identity: data.identity,
+    surface: "operator",
   });
 }
 
@@ -1780,5 +1789,6 @@ export function renderCancelConfirmPage(data: CancelConfirmData): string {
     showLogout: data.showLogout ?? false,
     csrfToken: data.csrfToken,
     identity: data.identity,
+    surface: "operator",
   });
 }

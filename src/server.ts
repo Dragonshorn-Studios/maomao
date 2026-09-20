@@ -40,6 +40,7 @@ import {
   renderJob,
   renderLogin,
   renderPromptConfigPage,
+  renderHealthPage,
   THEME_CSS,
   PIERRE_DIFFS_HREF,
   CHAT_BUNDLE_HREF,
@@ -431,13 +432,37 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
     return c.redirect(gateOn ? "/login" : "/", 302);
   });
 
-  app.get("/health", (c) =>
-    c.json({
+  app.get("/health", (c) => {
+    const payload = {
       ok: true,
       uptimeSec: Math.round((Date.now() - ctx.startedAt) / 1000),
       service: "maomao",
-    }),
-  );
+    };
+    const accept = c.req.header("accept") ?? "";
+    const wantsHtml = accept.includes("text/html") && c.req.query("json") !== "1";
+    if (wantsHtml) {
+      const token = getCookie(c, SESSION_COOKIE);
+      const oauth = verifyOAuthSession(ctx.config.uiSessionSecret, token);
+      const identity =
+        oauth && ctx.config.adminGithubIds.includes(oauth.id)
+          ? { login: oauth.login, avatarUrl: oauth.avatarUrl }
+          : undefined;
+      const authed = Boolean(identity) || verifySession(ctx.config.uiSessionSecret, token);
+      return c.html(
+        renderHealthPage({
+          ...payload,
+          options: {
+            ...pageOpts,
+            showLogout: gateOn && authed,
+            identity,
+            // Public probes must not mint CSRF cookies; reuse an existing session's token.
+            csrfToken: gateOn && authed ? ensureCsrfToken(c, ctx.config.uiSessionSecret) : undefined,
+          },
+        }),
+      );
+    }
+    return c.json(payload);
+  });
 
   app.get("/assets/maomao.css", (c) =>
     c.newResponse(THEME_CSS, 200, {
@@ -794,7 +819,11 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
             conversation,
             question,
             signal: c.req.raw.signal,
-            onDelta: (delta) => send({ delta }),
+            onEvent: (event) => {
+              if (event.kind === "text") send({ delta: event.text });
+              else if (event.kind === "reasoning") send({ reasoning: event.text });
+              else send({ tool: { id: event.id, name: event.name, status: event.status } });
+            },
           });
           send({ done: true });
         } catch (error) {
@@ -935,6 +964,7 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
   const configWriteDenied = (c: Context<AppEnv>) =>
     c.html(
       renderConfigPage({
+        identity: c.get("identity"),
         revisions: ctx.store.configs.listRevisions(),
         audit: ctx.store.configs.listAudit(),
         canWrite: false,
@@ -966,6 +996,7 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
   ) => {
     return c.html(
       renderConfigPage({
+        identity: c.get("identity"),
         revisions: ctx.store.configs.listRevisions(),
         audit: ctx.store.configs.listAudit(),
         canWrite: gateOn,
@@ -995,7 +1026,12 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
       renderConnectionsPage({
         connections: rows,
         csrfToken: gateOn ? ensureCsrfToken(c, ctx.config.uiSessionSecret) : undefined,
-        options: { ...pageOpts, notice: c.req.query("notice") ?? undefined, error: c.req.query("error") ?? undefined },
+        options: {
+          ...pageOpts,
+          identity: c.get("identity"),
+          notice: c.req.query("notice") ?? undefined,
+          error: c.req.query("error") ?? undefined,
+        },
       }),
     );
   });
@@ -1095,6 +1131,7 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
     const noticeKey = c.req.query("notice") ?? "";
     return c.html(
       renderConfigPage({
+        identity: c.get("identity"),
         revisions: ctx.store.configs.listRevisions(),
         audit: ctx.store.configs.listAudit(),
         canWrite: gateOn,
@@ -1170,6 +1207,7 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
         kind: "render",
         response: c.html(
           renderConfigPage({
+            identity: c.get("identity"),
             revisions: ctx.store.configs.listRevisions(),
             audit: ctx.store.configs.listAudit(),
             canWrite: gateOn,
@@ -1209,6 +1247,7 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
         const values = decodeProfileForm(bodyPreview);
         return c.html(
           renderConfigPage({
+            identity: c.get("identity"),
             revisions: ctx.store.configs.listRevisions(),
             audit: ctx.store.configs.listAudit(),
             canWrite: gateOn,
@@ -1281,6 +1320,7 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
         const values = decodeProfileForm(bodyPreview);
         return c.html(
           renderConfigPage({
+            identity: c.get("identity"),
             revisions: ctx.store.configs.listRevisions(),
             audit: ctx.store.configs.listAudit(),
             canWrite: gateOn,
@@ -1416,6 +1456,7 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
   const promptWriteDenied = (c: Context<AppEnv>) =>
     c.html(
       renderPromptConfigPage({
+        identity: c.get("identity"),
         revisions: promptViews(),
         fixtures: fixtureViews(),
         evaluations: evaluationViews(),
@@ -1428,6 +1469,7 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
   const renderPromptError = (c: Context<AppEnv>, message: string, status: 400 | 403 | 409 | 503 = 400) =>
     c.html(
       renderPromptConfigPage({
+        identity: c.get("identity"),
         revisions: promptViews(),
         fixtures: fixtureViews(),
         evaluations: evaluationViews(),
@@ -1450,6 +1492,7 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
     };
     return c.html(
       renderPromptConfigPage({
+        identity: c.get("identity"),
         revisions: promptViews(),
         fixtures: fixtureViews(),
         evaluations: evaluationViews(),

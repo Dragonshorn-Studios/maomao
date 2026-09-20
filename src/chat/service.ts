@@ -44,6 +44,12 @@ export interface ChatSendResult {
   sessionId: string;
 }
 
+/** Incremental stream frames for the Ask Maomao island (text, thinking, tools). */
+export type ChatStreamEvent =
+  | { kind: "text"; text: string }
+  | { kind: "reasoning"; text: string }
+  | { kind: "tool"; id: string; name: string; status: string };
+
 export interface ChatJob {
   id: number;
   repo_full_name: string;
@@ -106,6 +112,7 @@ export class ChatService {
     question: string;
     signal?: AbortSignal;
     onDelta?: (text: string) => void;
+    onEvent?: (event: ChatStreamEvent) => void;
   }): Promise<ChatSendResult> {
     const previous = this.locks.get(input.job.id) ?? Promise.resolve();
     const chained = previous.catch(() => undefined).then(() => this.sendLocked(input));
@@ -123,6 +130,7 @@ export class ChatService {
     question: string;
     signal?: AbortSignal;
     onDelta?: (text: string) => void;
+    onEvent?: (event: ChatStreamEvent) => void;
   }): Promise<ChatSendResult> {
     const { config, chatStore } = this.deps;
     // Re-read under the lock: a queued send must not run on a stale row
@@ -157,7 +165,13 @@ export class ChatService {
       const prompt = firstMessage ? this.seedPrompt(input.job, input.question) : input.question;
       const started = Date.now();
       const parser = new ExplainerEventParser();
-      let lastDeltaIndex = 0;
+      let lastText = "";
+      let lastReasoning = "";
+      const toolStatus = new Map<string, string>();
+      const emit = (event: ChatStreamEvent) => {
+        input.onEvent?.(event);
+        if (event.kind === "text") input.onDelta?.(event.text);
+      };
 
       const result = await this.deps.opencode.run({
         cwd: repoDir,
@@ -170,13 +184,25 @@ export class ChatService {
           : [],
         signal: input.signal,
         onStdout: (chunk) => {
-          const { sessionId, textParts } = parser.feed(chunk);
+          const { sessionId, textParts, reasoningParts, tools } = parser.feed(chunk);
           if (sessionId && !conversation.opencode_session_id) {
             chatStore.bindSession(conversation.id, sessionId, workspace);
             conversation.opencode_session_id = sessionId;
           }
-          for (; lastDeltaIndex < textParts.length; lastDeltaIndex += 1) {
-            input.onDelta?.(textParts[lastDeltaIndex]!);
+          const text = textParts.join("");
+          if (text !== lastText) {
+            lastText = text;
+            emit({ kind: "text", text });
+          }
+          const reasoning = reasoningParts.join("\n");
+          if (reasoning !== lastReasoning) {
+            lastReasoning = reasoning;
+            emit({ kind: "reasoning", text: reasoning });
+          }
+          for (const tool of tools) {
+            if (toolStatus.get(tool.id) === tool.status) continue;
+            toolStatus.set(tool.id, tool.status);
+            emit({ kind: "tool", id: tool.id, name: tool.name, status: tool.status });
           }
         },
       });

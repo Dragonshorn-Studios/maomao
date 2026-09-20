@@ -1,6 +1,7 @@
 /**
- * Server-rendered "Ask Maomao" chat page (PR 1: no-JS round-trip form; the
- * assistant-ui island upgrades this page to live streaming in slice 2).
+ * Server-rendered "Ask Maomao" chat page. The no-JS round-trip form stays as
+ * progressive enhancement; the assistant-ui island (Thread, Composer,
+ * thinking, tools, suggestions, copy action bar) takes over after it mounts.
  * Theming reuses the app's existing classes so light/dark/flavor all work.
  */
 import { escapeHtml } from "../util.js";
@@ -53,6 +54,7 @@ export function renderChatPage(data: ChatPageData): string {
     csrfToken: data.options.csrfToken ?? null,
     exhausted: exhaustedByBudget,
     suggestions,
+    messages: data.messages.map((message) => ({ role: message.role, content: message.content })),
   }).replaceAll("</", "<\\/");
   const budgetLeft = Math.max(0, data.maxMessages - (data.conversation?.message_count ?? 0));
   const errorNotice = data.conversation?.state === "error" && data.conversation.last_error
@@ -86,11 +88,11 @@ export function renderChatPage(data: ChatPageData): string {
         Ask about this change
         <textarea name="question" rows="3" placeholder="e.g. Walk me through the change in src/app.ts" ${exhausted ? "disabled" : "required"}></textarea>
       </label>
-      <button type="submit" ${exhausted ? "disabled" : ""}>${exhausted ? "Message limit reached — reset to continue" : "Ask"}</button>
+      <button type="submit" class="btn" ${exhausted ? "disabled" : ""}>${exhausted ? "Message limit reached — reset to continue" : "Ask"}</button>
     </form>
     <form method="post" action="/jobs/${data.job.id}/chat/reset">
       ${csrf}
-      <button type="submit" class="linklike">Start a new conversation</button>
+      <button type="submit" class="btn-secondary">Start a new conversation</button>
     </form>`;
-  return layout("Ask Maomao", body, data.options);
+  return layout("Ask Maomao", body, { ...data.options, surface: "operator" });
 }

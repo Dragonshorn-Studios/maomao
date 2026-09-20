@@ -29,6 +29,13 @@ export interface PageOptions {
   forgeScopes?: Array<{ provider: string; instance: string }>;
   /** The active `provider:instance` filter key on the home page. */
   activeForge?: string;
+  /**
+   * Operator chrome (connections, config, health, chat, forms). Dashboard and
+   * job overview stay on the default surface so their controls are untouched.
+   */
+  surface?: "default" | "operator";
+  /** Login hides the account menu; every other page shows it. */
+  accountMenu?: boolean;
 }
 
 export function csrfInput(token: string | undefined): string {
@@ -108,14 +115,51 @@ const PANCAKE_BOOT = `
 })();
 `.trim();
 
+const ACCOUNT_BOOT = `
+(function () {
+  function closeAll(except) {
+    document.querySelectorAll("details.account-menu[open]").forEach(function (el) {
+      if (el !== except) el.removeAttribute("open");
+    });
+  }
+  document.addEventListener("click", function (event) {
+    var target = event.target;
+    if (!(target instanceof Node)) return;
+    var open = document.querySelector("details.account-menu[open]");
+    if (open && !open.contains(target)) closeAll();
+  });
+  document.addEventListener("keydown", function (event) {
+    if (event.key === "Escape") closeAll();
+  });
+})();
+`.trim();
+
+function accountMenu(options: PageOptions): string {
+  if (options.accountMenu === false) return "";
+  const identity = options.identity;
+  const avatar = identity?.avatarUrl
+    ? `<img class="who-avatar" src="${escapeHtml(identity.avatarUrl)}" alt="" width="28" height="28"/>`
+    : "";
+  const label = identity ? escapeHtml(identity.login) : "Menu";
+  const logout = options.showLogout
+    ? `<form method="post" action="/logout" class="account-logout">${csrfInput(options.csrfToken)}<button type="submit">Log out</button></form>`
+    : "";
+  return `<details class="account-menu">
+      <summary class="account-menu-summary" aria-label="Operator menu">
+        ${avatar}<span class="account-name">${label}</span>
+      </summary>
+      <nav class="account-menu-panel" aria-label="Operator">
+        <a href="/connections">Connections</a>
+        <a href="/config#effective">Configuration</a>
+        <a href="/health">Health</a>
+        <a href="/scan">Scan</a>
+        ${logout}
+      </nav>
+    </details>`;
+}
+
 export function layout(title: string, body: string, options: PageOptions = {}): string {
   const live = options.live !== false;
-  const logout = options.showLogout
-    ? `<form method="post" action="/logout" class="logout">${csrfInput(options.csrfToken)}<button type="submit">Log out</button></form>`
-    : "";
-  const identity = options.identity
-    ? `<span class="who">${options.identity.avatarUrl ? `<img class="who-avatar" src="${escapeHtml(options.identity.avatarUrl)}" alt="" width="20" height="20"/> ` : ""}signed in as <strong>${escapeHtml(options.identity.login)}</strong></span>`
-    : "";
   const script = live
     ? `<script>
     if (!new URLSearchParams(location.search).has("static")) {
@@ -172,8 +216,9 @@ export function layout(title: string, body: string, options: PageOptions = {}): 
   <script src="${PIERRE_DIFFS_HREF}" defer></script>
   <script>${APPEARANCE_BOOT}</script>
   <script>${PANCAKE_BOOT}</script>
+  <script>${ACCOUNT_BOOT}</script>
 </head>
-<body>
+<body${options.surface === "operator" ? ' class="operator"' : ""}>
   <a class="skip" href="#main">Skip to content</a>
   <header class="top">
     <a class="brand" href="/">${brandMark()} Maomao</a>
@@ -184,10 +229,7 @@ export function layout(title: string, body: string, options: PageOptions = {}): 
       <button type="button" data-appearance="dark" aria-pressed="false">Dark</button>
       <button type="button" data-appearance="system" aria-pressed="true">System</button>
     </div>
-    <a class="top-link" href="/scan">scan</a>
-    <a class="top-link" href="/health">health</a>
-    ${identity}
-    ${logout}
+    ${accountMenu(options)}
   </header>
   <main id="main">${body}</main>
   ${script}
