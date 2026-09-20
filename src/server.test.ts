@@ -140,6 +140,15 @@ describe("HTTP app", () => {
     expect(health.status).toBe(200);
     expect(await health.json()).toMatchObject({ ok: true, service: "maomao" });
 
+    const healthHtml = await app.request("/health", { headers: { accept: "text/html" } });
+    expect(healthHtml.status).toBe(200);
+    expect(healthHtml.headers.get("content-type")).toContain("text/html");
+    expect(await healthHtml.text()).toContain("<h1>Health</h1>");
+    expect(await (await app.request("/health?json=1", { headers: { accept: "text/html" } })).json()).toMatchObject({
+      ok: true,
+      service: "maomao",
+    });
+
     const home = await app.request("/");
     expect(home.status).toBe(200);
     expect(home.headers.get("set-cookie") ?? "").not.toContain(CSRF_COOKIE);
@@ -183,6 +192,11 @@ describe("HTTP app", () => {
     expect((await app.request("/events")).status).toBe(401);
 
     expect((await app.request("/health")).status).toBe(200);
+    const anonymousHealthHtml = await app.request("/health", { headers: { accept: "text/html" } });
+    expect(anonymousHealthHtml.status).toBe(200);
+    expect(anonymousHealthHtml.headers.get("content-type")).toContain("text/html");
+    expect(anonymousHealthHtml.headers.get("set-cookie") ?? "").not.toContain(CSRF_COOKIE);
+    expect(await anonymousHealthHtml.text()).toContain("<h1>Health</h1>");
     expect((await app.request("/login")).status).toBe(200);
     expect((await app.request("/assets/maomao.css")).status).toBe(200);
     expect(await (await app.request("/assets/maomao.css")).text()).toContain("--jade:");
@@ -258,7 +272,10 @@ describe("HTTP app", () => {
 
     const home = await app.request("/", { headers: { cookie } });
     expect(home.status).toBe(200);
-    expect(await home.text()).toContain("Review jobs");
+    const homeHtml = await home.text();
+    expect(homeHtml).toContain("Review jobs");
+    expect(homeHtml).toContain("Operator");
+    expect(homeHtml).toContain('aria-label="Signed in as Operator"');
 
     const api = await app.request("/api/jobs", { headers: { cookie } });
     expect(api.status).toBe(200);
@@ -747,7 +764,11 @@ describe("oauth operator login", () => {
 
     const home = await app.request("/", { headers: { cookie: sessionCookie } });
     const homeHtml = await home.text();
-    expect(homeHtml).toContain("signed in as <strong>octocat</strong>");
+    expect(homeHtml).toContain("account-menu");
+    expect(homeHtml).toContain("octocat");
+    expect(homeHtml).toContain('href="/connections"');
+    expect(homeHtml).toContain("/config#effective");
+    expect(homeHtml).toContain('href="/health"');
     expect(homeHtml).not.toContain("human-access-token");
   });
 
@@ -1254,7 +1275,7 @@ describe("health scan routes", () => {
 
     const session = await operatorSession(app);
     const page = await operatorCsrf(app, session);
-    expect(page.html).toContain('href="/scan"'); // reachable from the header nav
+    expect(page.html).toContain('href="/scan"'); // reachable from the operator menu
 
     // Step 1 shows the resolved branch + exact head SHA and enqueues nothing.
     const previewHtml = await scanPreview(app, session, page.csrfCookie, page.csrfToken);
@@ -3978,8 +3999,11 @@ describe("home forge filter", () => {
     expect(html).toContain('aria-current="true"');
     expect(html).toContain("All forges");
     // Only the GitLab job card renders under the filter.
-    expect(html).toContain("[GitLab] acme/widgets !7");
-    expect(html).not.toContain("[GitHub] acme/widgets #7");
+    expect(html).toContain("acme/widgets !7");
+    expect(html).toContain('aria-label="GitLab"');
+    expect(html).not.toContain('aria-label="GitHub"');
+    expect(html).not.toContain("[GitLab]");
+    expect(html).not.toContain("[GitHub]");
   });
 
   it("keeps the filter when the filtered page is exhausted", async () => {
@@ -3999,8 +4023,9 @@ describe("home forge filter", () => {
     const exhausted = await app.request(`/?forge=gitlab:gitlab.com&before=${gitlab.id}`);
     const html = await exhausted.text();
     // Refill respects the filter: still exactly the GitLab job.
-    expect(html).toContain("[GitLab] acme/widgets !7");
-    expect(html).not.toContain("[GitHub] acme/widgets #7");
+    expect(html).toContain("acme/widgets !7");
+    expect(html).toContain('aria-label="GitLab"');
+    expect(html).not.toContain('aria-label="GitHub"');
     expect(html).toContain('aria-current="true"');
   });
 
@@ -4021,7 +4046,9 @@ describe("home forge filter", () => {
     const html = await home.text();
     expect(html).not.toContain('role="navigation" aria-label="Filter by forge"');
     // The single job renders unfiltered despite the bogus forge param.
-    expect(html).toContain("[GitHub] acme/widgets #7");
+    expect(html).toContain("acme/widgets #7");
+    expect(html).toContain('aria-label="GitHub"');
+    expect(html).not.toContain("[GitHub]");
   });
 });
 
@@ -4066,6 +4093,8 @@ describe("ask-maomao chat routes", () => {
           }
           const text = `answer to: ${input.prompt.slice(-20)}`;
           input.onStdout?.(`{"type":"step_start","sessionID":"ses_route","part":{}}\n`);
+          input.onStdout?.(`{"type":"reasoning","part":{"id":"r1","type":"reasoning","text":"checking the diff"}}\n`);
+          input.onStdout?.(`{"type":"tool","part":{"id":"t1","type":"tool","tool":"read","state":{"status":"completed","output":"secret-should-not-stream"}}}\n`);
           input.onStdout?.(`{"type":"text","part":{"id":"p1","text":${JSON.stringify(text)}}}\n`);
           return { stdout: "s", stderr: "", exitCode: 0, text, usage: { totalTokens: 5, cost: 0.001, complete: true } };
         },
@@ -4234,6 +4263,9 @@ describe("ask-maomao chat routes", () => {
     const events = await readSse(response);
     const deltas = events.filter((event) => "delta" in event);
     expect(deltas.length).toBeGreaterThan(0);
+    expect(events.some((event) => event.reasoning === "checking the diff")).toBe(true);
+    expect(events.some((event) => (event.tool as { name?: string } | undefined)?.name === "read")).toBe(true);
+    expect(JSON.stringify(events)).not.toContain("secret-should-not-stream");
     expect(events.at(-1)).toEqual({ done: true });
     const transcript = extras.chatStore.listMessages(extras.chatStore.activeConversationForJob(jobId)!.id);
     expect(transcript.map((m) => m.role)).toEqual(["user", "assistant"]);

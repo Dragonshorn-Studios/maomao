@@ -64,4 +64,21 @@ describe("ExplainerEventParser", () => {
     );
     expect(second.textParts).toEqual(["same", "same", "Hello world"]);
   });
+
+  it("extracts reasoning and tool status without capturing tool payloads", () => {
+    const result = events(
+      [
+        `{"type":"step_start","sessionID":"ses_r","part":{}}`,
+        `{"type":"reasoning","part":{"id":"r1","type":"reasoning","text":"consider the diff"}}`,
+        `{"type":"tool","part":{"id":"t1","type":"tool","tool":"read","state":{"status":"running","input":{"path":".env"}}}}`,
+        `{"type":"tool","part":{"id":"t1","type":"tool","tool":"read","state":{"status":"completed","output":"SECRET=s3cret"}}}`,
+        `{"type":"text","part":{"id":"p1","text":"done"}}`,
+      ].join("\n") + "\n",
+    );
+    expect(result.reasoningParts).toEqual(["consider the diff"]);
+    expect(result.tools).toEqual([{ id: "t1", name: "read", status: "completed" }]);
+    expect(JSON.stringify(result.tools)).not.toContain("SECRET");
+    expect(JSON.stringify(result.tools)).not.toContain(".env");
+    expect(result.textParts).toEqual(["done"]);
+  });
 });

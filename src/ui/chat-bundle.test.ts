@@ -21,6 +21,7 @@ describe("chat bundle build gate", () => {
     expect((bundle.match(/[^.\w]React\.createElement/g) ?? []).length).toBe(0);
     expect(/jsx-runtime|jsxDEV|jsx\(/.test(bundle)).toBe(true);
     expect(bundle.includes("maomao-chat-config")).toBe(true);
+    expect(bundle.includes("group-chainOfThought") || bundle.includes("GroupedParts")).toBe(true);
   });
 
   it("keeps the bundle href and file name in sync", () => {

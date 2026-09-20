@@ -54,6 +54,20 @@ describe("connections page", () => {
     expect(html).not.toContain("whsec-");
     expect(html).not.toContain(row.token_sealed);
     expect(html).not.toContain(row.webhook_secret_sealed);
+    expect(html).toContain("Probe now");
+    expect(html).toContain("Disable");
+    expect(html).toContain("Delete");
+    expect(html).toContain("connection-card");
+    expect(html).toContain("Enabled");
+    expect(html).toContain("Probed");
+  });
+
+  it("renders a themed empty state when there are no connections", () => {
+    const html = renderConnectionsPage({ connections: [], csrfToken: "tok", options: {} });
+    expect(html).toContain("No forge connections yet.");
+    expect(html).toContain('class="empty"');
+    expect(html).toContain("Create connection");
+    expect(html).not.toContain("token_sealed");
   });
 
   it("escapes hostile strings in row fields and tolerates corrupt probe JSON", () => {
