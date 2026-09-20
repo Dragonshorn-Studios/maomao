@@ -7,11 +7,14 @@ import { JobQueue } from "./jobs/queue.js";
 import { createPipeline } from "./jobs/pipeline.js";
 import { createApp } from "./server.js";
 import { GithubClient } from "./github/client.js";
-import { createCheckout, sweepWorkspaces } from "./checkout.js";
+import { chatWorkspaceRoot, createCheckout, sweepWorkspaces } from "./checkout.js";
 import { createOpenCodeRunner } from "./opencode/spawn.js";
+import { ChatService } from "./chat/service.js";
+import { ChatStore } from "./chat/store.js";
 import { oauthCallbackUrl, oauthEnabled } from "./oauth.js";
 import { ForgeConnectionStore, countConnections } from "./forge/connections.js";
 import { ensureEnvGitLabConnection } from "./forge/bootstrap.js";
+import { ForgeRegistry } from "./forge/registry.js";
 
 const config = loadConfig();
 mkdirSync(config.workspaceRoot, { recursive: true });
@@ -49,18 +52,37 @@ if (orphanedClaims > 0) {
 }
 const github = new GithubClient(config);
 const opencode = createOpenCodeRunner(config.opencode.bin);
+const getInstallationToken = (installationId: number) => github.getInstallationToken(installationId);
+const forge = new ForgeRegistry(github, config.github.appSlug, getInstallationToken, forgeConnections);
 const pipeline = createPipeline({
   config,
   store,
   github,
+  forge,
   connections: forgeConnections,
   checkout: createCheckout(config.workspaceRoot),
   opencode,
+  getInstallationToken,
 });
 const queue = new JobQueue(store, config.jobConcurrency, (jobId) => pipeline.run(jobId));
 queue.start();
 
-const app = createApp({ config, store, queue, github, opencode, forgeConnections, startedAt: Date.now(), env: process.env });
+const chatStore = config.chat.enabled ? new ChatStore(db) : undefined;
+const chat = chatStore
+  ? {
+      store: chatStore,
+      service: new ChatService({
+        config,
+        chatStore,
+        jobStore: store,
+        forge,
+        checkout: createCheckout(chatWorkspaceRoot(config.workspaceRoot)),
+        opencode,
+      }),
+    }
+  : undefined;
+
+const app = createApp({ config, store, queue, github, opencode, forgeConnections, chat, startedAt: Date.now(), env: process.env });
 
 serve({ fetch: app.fetch, hostname: config.host, port: config.port }, (info) => {
   console.log(`Maomao listening on http://${info.address}:${info.port}`);

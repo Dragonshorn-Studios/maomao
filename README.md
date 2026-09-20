@@ -197,7 +197,9 @@ Open `/connections` in the Maomao UI (requires `MAOMAO_FORGE_KEY`, see below) an
 - **Access token** — project access token (one project) or group access token (a group) preferred; a service-account PAT works where those are unavailable. Minimum scopes: **`api`** (read discussions, post notes, resolve threads, read MR diffs) plus **`read_repository`** (clone the reviewed head). Maomao never pushes; do not grant `write_repository`.
 - **Webhook secret** — a long random string. Newer GitLab instances (17.x+) should use a **signing token** (`whsec_...`, shown by GitLab when you create the webhook); older instances use the plain secret token.
 - **Custom CA bundle** (optional, self-managed) — PEM text for private PKI. TLS verification is always on; the bundle only adds a trust anchor. There is no "disable TLS" switch.
-- **Private network access** (self-managed only) — allow Maomao to reach private addresses. Credentials for the connection are encrypted at rest (`MAOMAO_FORGE_KEY`, 64 hex chars; a passphrase works but hex is preferred) and never rendered — the UI shows only the last four characters.
+- **Private network access** (self-managed only) — allow Maomao to reach private addresses. Credentials for the connection are encrypted at rest (`MAOMAO_FORGE_KEY`) and never rendered — the UI shows only the last four characters.
+
+Production **must** set `MAOMAO_FORGE_KEY` to 64 hex characters (`openssl rand -hex 32`) or point `MAOMAO_FORGE_KEY_FILE` at a file containing that hex. A passphrase is accepted as a fallback and stretched with scrypt, but the salt is fixed (`maomao-forge-key`), so the derived key is a function of the passphrase alone. Rotating a passphrase-derived key cannot be done independently of resealing every stored token; hex keys avoid that. Do not reuse a passphrase across deployments if you expect to rotate one of them.
 
 `GITLAB_BASE_URL` + `GITLAB_TOKEN` + `GITLAB_WEBHOOK_SECRET` (all three, set together) seed one `env` connection at boot and rotate it in place when the values change.
 
@@ -226,6 +228,7 @@ The connection id is shown on the connections page. Subscribe **Merge request ev
 - "Probe now" validates the token against `GET /api/v4/user` and records the bot identity, token scopes (where the instance exposes them), and instance version. Approval capability and any version-dependent behavior degrade to plain review comments when unsupported — the review never fails because of a missing verdict.
 - Clone failures on self-managed instances: check the private-network opt-in and the CA bundle first; credentials never appear in clone URLs or logs.
 - If every review stops arriving, check that the webhook shows recent deliveries in GitLab (a row of failures usually means the token was rotated without updating the connection) and that the connection is still enabled.
+- Discussion listing is capped at **2000** threads (100 per page). Webhook `@maomao` commands on a truncated listing are **not applied** (a redelivery can retry). Review reconciliation logs when the cap is hit; threads past it are invisible, so late buries and forge-resolved priors on very large MRs can be missed.
 
 ## Configure OpenCode models
 
@@ -490,7 +493,7 @@ The verifier only receives the prior finding plus nearby current file/diff conte
 
 ## Configuration reference
 
-See `.env.example`. Notable knobs: `ALLOWED_GITHUB_ACCOUNT_IDS`, `ALLOWED_GITHUB_REPOSITORY_IDS`, `MAOMAO_OVERRIDE_AUTHORS`, `MAX_DIFF_BYTES`, `REPO_RATE_LIMIT_PER_WINDOW`, `REPO_RATE_WINDOW_MS`, `OPENCODE_MAX_RETRIES`, `REVIEW_DRAFTS`, `POST_EMPTY_REVIEW`, `JOB_CONCURRENCY`, `WORKSPACE_ROOT`, `DATABASE_PATH`, `MAX_INLINE_COMMENTS`, `PULL_REQUEST_ACTIONS`, `OPENCODE_VERIFIER_MODEL`, `RECONCILE_MIN_CONFIDENCE`, `GITHUB_OAUTH_CLIENT_ID`, `GITHUB_OAUTH_CLIENT_SECRET`, `MAOMAO_ADMIN_GITHUB_IDS`, `MAOMAO_PUBLIC_URL`, `UI_LOCAL_LOGIN`, `UI_PASSWORD`, `UI_SESSION_SECRET`, `REVIEWER_ROUTING`, `POISON_ALERT_POLICY`.
+See `.env.example`. Notable knobs: `ALLOWED_GITHUB_ACCOUNT_IDS`, `ALLOWED_GITHUB_REPOSITORY_IDS`, `MAOMAO_OVERRIDE_AUTHORS`, `MAX_DIFF_BYTES`, `REPO_RATE_LIMIT_PER_WINDOW`, `REPO_RATE_WINDOW_MS`, `OPENCODE_MAX_RETRIES`, `REVIEW_DRAFTS`, `POST_EMPTY_REVIEW`, `JOB_CONCURRENCY`, `WORKSPACE_ROOT`, `DATABASE_PATH`, `MAX_INLINE_COMMENTS`, `PULL_REQUEST_ACTIONS`, `OPENCODE_VERIFIER_MODEL`, `RECONCILE_MIN_CONFIDENCE`, `GITHUB_OAUTH_CLIENT_ID`, `GITHUB_OAUTH_CLIENT_SECRET`, `MAOMAO_ADMIN_GITHUB_IDS`, `MAOMAO_PUBLIC_URL`, `UI_LOCAL_LOGIN`, `UI_PASSWORD`, `UI_SESSION_SECRET`, `REVIEWER_ROUTING`, `POISON_ALERT_POLICY`, `MAOMAO_FORGE_KEY`.
 
 ## Follow-ups (not in this MVP)
 

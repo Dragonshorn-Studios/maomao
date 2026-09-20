@@ -1,4 +1,4 @@
-import { mkdtemp, writeFile, chmod, readFile, rm, stat, mkdir } from "node:fs/promises";
+import { mkdtemp, writeFile, chmod, readFile, rm, stat, mkdir, utimes } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -9,6 +9,7 @@ import {
   gitAuthSecrets,
   gitHttpAuthArgs,
   removeTree,
+  sweepWorkspaces,
 } from "./checkout.js";
 
 const TOKEN = "ghs_testtoken_abcdefgh";
@@ -220,6 +221,51 @@ describe("removeTree", () => {
 
       await removeTree(leftover);
       await expect(stat(leftover)).rejects.toMatchObject({ code: "ENOENT" });
+    } finally {
+      await removeTree(tmp);
+    }
+  });
+});
+
+describe("execFile timeout redaction", () => {
+  it("redacts secret-bearing args from timeout messages", async () => {
+    const secret = "super-secret-header-value";
+    const message: string = await execFile("bash", ["-c", `sleep 5; echo ${secret}`], {
+      timeoutMs: 50,
+      secrets: [secret],
+    }).then(
+      () => "",
+      (error: unknown) => (error instanceof Error ? error.message : String(error)),
+    );
+    expect(message).toContain("timed out");
+    expect(message).not.toContain(secret);
+    expect(message).toContain("[redacted]");
+  });
+});
+
+describe("sweepWorkspaces", () => {
+  it("removes expired chat checkouts nested under chat/ without deleting a fresh sibling", async () => {
+    const tmp = await mkdtemp(join(tmpdir(), "maomao-sweep-"));
+    try {
+      const oldPipeline = join(tmp, "job-1-aaaaaaaaaaaa");
+      const chatRoot = join(tmp, "chat");
+      const oldChat = join(chatRoot, "job-2-bbbbbbbbbbbb");
+      const freshChat = join(chatRoot, "job-3-cccccccccccc");
+      await mkdir(oldPipeline, { recursive: true });
+      await mkdir(oldChat, { recursive: true });
+      await mkdir(freshChat, { recursive: true });
+      const stale = new Date(Date.now() - 48 * 3600 * 1000);
+      await utimes(oldPipeline, stale, stale);
+      await utimes(oldChat, stale, stale);
+      // chat/ itself is fresh because a new checkout landed; nested old trees must still go.
+      await utimes(chatRoot, new Date(), new Date());
+
+      const removed = await sweepWorkspaces(tmp, 24);
+      expect(removed).toBe(2);
+      await expect(stat(oldPipeline)).rejects.toMatchObject({ code: "ENOENT" });
+      await expect(stat(oldChat)).rejects.toMatchObject({ code: "ENOENT" });
+      await expect(stat(freshChat)).resolves.toMatchObject({});
+      await expect(stat(chatRoot)).resolves.toMatchObject({});
     } finally {
       await removeTree(tmp);
     }

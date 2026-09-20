@@ -143,6 +143,13 @@ export interface CheckoutPort {
   cleanup(dir: string): Promise<void>;
 }
 
+/** Nested checkout root so chat never clobbers a pipeline workspace. */
+export const CHAT_WORKSPACE_SEGMENT = "chat";
+
+export function chatWorkspaceRoot(workspaceRoot: string): string {
+  return join(workspaceRoot, CHAT_WORKSPACE_SEGMENT);
+}
+
 /** GitHub git HTTPS wants Basic `x-access-token:<installation token>`, not Bearer. */
 export function gitHttpAuthArgs(token?: string): string[] {
   if (!token) return [];
@@ -300,7 +307,15 @@ export async function sweepWorkspaces(root: string, retentionHours: number): Pro
     const full = join(root, entry);
     try {
       const info = await stat(full);
-      if (!info.isDirectory() || info.mtimeMs > cutoff) continue;
+      if (!info.isDirectory()) continue;
+      // Chat checkouts live under <workspaceRoot>/chat/job-* so they cannot
+      // clobber pipeline trees. Sweep that nested root by each child's mtime
+      // (same TTL); never treat the `chat` folder itself as one workspace.
+      if (entry === CHAT_WORKSPACE_SEGMENT) {
+        removed += await sweepWorkspaces(full, retentionHours);
+        continue;
+      }
+      if (info.mtimeMs > cutoff) continue;
       await removeTree(full);
       removed += 1;
     } catch {

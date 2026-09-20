@@ -7,6 +7,7 @@
 import type { ForgePort } from "../forge/port.js";
 import type { OpenedConnection } from "../forge/connections.js";
 import { SafeHttpError, safeHttpRequest } from "../forge/safe-http.js";
+import { DISCUSSION_CAP, DISCUSSION_PAGE_SIZE } from "./client.js";
 import { reviewMarker } from "../prompts.js";
 import type {
   ForgeChange,
@@ -323,17 +324,17 @@ export class GitLabProvider implements ForgePort {
   /**
    * GitLab returns a BARE ARRAY from the discussions endpoint (not a
    * wrapper object); bounded pagination follows while full pages come back.
-   * The 5-page/500-discussion bound means discussions past the cap are
-   * invisible to reconciliation (forge-resolved priors stop re-checking,
-   * late buries are missed) — the same documented trade-off as the webhook
-   * path's processing cap, minus its refusal-to-act signal.
+   * Threads past DISCUSSION_CAP are invisible to reconciliation (forge-resolved
+   * priors stop re-checking, late buries are missed). When the cap trips we
+   * log so the miss is not silent; webhook command handling refuses to act.
    */
   async listDiscussions(target: ForgeRepoTarget): Promise<ForgeDiscussion[]> {
     const discussions: ForgeDiscussion[] = [];
-    for (let page = 1; page <= 5; page += 1) {
+    const pages = Math.max(1, Math.ceil(DISCUSSION_CAP / DISCUSSION_PAGE_SIZE));
+    for (let page = 1; page <= pages; page += 1) {
       const page_ = await this.request<GitLabDiscussionPage[]>(
         "GET",
-        `${this.mrPath(this.projectIdOf(target), target.changeNumber)}/discussions?per_page=100&page=${page}`,
+        `${this.mrPath(this.projectIdOf(target), target.changeNumber)}/discussions?per_page=${DISCUSSION_PAGE_SIZE}&page=${page}`,
         { maxBytes: 8 * 1024 * 1024 },
       );
       if (!Array.isArray(page_)) {
@@ -354,7 +355,13 @@ export class GitLabProvider implements ForgePort {
             authorLogin: note.author?.username,
           })),
       })));
-      if (page_.length < 100) break;
+      if (page_.length < DISCUSSION_PAGE_SIZE) break;
+      if (discussions.length >= DISCUSSION_CAP) {
+        console.error(
+          `gitlab: discussion listing hit the ${DISCUSSION_CAP} cap for ${target.repoFullName}!${target.changeNumber}; later threads (late buries, forge-resolved priors) are not visible`,
+        );
+        break;
+      }
     }
     return discussions;
   }

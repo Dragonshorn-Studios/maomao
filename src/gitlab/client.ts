@@ -53,8 +53,14 @@ export interface GitLabCommandApi {
   getAccessLevel(projectId: number, userId: number): Promise<number | undefined>;
 }
 
-/** Processing cap on discussion listings; keeps a hostile instance bounded. */
-const DISCUSSION_CAP = 500;
+/**
+ * Processing cap on discussion listings. A hostile instance stays bounded;
+ * past this cap, webhook commands refuse to act (`truncated: true`) and review
+ * reconciliation logs rather than silently dropping late buries / forge-resolved
+ * priors. Keep the provider pager in lock-step with this number.
+ */
+export const DISCUSSION_PAGE_SIZE = 100;
+export const DISCUSSION_CAP = 2000;
 
 export class GitLabApiClient implements GitLabCommandApi {
   constructor(private readonly connection: OpenedConnection) {}
@@ -87,11 +93,11 @@ export class GitLabApiClient implements GitLabCommandApi {
     // hundred discussions, and the cap keeps a hostile instance bounded.
     while (discussions.length < DISCUSSION_CAP) {
       const page_ = await this.getJson<GitLabDiscussion[]>(
-        `${this.projectPath(projectId)}/merge_requests/${mergeRequestIid}/discussions?per_page=100&page=${page}`,
+        `${this.projectPath(projectId)}/merge_requests/${mergeRequestIid}/discussions?per_page=${DISCUSSION_PAGE_SIZE}&page=${page}`,
       );
       if (!Array.isArray(page_)) break;
       discussions.push(...page_);
-      if (page_.length < 100) {
+      if (page_.length < DISCUSSION_PAGE_SIZE) {
         return { discussions, truncated: false };
       }
       page += 1;

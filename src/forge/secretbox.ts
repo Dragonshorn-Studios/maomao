@@ -20,8 +20,10 @@ export function loadForgeKey(env: NodeJS.ProcessEnv = process.env): Buffer | und
 }
 
 function parseForgeKey(raw: string): Buffer {
-  // 64 hex chars is the documented form; anything else is treated as a
-  // passphrase and stretched so operators are not tempted to store weak keys.
+  // Production form is 64 hex chars (`openssl rand -hex 32`). Anything else is
+  // treated as a passphrase and stretched with a *fixed* scrypt salt so a
+  // typo'd env still boots — but that derived key cannot be rotated without
+  // resealing every stored token. Prefer hex.
   if (/^[0-9a-fA-F]{64}$/.test(raw)) return Buffer.from(raw, "hex");
   return scryptSync(raw, "maomao-forge-key", KEY_LENGTH);
 }
