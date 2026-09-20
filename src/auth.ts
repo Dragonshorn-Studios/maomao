@@ -1,5 +1,5 @@
 import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
-import { PIERRE_DIFFS_HREF } from "./ui/paths.js";
+import { CHAT_BUNDLE_HREF, PIERRE_DIFFS_HREF } from "./ui/paths.js";
 
 export const SESSION_COOKIE = "maomao_session";
 export const SESSION_TTL_MS = 7 * 24 * 60 * 60 * 1000;
@@ -58,6 +58,7 @@ export function isPublicPath(path: string): boolean {
     // Stylesheet and brand icons: fixed constants served by src/server.ts.
     path === "/assets/maomao.css" ||
     path === PIERRE_DIFFS_HREF ||
+    path === CHAT_BUNDLE_HREF ||
     path === "/assets/typeahead.js" ||
     path === "/assets/favicon.svg" ||
     path === "/assets/favicon.png" ||

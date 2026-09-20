@@ -184,7 +184,7 @@ export class ChatService {
       // A failed run must never become an empty "assistant reply": the runner
       // resolves on any exit, so failures are only visible here.
       const stderr = result.stderr.trim();
-      if (result.exitCode !== 0 || (parser.textParts.length === 0 && !result.usage.totalTokens)) {
+      if (result.exitCode !== 0 || parser.textParts.join("").trim() === "") {
         throw new Error(
           `explainer run failed (exit ${result.exitCode}): ${redactAll(stderr.slice(0, 300) || "no output; model auth or configuration is the usual cause")}`,
         );
@@ -199,7 +199,7 @@ export class ChatService {
       if (sessionId) {
         chatStore.bindSession(conversation.id, sessionId, workspace);
       }
-      const replyText = redactAll(parser.textParts.join("\n\n") || result.text);
+      const replyText = redactAll(parser.textParts.join("\n\n") || result.text).trim();
       const usage = result.usage;
       const reply = chatStore.appendMessage({
         conversationId: conversation.id,

@@ -956,4 +956,61 @@ details summary { cursor: pointer; color: var(--ink-muted); }
 @media (min-resolution: 1.4dppx) {
   body { -webkit-font-smoothing: antialiased; }
 }
+
+/* ---- Ask Maomao chat (island + no-JS fallback share these) ---- */
+.chat-transcript { display: grid; gap: var(--space-3); margin: var(--space-4) 0; }
+.chat-bubble {
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--surface);
+  padding: var(--space-2) var(--space-3);
+  max-width: 60rem;
+}
+.chat-bubble p { margin: var(--space-1) 0 0; overflow-wrap: anywhere; }
+.chat-bubble-user { border-left: 3px solid var(--herb); }
+.chat-bubble-assistant { border-left: 3px solid var(--jade); }
+.chat-thread { display: grid; gap: var(--space-3); margin-top: var(--space-4); }
+.chat-viewport {
+  display: grid;
+  gap: var(--space-3);
+  max-height: 28rem;
+  overflow-y: auto;
+  padding: var(--space-2);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--surface);
+}
+.chat-composer {
+  display: flex;
+  gap: var(--space-2);
+  align-items: flex-end;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--surface);
+  padding: var(--space-2);
+}
+.chat-composer-input {
+  flex: 1;
+  resize: vertical;
+  min-height: 2.4rem;
+  background: var(--paper);
+  color: var(--ink);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: var(--space-2);
+  font: inherit;
+}
+.chat-composer-input:focus-visible { outline: 2px solid var(--focus); outline-offset: 1px; }
+.chat-send, .chat-cancel {
+  border: 1px solid var(--jade);
+  background: var(--jade);
+  color: var(--btn-fg);
+  border-radius: var(--radius);
+  padding: var(--space-2) var(--space-3);
+  cursor: pointer;
+  font: inherit;
+}
+.chat-cancel { border-color: var(--line-strong); background: var(--surface-2); color: var(--ink); }
+.chat-send:disabled, .chat-cancel:disabled { opacity: 0.5; cursor: default; }
+.chat-error { border: 1px solid var(--cinnabar); background: var(--cinnabar-soft); color: var(--ink); border-radius: var(--radius); padding: var(--space-2); }
 `.trim();

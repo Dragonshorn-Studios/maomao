@@ -9,6 +9,7 @@ import type { JobQueue } from "./jobs/queue.js";
 import type { OpenCodePort } from "./opencode/parse.js";
 import { ChatService } from "./chat/service.js";
 import { ChatStore } from "./chat/store.js";
+import { CHAT_BUNDLE_HREF } from "./ui/paths.js";
 
 type OpenCodeLike = OpenCodePort;
 import { createApp } from "./server.js";
@@ -4114,6 +4115,9 @@ describe("ask-maomao chat routes", () => {
     expect(html).toContain("What does this change do?");
     expect(html).toContain("answer to:");
     expect(html).toContain("Messages left");
+    expect(html).toContain('id="maomao-chat-config"');
+    expect(html).toContain('/jobs/' + jobId + '/chat/stream');
+    expect(html).toContain(CHAT_BUNDLE_HREF);
     // Session bound for follow-ups.
     const conversation = extras.chatStore.activeConversationForJob(jobId);
     expect(conversation?.opencode_session_id).toBe("ses_route");
@@ -4192,6 +4196,95 @@ describe("ask-maomao chat routes", () => {
     expect(html).toContain("Last message failed");
     const crafted = await (await app.request(`/jobs/${jobId}/chat?error=${encodeURIComponent("sk-ant-secret-should-not-reach-url")}`)).text();
     expect(crafted).not.toContain("sk-ant-secret-should-not-reach-url");
+  });
+
+  async function readSse(response: Response): Promise<Array<Record<string, unknown>>> {
+    const text = await response.text();
+    const events: Array<Record<string, unknown>> = [];
+    for (const frame of text.split("\n\n")) {
+      for (const line of frame.split("\n")) {
+        if (!line.startsWith("data: ")) continue;
+        try {
+          events.push(JSON.parse(line.slice(6)));
+        } catch {
+          // ignore malformed frames
+        }
+      }
+    }
+    return events;
+  }
+
+  it("streams deltas and done over SSE for a question", async () => {
+    const extras = chatContextExtras();
+    const { app, store } = testApp(chatEnv, undefined, undefined, extras);
+    const jobId = seedJob(store);
+    const response = await app.request(`/jobs/${jobId}/chat/stream`, {
+      method: "POST",
+      headers: { "content-type": "application/x-www-form-urlencoded" },
+      body: "question=What+does+this+change+do%3F",
+    });
+    expect(response.status).toBe(200);
+    expect(response.headers.get("content-type")).toContain("text/event-stream");
+    const events = await readSse(response);
+    const deltas = events.filter((event) => "delta" in event);
+    expect(deltas.length).toBeGreaterThan(0);
+    expect(events.at(-1)).toEqual({ done: true });
+    const transcript = extras.chatStore.listMessages(extras.chatStore.activeConversationForJob(jobId)!.id);
+    expect(transcript.map((m) => m.role)).toEqual(["user", "assistant"]);
+  });
+
+  it("reports budget exhaustion as an error event without a done frame", async () => {
+    const extras = chatContextExtras();
+    const { app, store } = testApp({ ...chatEnv, MAOMAO_EXPLAIN_MAX_MESSAGES: "1" }, undefined, undefined, extras);
+    const jobId = seedJob(store);
+    await app.request(`/jobs/${jobId}/chat/messages`, {
+      method: "POST",
+      headers: { "content-type": "application/x-www-form-urlencoded" },
+      body: "question=first",
+    });
+    const response = await app.request(`/jobs/${jobId}/chat/stream`, {
+      method: "POST",
+      headers: { "content-type": "application/x-www-form-urlencoded" },
+      body: "question=second",
+    });
+    expect(response.status).toBe(200);
+    const events = await readSse(response);
+    expect(events).toHaveLength(1);
+    expect(String(events[0]?.error)).toContain("message limit");
+  });
+
+  it("answers an empty question with 400 before streaming", async () => {
+    const extras = chatContextExtras();
+    const { app, store } = testApp(chatEnv, undefined, undefined, extras);
+    const jobId = seedJob(store);
+    const response = await app.request(`/jobs/${jobId}/chat/stream`, {
+      method: "POST",
+      headers: { "content-type": "application/x-www-form-urlencoded" },
+      body: "question=",
+    });
+    expect(response.status).toBe(400);
+    expect((await response.json())).toEqual({ error: "Write a question first." });
+  });
+
+  it("404s the stream when the explainer is disabled", async () => {
+    const { app, store } = testApp();
+    const jobId = seedJob(store);
+    expect(
+      (await app.request(`/jobs/${jobId}/chat/stream`, {
+        method: "POST",
+        headers: { "content-type": "application/x-www-form-urlencoded" },
+        body: "question=x",
+      })).status,
+    ).toBe(404);
+  });
+
+  it("serves the chat bundle from the build output", async () => {
+    const { app } = testApp(chatEnv, undefined, undefined, chatContextExtras());
+    const response = await app.request(CHAT_BUNDLE_HREF);
+    expect([200, 404]).toContain(response.status); // 404 pre-build is the documented fallback
+    if (response.status === 404) {
+      expect(await response.text()).toContain("not built");
+    }
   });
 
   it("shows the Ask Maomao link on the job page only when enabled", async () => {
