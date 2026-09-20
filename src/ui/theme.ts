@@ -986,6 +986,7 @@ details summary { cursor: pointer; color: var(--ink-muted); }
 
 /* ---- Ask Maomao chat (island + no-JS fallback share these) ---- */
 .chat-transcript { display: grid; gap: var(--space-3); margin: var(--space-4) 0; }
+.chat-transcript[hidden] { display: none; }
 .chat-bubble {
   border: 1px solid var(--line);
   border-radius: var(--radius);
@@ -1283,8 +1284,8 @@ body.operator main th {
   gap: 0.65rem 1rem;
   margin: 0.85rem 0;
 }
-.chat-toolbar .meta-row { margin-top: 0; }
-.chat-reset { margin: 0; }
+.chat-toolbar .meta-row { margin-top: 0; flex: 1 1 16rem; }
+.chat-reset { margin: 0; margin-left: auto; }
 .config-nav { margin: 0.35rem 0 1rem; }
 .prompt-role-list {
   list-style: none;
@@ -1292,6 +1293,12 @@ body.operator main th {
   padding: 0;
   display: grid;
   gap: 0.85rem;
+}
+.prompt-role-list > li {
+  list-style: none;
+  display: block;
+  margin: 0;
+  padding: 0;
 }
 .prompt-role-head {
   display: flex;

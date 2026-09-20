@@ -72,7 +72,9 @@ describe("theme tokens", () => {
     expect(THEME_CSS).toContain(".forge-mark");
     expect(THEME_CSS).toContain(".brand-mark");
     expect(THEME_CSS).toContain(".chat-toolbar");
+    expect(THEME_CSS).toContain(".chat-transcript[hidden]");
     expect(THEME_CSS).toContain(".prompt-role");
+    expect(THEME_CSS).toContain(".prompt-role-list > li");
     expect(THEME_CSS).not.toContain("fonts.googleapis.com");
     expect(THEME_CSS).not.toContain("cdn.");
   });
