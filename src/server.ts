@@ -2079,8 +2079,12 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
       const shaConfirmed = confirmedSha === resolvedSha;
       const refConfirmed = confirmedRef === refLabel;
       if (!shaConfirmed || !refConfirmed) {
+        // A POST with no `sha` field came from the step-1 form (repo + optional
+        // ref) — a preview, not a confirmation attempt — so it gets the plain
+        // page rather than a warning. Notices are only for real confirms that
+        // carried a `sha` field and did not match.
         const notice: BriefConfirmNotice | undefined =
-          confirmedSha === "" && confirmedRef === ""
+          typeof body.sha !== "string"
             ? undefined
             : confirmedSha !== "" && confirmedSha !== resolvedSha
               ? { kind: "sha", fromSha: confirmedSha }

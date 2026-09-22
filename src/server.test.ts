@@ -2080,6 +2080,34 @@ describe("repo brief routes (issue #88)", () => {
     log.mockRestore();
   });
 
+  it("shows no warning on the first confirm render for a typed ref, only for a partial confirm", async () => {
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    const { app, store } = testApp(oauthEnv, briefGithub(), mockOauthFetch({ id: 1001, login: "octocat" }));
+    const { session, csrfCookie, csrfToken } = await operatorBriefCsrf(app);
+
+    // Step 1 with a typed ref submits no `sha` field — a preview, not a
+    // confirmation attempt — so the page renders without the warn banner.
+    const preview = await app.request("/brief", {
+      method: "POST",
+      headers: { cookie: `${session}; ${csrfCookie}`, "content-type": "application/x-www-form-urlencoded" },
+      body: `repo=acme%2Fwidgets&ref=main&csrf_token=${encodeURIComponent(csrfToken)}`,
+    });
+    const previewHtml = await preview.text();
+    expect(previewHtml).toContain("Confirm repo brief");
+    expect(previewHtml).not.toContain("Confirmation incomplete");
+
+    // A confirm POST that carried a `sha` field but left it blank did attempt
+    // a confirmation, so the warning applies.
+    const partial = await app.request("/brief", {
+      method: "POST",
+      headers: { cookie: `${session}; ${csrfCookie}`, "content-type": "application/x-www-form-urlencoded" },
+      body: `repo=acme%2Fwidgets&ref=main&sha=&csrf_token=${encodeURIComponent(csrfToken)}`,
+    });
+    expect(await partial.text()).toContain("Confirmation incomplete");
+    expect(store.listJobs()).toEqual([]);
+    log.mockRestore();
+  });
+
   it("rejects an unresolvable ref with a plain-language error", async () => {
     const log = vi.spyOn(console, "log").mockImplementation(() => {});
     const { app } = testApp(oauthEnv, briefGithub(), mockOauthFetch({ id: 1001, login: "octocat" }));
