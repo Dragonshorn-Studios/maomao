@@ -1033,7 +1033,7 @@ describe("review configuration routes", () => {
     const state = start.headers.get("location")?.match(/state=([^&]+)/)?.[1] ?? "";
     const callback = await app.request(`/login/github/callback?code=good-code&state=${state}`);
     const session = cookieFrom(callback);
-    const configPage = await app.request("/config", { headers: { cookie: session } });
+    const configPage = await app.request("/config/profiles", { headers: { cookie: session } });
     const artifacts = await csrfArtifacts(configPage);
 
     const created = await app.request("/config/drafts", {
@@ -1063,7 +1063,7 @@ describe("review configuration routes", () => {
     store.configs.createDraft({ definition, createdBy: "octocat" });
     const draft = store.configs.listRevisions()[0];
 
-    const configPage = await app.request("/config", { headers: { cookie: session } });
+    const configPage = await app.request("/config/profiles", { headers: { cookie: session } });
     const { csrfCookie, csrfToken } = await csrfArtifacts(configPage);
 
     const conflict = await app.request(`/config/drafts/${draft.id}`, {
@@ -1194,7 +1194,7 @@ describe("model discovery routes", () => {
     );
     const { session } = await loginSession(app);
 
-    const page = await app.request("/config", { headers: { cookie: session } });
+    const page = await app.request("/config/profiles", { headers: { cookie: session } });
     const html = await page.text();
     expect(html).toContain('value="catalog/curated" label="in MODEL_CATALOG"');
     expect(html).toContain('value="anthropic/claude-4.5-sonnet" label="key configured"');
@@ -1215,7 +1215,7 @@ describe("model discovery routes", () => {
       { modelDiscovery },
     );
     const { session } = await loginSession(app);
-    const page = await app.request("/config", { headers: { cookie: session } });
+    const page = await app.request("/config/profiles", { headers: { cookie: session } });
     const { csrfCookie, csrfToken } = await csrfArtifacts(page);
 
     models.push("anthropic/claude-4.5-sonnet");
@@ -1226,7 +1226,7 @@ describe("model discovery routes", () => {
       body: `csrf_token=${encodeURIComponent(csrfToken)}`,
     });
     expect(refreshed.status).toBe(303);
-    expect(refreshed.headers.get("location")).toBe("/config?notice=models-refreshed");
+    expect(refreshed.headers.get("location")).toBe("/config/profiles?notice=models-refreshed");
     expect(spawnFake.calls).toEqual([["opencode", "models"]]);
     expect(modelDiscovery.snapshot().models).toEqual(["openai/gpt-4o", "anthropic/claude-4.5-sonnet"]);
     log.mockRestore();
@@ -1243,7 +1243,7 @@ describe("model discovery routes", () => {
       { modelDiscovery },
     );
     const { session } = await loginSession(app);
-    const page = await app.request("/config", { headers: { cookie: session } });
+    const page = await app.request("/config/profiles", { headers: { cookie: session } });
     const { csrfCookie, csrfToken } = await csrfArtifacts(page);
 
     const refreshed = await app.request("/config/models/refresh", {
@@ -1252,9 +1252,50 @@ describe("model discovery routes", () => {
       body: `csrf_token=${encodeURIComponent(csrfToken)}`,
     });
     expect(refreshed.status).toBe(303);
-    expect(refreshed.headers.get("location")).toBe("/config?notice=models-refresh-failed");
-    const after = await app.request("/config", { headers: { cookie: session } });
+    expect(refreshed.headers.get("location")).toBe("/config/profiles?notice=models-refresh-failed");
+    const after = await app.request("/config/profiles", { headers: { cookie: session } });
     expect(await after.text()).toContain("Live model discovery is unavailable");
+    log.mockRestore();
+  });
+});
+
+describe("config page IA", () => {
+  const gateEnv = { UI_PASSWORD: "hunter2", UI_SESSION_SECRET: "session-secret-for-tests" };
+
+  it("splits config into landing, profiles, draft-edit, and audit pages under a shared nav", async () => {
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    const { app, store } = testApp(gateEnv);
+    const { session } = await loginSession(app);
+    store.configs.createDraft({
+      definition: { name: "default", reviewers: [{ role: "correctness" }], minPublishableSeverity: "info" },
+      createdBy: "octocat",
+    });
+    const draft = store.configs.listRevisions()[0]!;
+
+    const landing = await (await app.request("/config", { headers: { cookie: session } })).text();
+    expect(landing).toContain("Effective configuration");
+    expect(landing).toContain('href="/config/profiles"');
+    expect(landing).toContain('href="/health"');
+    // The landing page has no write forms — every edit lives on its own page.
+    expect(landing).not.toContain('name="csrf_token"');
+
+    const profiles = await (await app.request("/config/profiles", { headers: { cookie: session } })).text();
+    expect(profiles).toContain("Review profiles");
+    expect(profiles).toContain(`href="/config/profiles/drafts/${draft.id}/edit"`);
+    expect(profiles).not.toContain(`action="/config/drafts/${draft.id}"`);
+
+    const edit = await app.request(`/config/profiles/drafts/${draft.id}/edit`, { headers: { cookie: session } });
+    expect(edit.status).toBe(200);
+    const editHtml = await edit.text();
+    expect(editHtml).toContain(`action="/config/drafts/${draft.id}"`);
+    expect(editHtml).toContain('name="expected_edit_seq"');
+
+    const missing = await app.request("/config/profiles/drafts/999/edit", { headers: { cookie: session } });
+    expect(missing.status).toBe(404);
+
+    const audit = await (await app.request("/config/audit", { headers: { cookie: session } })).text();
+    expect(audit).toContain("Configuration audit");
+    expect(audit).toContain("draft_created");
     log.mockRestore();
   });
 });
@@ -3412,7 +3453,7 @@ describe("effective configuration summary", () => {
     }
   });
 
-  it("keeps the section on config error re-renders (400 validation failure)", async () => {
+  it("re-renders the profiles page with the error on config write failures (400 validation failure)", async () => {
     const oauthEnv = {
       UI_SESSION_SECRET: "session-secret-for-tests",
       GITHUB_OAUTH_CLIENT_ID: "cid",
@@ -3422,7 +3463,7 @@ describe("effective configuration summary", () => {
     };
     const { app } = testApp(oauthEnv, undefined, mockOauthFetch({ id: 1001, login: "octocat" }));
     const session = await operatorSession(app);
-    const page = await app.request("/config", { headers: { cookie: session } });
+    const page = await app.request("/config/profiles", { headers: { cookie: session } });
     const { csrfCookie, csrfToken } = await csrfArtifacts(page);
     const response = await app.request("/config/drafts", {
       method: "POST",
@@ -3431,7 +3472,9 @@ describe("effective configuration summary", () => {
     });
     expect(response.status).toBe(400);
     const html = await response.text();
-    expect(html).toContain("Effective configuration");
+    // The error re-render returns the page the form lives on.
+    expect(html).toContain("Review profiles");
+    expect(html).toContain("Definition must be valid JSON");
   });
 });
 
@@ -3446,7 +3489,7 @@ describe("structured profile editor", () => {
 
   async function operatorCsrf(app: ReturnType<typeof createApp>) {
     const session = await operatorSession(app);
-    const page = await app.request("/config", { headers: { cookie: session } });
+    const page = await app.request("/config/profiles", { headers: { cookie: session } });
     const { csrfCookie, csrfToken } = await csrfArtifacts(page);
     return { cookie: `${session}; ${csrfCookie}`, csrfToken, session };
   }
@@ -3585,10 +3628,10 @@ describe("structured profile editor", () => {
     expect(store.configs.getRevision(draftId)?.definition.reviewers.map((r) => r.role)).toEqual(["correctness", "security"]);
   });
 
-  it("renders the structured create form on GET /config when the gate allows writes", async () => {
+  it("renders the structured create form on GET /config/profiles when the gate allows writes", async () => {
     const { app } = testApp(oauthEnv, undefined, mockOauthFetch({ id: 1001, login: "octocat" }));
     const session = await operatorSession(app);
-    const html = await (await app.request("/config", { headers: { cookie: session } })).text();
+    const html = await (await app.request("/config/profiles", { headers: { cookie: session } })).text();
     expect(html).toContain('name="editor" value="structured"');
     expect(html).toContain("Minimum publishable severity");
     expect(html).toContain('name="budget_behavior"');
@@ -3607,7 +3650,7 @@ describe("structured profile editor review fixes", () => {
 
   async function operatorCsrf2(app: ReturnType<typeof createApp>) {
     const session = await operatorSession(app);
-    const page = await app.request("/config", { headers: { cookie: session } });
+    const page = await app.request("/config/profiles", { headers: { cookie: session } });
     const { csrfCookie, csrfToken } = await csrfArtifacts(page);
     return { cookie: `${session}; ${csrfCookie}`, csrfToken };
   }
@@ -3635,7 +3678,7 @@ describe("structured profile editor review fixes", () => {
     expect(store.configs.listRevisions().length).toBe(before);
     const html = await response.text();
     // Full-page render with an explanation, not a bare fragment.
-    expect(html).toContain("Review configuration");
+    expect(html).toContain("Review profiles");
     expect(html).toContain("does not apply");
   });
 
@@ -3771,7 +3814,7 @@ describe("structured editor review-bot round-2 fixes", () => {
 
   async function operatorCsrf3(app: ReturnType<typeof createApp>) {
     const session = await operatorSession(app);
-    const page = await app.request("/config", { headers: { cookie: session } });
+    const page = await app.request("/config/profiles", { headers: { cookie: session } });
     const { csrfCookie, csrfToken } = await csrfArtifacts(page);
     return { cookie: `${session}; ${csrfCookie}`, csrfToken };
   }
@@ -3834,7 +3877,7 @@ describe("structured editor review-bot low fixes", () => {
 
   async function operatorCsrf4(app: ReturnType<typeof createApp>) {
     const session = await operatorSession(app);
-    const page = await app.request("/config", { headers: { cookie: session } });
+    const page = await app.request("/config/profiles", { headers: { cookie: session } });
     const { csrfCookie, csrfToken } = await csrfArtifacts(page);
     return { cookie: `${session}; ${csrfCookie}`, csrfToken };
   }

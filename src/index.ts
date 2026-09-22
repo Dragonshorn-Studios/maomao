@@ -10,6 +10,7 @@ import { GithubClient } from "./github/client.js";
 import { chatWorkspaceRoot, createCheckout, sweepWorkspaces } from "./checkout.js";
 import { createOpenCodeRunner } from "./opencode/spawn.js";
 import { ModelDiscovery } from "./opencode/models.js";
+import { seedDefaultProfileRevision } from "./config-revisions.js";
 import { ChatService } from "./chat/service.js";
 import { ChatStore } from "./chat/store.js";
 import { oauthCallbackUrl, oauthEnabled } from "./oauth.js";
@@ -50,6 +51,12 @@ const store = new JobStore(db, config.modelCatalog);
 const orphanedClaims = store.clearOrphanedScanIssueClaims();
 if (orphanedClaims > 0) {
   console.log(`Cleared ${orphanedClaims} orphaned scan-issue claim(s) from a previous run`);
+}
+// First-boot seed: a `default` draft mirroring the env config, so operators
+// edit a prefilled baseline instead of a blank form. Idempotent, audited as a
+// system action; activating it unchanged is a no-op by construction.
+if (seedDefaultProfileRevision(store.configs, config)) {
+  console.log("Seeded default profile revision from environment configuration");
 }
 const github = new GithubClient(config);
 const opencode = createOpenCodeRunner(config.opencode.bin);

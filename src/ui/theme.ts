@@ -549,6 +549,7 @@ button, summary {
   margin: 0 0 0.2rem;
 }
 .meta-grid dd { margin: 0; }
+.config-hint { font-size: 0.82rem; margin-top: 0.25rem; }
 
 .sha-block {
   grid-column: 1 / -1;

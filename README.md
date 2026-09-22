@@ -248,7 +248,7 @@ OPENCODE_AGGREGATOR_MODEL=anthropic/claude-opus-4-6   # optional; defaults to re
 
 Use any `provider/model` string OpenCode understands (`opencode models`). Provider keys set in `.env` are passed through to the OpenCode child only when the variable matches a provider allowlist prefix (`src/opencode/env.ts`); GitHub App credentials never are.
 
-Model fields in the profile editor offer a pick-list: the configured `MODEL_CATALOG` merged with whatever `opencode models` reports for your configured providers (refreshed at boot and via the "Refresh model list" button on `/config`). Entries annotated "key configured" have a working credential. Free-text entry always remains allowed, and `MODEL_CATALOG` — when set — is still enforced on save.
+Model fields in the profile editor offer a pick-list: the configured `MODEL_CATALOG` merged with whatever `opencode models` reports for your configured providers (refreshed at boot and via the "Refresh model list" button on `/config/profiles`). Entries annotated "key configured" have a working credential. Free-text entry always remains allowed, and `MODEL_CATALOG` — when set — is still enforced on save.
 
 ### Provider credentials
 
@@ -488,14 +488,17 @@ Set `MAOMAO_EXPLAIN_ENABLED=true` and each job page gains an **Ask Maomao** chat
 
 ## Review configuration (versioned profiles)
 
-`/config` (in the monitoring UI) manages **versioned review profiles**: named revisions that pin which specialists run, their order, per-role models, the router model, a minimum publishable severity, and optional total cost/token budgets.
+Configuration lives under `/config` as a set of focused pages joined by a shared sub-nav: the landing page shows the **effective configuration** (the value actually running, its source — environment, default, or active profile — and a per-row pointer to where that value is changed), `/config/profiles` manages drafts/revisions, each draft is edited on its own page (`/config/profiles/drafts/:id/edit`), `/config/providers` holds provider API keys, `/config/prompts` the specialist prompts, and `/config/audit` the full lifecycle history.
 
+`/config/profiles` manages **versioned review profiles**: named revisions that pin which specialists run, their order, per-role models, the router model, a minimum publishable severity, and optional total cost/token budgets.
+
+- On first boot Maomao seeds a `default` draft — the env-derived configuration as a versioned baseline (v0), recorded as a `system` action. Edit it and activate; activating it untouched behaves exactly like the env configuration.
 - Drafts are validated against a schema plus system caps (≤12 reviewers, ≤30-minute timeouts, ≤5 retries, ≤$5 / 2M-token budgets). Invalid drafts cannot be activated.
 - Activation is explicit and audited; activating a new revision retires the previous active one of the same name. Rollback re-activates a retired revision — history is never rewritten.
 - Every job snapshots the revision it ran with (`profile_revision_id` on the job), so later edits never change historical jobs. Specialist selection, per-role models, and the minimum publishable severity are applied from the active revision; total budgets are enforced as warnings.
 - Draft edits use optimistic concurrency: saving against an older revision returns a conflict instead of overwriting a teammate's change.
 - `MODEL_CATALOG` (comma-separated `provider/model` values) optionally restricts models to an operator-approved catalog. Configuration contains no credentials; export/import is schema-versioned JSON, and imports always land as drafts.
-- All write actions require an operator GitHub OAuth identity and are recorded in the audit history.
+- All write actions require an operator GitHub OAuth identity and are recorded in the audit history (`/config/audit`).
 
 ## Finding reconciliation and `@maomao bury`
 
