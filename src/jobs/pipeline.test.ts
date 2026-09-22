@@ -5189,3 +5189,159 @@ describe("non-github health scans", () => {
     expect(job?.failure_reason).toMatch(/health scans are not available for gitlab:gitlab.com/);
   });
 });
+
+describe("stack reviews (issue #99)", () => {
+  function stackConfig() {
+    return loadConfig({
+      REVIEWER_ROLES: "correctness",
+      OPENCODE_REVIEWER_MODEL: "test/model",
+      OPENCODE_TIMEOUT_MS: "5000",
+      POST_EMPTY_REVIEW: "true",
+      GITHUB_APP_ID: "1",
+      GITHUB_WEBHOOK_SECRET: "s",
+      GITHUB_APP_PRIVATE_KEY: "k",
+    });
+  }
+
+  function enqueueStackJob(store: JobStore) {
+    const stack = store.enqueue({
+      repoFullName: "acme/widgets",
+      repoOwner: "acme",
+      repoName: "widgets",
+      installationId: 9,
+      prNumber: 42,
+      prTitle: "top of stack",
+      prBody: "",
+      prHtmlUrl: "",
+      prAuthor: "alice",
+      baseSha: "b41",
+      headSha: "h42",
+      baseRef: "main",
+      headRef: "feat-b",
+      reviewers: [{ role: "stack_cumulative", title: "Stack cumulative" }],
+      jobType: "stack_review",
+      dedupKey: "stack:s1",
+    });
+    store.insertStackMembers(stack.job.id, [
+      { position: 1, prNumber: 41, baseRef: "main", headRef: "feat-a", baseSha: "b41", headSha: "h41" },
+      { position: 2, prNumber: 42, baseRef: "feat-a", headRef: "feat-b", baseSha: "h41", headSha: "h42" },
+    ]);
+    return stack;
+  }
+
+  function resolvedPull(prNumber: number, headSha: string) {
+    const bases: Record<number, [string, string]> = { 41: ["main", "feat-a"], 42: ["feat-a", "feat-b"] };
+    const [baseRef, headRef] = bases[prNumber]!;
+    return {
+      installationId: 9,
+      accountId: 1001,
+      repositoryId: 2002,
+      repoOwner: "acme",
+      repoName: "widgets",
+      repoFullName: "acme/widgets",
+      prNumber,
+      prTitle: `PR ${prNumber}`,
+      prBody: "",
+      prHtmlUrl: `https://example.test/pull/${prNumber}`,
+      prAuthor: "alice",
+      baseSha: `b${prNumber}`,
+      headSha,
+      baseRef,
+      headRef,
+      draft: false,
+    };
+  }
+
+  const stackOpencode: OpenCodePort = {
+    async run(input) {
+      const text = /stack reviewer/i.test(input.prompt)
+        ? JSON.stringify({
+            schema_version: 1,
+            reviewer: "stack_cumulative",
+            verdict: "findings",
+            summary: "the stack is coherent except one cross-PR break",
+            findings: [
+              {
+                severity: "high",
+                confidence: 0.9,
+                category: "cross_pr",
+                file: "example.ts",
+                line: 1,
+                summary: "#41 removes the helper #42 calls",
+                reason: "#42's diff still invokes the symbol deleted in #41",
+              },
+            ],
+          })
+        : input.prompt.match(/Role id: (\w+)/)
+          ? reviewerJson("correctness")
+          : JSON.stringify({ schema_version: 1, verdict: "approve", summary: "fine", findings: [] });
+      return { stdout: text, stderr: "", exitCode: 0, text, usage: { promptTokens: 3, completionTokens: 2 } };
+    },
+  };
+
+  it("reviews each member in order, then publishes the cumulative summary and findings on the top PR", async () => {
+    const config = stackConfig();
+    const store = new JobStore(openDb(":memory:"));
+    const stack = enqueueStackJob(store);
+    const issueComments: { pullNumber: number; body: string }[] = [];
+    const reviews: number[] = [];
+    const github = {
+      ...githubPort(),
+      getPull: async (_i: number, _o: string, _r: string, n: number) => resolvedPull(n, `h${n}`),
+      createCommentReview: async (input: { pullNumber: number }) => {
+        reviews.push(input.pullNumber);
+        return { id: "9", url: "u" };
+      },
+      createIssueComment: async (input: { pullNumber: number; body: string }) => {
+        issueComments.push({ pullNumber: input.pullNumber, body: input.body });
+        return { id: "1", url: "u" };
+      },
+    } as unknown as GithubPort;
+    const pipeline = createPipeline({ config, store, github, checkout: await fixtureCheckout(), opencode: stackOpencode });
+    await pipeline.run(stack.job.id);
+
+    expect(store.getJob(stack.job.id)?.state).toBe("completed");
+    const memberJobs = store.listJobs(20).filter((j) => j.job_type === "pr_review");
+    expect(memberJobs.map((j) => j.pr_number).sort()).toEqual([41, 42]);
+    expect(memberJobs.every((j) => j.state === "completed")).toBe(true);
+    // Members were reviewed as normal pr_review jobs (one GitHub review each).
+    expect(reviews.sort()).toEqual([41, 42]);
+    const members = store.listStackMembers(stack.job.id);
+    expect(members.every((m) => m.state === "done" && m.member_job_id)).toBe(true);
+    // Stack-level output lands on the top PR only: summary + one finding.
+    expect(issueComments.every((c) => c.pullNumber === 42)).toBe(true);
+    expect(issueComments[0]?.body).toContain('Stack review "s1"');
+    expect(issueComments[0]?.body).toContain("#41@h41");
+    expect(issueComments.some((c) => /Cross-PR finding \(high\).*#41 removes the helper #42 calls/s.test(c.body))).toBe(true);
+    const cumulative = store.listReviewerRuns(stack.job.id).find((r) => r.role === "stack_cumulative");
+    expect(cumulative?.state).toBe("done");
+  });
+
+  it("marks the job stale and posts nothing when a member head moved before publish", async () => {
+    const config = stackConfig();
+    const store = new JobStore(openDb(":memory:"));
+    const stack = enqueueStackJob(store);
+    const issueComments: number[] = [];
+    // PR 41's head moves between the run-start pin and the pre-publish check.
+    const pullCalls: Record<number, number> = {};
+    const github = {
+      ...githubPort(),
+      getPull: async (_i: number, _o: string, _r: string, n: number) => {
+        pullCalls[n] = (pullCalls[n] ?? 0) + 1;
+        return resolvedPull(n, n === 41 && pullCalls[n]! > 1 ? "h41b" : `h${n}`);
+      },
+      createCommentReview: async () => ({ id: "9", url: "u" }),
+      createIssueComment: async (input: { pullNumber: number }) => {
+        issueComments.push(input.pullNumber);
+        return { id: "1", url: "u" };
+      },
+    } as unknown as GithubPort;
+    const pipeline = createPipeline({ config, store, github, checkout: await fixtureCheckout(), opencode: stackOpencode });
+    await pipeline.run(stack.job.id);
+
+    expect(store.getJob(stack.job.id)?.state).toBe("stale");
+    expect(issueComments).toHaveLength(0);
+    const logs = store.listLogs(stack.job.id).map((l) => l.message).join("\n");
+    expect(logs).toMatch(/head moved h41 → h41b/);
+  });
+});

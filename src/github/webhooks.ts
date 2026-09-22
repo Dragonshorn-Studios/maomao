@@ -511,6 +511,11 @@ async function handleStackCommand(
   if (!installationId || !repoOwner || !repoName || !repoFullName || !prNumber || !actorLogin || !input.github) {
     return { status: 202, body: { ok: true, ignored: true, reason: "missing github context" } };
   }
+  // Stack commands only make sense on pull requests — the same text on a
+  // plain issue must not record a declaration against an issue number.
+  if (!payload.issue?.pull_request) {
+    return { status: 202, body: { ok: true, ignored: true, reason: "stack commands require a pull request comment" } };
+  }
 
   if (isBotActor({ login: actor?.login, type: actor?.type })) {
     // Automation identities are admitted only via the explicit allowlist.
@@ -643,7 +648,10 @@ async function handleStackCommand(
         `${validation.members.map((m) => `#${m.prNumber}@${m.headSha.slice(0, 8)}`).join(" → ")}.`,
     );
   } else {
-    await reply(`Stack "${command.stackId}" already has a pending review (job ${enqueue.job.id}); nothing enqueued.`);
+    await reply(
+      `Stack "${command.stackId}" deduped onto job ${enqueue.job.id} ` +
+        `(${enqueue.skippedReason ?? `job ${enqueue.job.state}`}); nothing enqueued.`,
+    );
   }
   return {
     status: 200,

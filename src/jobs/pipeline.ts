@@ -1183,11 +1183,15 @@ async function waitForJob(store: JobStore, memberJobId: number, stackJobId: numb
   }
 }
 
-/** Post an issue comment on a member PR; absent the optional port the log records the text instead. */
+/**
+ * Post an issue comment on a member PR. Publishing is the stack review's
+ * whole purpose: a failure must fail the job (visible to the operator, and
+ * retried as a fresh run once a head moves) rather than silently complete
+ * with nothing posted.
+ */
 async function postStackComment(deps: PipelineDeps, job: JobRow, prNumber: number, body: string): Promise<void> {
   if (typeof deps.github.createIssueComment !== "function") {
-    deps.store.log(job.id, `Stack comment for #${prNumber} not posted (no issue-comment port): ${body.slice(0, 200)}`, "warn");
-    return;
+    throw new Error("stack review cannot publish: GitHub client has no issue-comment port");
   }
   try {
     await deps.github.createIssueComment({
@@ -1198,11 +1202,9 @@ async function postStackComment(deps: PipelineDeps, job: JobRow, prNumber: numbe
       body,
     });
   } catch (error) {
-    deps.store.log(
-      job.id,
-      `Stack comment for #${prNumber} failed: ${error instanceof Error ? error.message : error}`,
-      "warn",
-    );
+    const message = error instanceof Error ? error.message : String(error);
+    deps.store.log(job.id, `Stack comment for #${prNumber} failed: ${message}`, "error");
+    throw new Error(`failed to publish stack review on #${prNumber}: ${message}`);
   }
 }
 

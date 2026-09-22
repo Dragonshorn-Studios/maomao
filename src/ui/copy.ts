@@ -135,6 +135,10 @@ export function cancelledBannerCopy(job: {
       text: `Review cancelled by ${who}. Work stopped at the next checkpoint; the review was not completed.`,
     };
   }
+  if (job.cancelled_reason === "repo_paused") {
+    const who = job.cancelled_by ?? "an operator";
+    return { text: `Cancelled — ${who} paused automatic reviews for this repository.` };
+  }
   if (job.job_type === "health_scan") {
     return { text: "Scan cancelled. Findings already saved, if any, remain listed on this page." };
   }
