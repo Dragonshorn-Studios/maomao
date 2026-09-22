@@ -1,4 +1,7 @@
 import { createHmac } from "node:crypto";
+import { EventEmitter } from "node:events";
+import { PassThrough } from "node:stream";
+import type { ChildProcess } from "node:child_process";
 import { describe, expect, it, vi } from "vitest";
 import { loadConfig } from "./config.js";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync } from "node:fs";
@@ -16,6 +19,7 @@ type OpenCodeLike = OpenCodePort;
 import { createApp } from "./server.js";
 import { ForgeConnectionStore } from "./forge/connections.js";
 import { ProviderCredentialStore } from "./opencode/credentials.js";
+import { ModelDiscovery } from "./opencode/models.js";
 import { generateForgeKeyHex } from "./forge/secretbox.js";
 import { computeSignature } from "./gitlab/signature.js";
 import { fingerprintFinding } from "./findings/identity.js";
@@ -1149,6 +1153,108 @@ describe("provider credential routes", () => {
     expect(rejected.status).toBe(400);
     expect(await rejected.text()).toContain("whitespace");
     expect(existsSync(authPath)).toBe(false);
+    log.mockRestore();
+  });
+});
+
+describe("model discovery routes", () => {
+  function modelsSpawn(models: string[], failWith?: Error) {
+    const calls: string[][] = [];
+    const fn = (bin: string, args: string[], _opts: { env: NodeJS.ProcessEnv }): ChildProcess => {
+      calls.push([bin, ...args]);
+      const child = new EventEmitter() as ChildProcess & { stdout: PassThrough; stderr: PassThrough };
+      child.stdout = new PassThrough();
+      child.stderr = new PassThrough();
+      queueMicrotask(() => {
+        if (failWith) {
+          child.emit("error", failWith);
+        } else {
+          child.stdout.end(`${models.join("\n")}\n`);
+          child.emit("close", 0);
+        }
+      });
+      return child;
+    };
+    return { fn, calls };
+  }
+
+  it("merges discovered models into the profile editor datalist with key hints", async () => {
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    const dir = mkdtempSync(join(tmpdir(), "maomao-models-"));
+    const providerCredentials = new ProviderCredentialStore(join(dir, "opencode", "auth.json"), {});
+    expect(providerCredentials.set("anthropic", "sk-ant-some-key-value").ok).toBe(true);
+    const spawnFake = modelsSpawn(["anthropic/claude-4.5-sonnet", "openai/gpt-4o"]);
+    const modelDiscovery = new ModelDiscovery("opencode", {}, spawnFake.fn, 1000);
+    await modelDiscovery.refresh();
+    const { app } = testApp(
+      { UI_PASSWORD: "hunter2", UI_SESSION_SECRET: "session-secret-for-tests", MODEL_CATALOG: "catalog/curated" },
+      undefined,
+      undefined,
+      { providerCredentials, modelDiscovery },
+    );
+    const { session } = await loginSession(app);
+
+    const page = await app.request("/config", { headers: { cookie: session } });
+    const html = await page.text();
+    expect(html).toContain('value="catalog/curated" label="in MODEL_CATALOG"');
+    expect(html).toContain('value="anthropic/claude-4.5-sonnet" label="key configured"');
+    expect(html).toContain('value="openai/gpt-4o" label="discovered via opencode models"');
+    expect(html).toContain("2 models discovered");
+    log.mockRestore();
+  });
+
+  it("refresh re-runs opencode models and redirects back with a notice", async () => {
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    const models = ["openai/gpt-4o"];
+    const spawnFake = modelsSpawn(models);
+    const modelDiscovery = new ModelDiscovery("opencode", {}, spawnFake.fn, 1000);
+    const { app } = testApp(
+      { UI_PASSWORD: "hunter2", UI_SESSION_SECRET: "session-secret-for-tests" },
+      undefined,
+      undefined,
+      { modelDiscovery },
+    );
+    const { session } = await loginSession(app);
+    const page = await app.request("/config", { headers: { cookie: session } });
+    const { csrfCookie, csrfToken } = await csrfArtifacts(page);
+
+    models.push("anthropic/claude-4.5-sonnet");
+    // modelsSpawn captured the array reference, so the refresh sees the push.
+    const refreshed = await app.request("/config/models/refresh", {
+      method: "POST",
+      headers: { cookie: `${session}; ${csrfCookie}`, "content-type": "application/x-www-form-urlencoded" },
+      body: `csrf_token=${encodeURIComponent(csrfToken)}`,
+    });
+    expect(refreshed.status).toBe(303);
+    expect(refreshed.headers.get("location")).toBe("/config?notice=models-refreshed");
+    expect(spawnFake.calls).toEqual([["opencode", "models"]]);
+    expect(modelDiscovery.snapshot().models).toEqual(["openai/gpt-4o", "anthropic/claude-4.5-sonnet"]);
+    log.mockRestore();
+  });
+
+  it("surfaces a refresh failure as a failed-notice redirect and an editor note", async () => {
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    const spawnFake = modelsSpawn([], new Error("spawn opencode ENOENT"));
+    const modelDiscovery = new ModelDiscovery("opencode", {}, spawnFake.fn, 1000);
+    const { app } = testApp(
+      { UI_PASSWORD: "hunter2", UI_SESSION_SECRET: "session-secret-for-tests" },
+      undefined,
+      undefined,
+      { modelDiscovery },
+    );
+    const { session } = await loginSession(app);
+    const page = await app.request("/config", { headers: { cookie: session } });
+    const { csrfCookie, csrfToken } = await csrfArtifacts(page);
+
+    const refreshed = await app.request("/config/models/refresh", {
+      method: "POST",
+      headers: { cookie: `${session}; ${csrfCookie}`, "content-type": "application/x-www-form-urlencoded" },
+      body: `csrf_token=${encodeURIComponent(csrfToken)}`,
+    });
+    expect(refreshed.status).toBe(303);
+    expect(refreshed.headers.get("location")).toBe("/config?notice=models-refresh-failed");
+    const after = await app.request("/config", { headers: { cookie: session } });
+    expect(await after.text()).toContain("Live model discovery is unavailable");
     log.mockRestore();
   });
 });

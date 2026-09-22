@@ -58,6 +58,7 @@ import {
 } from "./ui/index.js";
 import { renderProvidersPage } from "./ui/providers.js";
 import { ProviderCredentialStore, opencodeAuthPath } from "./opencode/credentials.js";
+import { ModelDiscovery } from "./opencode/models.js";
 import type { JobRow } from "./jobs/store.js";
 import type { FindingRow } from "./findings/types.js";
 import type { ConfigPageData } from "./ui/index.js";
@@ -107,6 +108,8 @@ export interface ServerContext {
   forgeConnections?: ForgeConnectionStore;
   /** OpenCode provider credential store (auth.json). Defaults to the path the spawned child resolves. */
   providerCredentials?: ProviderCredentialStore;
+  /** Live model discovery via `opencode models`; the editor falls back to MODEL_CATALOG when unset. */
+  modelDiscovery?: ModelDiscovery;
   /** "Ask Maomao" explainer backend; undefined until MAOMAO_EXPLAIN_ENABLED. */
   chat?: { service: ChatService; store: ChatStore };
   /** The environment loadConfig consumed; defaults to process.env. Injectable for tests. */
@@ -987,10 +990,37 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
     }
   };
   const KNOWN_ROLE_OPTIONS = KNOWN_REVIEWER_ROLES.map((role) => ({ id: role.id, title: role.title }));
-  const profileEditorBase = () => ({
-    knownRoles: KNOWN_ROLE_OPTIONS,
-    modelCatalog: ctx.config.modelCatalog,
-  });
+  const profileEditorBase = () => {
+    const discovered = ctx.modelDiscovery?.snapshot();
+    const configured = new Set(
+      providerCreds()
+        .list()
+        .filter((status) => status.source !== "none")
+        .map((status) => status.id),
+    );
+    const seen = new Set<string>();
+    const modelCatalog: Array<{ id: string; hint?: string }> = [];
+    for (const id of ctx.config.modelCatalog) {
+      if (seen.has(id)) continue;
+      seen.add(id);
+      modelCatalog.push({ id, hint: "in MODEL_CATALOG" });
+    }
+    for (const id of discovered?.models ?? []) {
+      if (seen.has(id)) continue;
+      seen.add(id);
+      modelCatalog.push({
+        id,
+        hint: configured.has(id.split("/")[0] ?? "") ? "key configured" : "discovered via opencode models",
+      });
+    }
+    return {
+      knownRoles: KNOWN_ROLE_OPTIONS,
+      modelCatalog,
+      discovery: ctx.modelDiscovery
+        ? { count: discovered?.models.length ?? 0, fetchedAt: discovered?.fetchedAt ?? 0, error: discovered?.error }
+        : undefined,
+    };
+  };
 
   const renderConfigWithError = (
     c: Context<AppEnv>,
@@ -1163,6 +1193,16 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
     return c.redirect("/config/providers?notice=" + encodeURIComponent(note), 303);
   });
 
+  // Re-runs `opencode models` so the profile editor's datalist picks up newly
+  // configured providers (a stored key in auth.json only appears in the list
+  // after a refresh).
+  app.post("/config/models/refresh", async (c) => {
+    if (!gateOn) return c.redirect("/", 302);
+    const snap = await ctx.modelDiscovery?.refresh();
+    const key = snap?.error ? "models-refresh-failed" : "models-refreshed";
+    return c.redirect("/config?notice=" + key, 303);
+  });
+
   app.get("/config", (c) => {
     if (!gateOn) return c.redirect("/", 302);
     const notices: Record<string, string> = {
@@ -1171,6 +1211,8 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
       activated: "Revision activated.",
       "rolled-back": "Revision rolled back.",
       imported: "Configuration imported as drafts.",
+      "models-refreshed": "Model list refreshed from opencode models.",
+      "models-refresh-failed": "Model list refresh failed — see the note in the profile editor for details.",
     };
     const noticeKey = c.req.query("notice") ?? "";
     return c.html(
