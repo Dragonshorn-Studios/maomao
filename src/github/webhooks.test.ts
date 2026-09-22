@@ -1208,3 +1208,263 @@ describe("merged-pull marker with no active jobs", () => {
     expect(store.getJob(jobId)?.manual_escalate_requested).toBeFalsy();
   });
 });
+
+// ---- Timed review pause + deterministic stack commands (issue #99) ----
+
+function commentPayload(overrides: Record<string, unknown> = {}) {
+  return {
+    action: "created",
+    installation: { id: 42, account: { id: 1001 } },
+    repository: { id: 2002, full_name: "acme/widgets", name: "widgets", owner: { login: "acme", id: 1001 } },
+    issue: { number: 42, pull_request: { url: "https://github.com/acme/widgets/pull/42" } },
+    comment: {
+      id: 9001,
+      body: "issue 1 of 2 in stack ship-it",
+      user: { login: "alice", type: "User" },
+      author_association: "OWNER",
+    },
+    ...overrides,
+  };
+}
+
+function resolvedStackPull(prNumber: number, overrides: Record<string, unknown> = {}) {
+  return {
+    installationId: 42,
+    accountId: 1001,
+    repositoryId: 2002,
+    repoOwner: "acme",
+    repoName: "widgets",
+    repoFullName: "acme/widgets",
+    prNumber,
+    prTitle: `PR ${prNumber}`,
+    prBody: "",
+    prHtmlUrl: `https://github.com/acme/widgets/pull/${prNumber}`,
+    prAuthor: "alice",
+    baseSha: `base${prNumber}`,
+    headSha: `head${prNumber}`,
+    baseRef: "main",
+    headRef: `feat-${prNumber}`,
+    draft: false,
+    ...overrides,
+  };
+}
+
+function stackGithub(overrides: {
+  permission?: RepoPermission;
+  pulls?: Record<number, ReturnType<typeof resolvedStackPull> | undefined>;
+  comments?: { pullNumber: number; body: string }[];
+} = {}) {
+  const comments = overrides.comments ?? [];
+  const github = {
+    ...githubForCommands({ permission: overrides.permission ?? "write" }),
+    createIssueComment: async (input: { pullNumber: number; body: string }) => {
+      comments.push({ pullNumber: input.pullNumber, body: input.body });
+      return { id: `${comments.length}`, url: "u" };
+    },
+    getPull: async (_installationId: number, _owner: string, _repo: string, n: number) => {
+      const pull = overrides.pulls?.[n];
+      if (!pull) throw new Error(`no pull #${n}`);
+      return pull;
+    },
+  };
+  return { github: github as unknown as GithubPort, comments };
+}
+
+describe("timed review pause (issue #99)", () => {
+  it("skips automatic pull_request deliveries while paused and resumes after expiry", async () => {
+    const secret = "s3cret";
+    const config = loadConfig({
+      GITHUB_WEBHOOK_SECRET: secret,
+      GITHUB_APP_ID: "1",
+      GITHUB_APP_PRIVATE_KEY: "k",
+      REVIEWER_ROLES: "correctness",
+    });
+    const store = new JobStore(openDb(":memory:"));
+    store.createPause({ repoFullName: "acme/widgets", actor: "alice", durationMs: 60_000 });
+
+    const body = JSON.stringify(prPayload());
+    const paused = await handleGithubWebhook({
+      config,
+      store,
+      request: { event: "pull_request", deliveryId: "p1", signature: sign(secret, body), rawBody: body },
+    });
+    expect(paused.status).toBe(202);
+    expect(paused.body.ignored).toBe(true);
+    expect(String(paused.body.reason)).toMatch(/paused/i);
+    expect(store.listJobs(10)).toHaveLength(0);
+    // The skip is claimed on the delivery row — a retry cannot slip a job in.
+    expect(store.hasWebhookDelivery("p1")).toBe(true);
+    const dup = await handleGithubWebhook({
+      config,
+      store,
+      request: { event: "pull_request", deliveryId: "p1", signature: sign(secret, body), rawBody: body },
+    });
+    expect(dup.body.duplicate ?? dup.body.ignored).toBeTruthy();
+    expect(store.listJobs(10)).toHaveLength(0);
+
+    // An expired pause stops matching with no backfill — a NEW delivery
+    // enqueues normally; the skipped delivery is never replayed.
+    store.createPause({ repoFullName: "acme/widgets", actor: "alice", durationMs: -1 });
+    const expired = await handleGithubWebhook({
+      config,
+      store,
+      request: { event: "pull_request", deliveryId: "p2", signature: sign(secret, body), rawBody: body },
+    });
+    expect(expired.body.created).toBe(true);
+    expect(store.listJobs(10)).toHaveLength(1);
+  });
+});
+
+describe("stack commands (issue #99)", () => {
+  const stackConfig = (secret: string, extra: Record<string, string> = {}) =>
+    loadConfig({
+      GITHUB_WEBHOOK_SECRET: secret,
+      GITHUB_APP_ID: "1",
+      GITHUB_APP_PRIVATE_KEY: "k",
+      REVIEWER_ROLES: "correctness",
+      ...extra,
+    });
+
+  it("records a declaration for an authorized human and answers on the PR", async () => {
+    const secret = "s3cret";
+    const config = stackConfig(secret);
+    const store = new JobStore(openDb(":memory:"));
+    const { github, comments } = stackGithub();
+    const body = JSON.stringify(commentPayload());
+    const result = await handleGithubWebhook({
+      config,
+      store,
+      github,
+      request: { event: "issue_comment", deliveryId: "c1", signature: sign(secret, body), rawBody: body },
+    });
+    expect(result.status).toBe(200);
+    const decls = store.listStackDeclarations("acme/widgets", "ship-it");
+    expect(decls).toHaveLength(1);
+    expect(decls[0]?.pr_number).toBe(42);
+    expect(decls[0]?.position).toBe(1);
+    expect(comments.some((c) => /Recorded/.test(c.body))).toBe(true);
+  });
+
+  it("ignores a non-allowlisted bot and accepts one from MAOMAO_STACK_AUTHORS", async () => {
+    const secret = "s3cret";
+    const config = stackConfig(secret, { MAOMAO_STACK_AUTHORS: "ci-bot[bot]" });
+    const store = new JobStore(openDb(":memory:"));
+    const botComment = (id: number, login: string) =>
+      JSON.stringify(
+        commentPayload({
+          comment: { id, body: "issue 1 of 2 in stack ship-it", user: { login, type: "Bot" }, author_association: "NONE" },
+        }),
+      );
+    const denied = await handleGithubWebhook({
+      config,
+      store,
+      github: stackGithub().github,
+      request: { event: "issue_comment", deliveryId: "b1", signature: sign(secret, botComment(1, "other[bot]")), rawBody: botComment(1, "other[bot]") },
+    });
+    expect(denied.body.ignored).toBe(true);
+    expect(store.listStackDeclarations("acme/widgets", "ship-it")).toHaveLength(0);
+
+    const { github, comments } = stackGithub();
+    const allowed = await handleGithubWebhook({
+      config,
+      store,
+      github,
+      request: { event: "issue_comment", deliveryId: "b2", signature: sign(secret, botComment(2, "ci-bot[bot]")), rawBody: botComment(2, "ci-bot[bot]") },
+    });
+    expect(allowed.status).toBe(200);
+    expect(store.listStackDeclarations("acme/widgets", "ship-it")).toHaveLength(1);
+    expect(comments.length).toBe(1);
+  });
+
+  it("validates the whole stack and enqueues exactly one stack_review job", async () => {
+    const secret = "s3cret";
+    const config = stackConfig(secret);
+    const store = new JobStore(openDb(":memory:"));
+    store.upsertStackDeclaration({ repoFullName: "acme/widgets", stackId: "ship-it", prNumber: 41, position: 1, expectedCount: 2, actor: "alice" });
+    store.upsertStackDeclaration({ repoFullName: "acme/widgets", stackId: "ship-it", prNumber: 42, position: 2, expectedCount: 2, actor: "alice" });
+
+    const pulls = {
+      41: resolvedStackPull(41, { baseRef: "main", headRef: "feat-a", baseSha: "m0", headSha: "h41" }),
+      42: resolvedStackPull(42, { baseRef: "feat-a", headRef: "feat-b", baseSha: "h41", headSha: "h42" }),
+    };
+    const { github, comments } = stackGithub({ pulls });
+    const topBody = JSON.stringify(
+      commentPayload({ comment: { id: 42, body: "@maomao top of stack ship-it: #41, #42", user: { login: "alice", type: "User" }, author_association: "OWNER" } }),
+    );
+    const result = await handleGithubWebhook({
+      config,
+      store,
+      github,
+      request: { event: "issue_comment", deliveryId: "t1", signature: sign(secret, topBody), rawBody: topBody },
+    });
+    expect(result.status).toBe(200);
+    expect(result.body.enqueued).toBe(true);
+    const jobs = store.listJobs(10).filter((j) => j.job_type === "stack_review");
+    expect(jobs).toHaveLength(1);
+    const job = jobs[0]!;
+    expect(job.dedup_key).toBe("stack:ship-it");
+    expect(job.pr_number).toBe(42);
+    const members = store.listStackMembers(job.id);
+    expect(members.map((m) => m.pr_number)).toEqual([41, 42]);
+    expect(members[1]?.head_sha).toBe("h42");
+    expect(comments.some((c) => /enqueued/.test(c.body))).toBe(true);
+
+    // A re-trigger dedups on the same SHA vector — still exactly one job.
+    const again = await handleGithubWebhook({
+      config,
+      store,
+      github,
+      request: { event: "issue_comment", deliveryId: "t2", signature: sign(secret, topBody.replace('"id":42', '"id":43')), rawBody: topBody.replace('"id":42', '"id":43') },
+    });
+    expect(again.body.enqueued).toBe(false);
+    expect(store.listJobs(10).filter((j) => j.job_type === "stack_review")).toHaveLength(1);
+  });
+
+  it("posts one actionable error comment on an invalid trigger and enqueues nothing", async () => {
+    const secret = "s3cret";
+    const config = stackConfig(secret);
+    const store = new JobStore(openDb(":memory:"));
+    const pulls = {
+      41: resolvedStackPull(41),
+      42: resolvedStackPull(42, { baseRef: "feat-41" }),
+    };
+    const { github, comments } = stackGithub({ pulls });
+    const body = JSON.stringify(
+      commentPayload({ comment: { id: 77, body: "top of stack ghost: #41, #42", user: { login: "alice", type: "User" }, author_association: "OWNER" } }),
+    );
+    const result = await handleGithubWebhook({
+      config,
+      store,
+      github,
+      request: { event: "issue_comment", deliveryId: "e1", signature: sign(secret, body), rawBody: body },
+    });
+    expect(result.status).toBe(200);
+    expect(result.body.enqueued).toBe(false);
+    expect(store.listJobs(10)).toHaveLength(0);
+    expect(comments).toHaveLength(1);
+    expect(comments[0]?.body).toMatch(/never declared/);
+  });
+
+  it("dedupes repeated comment deliveries", async () => {
+    const secret = "s3cret";
+    const config = stackConfig(secret);
+    const store = new JobStore(openDb(":memory:"));
+    const { github, comments } = stackGithub();
+    const body = JSON.stringify(commentPayload());
+    await handleGithubWebhook({
+      config,
+      store,
+      github,
+      request: { event: "issue_comment", deliveryId: "d1", signature: sign(secret, body), rawBody: body },
+    });
+    const dup = await handleGithubWebhook({
+      config,
+      store,
+      github,
+      request: { event: "issue_comment", deliveryId: "d2", signature: sign(secret, body), rawBody: body },
+    });
+    expect(dup.body.duplicate).toBe(true);
+    expect(store.listStackDeclarations("acme/widgets", "ship-it")).toHaveLength(1);
+    expect(comments).toHaveLength(1);
+  });
+});

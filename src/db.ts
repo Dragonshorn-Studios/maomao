@@ -388,6 +388,44 @@ function migrate(db: SqliteDb): void {
       created_at TEXT NOT NULL,
       PRIMARY KEY (provider, provider_instance, repo_full_name, sha)
     );
+
+    CREATE TABLE IF NOT EXISTS repo_pauses (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      ${PROVIDER_COLUMNS},
+      repo_full_name TEXT NOT NULL,
+      actor TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      expires_at TEXT NOT NULL,
+      ended_at TEXT,
+      ended_by TEXT
+    );
+
+    CREATE TABLE IF NOT EXISTS stack_declarations (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      ${PROVIDER_COLUMNS},
+      repo_full_name TEXT NOT NULL,
+      stack_id TEXT NOT NULL,
+      pr_number INTEGER NOT NULL,
+      position INTEGER NOT NULL,
+      expected_count INTEGER NOT NULL,
+      actor TEXT NOT NULL,
+      comment_id TEXT,
+      created_at TEXT NOT NULL,
+      UNIQUE (provider, provider_instance, repo_full_name, stack_id, pr_number)
+    );
+
+    CREATE TABLE IF NOT EXISTS stack_run_members (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      job_id INTEGER NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
+      position INTEGER NOT NULL,
+      pr_number INTEGER NOT NULL,
+      base_ref TEXT NOT NULL DEFAULT '',
+      head_ref TEXT NOT NULL DEFAULT '',
+      base_sha TEXT NOT NULL,
+      head_sha TEXT NOT NULL,
+      member_job_id INTEGER,
+      state TEXT NOT NULL DEFAULT 'queued'
+    );
   `);
 
     // Legacy (pre-multi-forge) databases: rebuild the provider-scoped tables so

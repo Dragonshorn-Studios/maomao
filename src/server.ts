@@ -18,7 +18,7 @@ import { authorizeGithubAccount, authorizeGithubRepository, authorizeGithubTarge
 import { repoRateLimitActive, RepoRateLimiter, WindowRateLimiter } from "./github/rate-limit.js";
 import { parseGithubPullUrl, PullUrlError } from "./github/pull-url.js";
 import { dispatchEnqueue, enqueuePullJob } from "./jobs/enqueue.js";
-import { cancelJob } from "./jobs/cancel.js";
+import { cancelJob, cancelJobsForRepoType } from "./jobs/cancel.js";
 import { LIVE_JOB_STATES } from "./config.js";
 import { effectiveConfigEntries } from "./config-effective.js";
 import type { ProfileFieldErrors, ProfileFormValues } from "./config-form.js";
@@ -36,6 +36,8 @@ import {
   renderBriefPage,
   renderBriefConfirmPage,
   renderBriefTabPage,
+  renderPausePage,
+  PAUSE_DURATIONS,
   renderCancelConfirmPage,
   renderConfigPage,
   renderProfilesPage,
@@ -64,6 +66,7 @@ import {
   type ScanPageData,
   type BriefConfirmNotice,
   type BriefPageData,
+  type PausePageData,
 } from "./ui/index.js";
 import { renderProvidersPage } from "./ui/providers.js";
 import { ProviderCredentialStore, opencodeAuthPath } from "./opencode/credentials.js";
@@ -962,6 +965,7 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
         }),
         scanIssueCreation: scanIssueCreationData(job),
         scanIssues: job.job_type === "health_scan" ? ctx.store.listScanIssues(job.id) : undefined,
+        stackMembers: job.job_type === "stack_review" ? ctx.store.listStackMembers(job.id) : undefined,
       }),
     );
   });
@@ -2156,6 +2160,123 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
         csrfToken: gateOn ? ensureCsrfToken(c, ctx.config.uiSessionSecret) : undefined,
       }),
     );
+  });
+
+  const pausePageData = (
+    c: Context<AppEnv>,
+    extra: { error?: string; notice?: string } = {},
+  ): PausePageData => ({
+    canOperate: Boolean(configActor(c)),
+    identity: c.get("identity"),
+    csrfToken: ensureCsrfToken(c, ctx.config.uiSessionSecret),
+    pauses: ctx.store.listActivePauses().map((pause) => ({
+      id: pause.id,
+      repoFullName: pause.repo_full_name,
+      expiresAt: pause.expires_at,
+      actor: pause.actor,
+    })),
+    ...extra,
+  });
+
+  // Timed automatic-review pause (issue #99): an operator gates pull_request
+  // webhook enqueue for one repository until an expiry; manual forms and
+  // stack commands are unaffected, and enabling cancels pending pr_review
+  // jobs so queued work never starts expensive reviewers inside the window.
+  app.get("/pause", (c) => {
+    if (!gateOn) return c.redirect("/", 302);
+    return c.html(renderPausePage(pausePageData(c, { notice: c.req.query("notice") })));
+  });
+
+  app.post("/pause", async (c) => {
+    if (!gateOn) return c.redirect("/", 302);
+    const actor = configActor(c);
+    if (!actor) {
+      return c.html(
+        renderPausePage(pausePageData(c, { error: "Managing review pauses requires an operator GitHub OAuth identity." })),
+        403,
+      );
+    }
+    if (!ctx.github || !isReviewGithub(ctx.github)) {
+      return c.html(
+        renderPausePage(pausePageData(c, { error: "GitHub App client is not configured on this process." })),
+        503,
+      );
+    }
+    const body = await c.req.parseBody();
+    const parsed = parseRepoInput(typeof body.repo === "string" ? body.repo : "");
+    if (!parsed) {
+      return c.html(renderPausePage(pausePageData(c, { error: "Enter a repository as owner/repo or a GitHub URL." })), 400);
+    }
+    const hours = Number(body.duration_hours);
+    if (!PAUSE_DURATIONS.some((d) => d.hours === hours)) {
+      return c.html(renderPausePage(pausePageData(c, { error: "Pick one of the offered pause durations." })), 400);
+    }
+    try {
+      const installation = await ctx.github.getRepoInstallation(parsed.owner, parsed.repo);
+      const accountAuth = authorizeGithubAccount(ctx.config, {
+        installationId: installation.installationId,
+        accountId: installation.accountId,
+      });
+      const repository = accountAuth.ok
+        ? await ctx.github.getRepository(parsed.owner, parsed.repo, installation.installationId)
+        : undefined;
+      const repoAuth =
+        accountAuth.ok && repository
+          ? rejectUnauthorized(ctx.config, {
+              installationId: installation.installationId,
+              accountId: installation.accountId,
+              repositoryId: repository.id,
+            })
+          : accountAuth;
+      if (!repoAuth.ok) {
+        logAuthorizationRejection({ installationId: installation.installationId, reason: repoAuth.reason });
+        return c.html(
+          renderPausePage(pausePageData(c, { error: "Not authorized to pause reviews on this installation or repository." })),
+          403,
+        );
+      }
+      const repoFullName = `${parsed.owner}/${parsed.repo}`;
+      const pause = ctx.store.createPause({
+        repoFullName,
+        actor: actor.login,
+        durationMs: hours * 60 * 60 * 1000,
+      });
+      // Queued and in-flight automatic reviews for the repo are cancelled at
+      // the same moment the pause takes effect; scans, briefs, and stack
+      // reviews are explicit operator actions and are never touched.
+      const { cancelledJobIds } = cancelJobsForRepoType(ctx.store, {
+        repoFullName,
+        jobType: "pr_review",
+        reason: "repo_paused",
+        actor: actor.login,
+        note: `paused until ${pause.expires_at}`,
+        onCancelled: (ids) => ctx.queue.abortMany(ids),
+      });
+      return c.redirect(
+        `/pause?notice=${encodeURIComponent(
+          `Automatic reviews for ${repoFullName} paused until ${pause.expires_at}` +
+            (cancelledJobIds.length ? ` — cancelled ${cancelledJobIds.length} job(s)` : ""),
+        )}`,
+        302,
+      );
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      console.error(`pause: could not pause ${parsed.owner}/${parsed.repo}: ${message}`);
+      return c.html(renderPausePage(pausePageData(c, { error: message })), 400);
+    }
+  });
+
+  app.post("/pause/:id/end", (c) => {
+    if (!gateOn) return c.redirect("/", 302);
+    const actor = configActor(c);
+    if (!actor) {
+      return c.html(
+        renderPausePage(pausePageData(c, { error: "Managing review pauses requires an operator GitHub OAuth identity." })),
+        403,
+      );
+    }
+    ctx.store.endPause(Number(c.req.param("id")), actor.login);
+    return c.redirect("/pause", 302);
   });
 
   type ScanIssuePort = ManualTriggerPort & {

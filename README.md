@@ -487,6 +487,23 @@ Set `MAOMAO_EXPLAIN_ENABLED=true` and each job page gains an **Ask Maomao** chat
 - The result is a table of contents of 5–15 sections — the files that matter for understanding what this SHA holds, in reading order. Each job page gains a **Repo brief** tab (`/jobs/<id>/brief`); opening a section shows the bounded file fragment the pipeline captured at run time, so the tab keeps working after the workspace is swept. Paths come from model output and are treated as untrusted — absolute, escaping, or symlinked paths are rejected server-side.
 - Every confirmed brief is its own job ("this run / this SHA"). A completed payload is also kept in the `repo_brief_cache` table keyed by forge + repository + exact SHA, so a second brief on the same tip is served from cache — no clone, no OpenCode run — and the tab notes that it was served from cache. A different SHA is a different key and always re-runs; there is no cross-repo or cross-forge bleed. Set `MAOMAO_BRIEF_CACHE_ENABLED=false` to opt out and always re-run. The cache is an optimization, not an index — there is no sidebar or persistent tree.
 
+## Review pause and PR stacks
+
+`/pause` (operator UI) sets a **timed automatic-review pause** for one repository while a stack is being built. It is durable (SQLite row), expiring (2/8/24/72 hours), operator-only (OAuth identity + installation/repository allowlists), and visible on the page until it expires or an operator ends it early.
+
+- While a pause is active, `pull_request` webhook deliveries for that repository are skipped — recorded on the delivery row — and never enqueue work or spend reviewer budget. Manual URL reviews, health scans, repo briefs, and stack commands are unaffected: the pause gates *automatic* reviews only.
+- Starting a pause cancels queued and in-flight `pr_review` jobs for the repository (cancel reason `repo_paused`); scans, briefs, and stack reviews are never touched. Starting a new pause on a paused repository supersedes the old one (extend).
+- An expired pause simply stops matching — there is no backfill and no replay of intermediate pushes; a `ready_for_review` or the next push resumes normal handling. Pauses can only be managed from `/pause` or by expiry — PR comments cannot create, extend, or end a pause.
+
+**Stack commands** are deterministic comments on pull requests (no model is involved in parsing or scheduling):
+
+- `issue X of Y in stack <id>` — declares the PR it is posted on as member `X` of `Y` of stack `<id>`; recorded idempotently, conflicts (same PR, different position) get an error comment. Declarations never touch the pause.
+- `top of stack <id>: #a, #b, #c` — posted on the **top** PR; validates that every listed PR resolves in the same repository, is declared for the stack at its listed position with a matching count, and chains (`#b` bases on `#a`'s head branch). An invalid trigger gets one actionable error comment; a valid one pins the ordered base/head SHA vector and enqueues exactly one `stack_review` job (deduped per stack id — re-triggers stale a pending run for the same stack, never double-run).
+
+Authorization: humans need the same collaborator permission as other commands; automation identities (bot logins) are admitted only via `MAOMAO_STACK_AUTHORS`. Duplicate comment deliveries and duplicate webhook deliveries are deduped — they can never double-post or double-enqueue.
+
+A **stack review** job is one logical operation: it re-pins each member's SHAs at run start (heads that moved early are re-pinned, not failed), reviews each member in order as a normal `pr_review` job (reusing existing budget, dedup, and publish paths — a matching completed review is reused, not re-run), then re-checks every head before publishing anything stack-level. If a head moved after pinning, the run is marked **stale** and posts nothing. Otherwise one cumulative OpenCode pass hunts cross-PR breakage (contracts a lower PR changes that a higher PR still uses), and the stack summary plus each cross-PR finding is posted as an issue comment on the top PR — every finding names the PRs and SHAs involved. The job page's **Stack members** table shows the pinned SHA vector, per-member state, and links to each member review job.
+
 ## Specialist prompts, fixtures, and offline evaluation
 
 `/config/prompts` manages **versioned specialist prompts**: per-role revisions with an operator-editable body. Security guardrails (the hard rules and JSON schema) are composed at runtime and are never part of an editable revision — the UI shows them separately.

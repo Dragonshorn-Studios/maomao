@@ -40,10 +40,13 @@ export {
   renderBriefPage,
   renderBriefConfirmPage,
   renderBriefTabPage,
+  renderPausePage,
+  PAUSE_DURATIONS,
   type BriefPageData,
   type BriefConfirmData,
   type BriefConfirmNotice,
   type BriefTabData,
+  type PausePageData,
 } from "./pages.js";
 export { THEME_CSS, THEME_HREF } from "./theme.js";
 export { TYPEAHEAD_JS, TYPEAHEAD_HREF } from "./typeahead.js";

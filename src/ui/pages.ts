@@ -201,7 +201,35 @@ export type JobPageOptions = PageOptions & {
   scanIssueCreation?: ScanIssueCreationData;
   /** Provenance rows for a health-scan job (fingerprints → GitHub issues). */
   scanIssues?: Array<{ fingerprint: string; issue_number: number; issue_url: string; title: string }>;
+  /** Ordered, SHA-pinned members of a stack_review job. */
+  stackMembers?: Array<{
+    position: number;
+    pr_number: number;
+    base_ref: string;
+    head_ref: string;
+    base_sha: string;
+    head_sha: string;
+    member_job_id: number | null;
+    state: string;
+  }>;
 };
+
+/** Ordered member list with pinned SHAs and links to each member's review job. */
+function renderStackMembers(members: NonNullable<JobPageOptions["stackMembers"]>): string {
+  const rows = members
+    .map(
+      (member) => `<tr>
+        <td class="metric">${member.position}</td>
+        <td>#${member.pr_number}${member.member_job_id != null ? ` · <a href="/jobs/${member.member_job_id}">job ${member.member_job_id}</a>` : ""}</td>
+        <td><code>${escapeHtml(member.base_ref || "—")}</code> → <code>${escapeHtml(member.head_ref || "—")}</code></td>
+        <td><code class="sha">${escapeHtml(shortSha(member.head_sha, 12))}</code></td>
+        <td>${escapeHtml(member.state)}</td>
+      </tr>`,
+    )
+    .join("");
+  return `<h2>Stack members</h2>
+    <table class="config-audit"><thead><tr><th>#</th><th>Pull request</th><th>Refs</th><th>Pinned head</th><th>State</th></tr></thead><tbody>${rows}</tbody></table>`;
+}
 
 function renderScanIssuesAudit(rows: NonNullable<JobPageOptions["scanIssues"]>): string {
   const items = rows
@@ -320,6 +348,7 @@ export function renderJob(
     </dl>
     ${isBrief ? "" : renderRouting(job)}
     ${isBrief ? "" : renderEscalation(job)}
+    ${options.stackMembers?.length ? renderStackMembers(options.stackMembers) : ""}
     ${job.failure_reason ? `<p class="error" role="alert"><strong>Failure:</strong> ${escapeHtml(job.failure_reason)}</p>` : ""}
     <div class="section-head">
       <h2>Reviewers</h2>
@@ -2139,6 +2168,79 @@ export function renderBriefPage(data: BriefPageData): string {
     : `<p class="muted">Repo briefs require an operator GitHub OAuth identity.</p>`}`;
   return layout("Repo brief", body, {
     showLogout: data.canBrief || Boolean(data.csrfToken),
+    csrfToken: data.csrfToken,
+    identity: data.identity,
+    surface: "operator",
+  });
+}
+
+export interface PausePageData {
+  canOperate: boolean;
+  identity?: UiIdentity;
+  csrfToken?: string;
+  pauses: Array<{ id: number; repoFullName: string; expiresAt: string; actor: string }>;
+  error?: string;
+  notice?: string;
+}
+
+/** Duration choices for a timed review pause — a fixed menu keeps the bound explicit. */
+export const PAUSE_DURATIONS: { hours: number; label: string }[] = [
+  { hours: 2, label: "2 hours" },
+  { hours: 8, label: "8 hours" },
+  { hours: 24, label: "24 hours" },
+  { hours: 72, label: "72 hours" },
+];
+
+export function renderPausePage(data: PausePageData): string {
+  const csrf = csrfInput(data.csrfToken);
+  const pauseRows = data.pauses.length
+    ? `<ul class="queue">${data.pauses
+        .map(
+          (pause) => `
+          <li><article class="specimen">
+            <p class="specimen-title">${escapeHtml(pause.repoFullName)}</p>
+            <div class="meta-row">
+              <span class="pair">expires <strong>${escapeHtml(pause.expiresAt)}</strong></span>
+              <span class="pair">by <strong>${escapeHtml(pause.actor)}</strong></span>
+            </div>
+            <form class="trigger" method="post" action="/pause/${pause.id}/end">
+              ${csrf}
+              <button type="submit" aria-label="End pause for ${escapeHtml(pause.repoFullName)}">End now</button>
+            </form>
+          </article></li>`,
+        )
+        .join("")}</ul>`
+    : `<p class="muted">No repositories are paused.</p>`;
+  const body = `
+    <h1>Review pause</h1>
+    <p class="lede">Pause automatic pull-request reviews for one repository while a stack is being built. Expiring a pause resumes normal handling of future webhooks — it does not backfill intermediate states. Manual reviews, scans, briefs, and an explicit stack trigger still work during a pause.</p>
+    ${data.error ? `<p class="error" role="alert">${escapeHtml(data.error)}</p>` : ""}
+    ${data.notice ? `<p class="notice" role="status">${escapeHtml(data.notice)}</p>` : ""}
+    ${data.canOperate ? `
+    <form class="trigger" method="post" action="/pause">
+      ${csrf}
+      <label for="pause-repo-input">Repository (owner/repo — must be an allowlisted installation)
+        <span class="typeahead-wrap">
+          <input id="pause-repo-input" name="repo" placeholder="owner/repo — start typing to search" required autocomplete="off"
+            role="combobox" aria-expanded="false" aria-controls="repo-listbox" aria-autocomplete="list"
+            data-repo-typeahead/>
+          <ul id="repo-listbox" role="listbox" aria-label="Allowlisted repositories" class="typeahead-listbox" hidden></ul>
+        </span>
+      </label>
+      <label for="pause-duration">Pause duration
+        <select id="pause-duration" name="duration_hours">
+          ${PAUSE_DURATIONS.map((d) => `<option value="${d.hours}"${d.hours === 24 ? " selected" : ""}>${d.label}</option>`).join("")}
+        </select>
+      </label>
+      <button type="submit" aria-label="Pause automatic reviews">Pause reviews</button>
+    </form>
+    <p class="muted">Pausing now cancels queued and in-flight automatic reviews for the repository; starting a new pause for a paused repository extends it. Stack declarations and the stack trigger are posted as PR comments, not here.</p>
+    <h2>Active pauses</h2>
+    ${pauseRows}
+    <script src="${TYPEAHEAD_HREF}" defer></script>`
+    : `<p class="muted">Managing review pauses requires an operator GitHub OAuth identity.</p>`}`;
+  return layout("Review pause", body, {
+    showLogout: data.canOperate || Boolean(data.csrfToken),
     csrfToken: data.csrfToken,
     identity: data.identity,
     surface: "operator",

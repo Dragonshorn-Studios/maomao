@@ -386,3 +386,97 @@ describe("setFindingStatus", () => {
     expect(untouched?.status).toBe("resolved");
   });
 });
+
+describe("repo pauses and stack state (issue #99)", () => {
+  it("supersedes an active pause, expires by time, and ends explicitly", () => {
+    const store = new JobStore(openDb(":memory:"));
+    const first = store.createPause({ repoFullName: "acme/widgets", actor: "alice", durationMs: 60_000 });
+    expect(store.getActivePause("acme/widgets")?.id).toBe(first.id);
+    expect(store.listActivePauses()).toHaveLength(1);
+
+    // A new pause supersedes (extends) the active one for the same repo.
+    const second = store.createPause({ repoFullName: "acme/widgets", actor: "alice", durationMs: 120_000 });
+    expect(store.getActivePause("acme/widgets")?.id).toBe(second.id);
+    expect(store.listActivePauses()).toHaveLength(1);
+
+    expect(store.endPause(second.id, "bob")).toBe(true);
+    expect(store.getActivePause("acme/widgets")).toBeUndefined();
+    // Ending an already-ended pause is a no-op.
+    expect(store.endPause(second.id, "bob")).toBe(false);
+
+    store.createPause({ repoFullName: "acme/widgets", actor: "alice", durationMs: -1 });
+    expect(store.getActivePause("acme/widgets")).toBeUndefined();
+    expect(store.listActivePauses()).toHaveLength(0);
+  });
+
+  it("records stack declarations idempotently and rejects conflicting ones", () => {
+    const store = new JobStore(openDb(":memory:"));
+    const input = { repoFullName: "acme/widgets", stackId: "s1", prNumber: 7, position: 1, expectedCount: 2, actor: "alice" };
+    expect(store.upsertStackDeclaration(input)).toEqual({ ok: true, created: true });
+    // Same declaration again: idempotent, no new row.
+    expect(store.upsertStackDeclaration(input)).toEqual({ ok: true, created: false });
+    expect(store.listStackDeclarations("acme/widgets", "s1")).toHaveLength(1);
+
+    // Same PR at a different position is a conflict, not a move.
+    const conflict = store.upsertStackDeclaration({ ...input, position: 2 });
+    expect(conflict.ok).toBe(false);
+
+    // A different PR claiming the same position is also a conflict.
+    const occupied = store.upsertStackDeclaration({ ...input, prNumber: 8, position: 1 });
+    expect(occupied.ok).toBe(false);
+    expect(store.listStackDeclarations("acme/widgets", "s1")).toHaveLength(1);
+    expect(store.upsertStackDeclaration({ ...input, prNumber: 8, position: 2 })).toEqual({ ok: true, created: true });
+    expect(store.listStackDeclarations("acme/widgets", "s1").map((d) => d.pr_number)).toEqual([7, 8]);
+  });
+
+  it("pins and patches stack run members", () => {
+    const store = new JobStore(openDb(":memory:"));
+    const job = store.enqueue({
+      repoFullName: "acme/widgets",
+      repoOwner: "acme",
+      repoName: "widgets",
+      installationId: 42,
+      prNumber: 42,
+      prTitle: "top",
+      prBody: "",
+      prHtmlUrl: "u",
+      prAuthor: "alice",
+      baseSha: "b",
+      headSha: "h",
+      baseRef: "main",
+      headRef: "feat",
+      reviewers: [{ role: "stack_cumulative", title: "Stack cumulative" }],
+      jobType: "stack_review",
+      dedupKey: "stack:s1",
+    });
+    store.insertStackMembers(job.job.id, [
+      { position: 1, prNumber: 41, baseRef: "main", headRef: "a", baseSha: "b1", headSha: "h1" },
+      { position: 2, prNumber: 42, baseRef: "a", headRef: "b", baseSha: "h1", headSha: "h2" },
+    ]);
+    let members = store.listStackMembers(job.job.id);
+    expect(members.map((m) => m.pr_number)).toEqual([41, 42]);
+    store.patchStackMember(members[0]!.id, { headSha: "h1b", memberJobId: 99, state: "reviewing" });
+    members = store.listStackMembers(job.job.id);
+    expect(members[0]?.head_sha).toBe("h1b");
+    expect(members[0]?.member_job_id).toBe(99);
+    expect(members[0]?.state).toBe("reviewing");
+    expect(members[1]?.head_sha).toBe("h2");
+
+    // Same stack re-triggered on the same vector dedups; a different top SHA stales it.
+    const dup = store.enqueue({
+      repoFullName: "acme/widgets", repoOwner: "acme", repoName: "widgets", installationId: 42,
+      prNumber: 42, prTitle: "top", prBody: "", prHtmlUrl: "u", prAuthor: "alice",
+      baseSha: "b", headSha: "h", baseRef: "main", headRef: "feat",
+      reviewers: [], jobType: "stack_review", dedupKey: "stack:s1",
+    });
+    expect(dup.created).toBe(false);
+    const moved = store.enqueue({
+      repoFullName: "acme/widgets", repoOwner: "acme", repoName: "widgets", installationId: 42,
+      prNumber: 42, prTitle: "top", prBody: "", prHtmlUrl: "u", prAuthor: "alice",
+      baseSha: "b", headSha: "h9", baseRef: "main", headRef: "feat",
+      reviewers: [], jobType: "stack_review", dedupKey: "stack:s1",
+    });
+    expect(moved.created).toBe(true);
+    expect(moved.staleJobIds).toEqual([job.job.id]);
+  });
+});

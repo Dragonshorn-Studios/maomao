@@ -88,6 +88,42 @@ export function cancelJobsForPull(
   return { cancelledJobIds };
 }
 
+export interface CancelJobsForRepoTypeInput extends CancelInput {
+  repoFullName: string;
+  /** Cancels only jobs of this type (e.g. "pr_review"); manual job types are excluded by the caller's choice. */
+  jobType: string;
+  scope?: Partial<ForgeScope>;
+}
+
+/**
+ * Cancels every non-terminal job of one type across a whole repository —
+ * the pause-enable policy (issue #99): pending automatic reviews must not
+ * start expensive reviewers after the pause takes effect, and running ones
+ * wind down at their next pipeline checkpoint. Manual job types (scans,
+ * briefs, stack reviews) are never targeted by this path.
+ */
+export function cancelJobsForRepoType(
+  store: JobStore,
+  input: CancelJobsForRepoTypeInput,
+): { cancelledJobIds: number[] } {
+  const cancelledJobIds = store.cancelJobs(
+    { repoFullName: input.repoFullName, jobType: input.jobType, scope: input.scope },
+    input.reason,
+    input.actor ?? null,
+  );
+  abortJobsSafely(input, cancelledJobIds);
+  for (const id of cancelledJobIds) {
+    try {
+      logCancellation(store, id, input);
+    } catch (error) {
+      console.error(`cancel: could not write audit log for job ${id}: ${error instanceof Error ? error.message : String(error)}`);
+    }
+    publish({ type: "job", jobId: id });
+  }
+  if (cancelledJobIds.length > 0) publish({ type: "jobs" });
+  return { cancelledJobIds };
+}
+
 export type CancelJobResult =
   | { ok: true; already: boolean }
   | { ok: false; error: string };

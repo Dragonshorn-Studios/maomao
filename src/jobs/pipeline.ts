@@ -14,7 +14,7 @@ import {
   type OpenCodePort,
   type OpenCodeRunResult,
 } from "../opencode/parse.js";
-import { buildAggregatorPrompt, buildBriefPrompt, buildReviewerPrompt } from "../prompts.js";
+import { buildAggregatorPrompt, buildBriefPrompt, buildReviewerPrompt, buildStackCumulativePrompt } from "../prompts.js";
 import { applyProfileToSpecs, reviewerSpecs } from "./enqueue.js";
 import type { ProfileDefinition } from "../config-revisions.js";
 import {
@@ -115,6 +115,8 @@ export function createPipeline(deps: PipelineDeps) {
           await runScanJob(deps, forge, jobId, controller.signal);
         } else if (job?.job_type === "repo_brief") {
           await runBriefJob(deps, forge, jobId, controller.signal);
+        } else if (job?.job_type === "stack_review") {
+          await runStackJob(deps, forge, jobId, controller.signal);
         } else {
           await runJob(deps, forge, jobId, controller.signal);
         }
@@ -958,6 +960,341 @@ async function runBriefJob(deps: PipelineDeps, forge: ForgeRegistry, jobId: numb
     });
     store.log(jobId, `Repo brief failed: ${message}`, "error");
   }
+}
+
+// Stack reviews (issue #99): one job orchestrates a whole stack. It re-pins
+// member SHAs at run start, reviews each member in dependency order as a
+// normal pr_review job (same budgets, limits, and per-PR publishing), then
+// re-checks every head and — only when nothing moved — runs one cumulative
+// OpenCode pass for cross-PR breakage and posts the stack summary plus
+// cross-PR findings on the top PR.
+async function runStackJob(deps: PipelineDeps, forge: ForgeRegistry, jobId: number, signal: AbortSignal): Promise<void> {
+  const { store, config } = deps;
+  const job = store.getJob(jobId);
+  if (!job) return;
+  if (["stale", "cancelled"].includes(job.state)) {
+    store.log(jobId, `Skipped run: job is ${job.state}`, "warn");
+    return;
+  }
+  if (job.state === "completed") return;
+  try {
+    if (job.provider !== "github") {
+      store.setJobState(jobId, "failed", {
+        failure_reason: `stack reviews are not available for ${job.provider}:${job.provider_instance}`,
+        finished_at: nowIso(),
+      });
+      return;
+    }
+    const auth = authorizeGithubTarget(config, {
+      installationId: job.installation_id,
+      accountId: job.github_account_id ?? undefined,
+      repositoryId: job.github_repository_id ?? undefined,
+    });
+    if (!auth.ok) {
+      logAuthorizationRejection({ installationId: job.installation_id, reason: auth.reason });
+      store.setJobState(jobId, "failed", { failure_reason: `unauthorized: ${auth.reason}`, finished_at: nowIso() });
+      return;
+    }
+    const provider = forge.forJob(job);
+    const members = store.listStackMembers(jobId);
+    if (!members.length) {
+      store.setJobState(jobId, "failed", { failure_reason: "stack review has no recorded members", finished_at: nowIso() });
+      return;
+    }
+    const stackId = job.dedup_key.startsWith("stack:") ? job.dedup_key.slice("stack:".length) : job.dedup_key;
+    const memberTarget = (prNumber: number) => ({ ...forgeTargetOf(job), changeNumber: prNumber });
+    store.setJobState(jobId, "preparing", { started_at: nowIso() });
+
+    // Phase 1 — re-resolve and pin every member's base/head at run start.
+    // Heads that moved before the run began simply update the pins; a move
+    // detected later (pre-publish) marks the result stale instead.
+    const meta = new Map<number, { title: string; body: string; htmlUrl: string; author: string }>();
+    for (const member of members) {
+      throwIfStale(store, jobId, signal);
+      const change = await provider.getChange(memberTarget(member.pr_number));
+      meta.set(member.pr_number, { title: change.title, body: change.body, htmlUrl: change.htmlUrl, author: change.author });
+      if (change.baseSha !== member.base_sha || change.headSha !== member.head_sha) {
+        store.patchStackMember(member.id, { baseSha: change.baseSha, headSha: change.headSha });
+        member.base_sha = change.baseSha;
+        member.head_sha = change.headSha;
+        store.log(
+          jobId,
+          `Re-pinned #${member.pr_number} at ${change.headSha.slice(0, 8)} (base ${change.baseSha.slice(0, 8)}) before review`,
+        );
+      }
+    }
+
+    // Phase 2 — member reviews in dependency order. Each runs as a standard
+    // pr_review job so the existing budget, concurrency, dedup, and publish
+    // paths apply unchanged; a matching completed job is reused as-is.
+    store.setJobState(jobId, "reviewing");
+    const memberJobs: { member: (typeof members)[number]; jobId: number }[] = [];
+    for (const member of members) {
+      throwIfStale(store, jobId, signal);
+      store.patchStackMember(member.id, { state: "reviewing" });
+      const info = meta.get(member.pr_number)!;
+      const enqueued = store.enqueue({
+        repoFullName: job.repo_full_name,
+        repoOwner: job.repo_owner,
+        repoName: job.repo_name,
+        installationId: job.installation_id,
+        githubAccountId: job.github_account_id ?? undefined,
+        githubRepositoryId: job.github_repository_id ?? undefined,
+        prNumber: member.pr_number,
+        prTitle: info.title,
+        prBody: info.body,
+        prHtmlUrl: info.htmlUrl,
+        prAuthor: info.author,
+        baseSha: member.base_sha,
+        headSha: member.head_sha,
+        baseRef: member.base_ref,
+        headRef: member.head_ref,
+        webhookDeliveryId: job.webhook_delivery_id ?? undefined,
+        webhookEvent: "stack_review",
+        reviewers: reviewerSpecs(config),
+        jobType: "pr_review",
+      });
+      const memberJobId = enqueued.job.id;
+      memberJobs.push({ member, jobId: memberJobId });
+      store.patchStackMember(member.id, { memberJobId, state: "reviewing" });
+      if (enqueued.created) {
+        store.log(jobId, `Reviewing stack member #${member.pr_number} as job ${memberJobId}`);
+        await runJob(deps, forge, memberJobId, signal);
+      } else {
+        store.log(
+          jobId,
+          `Stack member #${member.pr_number} reuses existing job ${memberJobId} (${enqueued.job.state})`,
+        );
+      }
+      const outcome = await waitForJob(deps.store, memberJobId, jobId, signal);
+      if (outcome !== "completed") {
+        store.patchStackMember(member.id, { state: "failed" });
+        throw new Error(`stack member #${member.pr_number} review ended ${outcome} (job ${memberJobId})`);
+      }
+      store.patchStackMember(member.id, { state: "done" });
+    }
+
+    // Phase 3 — re-check every head before anything stack-level is published.
+    // A moved head makes this run's view inconsistent: mark it stale and post
+    // nothing; the next trigger re-pins at run start instead.
+    const diffs = new Map<number, string>();
+    for (const member of members) {
+      throwIfStale(store, jobId, signal);
+      const change = await provider.getChange(memberTarget(member.pr_number));
+      if (change.headSha !== member.head_sha) {
+        store.setJobState(jobId, "stale", { finished_at: nowIso() });
+        store.log(
+          jobId,
+          `PR #${member.pr_number} head moved ${member.head_sha.slice(0, 8)} → ${change.headSha.slice(0, 8)} after review; stack result stale, nothing published`,
+          "warn",
+        );
+        return;
+      }
+      diffs.set(member.pr_number, await provider.getChangeDiff(memberTarget(member.pr_number), config.maxDiffBytes));
+    }
+
+    // Phase 4 — cumulative pass over the stack tip plus every member diff.
+    const cumulativeRun = store.listReviewerRuns(jobId).find((entry) => entry.role === "stack_cumulative");
+    const clone = await provider.cloneSpec(memberTarget(members[members.length - 1]!.pr_number), {
+      anonymous: job.installation_id === 0,
+    });
+    const top = members[members.length - 1]!;
+    const workspace = await deps.checkout.prepare({
+      jobId,
+      cloneUrl: clone.cloneUrl,
+      gitAuthArgs: clone.gitAuthArgs,
+      remoteRef: clone.remoteRef,
+      secrets: [...clone.secrets, ...globalSecrets(config)],
+      baseSha: top.head_sha,
+      headSha: top.head_sha,
+      signal,
+      fetchDiff: async () => diffs.get(top.pr_number) ?? "",
+      metadata: {
+        repo: job.repo_full_name,
+        pr: top.pr_number,
+        title: job.pr_title,
+        baseSha: top.head_sha,
+        headSha: top.head_sha,
+      },
+    });
+    store.patchJob(jobId, { workspace_path: workspace.dir });
+    throwIfStale(store, jobId, signal);
+    const cumulative = await runStackCumulativeRun(deps, job, cumulativeRun, workspace.repoDir, stackId, members, diffs, meta, signal);
+    if (!cumulative) {
+      throw new Error("stack cumulative pass failed");
+    }
+
+    // Phase 5 — publish the stack summary and each cross-PR finding as issue
+    // comments on the top PR, naming every PR and SHA involved.
+    store.setJobState(jobId, "publishing");
+    const ordered = members
+      .map((member) => `#${member.pr_number}@${member.head_sha.slice(0, 8)}`)
+      .join(" → ");
+    const summaryBody =
+      `**Stack review "${stackId}"** — reviewed ${members.length} pull request(s) in order: ${ordered}.\n\n` +
+      `Member reviews: ${memberJobs.map((entry) => `#${entry.member.pr_number} (job ${entry.jobId})`).join(", ")}.\n\n` +
+      (cumulative.summary ? `${cumulative.summary}\n\n` : "") +
+      `Cross-PR findings: ${cumulative.findings.length}.`;
+    await postStackComment(deps, job, top.pr_number, summaryBody);
+    for (const finding of cumulative.findings) {
+      const location = finding.file ? `\`${finding.file}${finding.line ? `:${finding.line}` : ""}\`\n\n` : "";
+      await postStackComment(
+        deps,
+        job,
+        top.pr_number,
+        `**Cross-PR finding (${finding.severity})** — ${finding.summary}\n\n${location}${finding.reason}\n\n_Stack "${stackId}" · members ${ordered}_`,
+      );
+    }
+    store.setJobState(jobId, "completed", { finished_at: nowIso() });
+    store.log(
+      jobId,
+      `Stack review completed: ${members.length} member(s), ${cumulative.findings.length} cross-PR finding(s)`,
+    );
+  } catch (error) {
+    if (store.isStale(jobId) || signal.aborted) {
+      const cancelled = store.getJob(jobId)?.state === "cancelled";
+      store.log(jobId, cancelled ? "Stack review cancelled" : "Stack review aborted or marked stale", "warn");
+      if (!store.isStale(jobId)) store.setJobState(jobId, "stale", { finished_at: nowIso() });
+      return;
+    }
+    const message = error instanceof Error ? error.message : String(error);
+    for (const run of store.listReviewerRuns(jobId)) {
+      if (run.state === "queued" || run.state === "running") {
+        store.patchReviewer(run.id, {
+          state: "failed",
+          validation_error: "job ended before this run finished",
+          finished_at: nowIso(),
+        });
+      }
+    }
+    store.setJobState(jobId, "failed", { failure_reason: message, finished_at: nowIso() });
+    store.log(jobId, `Stack review failed: ${message}`, "error");
+  }
+}
+
+/** Await a member review job; the stack job's own staleness/abort still wins. */
+async function waitForJob(store: JobStore, memberJobId: number, stackJobId: number, signal: AbortSignal): Promise<string> {
+  for (;;) {
+    throwIfStale(store, stackJobId, signal);
+    const member = store.getJob(memberJobId);
+    if (!member) return "missing";
+    if (["completed", "failed", "stale", "cancelled"].includes(member.state)) return member.state;
+    await sleep(2000, signal);
+  }
+}
+
+/** Post an issue comment on a member PR; absent the optional port the log records the text instead. */
+async function postStackComment(deps: PipelineDeps, job: JobRow, prNumber: number, body: string): Promise<void> {
+  if (typeof deps.github.createIssueComment !== "function") {
+    deps.store.log(job.id, `Stack comment for #${prNumber} not posted (no issue-comment port): ${body.slice(0, 200)}`, "warn");
+    return;
+  }
+  try {
+    await deps.github.createIssueComment({
+      installationId: job.installation_id,
+      owner: job.repo_owner,
+      repo: job.repo_name,
+      pullNumber: prNumber,
+      body,
+    });
+  } catch (error) {
+    deps.store.log(
+      job.id,
+      `Stack comment for #${prNumber} failed: ${error instanceof Error ? error.message : error}`,
+      "warn",
+    );
+  }
+}
+
+/** The cumulative OpenCode pass; retries follow the standard reviewer budget. */
+async function runStackCumulativeRun(
+  deps: PipelineDeps,
+  job: JobRow,
+  run: ReviewerRunRow | undefined,
+  cwd: string,
+  stackId: string,
+  members: { pr_number: number; base_sha: string; head_sha: string }[],
+  diffs: Map<number, string>,
+  meta: Map<number, { title: string }>,
+  signal: AbortSignal,
+): Promise<ReviewerResult | undefined> {
+  const model = run?.model || deps.config.chat.model || deps.config.opencode.reviewerModel;
+  const retries = Math.max(0, deps.config.opencode.maxRetries);
+  const prompt = buildStackCumulativePrompt({
+    repoFullName: job.repo_full_name,
+    stackId,
+    members: members.map((member) => ({
+      prNumber: member.pr_number,
+      prTitle: meta.get(member.pr_number)?.title ?? "",
+      baseSha: member.base_sha,
+      headSha: member.head_sha,
+      diff: truncate(diffs.get(member.pr_number) ?? "(diff unavailable)", Math.max(10_000, deps.config.maxDiffBytes)),
+    })),
+  });
+  let lastError = "unknown error";
+  for (let attempt = 1; attempt <= retries + 1; attempt++) {
+    throwIfStale(deps.store, job.id, signal);
+    const started = Date.now();
+    if (run) {
+      deps.store.patchReviewer(run.id, {
+        state: "running",
+        attempt,
+        model: model || null,
+        provider: model.includes("/") ? model.split("/")[0] : null,
+        started_at: nowIso(),
+      });
+    }
+    deps.store.log(job.id, `Stack cumulative attempt ${attempt}/${retries + 1} model=${model || "(default)"}`, "info", run?.id);
+    let result: OpenCodeRunResult | undefined;
+    try {
+      result = await deps.opencode.run({
+        cwd,
+        model,
+        prompt,
+        files: [],
+        timeoutMs: deps.config.chat.timeoutMs,
+        extraArgs: deps.config.opencode.extraArgs,
+        bin: deps.config.opencode.bin,
+        title: `maomao-stack-${job.id}`,
+        signal,
+      });
+      const parsed = parseReviewerResult(result.text || result.stdout, "stack_cumulative");
+      if (run) {
+        deps.store.patchReviewer(run.id, {
+          state: "done",
+          raw_output: truncate(result.text || result.stdout, 200_000),
+          normalized_json: JSON.stringify(parsed, null, 2),
+          stdout: truncate(result.stdout, 80_000),
+          stderr: truncate(result.stderr, 20_000),
+          exit_code: result.exitCode,
+          finished_at: nowIso(),
+          duration_ms: Date.now() - started,
+          ...usagePersistence(result.usage),
+          validation_error: null,
+        });
+      }
+      deps.store.log(job.id, `Stack cumulative done: ${parsed.findings.length} cross-PR finding(s)`, "info", run?.id);
+      return parsed;
+    } catch (error) {
+      lastError = formatError(error);
+      if (run) {
+        deps.store.patchReviewer(run.id, {
+          state: "failed",
+          validation_error: lastError,
+          raw_output: result ? truncate(result.text || result.stdout, 200_000) : null,
+          stdout: result ? truncate(result.stdout, 80_000) : null,
+          stderr: result ? truncate(result.stderr, 20_000) : null,
+          exit_code: result?.exitCode ?? null,
+          finished_at: nowIso(),
+          duration_ms: Date.now() - started,
+          ...(result ? usagePersistence(result.usage) : {}),
+        });
+      }
+      deps.store.log(job.id, `Stack cumulative attempt ${attempt} failed: ${lastError}`, "warn", run?.id);
+      if (attempt <= retries) await sleep(500 * attempt, signal);
+    }
+  }
+  return undefined;
 }
 
 /**
