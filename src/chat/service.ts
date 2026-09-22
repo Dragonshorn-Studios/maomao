@@ -13,6 +13,7 @@ import type { CheckoutPort } from "../checkout.js";
 import { chatWorkspaceRoot, createCheckout } from "../checkout.js";
 import type { OpenCodePort } from "../opencode/parse.js";
 import { OpenCodeTimeoutError, opencodeEnvSecrets } from "../opencode/spawn.js";
+import { providerAuthSecrets } from "../opencode/credentials.js";
 import { reviewerPermissionConfig } from "../opencode/env.js";
 import { formatDuration, redactSecrets } from "../util.js";
 import type { ForgeJobIdentity } from "../forge/registry.js";
@@ -151,7 +152,7 @@ export class ChatService {
     }
 
     const redactAll = (text: string) =>
-      redactSecrets(text, [...githubSecrets(config), ...opencodeEnvSecrets(process.env)]);
+      redactSecrets(text, [...githubSecrets(config), ...opencodeEnvSecrets(process.env), ...providerAuthSecrets(process.env)]);
 
     try {
       // Checkout failures are conversation failures too: inside the try so
