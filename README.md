@@ -246,14 +246,39 @@ OPENCODE_REVIEWER_MODEL=anthropic/claude-sonnet-4-5
 OPENCODE_AGGREGATOR_MODEL=anthropic/claude-opus-4-6   # optional; defaults to reviewer model
 ```
 
-Use any `provider/model` string OpenCode understands (`opencode models`). Supply API keys the way OpenCode expects, for example `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `OPENROUTER_API_KEY`, or `ZHIPU_API_KEY`. Those are passed through to the child; GitHub App credentials are not.
+Use any `provider/model` string OpenCode understands (`opencode models`). Provider keys set in `.env` are passed through to the OpenCode child only when the variable matches a provider allowlist prefix (`src/opencode/env.ts`); GitHub App credentials never are.
 
-**Z.AI Coding Plan.** OpenCode ships a `zai-coding-plan` provider, so `OPENCODE_REVIEWER_MODEL=zai-coding-plan/glm-4.7` (or any model `opencode models` lists for it) works once it can authenticate. Either set `ZHIPU_API_KEY` in `.env` (passed through to the child) or run `opencode auth login` once inside the container — its credentials file persists on the `maomao-opencode` volume:
+### Provider credentials
 
-```bash
-docker compose exec -it maomao /opt/opencode/.opencode/bin/opencode auth login
-# select "Z.AI Coding Plan", paste your Z.AI key
-```
+| Provider id (`provider/model`) | Set in `.env` | Example model |
+| --- | --- | --- |
+| `anthropic` | `ANTHROPIC_API_KEY` | `anthropic/claude-sonnet-4-6` |
+| `openai` | `OPENAI_API_KEY` | `openai/gpt-5` |
+| `openrouter` | `OPENROUTER_API_KEY` | `openrouter/anthropic/claude-sonnet-4-6` |
+| `google` | `GOOGLE_API_KEY`, `GOOGLE_GENERATIVE_AI_API_KEY`, or `GEMINI_API_KEY` | `google/gemini-3.1-pro-preview` |
+| `google-vertex`, `google-vertex-anthropic` | `GOOGLE_VERTEX_PROJECT`, `GOOGLE_VERTEX_LOCATION`, `GOOGLE_APPLICATION_CREDENTIALS` | `google-vertex-anthropic/claude-sonnet-4-6@default` |
+| `xai` | `XAI_API_KEY` | `xai/grok-4.20-0309-reasoning` |
+| `mistral` | `MISTRAL_API_KEY` | `mistral/magistral-small` |
+| `groq` | `GROQ_API_KEY` | `groq/llama-3.1-8b-instant` |
+| `deepseek` | `DEEPSEEK_API_KEY` | `deepseek/deepseek-v4-flash` |
+| `togetherai` | `TOGETHER_API_KEY` | `togetherai/deepseek-ai/DeepSeek-V4-Flash-0731` |
+| `cohere` | `COHERE_API_KEY` | `cohere/command-a-reasoning-08-2025` |
+| `azure` | `AZURE_RESOURCE_NAME`, `AZURE_API_KEY` | `azure/gpt-5` |
+| `azure-cognitive-services` | `AZURE_COGNITIVE_SERVICES_RESOURCE_NAME`, `AZURE_COGNITIVE_SERVICES_API_KEY` | `azure-cognitive-services/gpt-5.6-sol` |
+| `amazon-bedrock` | `AWS_REGION` + `AWS_BEARER_TOKEN_BEDROCK`, or `AWS_PROFILE` | `amazon-bedrock/us.anthropic.claude-opus-5` |
+| `ollama-cloud` | `OLLAMA_API_KEY` | `ollama-cloud/kimi-k2.6` |
+| `zai`, `zai-coding-plan` | `ZHIPU_API_KEY` | `zai-coding-plan/glm-4.7` |
+
+Notes:
+
+- Vars matching `*_SECRET*`, `*_TOKEN`, `*PRIVATE_KEY*`, `GITHUB_*`, `MAOMAO_*`, `UI_*`, `WEBHOOK_*`, or `INSTALLATION_*` are stripped **before** the allowlist is applied — e.g. Bedrock's `AWS_SECRET_ACCESS_KEY` and `AWS_SESSION_TOKEN` never reach the child. For static AWS credentials use `AWS_PROFILE` with the credentials file on the `maomao-opencode` volume (`/opt/opencode/.aws/credentials` — OpenCode's `HOME` is `/opt/opencode`). `GOOGLE_APPLICATION_CREDENTIALS` must likewise point at a path visible inside the container.
+- OAuth-style providers can skip env vars entirely — run `opencode auth login` once inside the container; the credentials file persists on the `maomao-opencode` volume. This is also the documented way to enable the **Z.AI Coding Plan** (select it in the provider list and paste your Z.AI key):
+
+  ```bash
+  docker compose exec -it maomao /opt/opencode/.opencode/bin/opencode auth login
+  ```
+
+- Providers not in the table still work via a custom provider in the OpenCode global config on the volume (`/opt/opencode/.config/opencode/opencode.json`) with `"apiKey": "{env:OPENCODE_<NAME>_API_KEY}"` — `OPENCODE_`-prefixed vars always pass. `HTTP_PROXY`/`HTTPS_PROXY`/`NO_PROXY` pass too.
 
 Default specialist roles (override with `REVIEWER_ROLES`):
 
@@ -405,7 +430,7 @@ If you cannot pin and verify OpenCode’s permission behavior, do not point Maom
 
 ### Provider credentials in the process environment
 
-OpenCode children inherit a **narrow allowlist** of env vars (provider API keys, `OPENCODE_*`, proxy, `PATH`/`HOME`, …) so BYO models keep working. That list includes broad prefixes such as `AWS_`, `BEDROCK_`, and `VERTEX_`. **Do not run Maomao on a host whose process environment already holds unrelated cloud credentials** — those keys would be visible to the reviewer process. Prefer a dedicated user/container whose env only contains the GitHub App material plus the model provider you intend.
+OpenCode children inherit a **narrow allowlist** of env vars (provider API keys, `OPENCODE_*`, proxy, `PATH`/`HOME`, …) so BYO models keep working. That list includes broad prefixes such as `AWS_`, `BEDROCK_`, `VERTEX_`, `AZURE_`, and `GOOGLE_`. **Do not run Maomao on a host whose process environment already holds unrelated cloud credentials** — those keys would be visible to the reviewer process. Prefer a dedicated user/container whose env only contains the GitHub App material plus the model provider you intend.
 
 OpenCode is still a powerful process. Keep Maomao on a locked-down host and do not run it as root.
 

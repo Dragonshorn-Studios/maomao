@@ -13,7 +13,7 @@ const PROVIDER_ALLOWLIST = [
   /^TOGETHER_/i,
   /^DEEPSEEK_/i,
   /^COHERE_/i,
-  /^AZURE_OPENAI_/i,
+  /^AZURE_/i,
   /^ZHIPU_/i,
   /^ZAI_/i,
   // Broad cloud prefixes so documented BYO providers keep working. Do not run

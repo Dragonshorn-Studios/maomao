@@ -14,6 +14,10 @@ describe("sanitizeChildEnv", () => {
       ZHIPU_API_KEY: "sk-zhipu",
       ZAI_API_KEY: "sk-zai",
       ZAI_CODING_PLAN_TOKEN: "should-not-pass",
+      AZURE_RESOURCE_NAME: "my-resource",
+      AZURE_API_KEY: "sk-azure",
+      AWS_SECRET_ACCESS_KEY: "stripped-by-secret-pattern",
+      AWS_SESSION_TOKEN: "stripped-by-token-pattern",
       OPENCODE_REVIEWER_MODEL: "anthropic/claude",
       MAOMAO_INTERNAL: "nope",
       UI_PASSWORD: "pw",
@@ -28,6 +32,10 @@ describe("sanitizeChildEnv", () => {
     expect(env.ZHIPU_API_KEY).toBe("sk-zhipu");
     expect(env.ZAI_API_KEY).toBe("sk-zai");
     expect(env.ZAI_CODING_PLAN_TOKEN).toBeUndefined();
+    expect(env.AZURE_RESOURCE_NAME).toBe("my-resource");
+    expect(env.AZURE_API_KEY).toBe("sk-azure");
+    expect(env.AWS_SECRET_ACCESS_KEY).toBeUndefined();
+    expect(env.AWS_SESSION_TOKEN).toBeUndefined();
     expect(env.OPENCODE_REVIEWER_MODEL).toBe("anthropic/claude");
     expect(env.MAOMAO_INTERNAL).toBeUndefined();
     expect(env.UI_PASSWORD).toBeUndefined();
