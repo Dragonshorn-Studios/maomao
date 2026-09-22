@@ -316,6 +316,32 @@ export function parseAggregatorResult(
   return parsed;
 }
 
+/**
+ * Repo brief TOC section (issue #88): one file that matters for understanding
+ * what the checkout holds, with the line window the fragment view shows.
+ * `path` is repo-relative; traversal and absolute paths are rejected when the
+ * pipeline resolves the fragment, not here.
+ */
+export const briefSectionSchema = z.object({
+  title: z.string().min(1).max(200),
+  path: z.string().min(1).max(500),
+  summary: z.string().min(1).max(2000),
+  start_line: z.number().int().positive().optional(),
+  end_line: z.number().int().positive().optional(),
+});
+export type BriefSection = z.infer<typeof briefSectionSchema>;
+
+export const briefResultSchema = z.object({
+  schema_version: z.number().int().optional().default(1),
+  summary: z.string().optional().default(""),
+  sections: z.array(briefSectionSchema).min(5).max(15),
+});
+export type BriefResult = z.infer<typeof briefResultSchema>;
+
+export function parseBriefResult(raw: string): BriefResult {
+  return briefResultSchema.parse(extractJsonFromText(raw));
+}
+
 export function fallbackAggregator(reviewers: ReviewerResult[]): AggregatorResult {
   const findings: AggregatorFinding[] = [];
   const seen = new Set<string>();

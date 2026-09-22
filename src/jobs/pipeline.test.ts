@@ -10,6 +10,7 @@ import type { OpenCodePort } from "../opencode/parse.js";
 import { profileBudgetExceeded } from "../routing/policy.js";
 import { findingMarker, fingerprintFinding } from "../findings/identity.js";
 import { createPipeline } from "./pipeline.js";
+import { parseBriefPayload } from "./brief.js";
 import { JobStore } from "./store.js";
 import { DiffTooLargeError } from "../github/diff-limit.js";
 
@@ -89,6 +90,35 @@ describe("JobStore enqueue", () => {
     expect(next.created).toBe(true);
     expect(store.getJob(first.job.id)?.state).toBe("stale");
     expect(store.listReviewerRuns(first.job.id)).toHaveLength(1);
+  });
+
+  it("scopes dedup and staling by job_type so a brief coexists with a scan on the same SHA", () => {
+    const store = new JobStore(openDb(":memory:"));
+    const base = {
+      repoFullName: "acme/widgets",
+      repoOwner: "acme",
+      repoName: "widgets",
+      installationId: 1,
+      prNumber: 0,
+      prTitle: "t",
+      prBody: "",
+      prHtmlUrl: "",
+      prAuthor: "a",
+      baseSha: "sha1",
+      baseRef: "main",
+      headRef: "main",
+      reviewers: [],
+    };
+    const scan = store.enqueue({ ...base, headSha: "sha1", jobType: "health_scan" });
+    const brief = store.enqueue({ ...base, headSha: "sha1", jobType: "repo_brief" });
+    const briefDup = store.enqueue({ ...base, headSha: "sha1", jobType: "repo_brief" });
+    const briefMoved = store.enqueue({ ...base, headSha: "sha2", jobType: "repo_brief" });
+    expect(scan.created).toBe(true);
+    expect(brief.created).toBe(true); // same repo+SHA, different job type: no collision
+    expect(briefDup.created).toBe(false);
+    expect(briefMoved.created).toBe(true);
+    expect(store.getJob(brief.job.id)?.state).toBe("stale");
+    expect(store.getJob(scan.job.id)?.state).toBe("queued"); // scan untouched by the brief's restale
   });
 });
 
@@ -3880,6 +3910,119 @@ describe("repository health scan", () => {
     }).run(created.job.id);
     expect(store.getJob(created.job.id)?.state).toBe("stale");
     expect(closed).toEqual([]);
+  });
+});
+
+describe("repo brief (issue #88)", () => {
+  const briefJson = JSON.stringify({
+    schema_version: 1,
+    summary: "what this tree holds",
+    sections: [
+      { title: "Entry", path: "example.ts", summary: "entry point", start_line: 1, end_line: 1 },
+      { title: "Missing", path: "src/missing.ts", summary: "described but absent" },
+      { title: "Escape", path: "../outside.ts", summary: "traversal attempt" },
+      { title: "Absolute", path: "/etc/passwd", summary: "absolute path" },
+      { title: "Again", path: "example.ts", summary: "second reference" },
+    ],
+  });
+
+  function briefOpencode(): OpenCodePort {
+    return {
+      async run() {
+        return { stdout: briefJson, stderr: "", exitCode: 0, text: briefJson, usage: { cost: 0.01, totalTokens: 10, complete: true } };
+      },
+    };
+  }
+
+  function briefConfig() {
+    return loadConfig({
+      OPENCODE_REVIEWER_MODEL: "test/model",
+      GITHUB_APP_ID: "1",
+      GITHUB_WEBHOOK_SECRET: "s",
+      GITHUB_APP_PRIVATE_KEY: "k",
+    });
+  }
+
+  function enqueueBrief(store: JobStore, sha = "brief000brief000brief000brief000") {
+    return store.enqueue({
+      ...jobInput(sha),
+      reviewers: [{ role: "repo_brief", title: "Repo brief" }],
+      jobType: "repo_brief",
+      prNumber: 0,
+      headSha: sha,
+      baseSha: sha,
+    });
+  }
+
+  it("completes: persists a brief payload with bounded fragments and finishes the run", async () => {
+    const store = new JobStore(openDb(":memory:"));
+    const created = enqueueBrief(store);
+    await createPipeline({
+      config: briefConfig(),
+      store,
+      github: githubPort(),
+      checkout: await fixtureCheckout(),
+      opencode: briefOpencode(),
+    }).run(created.job.id);
+
+    const job = store.getJob(created.job.id);
+    expect(job?.state).toBe("completed");
+    const payload = parseBriefPayload(job?.brief_json);
+    expect(payload?.sections).toHaveLength(5);
+    expect(payload?.sections[0]?.fragment).toContain("export const n = 1");
+    expect(payload?.sections[1]?.fragmentNote).toBe("not found");
+    expect(payload?.sections[2]?.fragmentNote).toBe("outside repo");
+    expect(payload?.sections[3]?.fragmentNote).toBe("outside repo");
+    const runs = store.listReviewerRuns(created.job.id);
+    expect(runs[0]?.state).toBe("done");
+    expect(runs[0]?.role).toBe("repo_brief");
+    expect(runs[0]?.normalized_json).toContain('"sections"');
+  });
+
+  it("fails the job when the model never returns a valid brief", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const store = new JobStore(openDb(":memory:"));
+    const created = enqueueBrief(store);
+    await createPipeline({
+      config: briefConfig(),
+      store,
+      github: githubPort(),
+      checkout: await fixtureCheckout(),
+      opencode: {
+        async run() {
+          return { stdout: "oops", stderr: "", exitCode: 0, text: "oops", usage: {} };
+        },
+      },
+    }).run(created.job.id);
+    const job = store.getJob(created.job.id);
+    expect(job?.state).toBe("failed");
+    expect(job?.brief_json).toBeNull();
+    expect(store.listReviewerRuns(created.job.id)[0]?.state).toBe("failed");
+    warn.mockRestore();
+  });
+
+  it("fails fast for non-github brief jobs before any checkout", async () => {
+    const store = new JobStore(openDb(":memory:"));
+    const created = store.enqueue({
+      ...jobInput("brief000brief000brief000brief000"),
+      reviewers: [{ role: "repo_brief", title: "Repo brief" }],
+      jobType: "repo_brief",
+      prNumber: 0,
+      headSha: "brief000brief000brief000brief000",
+      baseSha: "brief000brief000brief000brief000",
+      provider: "gitlab",
+      providerInstance: "https://gitlab.example",
+    });
+    await createPipeline({
+      config: briefConfig(),
+      store,
+      github: githubPort(),
+      checkout: await fixtureCheckout(),
+      opencode: briefOpencode(),
+    }).run(created.job.id);
+    const job = store.getJob(created.job.id);
+    expect(job?.state).toBe("failed");
+    expect(job?.failure_reason).toContain("not available");
   });
 });
 

@@ -44,8 +44,10 @@ export interface JobRow {
   cancelled_reason: CancelReason | null;
   cancelled_by: string | null;
   profile_revision_id: number | null;
-  job_type: "pr_review" | "health_scan";
+  job_type: "pr_review" | "health_scan" | "repo_brief";
   scan_branch: string | null;
+  /** Repo-brief payload (TOC + persisted file fragments), JSON; null for other job types. */
+  brief_json: string | null;
   aggregator_raw: string | null;
   aggregator_normalized: string | null;
   aggregator_model: string | null;
@@ -174,7 +176,7 @@ export interface NewJobInput {
   webhookDeliveryId?: string;
   webhookEvent?: string;
   reviewers: { role: string; title: string; model?: string }[];
-  jobType?: "pr_review" | "health_scan";
+  jobType?: "pr_review" | "health_scan" | "repo_brief";
   scanBranch?: string | null;
 }
 
@@ -292,6 +294,7 @@ const JOB_PATCH_KEYS = new Set<string>([
   "reconciliation_json",
   "risk_profile",
   "risk_reason",
+  "brief_json",
 ]);
 
 export class JobStore {
@@ -319,17 +322,17 @@ export class JobStore {
           `UPDATE jobs
            SET state = 'stale', updated_at = ?, finished_at = COALESCE(finished_at, ?)
            WHERE provider = ? AND provider_instance = ? AND repo_full_name = ? AND pr_number = ? AND head_sha != ?
-             AND state NOT IN ('stale', 'cancelled')
+             AND job_type = ? AND state NOT IN ('stale', 'cancelled')
            RETURNING id`,
         )
-        .all(createdAt, createdAt, scope.provider, scope.instance, input.repoFullName, input.prNumber, input.headSha) as { id: number }[];
+        .all(createdAt, createdAt, scope.provider, scope.instance, input.repoFullName, input.prNumber, input.headSha, input.jobType ?? "pr_review") as { id: number }[];
       staleJobIds.push(...stale.map((row) => row.id));
 
       const existing = this.db
         .prepare(
-          `SELECT * FROM jobs WHERE provider = ? AND provider_instance = ? AND repo_full_name = ? AND pr_number = ? AND head_sha = ?`,
+          `SELECT * FROM jobs WHERE provider = ? AND provider_instance = ? AND repo_full_name = ? AND pr_number = ? AND head_sha = ? AND job_type = ?`,
         )
-        .get(scope.provider, scope.instance, input.repoFullName, input.prNumber, input.headSha) as JobRow | undefined;
+        .get(scope.provider, scope.instance, input.repoFullName, input.prNumber, input.headSha, input.jobType ?? "pr_review") as JobRow | undefined;
 
       if (existing) {
         const skippedReason = skipReason(existing);

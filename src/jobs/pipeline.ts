@@ -14,21 +14,24 @@ import {
   type OpenCodePort,
   type OpenCodeRunResult,
 } from "../opencode/parse.js";
-import { buildAggregatorPrompt, buildReviewerPrompt } from "../prompts.js";
+import { buildAggregatorPrompt, buildBriefPrompt, buildReviewerPrompt } from "../prompts.js";
 import { applyProfileToSpecs, reviewerSpecs } from "./enqueue.js";
 import type { ProfileDefinition } from "../config-revisions.js";
 import {
   fallbackAggregator,
   parseAggregatorResult,
+  parseBriefResult,
   parseReviewerResult,
   severityRank,
   SchemaValidationError,
   extractJsonFromText,
   formatSchemaError,
   type AggregatorResult,
+  type BriefResult,
   type ReviewerResult,
   type Severity,
 } from "../schema.js";
+import { buildBriefPayload } from "./brief.js";
 import { classifyPriorFindings, collectPriorFindings, findingsForPublish } from "../findings/reconcile.js";
 import {
   collectHumanOverrides,
@@ -110,6 +113,8 @@ export function createPipeline(deps: PipelineDeps) {
         const job = deps.store.getJob(jobId);
         if (job?.job_type === "health_scan") {
           await runScanJob(deps, forge, jobId, controller.signal);
+        } else if (job?.job_type === "repo_brief") {
+          await runBriefJob(deps, forge, jobId, controller.signal);
         } else {
           await runJob(deps, forge, jobId, controller.signal);
         }
@@ -819,6 +824,202 @@ async function runScanJob(deps: PipelineDeps, forge: ForgeRegistry, jobId: numbe
     });
     store.log(jobId, `Scan failed: ${message}`, "error");
   }
+}
+
+/**
+ * Repo-brief job (issue #88): a forge-aware checkout of the chosen SHA, then a
+ * single read-only OpenCode run producing a 5–15-section TOC. The pipeline
+ * reads bounded fragments of each section's file into `jobs.brief_json` before
+ * the workspace is swept, so the TOC keeps working after retention cleans up.
+ * No findings, no aggregation, nothing posted to the forge.
+ */
+async function runBriefJob(deps: PipelineDeps, forge: ForgeRegistry, jobId: number, signal: AbortSignal): Promise<void> {
+  const store = deps.store;
+  const config = deps.config;
+  const job = store.getJob(jobId);
+  if (!job) return;
+  try {
+    // Repo briefs are a GitHub feature like health scans.
+    if (job.provider !== "github") {
+      store.setJobState(jobId, "failed", {
+        failure_reason: `repo briefs are not available for ${job.provider}:${job.provider_instance}`,
+        finished_at: nowIso(),
+      });
+      return;
+    }
+    // Allowlists can change after enqueue; re-check before doing any work.
+    const auth = authorizeGithubTarget(config, {
+      installationId: job.installation_id,
+      accountId: job.github_account_id ?? undefined,
+      repositoryId: job.github_repository_id ?? undefined,
+    });
+    if (!auth.ok) {
+      logAuthorizationRejection({ installationId: job.installation_id, reason: auth.reason });
+      store.setJobState(jobId, "failed", { failure_reason: `unauthorized: ${auth.reason}`, finished_at: nowIso() });
+      return;
+    }
+    store.setJobState(jobId, "preparing", { started_at: nowIso() });
+    store.log(jobId, `Repo brief of ${job.repo_full_name} at ${job.head_sha}`);
+    const provider = forge.forJob(job);
+    const target = forgeTargetOf(job);
+    const clone = await provider.cloneSpec(target, { anonymous: job.installation_id === 0 });
+    const workspace = await deps.checkout.prepare({
+      jobId,
+      cloneUrl: clone.cloneUrl,
+      gitAuthArgs: clone.gitAuthArgs,
+      remoteRef: clone.remoteRef,
+      secrets: [...clone.secrets, ...globalSecrets(config)],
+      baseSha: job.head_sha,
+      headSha: job.head_sha,
+      signal,
+      // Briefs read the tree, not a diff; the PR ref fetch (refs/pull/0/head)
+      // fails and the checkout falls back to the head SHA refspec.
+      fetchDiff: async () => "",
+      metadata: {
+        repo: job.repo_full_name,
+        pr: 0,
+        title: job.pr_title,
+        baseSha: job.head_sha,
+        headSha: job.head_sha,
+      },
+    });
+    store.patchJob(jobId, { workspace_path: workspace.dir });
+    throwIfStale(store, jobId, signal);
+
+    store.setJobState(jobId, "reviewing");
+    const run = store.listReviewerRuns(jobId).find((entry) => entry.role === "repo_brief");
+    if (!run) throw new Error("repo brief run was not enqueued");
+    const brief = await runBriefRun(deps, job, run, workspace.repoDir, signal);
+    const finished = store.getReviewerRun(run.id);
+    if (!brief || finished?.state !== "done") {
+      throw new Error(finished?.validation_error ?? "repo brief run failed");
+    }
+    throwIfStale(store, jobId, signal);
+
+    const payload = await buildBriefPayload(workspace.repoDir, {
+      repo: job.repo_full_name,
+      sha: job.head_sha,
+      brief,
+    });
+    store.patchJob(jobId, { brief_json: JSON.stringify(payload) });
+    store.setJobState(jobId, "completed", { finished_at: nowIso() });
+    store.log(
+      jobId,
+      `Repo brief completed: ${payload.sections.length} section(s), ${payload.sections.filter((section) => section.fragment != null).length} fragment(s) persisted`,
+    );
+  } catch (error) {
+    if (store.isStale(jobId) || signal.aborted) {
+      const cancelled = store.getJob(jobId)?.state === "cancelled";
+      store.log(jobId, cancelled ? "Repo brief cancelled" : "Repo brief aborted or marked stale", "warn");
+      if (!store.isStale(jobId)) store.setJobState(jobId, "stale", { finished_at: nowIso() });
+      return;
+    }
+    const message = error instanceof Error ? error.message : String(error);
+    for (const run of store.listReviewerRuns(jobId)) {
+      if (run.state === "queued" || run.state === "running") {
+        store.patchReviewer(run.id, {
+          state: "failed",
+          validation_error: "job ended before this run finished",
+          finished_at: nowIso(),
+        });
+      }
+    }
+    store.setJobState(jobId, "failed", {
+      failure_reason: message,
+      finished_at: nowIso(),
+    });
+    store.log(jobId, `Repo brief failed: ${message}`, "error");
+  }
+}
+
+/**
+ * The single OpenCode run behind a repo brief. Shares the reviewers' deny list
+ * (applied in opencode spawn for every run) and the Ask budget knob: timeout
+ * comes from `config.chat` so briefs and Ask are bounded the same way.
+ */
+async function runBriefRun(
+  deps: PipelineDeps,
+  job: JobRow,
+  run: ReviewerRunRow,
+  cwd: string,
+  signal: AbortSignal,
+): Promise<BriefResult | undefined> {
+  // The run's stored model wins; otherwise follow the Ask model, then the
+  // generic reviewer default.
+  const model = run.model || deps.config.chat.model || deps.config.opencode.reviewerModel;
+  const retries = Math.max(0, deps.config.opencode.maxRetries);
+  let lastError = "unknown error";
+
+  for (let attempt = 1; attempt <= retries + 1; attempt++) {
+    throwIfStale(deps.store, job.id, signal);
+    const started = Date.now();
+    deps.store.patchReviewer(run.id, {
+      state: "running",
+      attempt,
+      model: model || null,
+      provider: model.includes("/") ? model.split("/")[0] : null,
+      started_at: nowIso(),
+    });
+    deps.store.log(job.id, `Repo brief attempt ${attempt}/${retries + 1} model=${model || "(default)"}`, "info", run.id);
+
+    let result: OpenCodeRunResult | undefined;
+    try {
+      result = await deps.opencode.run({
+        cwd,
+        model,
+        prompt: buildBriefPrompt({ repoFullName: job.repo_full_name, sha: job.head_sha }),
+        files: [],
+        timeoutMs: deps.config.chat.timeoutMs,
+        extraArgs: deps.config.opencode.extraArgs,
+        bin: deps.config.opencode.bin,
+        title: `maomao-brief-${job.id}`,
+        signal,
+        onStdout: (chunk) => {
+          if (chunk.includes("error")) deps.store.log(job.id, chunk.slice(0, 500), "debug", run.id);
+        },
+      });
+      const parsed = parseBriefResult(result.text || result.stdout);
+      deps.store.patchReviewer(run.id, {
+        state: "done",
+        raw_output: truncate(result.text || result.stdout, 200_000),
+        normalized_json: JSON.stringify(parsed, null, 2),
+        stdout: truncate(result.stdout, 80_000),
+        stderr: truncate(result.stderr, 20_000),
+        exit_code: result.exitCode,
+        finished_at: nowIso(),
+        duration_ms: Date.now() - started,
+        ...usagePersistence(result.usage),
+        validation_error: null,
+      });
+      deps.store.log(job.id, `Repo brief done: ${parsed.sections.length} section(s)`, "info", run.id);
+      if (result.usage.complete === false && result.usage.warning) {
+        deps.store.log(job.id, result.usage.warning, "warn", run.id);
+      }
+      return parsed;
+    } catch (error) {
+      lastError = formatError(error);
+      const cliDump = result ? truncate(result.stderr.trim() || result.stdout.trim(), 500) : "";
+      deps.store.patchReviewer(run.id, {
+        state: "failed",
+        validation_error: lastError,
+        raw_output: result ? truncate(result.text || result.stdout, 200_000) : null,
+        stdout: result ? truncate(result.stdout, 80_000) : null,
+        stderr: result ? truncate(result.stderr, 20_000) : null,
+        exit_code: result?.exitCode ?? null,
+        finished_at: nowIso(),
+        duration_ms: Date.now() - started,
+        ...(result ? usagePersistence(result.usage) : {}),
+      });
+      deps.store.log(
+        job.id,
+        `Repo brief attempt ${attempt} failed: ${lastError}${cliDump ? ` — ${cliDump}` : ""}`,
+        "warn",
+        run.id,
+      );
+      if (attempt <= retries) await sleep(500 * attempt, signal);
+    }
+  }
+  return undefined;
 }
 
 function globalSecrets(config: Config): string[] {

@@ -36,6 +36,15 @@ export {
   type ScanConfirmData,
   type ScanConfirmNotice,
 } from "./pages.js";
+export {
+  renderBriefPage,
+  renderBriefConfirmPage,
+  renderBriefTabPage,
+  type BriefPageData,
+  type BriefConfirmData,
+  type BriefConfirmNotice,
+  type BriefTabData,
+} from "./pages.js";
 export { THEME_CSS, THEME_HREF } from "./theme.js";
 export { TYPEAHEAD_JS, TYPEAHEAD_HREF } from "./typeahead.js";
 export { PIERRE_DIFFS_HREF, CHAT_BUNDLE_HREF } from "./paths.js";

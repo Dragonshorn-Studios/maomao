@@ -8,6 +8,7 @@ import type { ProfileFieldErrors, ProfileFormValues } from "../config-form.js";
 import { initialProfileFormValues, profileFormValuesFromDefinition } from "../config-form.js";
 import type { EffectiveConfigEntry } from "../config-effective.js";
 import type { Severity } from "../schema.js";
+import { parseBriefPayload, type BriefPayload } from "../jobs/brief.js";
 import { elapsedMs, escapeHtml, formatDuration, shortSha } from "../util.js";
 import { KNOWN_REVIEWER_ROLES, promptBodyFromRolePrompt } from "../prompts.js";
 import {
@@ -230,9 +231,12 @@ export function renderJob(
   const stale = job.state === "stale";
   const failedToRetry = retryableFailedCount(job, runs);
   const isScan = job.job_type === "health_scan";
-  const heading = isScan
-    ? `Health scan · ${escapeHtml(job.repo_full_name)} @ ${escapeHtml(shortSha(job.head_sha, 12))}`
-    : `${forgeBadgeTitleHtml(job, job.repo_full_name, job.pr_number)}`;
+  const isBrief = job.job_type === "repo_brief";
+  const heading = isBrief
+    ? `Repo brief · ${escapeHtml(job.repo_full_name)} @ ${escapeHtml(shortSha(job.head_sha, 12))}`
+    : isScan
+      ? `Health scan · ${escapeHtml(job.repo_full_name)} @ ${escapeHtml(shortSha(job.head_sha, 12))}`
+      : `${forgeBadgeTitleHtml(job, job.repo_full_name, job.pr_number)}`;
   const cancelledBanner =
     job.state === "cancelled"
       ? renderCancelledBanner(job)
@@ -247,6 +251,7 @@ export function renderJob(
     <h1>${heading}</h1>
     <p class="lede">${escapeHtml(job.pr_title || "")}${flavor ? ` · ${escapeHtml(flavor)}` : ""}</p>
     ${options.chatEnabled ? `<p><a href="/jobs/${job.id}/chat">Ask Maomao about this change →</a></p>` : ""}
+    ${isBrief ? `<p><a href="/jobs/${job.id}/brief">Repo brief →</a></p>` : ""}
     ${jobActions}
     ${
       job.state === "completed"
@@ -274,7 +279,7 @@ export function renderJob(
         <dt>Elapsed</dt>
         <dd class="metric">${escapeHtml(elapsed)}</dd>
       </div>
-      <div>
+      ${isBrief ? "" : `<div>
         <dt>Aggregator</dt>
         <dd>${renderState(job.aggregator_state, runStateLabel(job.aggregator_state).text, runStateLabel(job.aggregator_state).hint, runStateLabel(job.aggregator_state).mark)}
           ${job.aggregator_model ? `<div><code class="metric">${escapeHtml(job.aggregator_model)}</code>${job.aggregator_provider ? `<span class="muted"> · <code class="metric">${escapeHtml(job.aggregator_provider)}</code></span>` : ""}</div>` : ""}
@@ -284,7 +289,7 @@ export function renderJob(
       <div>
         <dt>Reconciliation</dt>
         <dd>${escapeHtml(reconciliationSummary(job))}</dd>
-      </div>
+      </div>`}
       <div>
         <dt>Tokens / cost</dt>
         <dd class="metric">${escapeHtml(formatTokens(metrics.tokens))} · ${escapeHtml(formatCost(metrics.cost))}${
@@ -296,7 +301,7 @@ export function renderJob(
           <div class="muted usage-note">${escapeHtml(usageReportedCopy())}</div>
         </dd>
       </div>
-      <div>
+      ${isBrief ? "" : `<div>
         <dt>GitHub review</dt>
         <dd>${
           job.github_review_url
@@ -311,10 +316,10 @@ export function renderJob(
               : ""
           }
         </dd>
-      </div>
+      </div>`}
     </dl>
-    ${renderRouting(job)}
-    ${renderEscalation(job)}
+    ${isBrief ? "" : renderRouting(job)}
+    ${isBrief ? "" : renderEscalation(job)}
     ${job.failure_reason ? `<p class="error" role="alert"><strong>Failure:</strong> ${escapeHtml(job.failure_reason)}</p>` : ""}
     <div class="section-head">
       <h2>Reviewers</h2>
@@ -324,7 +329,7 @@ export function renderJob(
     <div class="cards">
       ${runs.map((run) => renderRun(run, canRetryRun(job, run), options.csrfToken, options.uiFlavor)).join("")}
     </div>
-    <h2>Aggregator</h2>
+    ${isBrief ? renderJobBriefSection(job) : `<h2>Aggregator</h2>
     ${renderAggregator(job, metrics)}
     <h2 id="findings">Findings</h2>
     ${renderFindings(metrics, options.prFindings ?? [], {
@@ -332,7 +337,7 @@ export function renderJob(
       prHtmlUrl: job.pr_html_url,
     })}
     ${options.scanIssueCreation ? renderScanIssueCreation(options.scanIssueCreation, options.csrfToken) : ""}
-    ${options.scanIssues?.length ? renderScanIssuesAudit(options.scanIssues) : ""}
+    ${options.scanIssues?.length ? renderScanIssuesAudit(options.scanIssues) : ""}`}
     <h2>Logs</h2>
     <ol class="logs" aria-label="Job logs">
       ${
@@ -346,10 +351,39 @@ export function renderJob(
     </ol>
   `;
   return layout(
-    isScan ? `Health scan · ${job.repo_full_name}` : forgeBadgeTitle(job, job.repo_full_name, job.pr_number),
+    isBrief
+      ? `Repo brief · ${job.repo_full_name}`
+      : isScan
+        ? `Health scan · ${job.repo_full_name}`
+        : forgeBadgeTitle(job, job.repo_full_name, job.pr_number),
     body,
     options,
   );
+}
+
+/** Inline TOC on the job page; each path opens the in-job brief tab. */
+function renderJobBriefSection(job: JobRow): string {
+  const payload = parseBriefPayload(job.brief_json);
+  if (!payload) {
+    return `<h2>Repo brief</h2><p class="muted">No repo brief stored for this job yet — the run writes it when the job completes.</p>`;
+  }
+  return `<h2>Repo brief</h2>
+    ${payload.summary ? `<p class="muted">${escapeHtml(payload.summary)}</p>` : ""}
+    ${renderBriefToc(job.id, payload)}`;
+}
+
+function renderBriefToc(jobId: number, payload: BriefPayload): string {
+  const rows = payload.sections
+    .map(
+      (section, index) => `<tr>
+        <td class="metric">${index + 1}</td>
+        <td>${escapeHtml(section.title)}</td>
+        <td><a href="/jobs/${jobId}/brief?section=${index}"><code>${escapeHtml(section.path)}</code></a></td>
+        <td>${escapeHtml(section.summary)}</td>
+      </tr>`,
+    )
+    .join("");
+  return `<table class="config-audit"><thead><tr><th>#</th><th>Section</th><th>File</th><th>Why it matters</th></tr></thead><tbody>${rows}</tbody></table>`;
 }
 
 function renderCancelledBanner(job: JobRow): string {
@@ -1970,6 +2004,188 @@ export function renderScanIssuePreviewPage(data: ScanIssuePreviewData): string {
     ${cards}
     ${confirmForm}`;
   return layout("Preview GitHub issues", body, {
+    showLogout: Boolean(data.csrfToken),
+    csrfToken: data.csrfToken,
+    identity: data.identity,
+    surface: "operator",
+  });
+}
+
+export interface BriefPageData {
+  canBrief: boolean;
+  identity?: UiIdentity;
+  csrfToken?: string;
+  recentBriefs: Array<{ id: number; repoFullName: string; headSha: string }>;
+  /** Resolved model shown as the run's limits; empty string means the server default. */
+  model: string;
+  timeoutMs: number;
+  error?: string;
+}
+
+/** Why a confirming brief POST was rejected; fresh values re-render alongside. */
+export type BriefConfirmNotice =
+  | { kind: "sha"; fromSha: string }
+  | { kind: "ref"; fromRef: string }
+  | { kind: "incomplete" };
+
+export interface BriefConfirmData {
+  identity?: UiIdentity;
+  csrfToken: string;
+  repo: string;
+  ref: string;
+  sha: string;
+  model: string;
+  timeoutMs: number;
+  notice?: BriefConfirmNotice;
+}
+
+function briefConfirmNoticeText(notice: BriefConfirmNotice): string {
+  switch (notice.kind) {
+    case "sha":
+      return `The commit changed since you confirmed: ${notice.fromSha} no longer resolves. Review the resolved SHA and confirm again.`;
+    case "ref":
+      return `The ref is different from the one you confirmed (${notice.fromRef}). Review and confirm again.`;
+    case "incomplete":
+      return "Confirmation incomplete — the commit shown here is the one that will be briefed. Confirm again.";
+  }
+}
+
+export function renderBriefConfirmPage(data: BriefConfirmData): string {
+  const notice = data.notice
+    ? `<p class="warn" role="alert">${escapeHtml(briefConfirmNoticeText(data.notice))}</p>`
+    : "";
+  const lede = data.notice
+    ? ""
+    : `<p class="lede">What this SHA holds. The brief reads this exact commit, read-only. Nothing is created on GitHub.</p>`;
+  const body = `
+    <h1>Confirm repo brief</h1>
+    ${notice}
+    ${lede}
+    <dl class="meta-grid">
+      <div>
+        <dt>Repository</dt>
+        <dd><code>${escapeHtml(data.repo)}</code></dd>
+      </div>
+      <div>
+        <dt>Ref</dt>
+        <dd><code>${escapeHtml(data.ref)}</code></dd>
+      </div>
+      <div class="sha-block">
+        <dt>Commit SHA</dt>
+        <dd><code class="sha">${escapeHtml(data.sha)}</code></dd>
+      </div>
+      <div>
+        <dt>Model</dt>
+        <dd><code class="metric">${escapeHtml(data.model || "(server default)")}</code></dd>
+      </div>
+      <div>
+        <dt>Limits</dt>
+        <dd class="metric">run timeout ${escapeHtml(formatDuration(data.timeoutMs))} · read-only tools only</dd>
+      </div>
+    </dl>
+    <form class="trigger" method="post" action="/brief">
+      ${csrfInput(data.csrfToken)}
+      <input type="hidden" name="repo" value="${escapeHtml(data.repo)}"/>
+      <input type="hidden" name="ref" value="${escapeHtml(data.ref)}"/>
+      <input type="hidden" name="sha" value="${escapeHtml(data.sha)}"/>
+      <button type="submit" aria-label="Run repo brief">Repo brief</button>
+      <a href="/brief">Cancel</a>
+    </form>`;
+  return layout("Confirm repo brief", body, {
+    showLogout: Boolean(data.csrfToken),
+    csrfToken: data.csrfToken,
+    identity: data.identity,
+    surface: "operator",
+  });
+}
+
+export function renderBriefPage(data: BriefPageData): string {
+  const csrf = csrfInput(data.csrfToken);
+  const recentBriefs = data.recentBriefs.length
+    ? `<ul class="queue">${data.recentBriefs
+        .map(
+          (brief) =>
+            `<li><article class="specimen"><p class="specimen-title"><a href="/jobs/${brief.id}/brief">Job ${brief.id} · ${escapeHtml(brief.repoFullName)}</a></p><div class="meta-row"><span class="pair">SHA <strong><code class="sha">${escapeHtml(shortSha(brief.headSha, 12))}</code></strong></span></div></article></li>`,
+        )
+        .join("")}</ul>`
+    : `<p class="muted">No repo briefs yet.</p>`;
+  const body = `
+    <h1>Repo brief</h1>
+    <p class="lede">What this SHA holds. Pick a repository and a commit — Maomao reads the tree at that exact SHA and hands back a table of contents you can open file by file, read-only.</p>
+    ${data.error ? `<p class="error" role="alert">${escapeHtml(data.error)}</p>` : ""}
+    ${data.canBrief ? `
+    <form class="trigger" method="post" action="/brief">
+      ${csrf}
+      <label for="brief-repo-input">Repository (owner/repo — must be an allowlisted installation)
+        <span class="typeahead-wrap">
+          <input id="brief-repo-input" name="repo" placeholder="owner/repo — start typing to search" required autocomplete="off"
+            role="combobox" aria-expanded="false" aria-controls="repo-listbox" aria-autocomplete="list"
+            data-repo-typeahead/>
+          <ul id="repo-listbox" role="listbox" aria-label="Allowlisted repositories" class="typeahead-listbox" hidden></ul>
+        </span>
+      </label>
+      <label for="brief-ref-input">Commit (SHA, branch, or tag — leave empty for the default branch head)
+        <input id="brief-ref-input" name="ref" placeholder="e.g. 5f3aa1c, main, v1.2.0" autocomplete="off"/>
+      </label>
+      <button type="submit" aria-label="Run repo brief">Repo brief</button>
+    </form>
+    <p class="muted">Model: ${escapeHtml(data.model || "(server default)")} · timeout ${escapeHtml(formatDuration(data.timeoutMs))}.</p>
+    <h2>Recent repo briefs</h2>
+    ${recentBriefs}
+    <script src="${TYPEAHEAD_HREF}" defer></script>`
+    : `<p class="muted">Repo briefs require an operator GitHub OAuth identity.</p>`}`;
+  return layout("Repo brief", body, {
+    showLogout: data.canBrief || Boolean(data.csrfToken),
+    csrfToken: data.csrfToken,
+    identity: data.identity,
+    surface: "operator",
+  });
+}
+
+export interface BriefTabData {
+  job: JobRow;
+  payload?: BriefPayload;
+  /** Zero-based index into payload.sections; undefined renders the TOC. */
+  sectionIndex?: number;
+  identity?: UiIdentity;
+  csrfToken?: string;
+}
+
+/** The in-job "Repo brief" tab: TOC by default, one section's fragment with ?section=N. */
+export function renderBriefTabPage(data: BriefTabData): string {
+  const { job, payload } = data;
+  const sha = escapeHtml(shortSha(job.head_sha, 12));
+  const crumb = `<p class="crumb"><a href="/jobs/${job.id}">Job ${job.id}</a> / repo brief</p>`;
+  let content: string;
+  if (!payload) {
+    content = `<p class="muted">No repo brief stored for this job.</p>`;
+  } else if (data.sectionIndex !== undefined && payload.sections[data.sectionIndex]) {
+    const section = payload.sections[data.sectionIndex]!;
+    const range =
+      section.startLine != null
+        ? `:${section.startLine}${section.endLine != null && section.endLine !== section.startLine ? `-${section.endLine}` : ""}`
+        : "";
+    const fragment =
+      section.fragment != null
+        ? `<pre class="diff-panel" aria-label="File fragment">${escapeHtml(section.fragment)}</pre>`
+        : `<p class="muted">No fragment attached${section.fragmentNote ? ` (${escapeHtml(section.fragmentNote)})` : ""}.</p>`;
+    content = `
+      <p><a href="/jobs/${job.id}/brief">← Table of contents</a></p>
+      <h2>${escapeHtml(section.title)}</h2>
+      <p><code>${escapeHtml(section.path)}${escapeHtml(range)}</code></p>
+      <p class="muted">${escapeHtml(section.summary)}</p>
+      ${fragment}`;
+  } else {
+    content = `
+      ${payload.summary ? `<p class="lede">${escapeHtml(payload.summary)}</p>` : ""}
+      <p class="muted">${payload.sections.length} section(s) captured at run time — open a file to read its fragment.</p>
+      ${renderBriefToc(job.id, payload)}`;
+  }
+  const body = `
+    ${crumb}
+    <h1>Repo brief · ${escapeHtml(job.repo_full_name)} @ ${sha}</h1>
+    ${content}`;
+  return layout(`Repo brief · ${job.repo_full_name}`, body, {
     showLogout: Boolean(data.csrfToken),
     csrfToken: data.csrfToken,
     identity: data.identity,

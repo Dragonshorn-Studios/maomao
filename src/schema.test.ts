@@ -5,6 +5,7 @@ import {
   fallbackAggregator,
   formatZodIssues,
   parseAggregatorResult,
+  parseBriefResult,
   parseReviewerResult,
   parseVerifierResult,
   SchemaValidationError,
@@ -360,6 +361,30 @@ describe("location-sentinel normalization (issue #62)", () => {
         ),
       ).toThrow();
     }
+  });
+});
+
+describe("repo brief schema (issue #88)", () => {
+  const section = (path: string) => ({ title: `Section ${path}`, path, summary: "why it matters" });
+  const briefJson = (sections: unknown[]) =>
+    JSON.stringify({ schema_version: 1, summary: "what this tree holds", sections });
+
+  it("accepts a 5–15 section TOC and extracts it from fenced output", () => {
+    const parsed = parseBriefResult(
+      `\`\`\`json\n${briefJson([section("a.ts"), section("b.ts"), section("c.ts"), section("d.ts"), section("e.ts")])}\n\`\`\``,
+    );
+    expect(parsed.sections).toHaveLength(5);
+    expect(parsed.sections[0]?.path).toBe("a.ts");
+  });
+
+  it("rejects TOCs outside the 5–15 section bound", () => {
+    expect(() => parseBriefResult(briefJson([section("a.ts"), section("b.ts"), section("c.ts"), section("d.ts")]))).toThrow();
+    const tooMany = Array.from({ length: 16 }, (_, i) => section(`f${i}.ts`));
+    expect(() => parseBriefResult(briefJson(tooMany))).toThrow();
+  });
+
+  it("rejects non-JSON output", () => {
+    expect(() => parseBriefResult("no json here")).toThrow(SchemaValidationError);
   });
 });
 

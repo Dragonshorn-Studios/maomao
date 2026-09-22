@@ -312,7 +312,7 @@ export class ChatService {
       "You are Maomao's code explainer. You explain a reviewed change to the operator who ran the review.",
       "Read-only: you can read, glob, and grep the repository, but you must never modify anything.",
       "",
-      `Repository: ${job.repo_full_name} (${job.job_type === "health_scan" ? "health scan" : "pull request"} by ${job.pr_author || "unknown"})`,
+      `Repository: ${job.repo_full_name} (${job.job_type === "health_scan" ? "health scan" : job.job_type === "repo_brief" ? "repo brief" : "pull request"} by ${job.pr_author || "unknown"})`,
       `Change under review: ${job.pr_title || "(no title)"}`,
       `Reviewed head commit: ${job.head_sha}`,
       "",

@@ -119,6 +119,113 @@ describe("usage schema migration", () => {
       rmSync(dir, { recursive: true, force: true });
     }
   });
+
+  it("rebuilds the jobs uniqueness to include job_type so a brief coexists with a scan", () => {
+    const dir = mkdtempSync(join(tmpdir(), "maomao-db-"));
+    const path = join(dir, "scoped-unique.sqlite");
+    try {
+      // A deployed v2 database: provider-scoped five-column UNIQUE, job_type
+      // carried as a plain column (exactly what the pre-brief schema looked like).
+      const legacy = new Database(path);
+      legacy.exec(`
+        CREATE TABLE jobs (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          repo_full_name TEXT NOT NULL,
+          repo_owner TEXT NOT NULL,
+          repo_name TEXT NOT NULL,
+          installation_id INTEGER NOT NULL,
+          provider TEXT NOT NULL DEFAULT 'github',
+          provider_instance TEXT NOT NULL DEFAULT 'github.com',
+          pr_number INTEGER NOT NULL,
+          pr_title TEXT NOT NULL DEFAULT '',
+          pr_body TEXT NOT NULL DEFAULT '',
+          pr_html_url TEXT NOT NULL DEFAULT '',
+          pr_author TEXT NOT NULL DEFAULT '',
+          forge_connection_id TEXT,
+          github_account_id INTEGER,
+          github_repository_id INTEGER,
+          webhook_delivery_id TEXT,
+          webhook_event TEXT,
+          profile_revision_id INTEGER,
+          base_sha TEXT NOT NULL,
+          head_sha TEXT NOT NULL,
+          base_ref TEXT NOT NULL DEFAULT '',
+          head_ref TEXT NOT NULL DEFAULT '',
+          state TEXT NOT NULL DEFAULT 'queued',
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          started_at TEXT,
+          finished_at TEXT,
+          job_type TEXT NOT NULL DEFAULT 'pr_review',
+          scan_branch TEXT,
+          UNIQUE (provider, provider_instance, repo_full_name, pr_number, head_sha)
+        );
+        CREATE TABLE reviewer_runs (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          job_id INTEGER NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
+          role TEXT NOT NULL,
+          title TEXT NOT NULL DEFAULT '',
+          model TEXT,
+          state TEXT NOT NULL DEFAULT 'queued',
+          attempt INTEGER NOT NULL DEFAULT 0,
+          UNIQUE (job_id, role)
+        );
+        CREATE TABLE job_logs (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          job_id INTEGER NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
+          reviewer_run_id INTEGER,
+          level TEXT NOT NULL,
+          message TEXT NOT NULL,
+          created_at TEXT NOT NULL
+        );
+      `);
+      legacy
+        .prepare(
+          `INSERT INTO jobs (repo_full_name, repo_owner, repo_name, installation_id, pr_number,
+            base_sha, head_sha, job_type, scan_branch, created_at, updated_at)
+           VALUES ('acme/widgets','acme','widgets',42,0,'sha1','sha1','health_scan','main',
+            '2026-01-01T00:00:00.000Z','2026-01-01T00:00:00.000Z')`,
+        )
+        .run();
+      legacy.close();
+
+      const store = new JobStore(openDb(path));
+      const schema = new Database(path)
+        .prepare(`SELECT sql FROM sqlite_master WHERE type='table' AND name='jobs'`)
+        .get() as { sql: string };
+      expect(schema.sql).toContain(
+        "UNIQUE (provider, provider_instance, repo_full_name, pr_number, head_sha, job_type)",
+      );
+
+      // The pre-existing scan row survived the rebuild with its type intact.
+      const preserved = store.listJobs()[0];
+      expect(preserved?.job_type).toBe("health_scan");
+      expect(preserved?.scan_branch).toBe("main");
+
+      // And a brief on the same repo+SHA is a new job, not a collision.
+      const brief = store.enqueue({
+        repoFullName: "acme/widgets",
+        repoOwner: "acme",
+        repoName: "widgets",
+        installationId: 42,
+        prNumber: 0,
+        prTitle: "Repo brief (main)",
+        prBody: "",
+        prHtmlUrl: "",
+        prAuthor: "octocat",
+        baseSha: "sha1",
+        headSha: "sha1",
+        baseRef: "main",
+        headRef: "main",
+        jobType: "repo_brief",
+        reviewers: [{ role: "repo_brief", title: "Repo brief" }],
+      });
+      expect(brief.created).toBe(true);
+      expect(brief.job.id).not.toBe(preserved?.id);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
 });
 
 describe("health-scan issue registry", () => {

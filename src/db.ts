@@ -121,7 +121,9 @@ function migrate(db: SqliteDb): void {
       escalation_id TEXT,
       poison_alert_policy TEXT,
       manual_escalate_requested INTEGER NOT NULL DEFAULT 0,
-      UNIQUE (provider, provider_instance, repo_full_name, pr_number, head_sha)
+      job_type TEXT NOT NULL DEFAULT 'pr_review',
+      brief_json TEXT,
+      UNIQUE (provider, provider_instance, repo_full_name, pr_number, head_sha, job_type)
     );
 
     CREATE TABLE IF NOT EXISTS escalation_dispatches (
@@ -423,6 +425,7 @@ function migrate(db: SqliteDb): void {
     ensureColumn(db, "jobs", "cancelled_by", "TEXT");
     ensureColumn(db, "jobs", "forge_connection_id", "TEXT");
     const jobColumns: Array<[string, string]> = [
+      ["brief_json", "TEXT"],
       ["routing_state", "TEXT NOT NULL DEFAULT 'queued'"],
       ["routing_mode", "TEXT"],
       ["routing_profile", "TEXT"],
@@ -468,6 +471,11 @@ function migrate(db: SqliteDb): void {
       ["scan_branch", "TEXT"],
     ];
     for (const [name, ddl] of jobColumns) ensureColumn(db, "jobs", name, ddl);
+
+    // Scans and repo briefs both live at pr_number 0, so job_type must be
+    // part of the dedup key — otherwise a brief would collapse into a
+    // health scan (or vice versa) on the same repo+SHA.
+    rebuildJobsForScopedJobType(db);
 
     const findingColumns: [string, string][] = [
       ["diff_hunk", "TEXT"],
@@ -551,6 +559,47 @@ interface ColumnInfo {
  * and all data are preserved; indexes die with the rename and are recreated
  * by `migrate` afterwards.
  */
+const JOBS_SCOPED_UNIQUE =
+  "UNIQUE (provider, provider_instance, repo_full_name, pr_number, head_sha, job_type)";
+
+function rebuildJobsForScopedJobType(db: SqliteDb): void {
+  const row = db
+    .prepare(`SELECT sql FROM sqlite_master WHERE type='table' AND name='jobs'`)
+    .get() as { sql: string } | undefined;
+  if (!row?.sql) return;
+  if (row.sql.includes(JOBS_SCOPED_UNIQUE)) return;
+  const legacyPattern =
+    /UNIQUE\s*\(provider,\s*provider_instance,\s*repo_full_name,\s*pr_number,\s*head_sha\)/;
+  if (!legacyPattern.test(row.sql)) {
+    throw new Error(
+      `Cannot migrate: expected the legacy jobs uniqueness constraint, got: ${row.sql}. Refusing to rebuild the jobs table.`,
+    );
+  }
+  const newSql = row.sql.replace(legacyPattern, JOBS_SCOPED_UNIQUE);
+  applyTableRebuild(db, "jobs", newSql);
+}
+
+function applyTableRebuild(db: SqliteDb, table: string, newSql: string): void {
+  const legacyColumns = columnNames(db, table);
+  const legacyName = `${table}__legacy_pre_scope`;
+  db.transaction(() => {
+    db.exec(`ALTER TABLE ${table} RENAME TO ${legacyName}`);
+    db.exec(newSql);
+    // Columns ensured after the stored CREATE text was written exist only in
+    // table_info; re-add them before copying so no data is lost.
+    const recreated = columnNames(db, table);
+    const legacyInfo = db.prepare(`PRAGMA table_info(${legacyName})`).all() as ColumnInfo[];
+    for (const info of legacyInfo) {
+      if (recreated.has(info.name)) continue;
+      const ddl = `${info.type}${info.notnull ? " NOT NULL" : ""}${info.dflt_value != null ? ` DEFAULT ${info.dflt_value}` : ""}`;
+      db.exec(`ALTER TABLE ${table} ADD COLUMN "${info.name}" ${ddl}`);
+    }
+    const columnList = [...legacyColumns].map((name) => `"${name}"`).join(", ");
+    db.exec(`INSERT INTO ${table} (${columnList}) SELECT ${columnList} FROM ${legacyName}`);
+    db.exec(`DROP TABLE ${legacyName}`);
+  })();
+}
+
 function rebuildTableScoped(db: SqliteDb, rebuild: ScopedRebuild): void {
   // Already scoped (fresh v2 database, or rebuilt in an earlier pass).
   if (columnNames(db, rebuild.table).has("provider")) return;
