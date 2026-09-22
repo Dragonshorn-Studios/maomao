@@ -246,7 +246,14 @@ OPENCODE_REVIEWER_MODEL=anthropic/claude-sonnet-4-5
 OPENCODE_AGGREGATOR_MODEL=anthropic/claude-opus-4-6   # optional; defaults to reviewer model
 ```
 
-Use any `provider/model` string OpenCode understands (`opencode models`). Supply API keys the way OpenCode expects, for example `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, or `OPENROUTER_API_KEY`. Those are passed through to the child; GitHub App credentials are not.
+Use any `provider/model` string OpenCode understands (`opencode models`). Supply API keys the way OpenCode expects, for example `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `OPENROUTER_API_KEY`, or `ZHIPU_API_KEY`. Those are passed through to the child; GitHub App credentials are not.
+
+**Z.AI Coding Plan.** OpenCode ships a `zai-coding-plan` provider, so `OPENCODE_REVIEWER_MODEL=zai-coding-plan/glm-4.7` (or any model `opencode models` lists for it) works once it can authenticate. Either set `ZHIPU_API_KEY` in `.env` (passed through to the child) or run `opencode auth login` once inside the container — its credentials file persists on the `maomao-opencode` volume:
+
+```bash
+docker compose exec -it maomao /opt/opencode/.opencode/bin/opencode auth login
+# select "Z.AI Coding Plan", paste your Z.AI key
+```
 
 Default specialist roles (override with `REVIEWER_ROLES`):
 

@@ -11,6 +11,9 @@ describe("sanitizeChildEnv", () => {
       GITHUB_TOKEN: "ghs_xxx",
       ANTHROPIC_API_KEY: "sk-ant",
       OPENAI_API_KEY: "sk-openai",
+      ZHIPU_API_KEY: "sk-zhipu",
+      ZAI_API_KEY: "sk-zai",
+      ZAI_CODING_PLAN_TOKEN: "should-not-pass",
       OPENCODE_REVIEWER_MODEL: "anthropic/claude",
       MAOMAO_INTERNAL: "nope",
       UI_PASSWORD: "pw",
@@ -22,6 +25,9 @@ describe("sanitizeChildEnv", () => {
     }
     expect(env.ANTHROPIC_API_KEY).toBe("sk-ant");
     expect(env.OPENAI_API_KEY).toBe("sk-openai");
+    expect(env.ZHIPU_API_KEY).toBe("sk-zhipu");
+    expect(env.ZAI_API_KEY).toBe("sk-zai");
+    expect(env.ZAI_CODING_PLAN_TOKEN).toBeUndefined();
     expect(env.OPENCODE_REVIEWER_MODEL).toBe("anthropic/claude");
     expect(env.MAOMAO_INTERNAL).toBeUndefined();
     expect(env.UI_PASSWORD).toBeUndefined();

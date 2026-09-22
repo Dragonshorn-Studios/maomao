@@ -14,6 +14,8 @@ const PROVIDER_ALLOWLIST = [
   /^DEEPSEEK_/i,
   /^COHERE_/i,
   /^AZURE_OPENAI_/i,
+  /^ZHIPU_/i,
+  /^ZAI_/i,
   // Broad cloud prefixes so documented BYO providers keep working. Do not run
   // Maomao on a host whose process env holds unrelated AWS/GCP/Bedrock creds.
   /^AWS_/i,
