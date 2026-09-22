@@ -110,15 +110,18 @@ describe("JobStore enqueue", () => {
       reviewers: [],
     };
     const scan = store.enqueue({ ...base, headSha: "sha1", jobType: "health_scan" });
+    const scanDup = store.enqueue({ ...base, headSha: "sha1", jobType: "health_scan" });
     const brief = store.enqueue({ ...base, headSha: "sha1", jobType: "repo_brief" });
     const briefDup = store.enqueue({ ...base, headSha: "sha1", jobType: "repo_brief" });
     const briefMoved = store.enqueue({ ...base, headSha: "sha2", jobType: "repo_brief" });
     expect(scan.created).toBe(true);
+    expect(scanDup.created).toBe(false); // scans still dedup on repo+SHA
     expect(brief.created).toBe(true); // same repo+SHA, different job type: no collision
-    expect(briefDup.created).toBe(false);
+    expect(briefDup.created).toBe(true); // briefs are per-request jobs; repeats hit the cache instead
+    expect(briefDup.job.id).not.toBe(brief.job.id);
     expect(briefMoved.created).toBe(true);
-    expect(store.getJob(brief.job.id)?.state).toBe("stale");
-    expect(store.getJob(scan.job.id)?.state).toBe("queued"); // scan untouched by the brief's restale
+    expect(store.getJob(brief.job.id)?.state).toBe("queued"); // a brief is immutable history, never staled
+    expect(store.getJob(scan.job.id)?.state).toBe("queued"); // scan untouched by brief enqueues
   });
 });
 
@@ -3934,12 +3937,13 @@ describe("repo brief (issue #88)", () => {
     };
   }
 
-  function briefConfig() {
+  function briefConfig(overrides: Record<string, string> = {}) {
     return loadConfig({
       OPENCODE_REVIEWER_MODEL: "test/model",
       GITHUB_APP_ID: "1",
       GITHUB_WEBHOOK_SECRET: "s",
       GITHUB_APP_PRIVATE_KEY: "k",
+      ...overrides,
     });
   }
 
@@ -4023,6 +4027,125 @@ describe("repo brief (issue #88)", () => {
     const job = store.getJob(created.job.id);
     expect(job?.state).toBe("failed");
     expect(job?.failure_reason).toContain("not available");
+  });
+
+  describe("cache (issue #89)", () => {
+    function countingOpencode(counter: { runs: number }): OpenCodePort {
+      return {
+        async run() {
+          counter.runs += 1;
+          return { stdout: briefJson, stderr: "", exitCode: 0, text: briefJson, usage: { cost: 0.01, totalTokens: 10, complete: true } };
+        },
+      };
+    }
+
+    it("serves a repeat brief on the same SHA from cache — a new job, no checkout, no OpenCode run", async () => {
+      const store = new JobStore(openDb(":memory:"));
+      const counter = { runs: 0 };
+      const checkout = await fixtureCheckout();
+      const prepare = vi.spyOn(checkout, "prepare");
+      const pipeline = createPipeline({
+        config: briefConfig(),
+        store,
+        github: githubPort(),
+        checkout,
+        opencode: countingOpencode(counter),
+      });
+
+      const first = enqueueBrief(store);
+      await pipeline.run(first.job.id);
+      expect(counter.runs).toBe(1);
+
+      // The repeat request is its own job (per-request dedup key), not the
+      // first job deduped back.
+      const second = enqueueBrief(store);
+      expect(second.created).toBe(true);
+      expect(second.job.id).not.toBe(first.job.id);
+
+      await pipeline.run(second.job.id);
+      const job = store.getJob(second.job.id);
+      expect(job?.state).toBe("completed");
+      expect(prepare).toHaveBeenCalledTimes(1);
+      expect(counter.runs).toBe(1);
+      const payload = parseBriefPayload(job?.brief_json);
+      expect(payload?.served_from_cache).toBe(true);
+      expect(payload?.sections).toHaveLength(5);
+      expect(payload?.sections[0]?.fragment).toContain("export const n = 1");
+      expect(store.listReviewerRuns(second.job.id)[0]?.state).toBe("done");
+      expect(store.getJob(second.job.id)?.workspace_path).toBeNull();
+      const logs = store.listReviewerRuns(second.job.id);
+      expect(logs[0]?.role).toBe("repo_brief");
+    });
+
+    it("never serves the cached brief for a different SHA", async () => {
+      const store = new JobStore(openDb(":memory:"));
+      const counter = { runs: 0 };
+      const pipeline = createPipeline({
+        config: briefConfig(),
+        store,
+        github: githubPort(),
+        checkout: await fixtureCheckout(),
+        opencode: countingOpencode(counter),
+      });
+
+      const first = enqueueBrief(store, "aaaa0000aaaa0000aaaa0000aaaa0000aaaa0000");
+      await pipeline.run(first.job.id);
+      const second = enqueueBrief(store, "bbbb1111bbbb1111bbbb1111bbbb1111bbbb1111");
+      await pipeline.run(second.job.id);
+
+      expect(counter.runs).toBe(2);
+      const payload = parseBriefPayload(store.getJob(second.job.id)?.brief_json);
+      expect(payload?.served_from_cache).toBeUndefined();
+      expect(payload?.sha).toBe("bbbb1111bbbb1111bbbb1111bbbb1111bbbb1111");
+    });
+
+    it("re-runs every brief when the cache is disabled", async () => {
+      const store = new JobStore(openDb(":memory:"));
+      const counter = { runs: 0 };
+      const pipeline = createPipeline({
+        config: briefConfig({ MAOMAO_BRIEF_CACHE_ENABLED: "false" }),
+        store,
+        github: githubPort(),
+        checkout: await fixtureCheckout(),
+        opencode: countingOpencode(counter),
+      });
+
+      const first = enqueueBrief(store);
+      await pipeline.run(first.job.id);
+      const second = enqueueBrief(store);
+      await pipeline.run(second.job.id);
+
+      expect(counter.runs).toBe(2);
+      expect(store.getRepoBriefCache("github", "github.com", first.job.repo_full_name, first.job.head_sha)).toBeUndefined();
+    });
+
+    it("two confirmed briefs coexist as distinct jobs on the same repo+SHA, and a newer brief never stales an older one", () => {
+      const store = new JobStore(openDb(":memory:"));
+      const first = enqueueBrief(store, "aaaa0000aaaa0000aaaa0000aaaa0000aaaa0000");
+      const second = enqueueBrief(store, "aaaa0000aaaa0000aaaa0000aaaa0000aaaa0000");
+      expect(first.created).toBe(true);
+      expect(second.created).toBe(true);
+      expect(second.job.id).not.toBe(first.job.id);
+      expect(store.getJob(first.job.id)?.dedup_key).not.toBe("");
+      expect(store.getJob(second.job.id)?.dedup_key).not.toBe(store.getJob(first.job.id)?.dedup_key);
+
+      // A brief on a different SHA is immutable history, not a superseded job.
+      const other = enqueueBrief(store, "bbbb1111bbbb1111bbbb1111bbbb1111bbbb1111");
+      expect(other.created).toBe(true);
+      expect(store.getJob(first.job.id)?.state).toBe("queued");
+      expect(store.getJob(second.job.id)?.state).toBe("queued");
+    });
+
+    it("stores and reads back a cached payload scoped to forge/repo/SHA", () => {
+      const store = new JobStore(openDb(":memory:"));
+      store.putRepoBriefCache("github", "github.com", "acme/widgets", "sha1", '{"k":1}');
+      expect(store.getRepoBriefCache("github", "github.com", "acme/widgets", "sha1")?.payload).toBe('{"k":1}');
+      expect(store.getRepoBriefCache("github", "github.com", "acme/widgets", "sha2")).toBeUndefined();
+      expect(store.getRepoBriefCache("github", "github.com", "acme/other", "sha1")).toBeUndefined();
+      expect(store.getRepoBriefCache("gitlab", "gitlab.example", "acme/widgets", "sha1")).toBeUndefined();
+      store.putRepoBriefCache("github", "github.com", "acme/widgets", "sha1", '{"k":2}');
+      expect(store.getRepoBriefCache("github", "github.com", "acme/widgets", "sha1")?.payload).toBe('{"k":2}');
+    });
   });
 });
 

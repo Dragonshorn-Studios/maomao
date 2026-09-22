@@ -144,6 +144,11 @@ export interface Config {
     maxCostUsd: number;
     timeoutMs: number;
   };
+  /** Repo-brief settings (issue #89). */
+  brief: {
+    /** When true, a completed brief payload is reused for repeat briefs on the same forge/repo/SHA. */
+    cacheEnabled: boolean;
+  };
 }
 
 const DEFAULT_ACTIONS: PullRequestAction[] = [
@@ -327,6 +332,9 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
       maxMessages: clamp(parseInteger(env.MAOMAO_EXPLAIN_MAX_MESSAGES, 20), 1, 200),
       maxCostUsd: Math.max(0, parseNumber(env.MAOMAO_EXPLAIN_MAX_COST_USD, 1)),
       timeoutMs: clamp(parseInteger(env.MAOMAO_EXPLAIN_TIMEOUT_MS, 180_000), 5_000, 600_000),
+    },
+    brief: {
+      cacheEnabled: parseBoolean(env.MAOMAO_BRIEF_CACHE_ENABLED, true),
     },
   };
 }

@@ -2212,6 +2212,7 @@ describe("repo brief routes (issue #88)", () => {
       sha: RESOLVED_SHA,
       generated_at: "2026-01-01T00:00:00.000Z",
       summary: "what this tree holds",
+      served_from_cache: true,
       sections: [
         { title: "Entry", path: "src/a.ts", summary: "entry point", startLine: 1, endLine: 3, fragment: "line1\nline2\nline3" },
         { title: "Readme", path: "README.md", summary: "docs", startLine: null, endLine: null, fragment: "# widgets" },
@@ -2230,6 +2231,7 @@ describe("repo brief routes (issue #88)", () => {
     expect(tocHtml).toContain(`Repo brief · acme/widgets @ ${RESOLVED_SHA.slice(0, 12)}`);
     expect(tocHtml).toContain(`href="/jobs/${created.job.id}/brief?section=0"`);
     expect(tocHtml).toContain("entry point");
+    expect(tocHtml).toContain("Served from the repo brief cache");
 
     const section = await app.request(`/jobs/${created.job.id}/brief?section=0`, { headers: { cookie: session } });
     const sectionHtml = await section.text();
@@ -2262,6 +2264,33 @@ describe("repo brief routes (issue #88)", () => {
     });
     const missing = await app.request(`/jobs/${other.job.id}/brief`, { headers: { cookie: session } });
     expect(missing.status).toBe(404);
+  });
+
+  it("gives every confirmed brief its own job — identical repeats are not deduped (issue #89)", async () => {
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    const { app, store } = testApp(oauthEnv, briefGithub(), mockOauthFetch({ id: 1001, login: "octocat" }));
+    const { session, csrfCookie, csrfToken } = await operatorBriefCsrf(app);
+
+    for (let i = 0; i < 2; i += 1) {
+      const preview = await app.request("/brief", {
+        method: "POST",
+        headers: { cookie: `${session}; ${csrfCookie}`, "content-type": "application/x-www-form-urlencoded" },
+        body: `repo=acme%2Fwidgets&csrf_token=${encodeURIComponent(csrfToken)}`,
+      });
+      const queued = await app.request("/brief", {
+        method: "POST",
+        headers: { cookie: `${session}; ${csrfCookie}`, "content-type": "application/x-www-form-urlencoded" },
+        body: briefConfirmBody(await preview.text(), csrfToken),
+      });
+      expect(queued.status).toBe(302);
+      expect(queued.headers.get("location")).toContain("brief-queued");
+    }
+
+    const jobs = store.listJobs();
+    expect(jobs).toHaveLength(2);
+    expect(new Set(jobs.map((job) => job.id)).size).toBe(2);
+    expect(jobs.every((job) => job.job_type === "repo_brief")).toBe(true);
+    log.mockRestore();
   });
 });
 

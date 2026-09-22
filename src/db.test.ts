@@ -194,13 +194,15 @@ describe("usage schema migration", () => {
         .prepare(`SELECT sql FROM sqlite_master WHERE type='table' AND name='jobs'`)
         .get() as { sql: string };
       expect(schema.sql).toContain(
-        "UNIQUE (provider, provider_instance, repo_full_name, pr_number, head_sha, job_type)",
+        "UNIQUE (provider, provider_instance, repo_full_name, pr_number, head_sha, job_type, dedup_key)",
       );
 
-      // The pre-existing scan row survived the rebuild with its type intact.
+      // The pre-existing scan row survived the rebuild with its type intact
+      // and the shared ('') dedup key, so scan/review dedup is unchanged.
       const preserved = store.listJobs()[0];
       expect(preserved?.job_type).toBe("health_scan");
       expect(preserved?.scan_branch).toBe("main");
+      expect(preserved?.dedup_key).toBe("");
 
       // And a brief on the same repo+SHA is a new job, not a collision.
       const brief = store.enqueue({
@@ -222,6 +224,28 @@ describe("usage schema migration", () => {
       });
       expect(brief.created).toBe(true);
       expect(brief.job.id).not.toBe(preserved?.id);
+
+      // And a repeat brief on the same repo+SHA is ALSO its own job: briefs
+      // carry a per-request nonce, identical repeats hit repo_brief_cache.
+      const repeat = store.enqueue({
+        repoFullName: "acme/widgets",
+        repoOwner: "acme",
+        repoName: "widgets",
+        installationId: 42,
+        prNumber: 0,
+        prTitle: "Repo brief (main)",
+        prBody: "",
+        prHtmlUrl: "",
+        prAuthor: "octocat",
+        baseSha: "sha1",
+        headSha: "sha1",
+        baseRef: "main",
+        headRef: "main",
+        jobType: "repo_brief",
+        reviewers: [{ role: "repo_brief", title: "Repo brief" }],
+      });
+      expect(repeat.created).toBe(true);
+      expect(repeat.job.id).not.toBe(brief.job.id);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

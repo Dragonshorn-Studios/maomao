@@ -31,7 +31,7 @@ import {
   type ReviewerResult,
   type Severity,
 } from "../schema.js";
-import { buildBriefPayload } from "./brief.js";
+import { buildBriefPayload, parseBriefPayload } from "./brief.js";
 import { classifyPriorFindings, collectPriorFindings, findingsForPublish } from "../findings/reconcile.js";
 import {
   collectHumanOverrides,
@@ -832,6 +832,12 @@ async function runScanJob(deps: PipelineDeps, forge: ForgeRegistry, jobId: numbe
  * reads bounded fragments of each section's file into `jobs.brief_json` before
  * the workspace is swept, so the TOC keeps working after retention cleans up.
  * No findings, no aggregation, nothing posted to the forge.
+ *
+ * Issue #89: payloads also persist into repo_brief_cache keyed by
+ * forge/repo/SHA, so a repeat brief on the same tip skips both the checkout
+ * and the OpenCode run — the new job is its own run that happens to be served
+ * from cache. Ask still works on cache-hit jobs: it lazily prepares its own
+ * chat workspace when the job has none.
  */
 async function runBriefJob(deps: PipelineDeps, forge: ForgeRegistry, jobId: number, signal: AbortSignal): Promise<void> {
   const store = deps.store;
@@ -860,6 +866,27 @@ async function runBriefJob(deps: PipelineDeps, forge: ForgeRegistry, jobId: numb
     }
     store.setJobState(jobId, "preparing", { started_at: nowIso() });
     store.log(jobId, `Repo brief of ${job.repo_full_name} at ${job.head_sha}`);
+    const run = store.listReviewerRuns(jobId).find((entry) => entry.role === "repo_brief");
+    if (!run) throw new Error("repo brief run was not enqueued");
+
+    // A cache hit for this exact forge/repo/SHA skips the clone and the
+    // OpenCode pass entirely; the stored payload's own sha is re-checked
+    // before serving so a mismatched row can never produce a wrong brief.
+    if (config.brief.cacheEnabled) {
+      const cached = store.getRepoBriefCache(job.provider, job.provider_instance, job.repo_full_name, job.head_sha);
+      const cachedPayload = cached ? parseBriefPayload(cached.payload) : undefined;
+      if (cachedPayload && cachedPayload.sha === job.head_sha) {
+        store.patchJob(jobId, { brief_json: JSON.stringify({ ...cachedPayload, served_from_cache: true }) });
+        store.patchReviewer(run.id, { state: "done", finished_at: nowIso() });
+        store.setJobState(jobId, "completed", { finished_at: nowIso() });
+        store.log(
+          jobId,
+          `Repo brief served from the brief cache (generated ${cachedPayload.generated_at}): ${cachedPayload.sections.length} section(s), no OpenCode run`,
+        );
+        return;
+      }
+    }
+
     const provider = forge.forJob(job);
     const target = forgeTargetOf(job);
     const clone = await provider.cloneSpec(target, { anonymous: job.installation_id === 0 });
@@ -887,8 +914,6 @@ async function runBriefJob(deps: PipelineDeps, forge: ForgeRegistry, jobId: numb
     throwIfStale(store, jobId, signal);
 
     store.setJobState(jobId, "reviewing");
-    const run = store.listReviewerRuns(jobId).find((entry) => entry.role === "repo_brief");
-    if (!run) throw new Error("repo brief run was not enqueued");
     const brief = await runBriefRun(deps, job, run, workspace.repoDir, signal);
     const finished = store.getReviewerRun(run.id);
     if (!brief || finished?.state !== "done") {
@@ -902,6 +927,9 @@ async function runBriefJob(deps: PipelineDeps, forge: ForgeRegistry, jobId: numb
       brief,
     });
     store.patchJob(jobId, { brief_json: JSON.stringify(payload) });
+    if (config.brief.cacheEnabled) {
+      store.putRepoBriefCache(job.provider, job.provider_instance, job.repo_full_name, job.head_sha, JSON.stringify(payload));
+    }
     store.setJobState(jobId, "completed", { finished_at: nowIso() });
     store.log(
       jobId,

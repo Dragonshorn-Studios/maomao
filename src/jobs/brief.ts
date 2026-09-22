@@ -34,6 +34,8 @@ export interface BriefPayload {
   generated_at: string;
   summary: string;
   sections: BriefSectionPayload[];
+  /** Set when this copy was served by repo_brief_cache rather than a fresh OpenCode run (issue #89). */
+  served_from_cache?: boolean;
 }
 
 export function parseBriefPayload(raw: string | null | undefined): BriefPayload | undefined {

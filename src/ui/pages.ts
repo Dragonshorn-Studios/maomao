@@ -383,7 +383,10 @@ function renderBriefToc(jobId: number, payload: BriefPayload): string {
       </tr>`,
     )
     .join("");
-  return `<table class="config-audit"><thead><tr><th>#</th><th>Section</th><th>File</th><th>Why it matters</th></tr></thead><tbody>${rows}</tbody></table>`;
+  const cacheNote = payload.served_from_cache
+    ? `<p class="muted">Served from the repo brief cache — this run skipped the OpenCode pass.</p>`
+    : "";
+  return `${cacheNote}<table class="config-audit"><thead><tr><th>#</th><th>Section</th><th>File</th><th>Why it matters</th></tr></thead><tbody>${rows}</tbody></table>`;
 }
 
 function renderCancelledBanner(job: JobRow): string {

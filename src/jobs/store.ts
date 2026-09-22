@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import type { SqliteDb } from "../db.js";
 import type { CancelReason, JobState, ReviewerState } from "../config.js";
 import { JOBS_PAGE_SIZE_DEFAULT, JOBS_PAGE_SIZE_MAX, LIVE_JOB_STATES } from "../config.js";
@@ -48,6 +49,12 @@ export interface JobRow {
   scan_branch: string | null;
   /** Repo-brief payload (TOC + persisted file fragments), JSON; null for other job types. */
   brief_json: string | null;
+  /**
+   * Dedup discriminator for the jobs UNIQUE key: '' for PR reviews and scans
+   * (one job per repo+PR+SHA), a per-request nonce for repo briefs — every
+   * confirmed brief is its own job and repeats hit repo_brief_cache instead.
+   */
+  dedup_key: string;
   aggregator_raw: string | null;
   aggregator_normalized: string | null;
   aggregator_model: string | null;
@@ -316,23 +323,32 @@ export class JobStore {
     const staleJobIds: number[] = [];
     const scope = normalizeScope({ provider: input.provider, instance: input.providerInstance });
 
+    const jobType = input.jobType ?? "pr_review";
+    // Repo briefs are per-request jobs: a fresh nonce keeps every confirmed
+    // brief distinct, and identical repeats are served by repo_brief_cache.
+    const dedupKey = jobType === "repo_brief" ? randomUUID() : "";
+
     const result = this.db.transaction(() => {
-      const stale = this.db
-        .prepare(
-          `UPDATE jobs
-           SET state = 'stale', updated_at = ?, finished_at = COALESCE(finished_at, ?)
-           WHERE provider = ? AND provider_instance = ? AND repo_full_name = ? AND pr_number = ? AND head_sha != ?
-             AND job_type = ? AND state NOT IN ('stale', 'cancelled')
-           RETURNING id`,
-        )
-        .all(createdAt, createdAt, scope.provider, scope.instance, input.repoFullName, input.prNumber, input.headSha, input.jobType ?? "pr_review") as { id: number }[];
-      staleJobIds.push(...stale.map((row) => row.id));
+      // Briefs are pinned to an immutable SHA, so a newer SHA can never stale
+      // one — and marking an in-flight brief stale would abort it mid-run.
+      if (jobType !== "repo_brief") {
+        const stale = this.db
+          .prepare(
+            `UPDATE jobs
+             SET state = 'stale', updated_at = ?, finished_at = COALESCE(finished_at, ?)
+             WHERE provider = ? AND provider_instance = ? AND repo_full_name = ? AND pr_number = ? AND head_sha != ?
+               AND job_type = ? AND state NOT IN ('stale', 'cancelled')
+             RETURNING id`,
+          )
+          .all(createdAt, createdAt, scope.provider, scope.instance, input.repoFullName, input.prNumber, input.headSha, jobType) as { id: number }[];
+        staleJobIds.push(...stale.map((row) => row.id));
+      }
 
       const existing = this.db
         .prepare(
-          `SELECT * FROM jobs WHERE provider = ? AND provider_instance = ? AND repo_full_name = ? AND pr_number = ? AND head_sha = ? AND job_type = ?`,
+          `SELECT * FROM jobs WHERE provider = ? AND provider_instance = ? AND repo_full_name = ? AND pr_number = ? AND head_sha = ? AND job_type = ? AND dedup_key = ?`,
         )
-        .get(scope.provider, scope.instance, input.repoFullName, input.prNumber, input.headSha, input.jobType ?? "pr_review") as JobRow | undefined;
+        .get(scope.provider, scope.instance, input.repoFullName, input.prNumber, input.headSha, jobType, dedupKey) as JobRow | undefined;
 
       if (existing) {
         const skippedReason = skipReason(existing);
@@ -345,8 +361,8 @@ export class JobStore {
             repo_full_name, repo_owner, repo_name, installation_id, provider, provider_instance, forge_connection_id,
             github_account_id, github_repository_id, pr_number,
             pr_title, pr_body, pr_html_url, pr_author, base_sha, head_sha, base_ref, head_ref,
-            webhook_delivery_id, webhook_event, profile_revision_id, job_type, scan_branch, state, created_at, updated_at
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?)`,
+            webhook_delivery_id, webhook_event, profile_revision_id, job_type, scan_branch, dedup_key, state, created_at, updated_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?)`,
         )
         .run(
           input.repoFullName,
@@ -370,8 +386,9 @@ export class JobStore {
           input.webhookDeliveryId ?? null,
           input.webhookEvent ?? null,
           input.profileRevisionId ?? this.configs.getActiveRevision("default")?.id ?? null,
-          input.jobType ?? "pr_review",
+          jobType,
           input.scanBranch ?? null,
+          dedupKey,
           createdAt,
           createdAt,
         );
@@ -393,6 +410,34 @@ export class JobStore {
     for (const id of staleJobIds) publish({ type: "job", jobId: id });
     if (result.job) publish({ type: "job", jobId: result.job.id });
     return result;
+  }
+
+  /**
+   * Repo-brief cache (issue #89): the persisted brief payload (TOC + file
+   * fragments) for one forge/repo pinned at one exact SHA. A new SHA is a
+   * different key, so moved tips miss by construction; there is no cross-repo
+   * or cross-forge bleed because the key carries all three identifiers.
+   */
+  getRepoBriefCache(
+    provider: string,
+    providerInstance: string,
+    repoFullName: string,
+    sha: string,
+  ): { payload: string; created_at: string } | undefined {
+    const scope = normalizeScope({ provider, instance: providerInstance });
+    return this.db
+      .prepare(`SELECT payload, created_at FROM repo_brief_cache WHERE provider = ? AND provider_instance = ? AND repo_full_name = ? AND sha = ?`)
+      .get(scope.provider, scope.instance, repoFullName, sha) as { payload: string; created_at: string } | undefined;
+  }
+
+  putRepoBriefCache(provider: string, providerInstance: string, repoFullName: string, sha: string, payload: string): void {
+    const scope = normalizeScope({ provider, instance: providerInstance });
+    this.db
+      .prepare(
+        `INSERT OR REPLACE INTO repo_brief_cache (provider, provider_instance, repo_full_name, sha, payload, created_at)
+         VALUES (?, ?, ?, ?, ?, ?)`,
+      )
+      .run(scope.provider, scope.instance, repoFullName, sha, payload, nowIso());
   }
 
   getJob(id: number): JobRow | undefined {

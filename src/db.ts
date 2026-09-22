@@ -123,7 +123,8 @@ function migrate(db: SqliteDb): void {
       manual_escalate_requested INTEGER NOT NULL DEFAULT 0,
       job_type TEXT NOT NULL DEFAULT 'pr_review',
       brief_json TEXT,
-      UNIQUE (provider, provider_instance, repo_full_name, pr_number, head_sha, job_type)
+      dedup_key TEXT NOT NULL DEFAULT '',
+      UNIQUE (provider, provider_instance, repo_full_name, pr_number, head_sha, job_type, dedup_key)
     );
 
     CREATE TABLE IF NOT EXISTS escalation_dispatches (
@@ -377,6 +378,16 @@ function migrate(db: SqliteDb): void {
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL
     );
+
+    CREATE TABLE IF NOT EXISTS repo_brief_cache (
+      provider TEXT NOT NULL,
+      provider_instance TEXT NOT NULL,
+      repo_full_name TEXT NOT NULL,
+      sha TEXT NOT NULL,
+      payload TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      PRIMARY KEY (provider, provider_instance, repo_full_name, sha)
+    );
   `);
 
     // Legacy (pre-multi-forge) databases: rebuild the provider-scoped tables so
@@ -469,12 +480,16 @@ function migrate(db: SqliteDb): void {
       ["profile_revision_id", "INTEGER"],
       ["job_type", "TEXT NOT NULL DEFAULT 'pr_review'"],
       ["scan_branch", "TEXT"],
+      ["dedup_key", "TEXT NOT NULL DEFAULT ''"],
     ];
     for (const [name, ddl] of jobColumns) ensureColumn(db, "jobs", name, ddl);
 
     // Scans and repo briefs both live at pr_number 0, so job_type must be
     // part of the dedup key — otherwise a brief would collapse into a
-    // health scan (or vice versa) on the same repo+SHA.
+    // health scan (or vice versa) on the same repo+SHA. dedup_key gives
+    // repo briefs a per-request nonce: every confirmed brief is its own
+    // job, and repeats on the same SHA are served by repo_brief_cache
+    // instead of collapsing onto the first job.
     rebuildJobsForScopedJobType(db);
 
     const findingColumns: [string, string][] = [
@@ -486,7 +501,7 @@ function migrate(db: SqliteDb): void {
     db.pragma("foreign_keys = ON");
     db.pragma("legacy_alter_table = OFF");
   }
-  db.pragma(`user_version = 2`);
+  db.pragma(`user_version = 3`);
 }
 
 /**
@@ -559,23 +574,26 @@ interface ColumnInfo {
  * and all data are preserved; indexes die with the rename and are recreated
  * by `migrate` afterwards.
  */
-const JOBS_SCOPED_UNIQUE =
-  "UNIQUE (provider, provider_instance, repo_full_name, pr_number, head_sha, job_type)";
+const JOBS_DEDUP_UNIQUE =
+  "UNIQUE (provider, provider_instance, repo_full_name, pr_number, head_sha, job_type, dedup_key)";
 
 function rebuildJobsForScopedJobType(db: SqliteDb): void {
   const row = db
     .prepare(`SELECT sql FROM sqlite_master WHERE type='table' AND name='jobs'`)
     .get() as { sql: string } | undefined;
   if (!row?.sql) return;
-  if (row.sql.includes(JOBS_SCOPED_UNIQUE)) return;
+  if (row.sql.includes(JOBS_DEDUP_UNIQUE)) return;
+  // Legacy shapes: the pre-provider UNIQUE ended at `head_sha)`; the v2 shape
+  // added `, job_type)`. Both rebuild to the canonical dedup key. An unrelated
+  // constraint fails closed rather than guessing.
   const legacyPattern =
-    /UNIQUE\s*\(provider,\s*provider_instance,\s*repo_full_name,\s*pr_number,\s*head_sha\)/;
+    /UNIQUE\s*\(provider,\s*provider_instance,\s*repo_full_name,\s*pr_number,\s*head_sha(\s*,\s*job_type)?\)/;
   if (!legacyPattern.test(row.sql)) {
     throw new Error(
       `Cannot migrate: expected the legacy jobs uniqueness constraint, got: ${row.sql}. Refusing to rebuild the jobs table.`,
     );
   }
-  const newSql = row.sql.replace(legacyPattern, JOBS_SCOPED_UNIQUE);
+  const newSql = row.sql.replace(legacyPattern, JOBS_DEDUP_UNIQUE);
   applyTableRebuild(db, "jobs", newSql);
 }
 
