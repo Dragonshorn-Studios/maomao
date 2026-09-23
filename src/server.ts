@@ -1197,6 +1197,12 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
 
   // ---- Provider API keys (/config/providers) — written to OpenCode's auth.json ----
   const providerCreds = () => ctx.providerCredentials ?? new ProviderCredentialStore(opencodeAuthPath(ctx.env ?? process.env), ctx.env ?? process.env);
+  const providerSecrets = () => [
+    ...githubSecrets(ctx.config),
+    ...opencodeEnvSecrets(ctx.env ?? process.env),
+    ...providerAuthSecrets(ctx.env ?? process.env),
+    ...providerCreds().storedSecrets(),
+  ];
   const renderProviders = (
     c: Context<AppEnv>,
     extra: { notice?: string; error?: string; status?: number } = {},
@@ -1208,7 +1214,7 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
         canWrite: gateOn,
         options: { ...pageOpts, identity: c.get("identity"), notice: extra.notice, error: extra.error },
       }),
-      (extra.status ?? 200) as 200 | 400 | 403,
+      (extra.status ?? 200) as 200 | 400 | 403 | 429 | 503,
     );
 
   app.get("/config/providers", (c) => {
@@ -1253,27 +1259,28 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
       return renderProviders(c, { error: "A provider test is already running — try again when it finishes.", status: 429 });
     }
     const id = c.req.param("id");
-    const model =
-      ctx.modelDiscovery?.snapshot().models.find((m) => m.split("/")[0] === id) ??
-      ctx.config.modelCatalog.find((m) => m.split("/")[0] === id);
-    if (!model) {
-      return renderProviders(c, {
-        error: `No model known for ${id} yet — run "Refresh model list" on the profile editor or add one to MODEL_CATALOG first.`,
-        status: 400,
-      });
-    }
-    // The button submits the key field's current value, but the run verifies
-    // the stored/env key — refuse rather than silently verify the wrong key.
-    const body = await c.req.parseBody();
-    if (typeof body.key === "string" && body.key.trim()) {
-      return renderProviders(c, {
-        error: "Save or clear the pasted key first — 'Test key' verifies the stored/env key, not the one in the field.",
-        status: 400,
-      });
-    }
-    providerTestLimiter.record("provider-test", PROVIDER_TEST_LIMIT, PROVIDER_TEST_WINDOW_MS);
     providerTestInFlight = true;
     try {
+      const model =
+        ctx.modelDiscovery?.snapshot().models.find((m) => m.split("/")[0] === id) ??
+        ctx.config.modelCatalog.find((m) => m.split("/")[0] === id);
+      if (!model) {
+        return renderProviders(c, {
+          error: `No model known for ${id} yet — run "Refresh model list" on the profile editor or add one to MODEL_CATALOG first.`,
+          status: 400,
+        });
+      }
+      // The button submits the key field's current value, but the run verifies
+      // the stored/env key — refuse rather than silently verify the wrong key.
+      const body = await c.req.parseBody();
+      if (typeof body.key === "string" && body.key.trim()) {
+        return renderProviders(c, {
+          error: "Save or clear the pasted key first — 'Test key' verifies the stored/env key, not the one in the field.",
+          status: 400,
+        });
+      }
+      providerTestLimiter.record("provider-test", PROVIDER_TEST_LIMIT, PROVIDER_TEST_WINDOW_MS);
+      const secrets = providerSecrets();
       const workspace = await mkdtemp(join(tmpdir(), "maomao-provider-test-"));
       try {
         const result = await ctx.opencode.run({
@@ -1286,18 +1293,13 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
           signal: c.req.raw.signal,
         });
         if (result.exitCode !== 0) {
+          const stderr = truncate(redactSecrets(result.stderr.trim(), secrets) || "no stderr", 300);
           return renderProviders(c, {
-            error: `${model} exited ${result.exitCode}: ${truncate(result.stderr.trim() || "no stderr", 300)}`,
+            error: `${model} exited ${result.exitCode}: ${stderr}`,
             status: 400,
           });
         }
-        if (!/\bok\b/i.test(result.text || "")) {
-          const secrets = [
-            ...githubSecrets(ctx.config),
-            ...opencodeEnvSecrets(ctx.env ?? process.env),
-            ...providerAuthSecrets(ctx.env ?? process.env),
-            ...providerCreds().storedSecrets(),
-          ];
+        if (!/^ok[.!\s]*$/i.test((result.text || "").trim())) {
           const replied = truncate(redactSecrets((result.text || "").trim(), secrets) || "nothing", 200);
           return renderProviders(c, {
             error: `${model} exited 0 but did not answer as expected (replied: ${replied}).`,
@@ -1312,8 +1314,9 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
         await rm(workspace, { recursive: true, force: true }).catch(() => {});
       }
     } catch (error) {
+      const message = redactSecrets(error instanceof Error ? error.message : String(error), providerSecrets());
       return renderProviders(c, {
-        error: `${id} test failed: ${error instanceof Error ? error.message : String(error)}`,
+        error: `${id} test failed: ${message}`,
         status: 400,
       });
     } finally {

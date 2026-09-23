@@ -1419,7 +1419,47 @@ describe("provider credential routes", () => {
     expect(await second.text()).toContain("already running");
     release();
     expect((await first).status).toBe(303);
+    // Only the first request reached the runner.
+    expect(call).toBe(1);
     expect(existsSync(lastCwd)).toBe(false);
+    log.mockRestore();
+  });
+
+  it("redacts key material echoed in the model's wrong reply", async () => {
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    const dir = mkdtempSync(join(tmpdir(), "maomao-prov-"));
+    const providerCredentials = new ProviderCredentialStore(join(dir, "opencode", "auth.json"), {});
+    expect(providerCredentials.set("anthropic", "sk-ant-test-value-9").ok).toBe(true);
+    const opencode: OpenCodeLike = {
+      async run() {
+        return {
+          stdout: "Authorization: Bearer sk-ant-test-value-9",
+          stderr: "401 Unauthorized: Bearer sk-ant-test-value-9",
+          exitCode: 1,
+          text: "Authorization: Bearer sk-ant-test-value-9",
+          usage: undefined as never,
+        };
+      },
+    };
+    const { app } = testApp(
+      { UI_PASSWORD: "hunter2", UI_SESSION_SECRET: "session-secret-for-tests", MODEL_CATALOG: "anthropic/claude-4.5-sonnet" },
+      undefined,
+      undefined,
+      { providerCredentials, opencode },
+    );
+    const { session } = await loginSession(app);
+    const { csrfCookie, csrfToken } = await csrfArtifacts(
+      await app.request("/config/providers", { headers: { cookie: session } }),
+    );
+    const tested = await app.request("/config/providers/anthropic/test", {
+      method: "POST",
+      headers: { cookie: `${session}; ${csrfCookie}`, "content-type": "application/x-www-form-urlencoded" },
+      body: `csrf_token=${encodeURIComponent(csrfToken)}`,
+    });
+    expect(tested.status).toBe(400);
+    const html = await tested.text();
+    expect(html).not.toContain("sk-ant-test-value-9");
+    expect(html).toContain("[redacted]");
     log.mockRestore();
   });
 
