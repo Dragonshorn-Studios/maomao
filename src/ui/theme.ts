@@ -871,6 +871,7 @@ details.finding-diff > summary {
   max-height: 18rem;
   overflow-y: auto;
 }
+.model-picker-pop[hidden] { display: none; }
 .model-picker-group {
   display: block;
   padding: 0.45rem 0.55rem 0.15rem;

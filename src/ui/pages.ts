@@ -1059,10 +1059,12 @@ export interface ConfigPageData {
   /** Structured-editor inputs; required for the create/edit forms when canWrite. */
   profileEditor?: {
     knownRoles: Array<{ id: string; title: string }>;
-    /** Datalist entries: MODEL_CATALOG plus models discovered via `opencode models`. */
+    /** Picker entries: MODEL_CATALOG, or models discovered via `opencode models` when the catalog is unset. */
     modelCatalog: Array<{ id: string; hint?: string }>;
     /** Live-discovery status for the refresh control; undefined when discovery is not wired. */
     discovery?: ModelDiscoveryStatus;
+    /** Env MODEL_CATALOG is set — the picker offers only approved entries. */
+    catalogEnforced?: boolean;
     /** A failed create save re-renders submitted values with field errors in place. */
     form?: { values: ProfileFormValues; errors?: ProfileFieldErrors };
   };
@@ -1192,6 +1194,8 @@ export interface ProfileFormOptions {
   knownRoles: Array<{ id: string; title: string }>;
   modelCatalog: Array<{ id: string; hint?: string }>;
   discovery?: ModelDiscoveryStatus;
+  /** Env MODEL_CATALOG is set — the picker offers only approved entries. */
+  catalogEnforced?: boolean;
 }
 
 const SEVERITIES: readonly Severity[] = ["blocker", "high", "medium", "low", "info"];
@@ -1283,7 +1287,7 @@ export function renderProfileForm(
         const line = d.error
           ? `Live model discovery is unavailable — the list above is MODEL_CATALOG only. (${d.error})`
           : d.fetchedAt
-            ? `${d.count} model${d.count === 1 ? "" : "s"} discovered via \`opencode models\`, last refreshed ${new Date(d.fetchedAt).toUTCString()}. Entries marked “key configured” have a provider key set.`
+            ? `${d.count} model${d.count === 1 ? "" : "s"} discovered via \`opencode models\`, last refreshed ${new Date(d.fetchedAt).toUTCString()}. Entries marked “key configured” have a provider key set.${options.catalogEnforced ? " MODEL_CATALOG is set — the picker offers the approved catalog only." : ""}`
             : "Model discovery has not run yet — the list above is MODEL_CATALOG only.";
         return `<div class="model-discovery">
           <p class="muted">${escapeHtml(line)}</p>
@@ -1444,6 +1448,8 @@ export interface DraftEditPageData {
     knownRoles: Array<{ id: string; title: string }>;
     modelCatalog: Array<{ id: string; hint?: string }>;
     discovery?: ModelDiscoveryStatus;
+    /** Env MODEL_CATALOG is set — the picker offers only approved entries. */
+    catalogEnforced?: boolean;
   };
   /** A failed save re-renders the submitted values with errors in place. */
   form?: { values: ProfileFormValues; errors?: ProfileFieldErrors };
@@ -1461,6 +1467,7 @@ export function renderDraftEditPage(data: DraftEditPageData): string {
           knownRoles: data.profileEditor.knownRoles,
           modelCatalog: data.profileEditor.modelCatalog,
           discovery: data.profileEditor.discovery,
+          catalogEnforced: data.profileEditor.catalogEnforced,
         },
       )
     : `<p class="muted">Writing configuration requires an operator OAuth identity.</p>`;
@@ -1503,6 +1510,7 @@ export function renderNewProfilePage(data: ConfigPageData): string {
           knownRoles: data.profileEditor.knownRoles,
           modelCatalog: data.profileEditor.modelCatalog,
           discovery: data.profileEditor.discovery,
+          catalogEnforced: data.profileEditor.catalogEnforced,
         },
       )
     : `<p class="muted">Writing configuration requires an operator OAuth identity.</p>`;

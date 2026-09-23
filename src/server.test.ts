@@ -1191,7 +1191,7 @@ describe("model discovery routes", () => {
     const modelDiscovery = new ModelDiscovery("opencode", {}, spawnFake.fn, 1000);
     await modelDiscovery.refresh();
     const { app } = testApp(
-      { UI_PASSWORD: "hunter2", UI_SESSION_SECRET: "session-secret-for-tests", MODEL_CATALOG: "catalog/curated" },
+      { UI_PASSWORD: "hunter2", UI_SESSION_SECRET: "session-secret-for-tests" },
       undefined,
       undefined,
       { providerCredentials, modelDiscovery },
@@ -1200,15 +1200,36 @@ describe("model discovery routes", () => {
 
     const page = await app.request("/config/profiles/new", { headers: { cookie: session } });
     const html = await page.text();
-    expect(html).toContain('<span class="model-picker-group" role="presentation">catalog</span>');
-    expect(html).toContain('data-value="catalog/curated"');
-    expect(html).toContain('catalog/curated · in MODEL_CATALOG');
     expect(html).toContain('<span class="model-picker-group" role="presentation">anthropic</span>');
     expect(html).toContain('data-value="anthropic/claude-4.5-sonnet"');
     expect(html).toContain('anthropic/claude-4.5-sonnet · key configured');
     expect(html).toContain('<span class="model-picker-group" role="presentation">openai</span>');
     expect(html).toContain('data-value="openai/gpt-4o"');
     expect(html).toContain("2 models discovered");
+    log.mockRestore();
+  });
+
+  it("offers only the approved catalog when MODEL_CATALOG is set", async () => {
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    const spawnFake = modelsSpawn(["anthropic/claude-4.5-sonnet"]);
+    const modelDiscovery = new ModelDiscovery("opencode", {}, spawnFake.fn, 1000);
+    await modelDiscovery.refresh();
+    const { app } = testApp(
+      { UI_PASSWORD: "hunter2", UI_SESSION_SECRET: "session-secret-for-tests", MODEL_CATALOG: "catalog/curated" },
+      undefined,
+      undefined,
+      { modelDiscovery },
+    );
+    const { session } = await loginSession(app);
+
+    const page = await app.request("/config/profiles/new", { headers: { cookie: session } });
+    const html = await page.text();
+    expect(html).toContain('<span class="model-picker-group" role="presentation">catalog</span>');
+    expect(html).toContain('data-value="catalog/curated"');
+    // Discovered models are not savable when a catalog is configured, so
+    // the picker does not offer them.
+    expect(html).not.toContain('data-value="anthropic/claude-4.5-sonnet"');
+    expect(html).toContain("the picker offers the approved catalog only");
     log.mockRestore();
   });
 
