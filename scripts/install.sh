@@ -270,8 +270,9 @@ secure_key_file() {
     chmod 400 "$dest"
     return 0
   fi
-  if command -v setfacl >/dev/null 2>&1 && setfacl -m u:1000:r "$dest" 2>/dev/null; then
-    chmod 600 "$dest"
+  # chmod before setfacl: chmod rewrites the ACL mask, so granting after the
+  # mode change is what keeps the uid-1000 entry effective.
+  if chmod 600 "$dest" && command -v setfacl >/dev/null 2>&1 && setfacl -m u:1000:r "$dest" 2>/dev/null; then
     log "Could not chown $name to 1000:1000; granted container uid 1000 read via ACL"
     return 0
   fi
