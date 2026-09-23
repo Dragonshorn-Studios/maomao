@@ -14,6 +14,7 @@ import {
 import type { EnqueueResult, JobStore } from "../jobs/store.js";
 import { enqueuePullJob } from "../jobs/enqueue.js";
 import { parseStackCommand, validateStackMembers, type StackCommand } from "../stacks/commands.js";
+import { upsertStackComment } from "../stacks/comments.js";
 import type { ResolvedPull } from "./client.js";
 import { cancelJobsForPull } from "../jobs/cancel.js";
 import { logAuthorizationRejection, logRateLimited, positiveGithubId, rejectUnauthorized } from "./authorize.js";
@@ -555,6 +556,30 @@ async function handleStackCommand(
       console.warn(`stack command: could not post reply on ${repoFullName}#${prNumber}: ${error instanceof Error ? error.message : error}`);
     }
   };
+  // Every member PR carries one marker comment naming its position in the
+  // stack; each accepted declare/trigger rewrites all of them so a partial
+  // declaration set still shows the same shared picture. Per-member failures
+  // warn only — the comment is informational, the command still stands.
+  const refreshStackComments = async (
+    members: { position: number; prNumber: number; headSha?: string; expectedCount: number }[],
+  ): Promise<void> => {
+    for (const member of members) {
+      try {
+        await upsertStackComment({
+          github: input.github!,
+          installationId,
+          repoOwner,
+          repoName,
+          selfPrNumber: member.prNumber,
+          stackId: command.stackId,
+          expectedCount: member.expectedCount,
+          members,
+        });
+      } catch (error) {
+        console.warn(`stack command: could not update stack comment on ${repoFullName}#${member.prNumber}: ${error instanceof Error ? error.message : error}`);
+      }
+    }
+  };
 
   if (command.kind === "declare") {
     const result = input.store.upsertStackDeclaration({
@@ -572,6 +597,10 @@ async function handleStackCommand(
     }
     if (result.created) {
       await reply(`Recorded this pull request as issue ${command.position} of ${command.expectedCount} in stack "${command.stackId}".`);
+      const declarations = input.store.listStackDeclarations(repoFullName, command.stackId);
+      await refreshStackComments(
+        declarations.map((d) => ({ position: d.position, prNumber: d.pr_number, expectedCount: d.expected_count })),
+      );
     }
     return finish(result.created ? "declare-recorded" : "declare-duplicate", {
       ok: true,
@@ -636,6 +665,14 @@ async function handleStackCommand(
     jobType: "stack_review",
     dedupKey: `stack:${command.stackId}`,
   });
+  await refreshStackComments(
+    validation.members.map((m) => ({
+      position: m.position,
+      prNumber: m.prNumber,
+      headSha: m.headSha,
+      expectedCount: validation.members.length,
+    })),
+  );
   if (enqueue.created) {
     input.store.insertStackMembers(enqueue.job.id, validation.members);
     input.store.log(

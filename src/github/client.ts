@@ -176,6 +176,13 @@ export interface GithubPort {
     pullNumber: number;
     body: string;
   }): Promise<{ id: string; url: string }>;
+  updateIssueComment?(input: {
+    installationId: number;
+    owner: string;
+    repo: string;
+    commentId: number;
+    body: string;
+  }): Promise<{ id: string; url: string }>;
   listReviewThreads(
     installationId: number,
     owner: string,
@@ -579,6 +586,23 @@ export class GithubClient implements GithubPort, ManualTriggerPort {
       owner: input.owner,
       repo: input.repo,
       issue_number: input.pullNumber,
+      body: input.body,
+    });
+    return { id: String(response.data.id), url: response.data.html_url ?? "" };
+  }
+
+  async updateIssueComment(input: {
+    installationId: number;
+    owner: string;
+    repo: string;
+    commentId: number;
+    body: string;
+  }): Promise<{ id: string; url: string }> {
+    const octokit = this.installationOctokit(input.installationId);
+    const response = await octokit.rest.issues.updateComment({
+      owner: input.owner,
+      repo: input.repo,
+      comment_id: input.commentId,
       body: input.body,
     });
     return { id: String(response.data.id), url: response.data.html_url ?? "" };

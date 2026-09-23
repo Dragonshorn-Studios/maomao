@@ -1257,9 +1257,20 @@ function stackGithub(overrides: {
   const comments = overrides.comments ?? [];
   const github = {
     ...githubForCommands({ permission: overrides.permission ?? "write" }),
+    listIssueComments: async (_i: number, _o: string, _r: string, pullNumber: number) =>
+      comments
+        .map((c, index) => ({ id: index + 1, body: c.body, pullNumber: c.pullNumber }))
+        .filter((c) => c.pullNumber === pullNumber)
+        .map((c) => ({ id: c.id, body: c.body })),
     createIssueComment: async (input: { pullNumber: number; body: string }) => {
       comments.push({ pullNumber: input.pullNumber, body: input.body });
       return { id: `${comments.length}`, url: "u" };
+    },
+    updateIssueComment: async (input: { commentId: number; body: string }) => {
+      const target = comments[input.commentId - 1];
+      if (!target) throw new Error(`no comment ${input.commentId}`);
+      target.body = input.body;
+      return { id: String(input.commentId), url: "u" };
     },
     getPull: async (_installationId: number, _owner: string, _repo: string, n: number) => {
       const pull = overrides.pulls?.[n];
@@ -1373,7 +1384,9 @@ describe("stack commands (issue #99)", () => {
     });
     expect(allowed.status).toBe(200);
     expect(store.listStackDeclarations("acme/widgets", "ship-it")).toHaveLength(1);
-    expect(comments.length).toBe(1);
+    // The reply plus the stack-position marker comment.
+    expect(comments.length).toBe(2);
+    expect(comments.filter((c) => c.body.includes("maomao-stack:ship-it"))).toHaveLength(1);
   });
 
   it("validates the whole stack and enqueues exactly one stack_review job", async () => {
@@ -1465,6 +1478,79 @@ describe("stack commands (issue #99)", () => {
     });
     expect(dup.body.duplicate).toBe(true);
     expect(store.listStackDeclarations("acme/widgets", "ship-it")).toHaveLength(1);
-    expect(comments).toHaveLength(1);
+    // Reply + marker comment from the first delivery; the duplicate adds nothing.
+    expect(comments).toHaveLength(2);
+    expect(comments.filter((c) => c.body.includes("maomao-stack:ship-it"))).toHaveLength(1);
+  });
+
+  it("keeps one marker comment per member PR and edits it as the stack grows", async () => {
+    const secret = "s3cret";
+    const config = stackConfig(secret);
+    const store = new JobStore(openDb(":memory:"));
+    const { github, comments } = stackGithub();
+    const declareOn = (n: number, position: number, commentId: number) =>
+      JSON.stringify(
+        commentPayload({
+          issue: { number: n, pull_request: { url: `https://github.com/acme/widgets/pull/${n}` } },
+          comment: {
+            id: commentId,
+            body: `issue ${position} of 2 in stack ship-it`,
+            user: { login: "alice", type: "User" },
+            author_association: "OWNER",
+          },
+        }),
+      );
+
+    const first = await handleGithubWebhook({
+      config,
+      store,
+      github,
+      request: { event: "issue_comment", deliveryId: "m1", signature: sign(secret, declareOn(41, 1, 1)), rawBody: declareOn(41, 1, 1) },
+    });
+    expect(first.status).toBe(200);
+    const markerOn41 = comments.filter((c) => c.pullNumber === 41 && c.body.includes("maomao-stack:ship-it"));
+    expect(markerOn41).toHaveLength(1);
+    expect(markerOn41[0]?.body).toContain("issue 1 of 2");
+
+    // A second declaration edits the existing marker comments in place rather
+    // than posting new ones — still exactly one marker comment per PR.
+    const second = await handleGithubWebhook({
+      config,
+      store,
+      github,
+      request: { event: "issue_comment", deliveryId: "m2", signature: sign(secret, declareOn(42, 2, 2)), rawBody: declareOn(42, 2, 2) },
+    });
+    expect(second.status).toBe(200);
+    const markers = comments.filter((c) => c.body.includes("maomao-stack:ship-it"));
+    expect(markers.map((c) => c.pullNumber).sort()).toEqual([41, 42]);
+    expect(markers.find((c) => c.pullNumber === 41)?.body).toContain("#42");
+    expect(markers.find((c) => c.pullNumber === 42)?.body).toContain("issue 2 of 2");
+    expect(markers.find((c) => c.pullNumber === 42)?.body).toContain("top of the stack");
+  });
+
+  it("writes the pinned SHA vector into every member comment on a valid trigger", async () => {
+    const secret = "s3cret";
+    const config = stackConfig(secret);
+    const store = new JobStore(openDb(":memory:"));
+    store.upsertStackDeclaration({ repoFullName: "acme/widgets", stackId: "ship-it", prNumber: 41, position: 1, expectedCount: 2, actor: "alice" });
+    store.upsertStackDeclaration({ repoFullName: "acme/widgets", stackId: "ship-it", prNumber: 42, position: 2, expectedCount: 2, actor: "alice" });
+    const pulls = {
+      41: resolvedStackPull(41, { baseRef: "main", headRef: "feat-a", baseSha: "m0", headSha: "h41" }),
+      42: resolvedStackPull(42, { baseRef: "feat-a", headRef: "feat-b", baseSha: "h41", headSha: "h42" }),
+    };
+    const { github, comments } = stackGithub({ pulls });
+    const body = JSON.stringify(
+      commentPayload({ comment: { id: 42, body: "top of stack ship-it: #41, #42", user: { login: "alice", type: "User" }, author_association: "OWNER" } }),
+    );
+    await handleGithubWebhook({
+      config,
+      store,
+      github,
+      request: { event: "issue_comment", deliveryId: "t1", signature: sign(secret, body), rawBody: body },
+    });
+    const markers = comments.filter((c) => c.body.includes("maomao-stack:ship-it"));
+    expect(markers.map((c) => c.pullNumber).sort()).toEqual([41, 42]);
+    expect(markers.find((c) => c.pullNumber === 41)?.body).toContain("h41");
+    expect(markers.find((c) => c.pullNumber === 42)?.body).toContain("h42");
   });
 });
