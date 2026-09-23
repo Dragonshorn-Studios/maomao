@@ -100,6 +100,20 @@ export const PROVIDER_CREDENTIAL_OPTIONS: ReadonlyArray<{
     envVars: ["ZHIPU_API_KEY", "ZAI_API_KEY"],
     helpUrl: "https://z.ai/manage-apikey/coding-plan",
   },
+  {
+    id: "opencode",
+    label: "OpenCode Zen",
+    envVars: ["OPENCODE_API_KEY"],
+    helpUrl: "https://opencode.ai/zen",
+    helpLabel: "Get a key (OpenCode console → Zen)",
+  },
+  {
+    id: "opencode-go",
+    label: "OpenCode Go",
+    envVars: ["OPENCODE_GO_API_KEY", "OPENCODE_API_KEY"],
+    helpUrl: "https://opencode.ai/zen",
+    helpLabel: "Subscribe to Go in the OpenCode console, then copy the key",
+  },
 ];
 
 export type ProviderCredentialSource = "environment" | "stored" | "none";
