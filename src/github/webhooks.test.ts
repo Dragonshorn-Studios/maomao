@@ -1353,7 +1353,9 @@ describe("stack commands (issue #99)", () => {
     expect(decls).toHaveLength(1);
     expect(decls[0]?.pr_number).toBe(42);
     expect(decls[0]?.position).toBe(1);
-    expect(comments.some((c) => /Recorded/.test(c.body))).toBe(true);
+    // Success posts no reply — the marker comment is the only trace.
+    expect(comments).toHaveLength(1);
+    expect(comments[0]?.body).toContain("maomao-stack:ship-it");
   });
 
   it("ignores a non-allowlisted bot and accepts one from MAOMAO_STACK_AUTHORS", async () => {
@@ -1384,8 +1386,7 @@ describe("stack commands (issue #99)", () => {
     });
     expect(allowed.status).toBe(200);
     expect(store.listStackDeclarations("acme/widgets", "ship-it")).toHaveLength(1);
-    // The reply plus the stack-position marker comment.
-    expect(comments.length).toBe(2);
+    expect(comments.length).toBe(1);
     expect(comments.filter((c) => c.body.includes("maomao-stack:ship-it"))).toHaveLength(1);
   });
 
@@ -1420,7 +1421,10 @@ describe("stack commands (issue #99)", () => {
     const members = store.listStackMembers(job.id);
     expect(members.map((m) => m.pr_number)).toEqual([41, 42]);
     expect(members[1]?.head_sha).toBe("h42");
-    expect(comments.some((c) => /enqueued/.test(c.body))).toBe(true);
+    // No reply chatter — just the edited marker comment on each member.
+    const markers = comments.filter((c) => c.body.includes("maomao-stack:ship-it"));
+    expect(markers.map((c) => c.pullNumber).sort()).toEqual([41, 42]);
+    expect(comments).toHaveLength(2);
 
     // A re-trigger dedups on the same SHA vector — still exactly one job.
     const again = await handleGithubWebhook({
@@ -1490,8 +1494,8 @@ describe("stack commands (issue #99)", () => {
     });
     expect(dup.body.duplicate).toBe(true);
     expect(store.listStackDeclarations("acme/widgets", "ship-it")).toHaveLength(1);
-    // Reply + marker comment from the first delivery; the duplicate adds nothing.
-    expect(comments).toHaveLength(2);
+    // One marker comment from the first delivery; the duplicate adds nothing.
+    expect(comments).toHaveLength(1);
     expect(comments.filter((c) => c.body.includes("maomao-stack:ship-it"))).toHaveLength(1);
   });
 

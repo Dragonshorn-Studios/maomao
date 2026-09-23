@@ -489,9 +489,10 @@ async function handleIssueComment(input: {
 
 // Stack commands (issue #99): "issue X of Y in stack <id>" declares a member,
 // "top of stack <id>: #n,…" validates the whole stack and enqueues exactly one
-// stack_review job. Both reply on the PR so every accepted or rejected command
-// leaves a GitHub-visible trace; duplicate comment deliveries are deduped by
-// comment id so they can never double-post or double-enqueue.
+// stack_review job. Success leaves one self-updating marker comment per member
+// PR (the only visible trace — no chatter); rejections get one actionable
+// error comment. Duplicate comment deliveries are deduped by comment id so
+// they can never double-post or double-enqueue.
 async function handleStackCommand(
   input: {
     config: Config;
@@ -596,7 +597,6 @@ async function handleStackCommand(
       return finish("declare-conflict", { ok: true, command: "declare", stackId: command.stackId, recorded: false, error: result.error });
     }
     if (result.created) {
-      await reply(`Recorded this pull request as issue ${command.position} of ${command.expectedCount} in stack "${command.stackId}".`);
       const declarations = input.store.listStackDeclarations(repoFullName, command.stackId);
       await refreshStackComments(
         declarations.map((d) => ({ position: d.position, prNumber: d.pr_number, expectedCount: d.expected_count })),
@@ -679,15 +679,6 @@ async function handleStackCommand(
       enqueue.job.id,
       `Stack "${command.stackId}" of ${validation.members.length} triggered by ${actorLogin}: ` +
         validation.members.map((m) => `#${m.prNumber}@${m.headSha.slice(0, 8)}`).join(" → "),
-    );
-    await reply(
-      `Stack review enqueued for "${command.stackId}" — job ${enqueue.job.id} pinned ` +
-        `${validation.members.map((m) => `#${m.prNumber}@${m.headSha.slice(0, 8)}`).join(" → ")}.`,
-    );
-  } else {
-    await reply(
-      `Stack "${command.stackId}" deduped onto job ${enqueue.job.id} ` +
-        `(${enqueue.skippedReason ?? `job ${enqueue.job.state}`}); nothing enqueued.`,
     );
   }
   const result = finish(enqueue.created ? "top-enqueued" : "top-deduped", {
