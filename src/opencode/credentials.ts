@@ -20,25 +20,86 @@ export const PROVIDER_CREDENTIAL_OPTIONS: ReadonlyArray<{
   id: string;
   label: string;
   envVars: readonly string[];
+  /** Where the operator obtains an API key for this provider. */
+  helpUrl: string;
+  /** Short instruction shown next to the help link; defaults to "Get a key". */
+  helpLabel?: string;
 }> = [
-  { id: "anthropic", label: "Anthropic", envVars: ["ANTHROPIC_API_KEY"] },
-  { id: "openai", label: "OpenAI", envVars: ["OPENAI_API_KEY"] },
-  { id: "openrouter", label: "OpenRouter", envVars: ["OPENROUTER_API_KEY"] },
+  {
+    id: "anthropic",
+    label: "Anthropic",
+    envVars: ["ANTHROPIC_API_KEY"],
+    helpUrl: "https://console.anthropic.com/settings/keys",
+  },
+  {
+    id: "openai",
+    label: "OpenAI",
+    envVars: ["OPENAI_API_KEY"],
+    helpUrl: "https://platform.openai.com/api-keys",
+  },
+  {
+    id: "openrouter",
+    label: "OpenRouter",
+    envVars: ["OPENROUTER_API_KEY"],
+    helpUrl: "https://openrouter.ai/keys",
+  },
   {
     id: "google",
     label: "Google (Gemini)",
     envVars: ["GOOGLE_API_KEY", "GOOGLE_GENERATIVE_AI_API_KEY", "GEMINI_API_KEY"],
+    helpUrl: "https://aistudio.google.com/app/apikey",
   },
-  { id: "xai", label: "xAI (Grok)", envVars: ["XAI_API_KEY"] },
-  { id: "mistral", label: "Mistral", envVars: ["MISTRAL_API_KEY"] },
-  { id: "groq", label: "Groq", envVars: ["GROQ_API_KEY"] },
-  { id: "deepseek", label: "DeepSeek", envVars: ["DEEPSEEK_API_KEY"] },
-  { id: "togetherai", label: "Together AI", envVars: ["TOGETHER_API_KEY"] },
-  { id: "cohere", label: "Cohere", envVars: ["COHERE_API_KEY"] },
-  { id: "azure", label: "Azure OpenAI", envVars: ["AZURE_API_KEY"] },
-  { id: "ollama-cloud", label: "Ollama Cloud", envVars: ["OLLAMA_API_KEY"] },
-  { id: "zai", label: "Z.AI", envVars: ["ZHIPU_API_KEY", "ZAI_API_KEY"] },
-  { id: "zai-coding-plan", label: "Z.AI Coding Plan", envVars: ["ZHIPU_API_KEY", "ZAI_API_KEY"] },
+  { id: "xai", label: "xAI (Grok)", envVars: ["XAI_API_KEY"], helpUrl: "https://console.x.ai/" },
+  {
+    id: "mistral",
+    label: "Mistral",
+    envVars: ["MISTRAL_API_KEY"],
+    helpUrl: "https://console.mistral.ai/api-keys",
+  },
+  { id: "groq", label: "Groq", envVars: ["GROQ_API_KEY"], helpUrl: "https://console.groq.com/keys" },
+  {
+    id: "deepseek",
+    label: "DeepSeek",
+    envVars: ["DEEPSEEK_API_KEY"],
+    helpUrl: "https://platform.deepseek.com/api_keys",
+  },
+  {
+    id: "togetherai",
+    label: "Together AI",
+    envVars: ["TOGETHER_API_KEY"],
+    helpUrl: "https://api.together.xyz/settings/api-keys",
+  },
+  {
+    id: "cohere",
+    label: "Cohere",
+    envVars: ["COHERE_API_KEY"],
+    helpUrl: "https://dashboard.cohere.com/api-keys",
+  },
+  {
+    id: "azure",
+    label: "Azure OpenAI",
+    envVars: ["AZURE_API_KEY"],
+    helpUrl: "https://portal.azure.com/",
+    helpLabel: "Azure portal → your OpenAI resource → Keys and Endpoint",
+  },
+  {
+    id: "ollama-cloud",
+    label: "Ollama Cloud",
+    envVars: ["OLLAMA_API_KEY"],
+    helpUrl: "https://ollama.com/settings/keys",
+  },
+  {
+    id: "zai",
+    label: "Z.AI",
+    envVars: ["ZHIPU_API_KEY", "ZAI_API_KEY"],
+    helpUrl: "https://z.ai/manage-apikey/apikey-list",
+  },
+  {
+    id: "zai-coding-plan",
+    label: "Z.AI Coding Plan",
+    envVars: ["ZHIPU_API_KEY", "ZAI_API_KEY"],
+    helpUrl: "https://z.ai/manage-apikey/coding-plan",
+  },
 ];
 
 export type ProviderCredentialSource = "environment" | "stored" | "none";
@@ -51,6 +112,10 @@ export interface ProviderCredentialStatus {
   envVar?: string;
   /** Last-4 fingerprint of the stored key when source === "stored". */
   fingerprint?: string;
+  /** Where the operator obtains an API key; absent for unknown/custom providers. */
+  helpUrl?: string;
+  /** Short instruction shown next to the help link; page defaults to "Get a key". */
+  helpLabel?: string;
 }
 
 interface AuthEntry {
@@ -134,9 +199,10 @@ export class ProviderCredentialStore {
       const envVar = option.envVars.find((name) => Boolean(this.env[name]?.trim()));
       const storedKey = seen.get(option.id);
       seen.delete(option.id);
-      if (envVar) return { id: option.id, label: option.label, source: "environment", envVar };
-      if (storedKey) return { id: option.id, label: option.label, source: "stored", fingerprint: fingerprint(storedKey) };
-      return { id: option.id, label: option.label, source: "none" };
+      const base = { id: option.id, label: option.label, helpUrl: option.helpUrl, helpLabel: option.helpLabel };
+      if (envVar) return { ...base, source: "environment" as const, envVar };
+      if (storedKey) return { ...base, source: "stored" as const, fingerprint: fingerprint(storedKey) };
+      return { ...base, source: "none" as const };
     });
     for (const [id, key] of seen) {
       statuses.push({ id, label: id, source: "stored", fingerprint: fingerprint(key) });

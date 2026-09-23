@@ -1102,6 +1102,9 @@ describe("provider credential routes", () => {
     const { csrfCookie, csrfToken, html } = await csrfArtifacts(page);
     expect(html).toContain("Provider API keys");
     expect(html).toContain("no key");
+    expect(html).toContain('id="provider-filter"');
+    expect(html).toContain("console.anthropic.com/settings/keys");
+    expect(html).toContain('data-provider="anthropic anthropic"');
 
     const saved = await app.request("/config/providers/anthropic", {
       method: "POST",
@@ -1116,6 +1119,7 @@ describe("provider credential routes", () => {
     const afterHtml = await after.text();
     expect(afterHtml).toContain("auth.json");
     expect(afterHtml).not.toContain("sk-ant-test-value-9");
+    expect(afterHtml).toContain('formaction="/config/providers/anthropic/delete"');
 
     const page2 = await app.request("/config/providers", { headers: { cookie: session } });
     const artifacts2 = await csrfArtifacts(page2);
