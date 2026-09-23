@@ -446,7 +446,7 @@ a.pr-external {
 }
 a.pr-external:hover { color: var(--jade); text-decoration: none; }
 a.pr-external svg { width: 1em; height: 1em; display: block; }
-h1 a.pr-external { font-size: 0.6em; vertical-align: 0.25em; }
+h1 a.pr-external { font-size: 0.72em; }
 
 .meta-row {
   display: flex;
