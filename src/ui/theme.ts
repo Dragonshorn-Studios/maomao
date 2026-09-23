@@ -435,6 +435,19 @@ button, summary {
 .forge-mark-text { font-size: 0.85em; color: var(--ink-muted); margin-right: 0.35rem; }
 .forge-host { font-weight: 500; }
 
+/* "View on <forge>" external link right of change titles — quiet until hovered. */
+a.pr-external {
+  display: inline-flex;
+  align-items: center;
+  margin-left: 0.4rem;
+  color: var(--ink-muted);
+  text-decoration: none;
+  vertical-align: middle;
+}
+a.pr-external:hover { color: var(--jade); text-decoration: none; }
+a.pr-external svg { width: 1em; height: 1em; display: block; }
+h1 a.pr-external { font-size: 0.72em; }
+
 .meta-row {
   display: flex;
   flex-wrap: wrap;

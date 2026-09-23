@@ -47,6 +47,11 @@ export function forgeMark(provider: string): string {
   }
 }
 
+/** Box-and-arrow mark for "open this change on the forge" links. */
+export function externalLinkGlyph(): string {
+  return `<svg ${SIZE}><path d="M9.2 2.6h4.2v4.2M13.4 2.6 7.6 8.4" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="square"/><path d="M12.6 9.4v4H2.6v-9h4" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="square" stroke-linejoin="miter"/></svg>`;
+}
+
 /** Pancake stack with a butter pat: the easter-egg treat for completed reviews. */
 export function pancakeMark(): string {
   return `<svg ${SIZE}>

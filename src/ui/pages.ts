@@ -1,5 +1,5 @@
 import type { JobRow, JobStore, ReviewerRunRow } from "../jobs/store.js";
-import { forgeBadgeTitle, forgeBadgeTitleHtml, forgeChipLabel } from "./forge-badge.js";
+import { forgeBadgeTitle, forgeBadgeTitleHtml, forgeChipLabel, providerLabel } from "./forge-badge.js";
 import type { FindingRow } from "../findings/types.js";
 import { fingerprintFinding, stripHtmlComments } from "../findings/identity.js";
 import { POLICIES_WITH_EXTERNAL, POLICIES_WITH_INTERNAL } from "../routing/types.js";
@@ -35,7 +35,7 @@ import {
   usageIncompleteCopy,
   usageReportedCopy,
 } from "./copy.js";
-import { pancakeMark, roleGlyph } from "./glyphs.js";
+import { externalLinkGlyph, pancakeMark, roleGlyph } from "./glyphs.js";
 import { TYPEAHEAD_HREF } from "./typeahead.js";
 import { csrfInput, layout, type PageOptions, type UiIdentity } from "./layout.js";
 import {
@@ -276,7 +276,7 @@ export function renderJob(
     ${options.error ? `<p class="error" role="alert">${escapeHtml(options.error)}</p>` : ""}
     ${cancelledBanner}
     ${stale ? `<p class="warn" role="status">${escapeHtml(staleBanner())}</p>` : ""}
-    <h1>${heading}</h1>
+    <h1>${heading}${prExternalLinkHtml(job)}</h1>
     <p class="lede">${escapeHtml(job.pr_title || "")}${flavor ? ` · ${escapeHtml(flavor)}` : ""}</p>
     ${options.chatEnabled ? `<p><a href="/jobs/${job.id}/chat">Ask Maomao about this change →</a></p>` : ""}
     ${isBrief ? `<p><a href="/jobs/${job.id}/brief">Repo brief →</a></p>` : ""}
@@ -458,6 +458,17 @@ function renderJobActions(job: JobRow, csrfToken?: string): string {
   return "";
 }
 
+/**
+ * Quiet "View on <Provider>" link right of a change title (job page h1, queue
+ * cards). Only rendered when the job carries the change's HTML URL — scans and
+ * jobs enqueued before the URL was captured have nothing to link to.
+ */
+function prExternalLinkHtml(job: JobRow): string {
+  if (!job.pr_html_url || !job.pr_number) return "";
+  const label = `View on ${providerLabel(job.provider)}`;
+  return `<a class="pr-external" href="${escapeHtml(job.pr_html_url)}" target="_blank" rel="noopener noreferrer" title="${escapeHtml(label)}" aria-label="${escapeHtml(label)}">${externalLinkGlyph()}</a>`;
+}
+
 function renderQueueCard(job: JobRow, metrics: JobMetrics, uiFlavor?: UiFlavor, csrfToken?: string): string {
   const state = jobStateLabel(job.state);
   const elapsed = formatDuration(elapsedMs(job.started_at, job.finished_at) ?? elapsedMs(job.created_at));
@@ -475,7 +486,7 @@ function renderQueueCard(job: JobRow, metrics: JobMetrics, uiFlavor?: UiFlavor, 
         <span class="specimen-id">Specimen · job ${job.id}</span>
         ${renderState(job.state, state.text, state.hint, state.mark)}
       </div>
-      <p class="specimen-title"><a href="/jobs/${job.id}">${forgeBadgeTitleHtml(job, job.repo_full_name, job.pr_number)} · ${escapeHtml(job.pr_title || "(no title)")}</a></p>
+      <p class="specimen-title"><a href="/jobs/${job.id}">${forgeBadgeTitleHtml(job, job.repo_full_name, job.pr_number)} · ${escapeHtml(job.pr_title || "(no title)")}</a>${prExternalLinkHtml(job)}</p>
       ${flavor ? `<p class="muted">${escapeHtml(flavor)}</p>` : ""}
       <div class="meta-row">
         <span class="pair">SHA <strong><code class="sha">${escapeHtml(shortSha(job.head_sha, 10))}</code></strong></span>
