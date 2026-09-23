@@ -130,6 +130,19 @@ describe("monitoring pages", () => {
     expect(html).toContain("unconfirmed observation");
   });
 
+  it("links the specimen title and job heading to the pull request on the forge", () => {
+    const store = seededStore();
+    const home = renderHome(store.listJobs(20), store);
+    expect(home).toContain('class="pr-external"');
+    expect(home).toContain("View on GitHub");
+    expect(home).toContain('href="https://github.com/acme/ledger/pull/412"');
+    expect(home).toContain('target="_blank"');
+    const job = store.listJobs(20).find((row) => row.pr_number === 412)!;
+    const detail = renderJob(job, store.listReviewerRuns(job.id), store.listLogs(job.id));
+    expect(detail).toContain('class="pr-external"');
+    expect(detail).toContain('href="https://github.com/acme/ledger/pull/412"');
+  });
+
   it("renders routing-in-progress and observation profiles on job detail", () => {
     const store = seededStore();
     const routing = store.listJobs(20).find((row) => row.pr_number === 422);
