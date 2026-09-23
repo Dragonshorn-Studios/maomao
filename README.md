@@ -248,6 +248,8 @@ OPENCODE_AGGREGATOR_MODEL=anthropic/claude-opus-4-6   # optional; defaults to re
 
 Use any `provider/model` string OpenCode understands (`opencode models`). Provider keys set in `.env` are passed through to the OpenCode child only when the variable matches a provider allowlist prefix (`src/opencode/env.ts`); GitHub App credentials never are.
 
+Model fields in the profile editor offer a pick-list: the configured `MODEL_CATALOG` merged with whatever `opencode models` reports for your configured providers (refreshed at boot and via the "Refresh model list" button on `/config`). Entries annotated "key configured" have a working credential. Free-text entry always remains allowed, and `MODEL_CATALOG` — when set — is still enforced on save.
+
 ### Provider credentials
 
 | Provider id (`provider/model`) | Set in `.env` | Example model |

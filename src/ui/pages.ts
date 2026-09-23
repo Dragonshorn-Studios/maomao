@@ -981,7 +981,10 @@ export interface ConfigPageData {
   /** Structured-editor inputs; required for the create/edit forms when canWrite. */
   profileEditor?: {
     knownRoles: Array<{ id: string; title: string }>;
-    modelCatalog: string[];
+    /** Datalist entries: MODEL_CATALOG plus models discovered via `opencode models`. */
+    modelCatalog: Array<{ id: string; hint?: string }>;
+    /** Live-discovery status for the refresh control; undefined when discovery is not wired. */
+    discovery?: ModelDiscoveryStatus;
     /** A failed save re-renders submitted values with field errors in place. */
     form?: { values: ProfileFormValues; errors?: ProfileFieldErrors; revision?: { id: number; editSeq: number } };
   };
@@ -1070,12 +1073,20 @@ function revisionCard(revision: ConfigRevisionView, data: ConfigPageData): strin
   </article>`;
 }
 
+/** Live model-discovery status shown under the profile editor. */
+export interface ModelDiscoveryStatus {
+  count: number;
+  fetchedAt: number;
+  error?: string;
+}
+
 export interface ProfileFormOptions {
   csrfToken: string;
   /** Present when editing an existing draft; absent when creating. */
   revision?: { id: number; editSeq: number };
   knownRoles: Array<{ id: string; title: string }>;
-  modelCatalog: string[];
+  modelCatalog: Array<{ id: string; hint?: string }>;
+  discovery?: ModelDiscoveryStatus;
 }
 
 const SEVERITIES: readonly Severity[] = ["blocker", "high", "medium", "low", "info"];
@@ -1159,9 +1170,30 @@ export function renderProfileForm(
   const modelDatalist =
     options.modelCatalog.length > 0
       ? `<datalist id="profile-model-catalog">${options.modelCatalog
-          .map((model) => `<option value="${escapeHtml(model)}"></option>`)
+          .map(
+            (model) =>
+              `<option value="${escapeHtml(model.id)}"${model.hint ? ` label="${escapeHtml(model.hint)}"` : ""}></option>`,
+          )
           .join("")}</datalist>`
       : "";
+
+  const discoveryStatus = options.discovery
+    ? (() => {
+        const d = options.discovery;
+        const line = d.error
+          ? `Live model discovery is unavailable — the list above is MODEL_CATALOG only. (${d.error})`
+          : d.fetchedAt
+            ? `${d.count} model${d.count === 1 ? "" : "s"} discovered via \`opencode models\`, last refreshed ${new Date(d.fetchedAt).toUTCString()}. Entries marked “key configured” have a provider key set.`
+            : "Model discovery has not run yet — the list above is MODEL_CATALOG only.";
+        return `<div class="model-discovery">
+          <p class="muted">${escapeHtml(line)}</p>
+          <form method="post" action="/config/models/refresh" class="inline-form">
+            ${csrfInput(options.csrfToken)}
+            <button type="submit" class="btn-secondary">Refresh model list</button>
+          </form>
+        </div>`;
+      })()
+    : "";
 
   const target = options.revision
     ? `/config/drafts/${options.revision.id}`
@@ -1224,6 +1256,7 @@ export function renderProfileForm(
       <button type="submit" name="action" value="save" class="btn">Save draft</button>
       <a href="/config">Cancel</a>
     </form>
+    ${discoveryStatus}
   </section>`;
 }
 
@@ -1240,11 +1273,13 @@ export function renderConfigPage(data: ConfigPageData): string {
             csrfToken: data.csrfToken ?? "",
             knownRoles: data.profileEditor.knownRoles,
             modelCatalog: data.profileEditor.modelCatalog,
+            discovery: data.profileEditor.discovery,
           })
         : renderProfileForm(initialProfileFormValues(), undefined, {
             csrfToken: data.csrfToken ?? "",
             knownRoles: data.profileEditor.knownRoles,
             modelCatalog: data.profileEditor.modelCatalog,
+            discovery: data.profileEditor.discovery,
           })
       : `<p class="muted">Writing configuration requires an operator OAuth identity.</p>`;
   const importForm = data.canWrite
@@ -1292,6 +1327,7 @@ export function renderConfigPage(data: ConfigPageData): string {
                   revision: { id: revision.id, editSeq: revision.editSeq },
                   knownRoles: data.profileEditor.knownRoles,
                   modelCatalog: data.profileEditor.modelCatalog,
+                  discovery: data.profileEditor.discovery,
                 },
               )
             : "";
