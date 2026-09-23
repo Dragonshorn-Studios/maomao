@@ -1177,7 +1177,12 @@ describe("provider credential routes", () => {
       },
     };
     const { app } = testApp(
-      { UI_PASSWORD: "hunter2", UI_SESSION_SECRET: "session-secret-for-tests", MODEL_CATALOG: "anthropic/claude-4.5-sonnet" },
+      {
+        UI_PASSWORD: "hunter2",
+        UI_SESSION_SECRET: "session-secret-for-tests",
+        MODEL_CATALOG: "anthropic/claude-4.5-sonnet",
+        OPENCODE_EXTRA_ARGS: "--json",
+      },
       undefined,
       undefined,
       { providerCredentials, opencode },
@@ -1201,17 +1206,21 @@ describe("provider credential routes", () => {
     expect(calls[0].prompt).toContain("Reply with exactly the word: ok");
     expect(calls[0].timeoutMs).toBe(60_000);
     expect(calls[0].title).toBe("maomao-provider-test-anthropic");
+    expect(calls[0].signal).toBeInstanceOf(AbortSignal);
+    expect(calls[0].extraArgs).toEqual(["--json"]);
     log.mockRestore();
   });
 
-  it("reports a failed provider test with the runner's stderr", async () => {
+  it("reports a failed provider test, falling back to stdout when stderr is empty", async () => {
     const log = vi.spyOn(console, "log").mockImplementation(() => {});
     const dir = mkdtempSync(join(tmpdir(), "maomao-prov-"));
     const providerCredentials = new ProviderCredentialStore(join(dir, "opencode", "auth.json"), {});
     expect(providerCredentials.set("anthropic", "sk-ant-bad-key").ok).toBe(true);
+    let lastCwd = "";
     const opencode: OpenCodeLike = {
-      async run() {
-        return { stdout: "", stderr: "401 Unauthorized: bad api key", exitCode: 1, text: "", usage: undefined as never };
+      async run(input) {
+        lastCwd = input.cwd;
+        return { stdout: "401 Unauthorized: bad api key", stderr: "", exitCode: 1, text: "", usage: undefined as never };
       },
     };
     const { app } = testApp(
@@ -1230,6 +1239,8 @@ describe("provider credential routes", () => {
     });
     expect(tested.status).toBe(400);
     expect(await tested.text()).toContain("401 Unauthorized");
+    // The workspace is cleaned up after failures too.
+    expect(existsSync(lastCwd)).toBe(false);
     log.mockRestore();
   });
 
@@ -1262,7 +1273,7 @@ describe("provider credential routes", () => {
     log.mockRestore();
   });
 
-  it("prefers a discovered model over the catalog and rejects an exit-0 wrong reply", async () => {
+  it("prefers a discovered model over the catalog and accepts verbose exit-0 replies", async () => {
     const log = vi.spyOn(console, "log").mockImplementation(() => {});
     const dir = mkdtempSync(join(tmpdir(), "maomao-prov-"));
     const providerCredentials = new ProviderCredentialStore(join(dir, "opencode", "auth.json"), {});
@@ -1309,10 +1320,16 @@ describe("provider credential routes", () => {
     // Discovery's claude-4.6-opus wins over the catalog's claude-4.5-sonnet.
     expect(calls).toEqual(["anthropic/claude-4.6-opus"]);
 
-    reply = "I cannot comply with that request.";
+    // A verbose-but-coherent reply still proves the key authenticated.
+    reply = "OK, verified — the key works.";
     const second = await post(await csrfArtifacts(await app.request("/config/providers", { headers: { cookie: session } })));
-    expect(second.status).toBe(400);
-    expect(await second.text()).toContain("did not answer as expected");
+    expect(second.status).toBe(303);
+
+    // An empty reply is the only exit-0 failure left.
+    reply = "";
+    const third = await post(await csrfArtifacts(await app.request("/config/providers", { headers: { cookie: session } })));
+    expect(third.status).toBe(400);
+    expect(await third.text()).toContain("produced no reply");
     log.mockRestore();
   });
 
@@ -1460,6 +1477,39 @@ describe("provider credential routes", () => {
     const html = await tested.text();
     expect(html).not.toContain("sk-ant-test-value-9");
     expect(html).toContain("[redacted]");
+    log.mockRestore();
+  });
+
+  it("refuses a provider test when no key is configured for it", async () => {
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    const dir = mkdtempSync(join(tmpdir(), "maomao-prov-"));
+    const providerCredentials = new ProviderCredentialStore(join(dir, "opencode", "auth.json"), {});
+    const opencode: OpenCodeLike = {
+      async run() {
+        throw new Error("must not be called");
+      },
+    };
+    const { app } = testApp(
+      {
+        UI_PASSWORD: "hunter2",
+        UI_SESSION_SECRET: "session-secret-for-tests",
+        MODEL_CATALOG: "anthropic/claude-4.5-sonnet,openai/gpt-5",
+      },
+      undefined,
+      undefined,
+      { providerCredentials, opencode },
+    );
+    const { session } = await loginSession(app);
+    const { csrfCookie, csrfToken } = await csrfArtifacts(
+      await app.request("/config/providers", { headers: { cookie: session } }),
+    );
+    const tested = await app.request("/config/providers/openai/test", {
+      method: "POST",
+      headers: { cookie: `${session}; ${csrfCookie}`, "content-type": "application/x-www-form-urlencoded" },
+      body: `csrf_token=${encodeURIComponent(csrfToken)}`,
+    });
+    expect(tested.status).toBe(400);
+    expect(await tested.text()).toContain("No key configured for openai");
     log.mockRestore();
   });
 

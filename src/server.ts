@@ -1270,6 +1270,15 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
           status: 400,
         });
       }
+      // Mirror the button's own invariant: only spawn when a key exists — a
+      // stale tab or hand-crafted POST shouldn't burn a billable run.
+      const status = providerCreds().list().find((p) => p.id === id);
+      if (!status || status.source === "none") {
+        return renderProviders(c, {
+          error: `No key configured for ${id} — save one or set its environment variable first.`,
+          status: 400,
+        });
+      }
       // The button submits the key field's current value, but the run verifies
       // the stored/env key — refuse rather than silently verify the wrong key.
       const body = await c.req.parseBody();
@@ -1293,16 +1302,20 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
           signal: c.req.raw.signal,
         });
         if (result.exitCode !== 0) {
-          const stderr = truncate(redactSecrets(result.stderr.trim(), secrets) || "no stderr", 300);
+          const detail = truncate(
+            redactSecrets(result.stderr.trim() || result.stdout.trim(), secrets) || "no output",
+            300,
+          );
           return renderProviders(c, {
-            error: `${model} exited ${result.exitCode}: ${stderr}`,
+            error: `${model} exited ${result.exitCode}: ${detail}`,
             status: 400,
           });
         }
-        if (!/^ok[.!\s]*$/i.test((result.text || "").trim())) {
-          const replied = truncate(redactSecrets((result.text || "").trim(), secrets) || "nothing", 200);
+        // Any non-empty reply means the key authenticated and the model
+        // responded — even a refusal proves the spawn path works.
+        if (!(result.text || "").trim()) {
           return renderProviders(c, {
-            error: `${model} exited 0 but did not answer as expected (replied: ${replied}).`,
+            error: `${model} exited 0 but produced no reply — nothing confirms the key actually reached the model.`,
             status: 400,
           });
         }
