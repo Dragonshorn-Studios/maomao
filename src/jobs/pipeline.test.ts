@@ -4060,10 +4060,10 @@ describe("repo brief (issue #88)", () => {
     });
   }
 
-  function enqueueBrief(store: JobStore, sha = "brief000brief000brief000brief000") {
+  function enqueueBrief(store: JobStore, sha = "brief000brief000brief000brief000", model?: string) {
     return store.enqueue({
       ...jobInput(sha),
-      reviewers: [{ role: "repo_brief", title: "Repo brief" }],
+      reviewers: [{ role: "repo_brief", title: "Repo brief", ...(model ? { model } : {}) }],
       jobType: "repo_brief",
       prNumber: 0,
       headSha: sha,
@@ -4210,6 +4210,37 @@ describe("repo brief (issue #88)", () => {
       const payload = parseBriefPayload(store.getJob(second.job.id)?.brief_json);
       expect(payload?.served_from_cache).toBeUndefined();
       expect(payload?.sha).toBe("bbbb1111bbbb1111bbbb1111bbbb1111bbbb1111");
+    });
+
+    it("bypasses the cache on both sides for a model-override brief", async () => {
+      const store = new JobStore(openDb(":memory:"));
+      const counter = { runs: 0 };
+      const pipeline = createPipeline({
+        config: briefConfig(),
+        store,
+        github: githubPort(),
+        checkout: await fixtureCheckout(),
+        opencode: countingOpencode(counter),
+      });
+
+      const sha = "aaaa0000aaaa0000aaaa0000aaaa0000aaaa0000";
+      const first = enqueueBrief(store, sha);
+      await pipeline.run(first.job.id);
+      expect(counter.runs).toBe(1);
+      const cachedBefore = store.getRepoBriefCache("github", "github.com", first.job.repo_full_name, sha)?.payload;
+      expect(cachedBefore).toBeTruthy();
+
+      // Same SHA with an operator-picked model: the cached default-model
+      // brief must not be served, and the override result must not
+      // overwrite the shared cache row either.
+      const second = enqueueBrief(store, sha, "opencode/big-pickle");
+      await pipeline.run(second.job.id);
+
+      expect(counter.runs).toBe(2);
+      const payload = parseBriefPayload(store.getJob(second.job.id)?.brief_json);
+      expect(payload?.served_from_cache).toBeUndefined();
+      expect(store.getRepoBriefCache("github", "github.com", first.job.repo_full_name, sha)?.payload).toBe(cachedBefore);
+      expect(store.listReviewerRuns(second.job.id)[0]?.model).toBe("opencode/big-pickle");
     });
 
     it("re-runs every brief when the cache is disabled", async () => {

@@ -2465,6 +2465,7 @@ describe("repo brief routes (issue #88)", () => {
       repo: hiddenValue(html, "repo"),
       ref: hiddenValue(html, "ref"),
       sha: hiddenValue(html, "sha"),
+      model: hiddenValue(html, "model"),
       csrf_token: csrfToken,
       ...overrides,
     }).toString();
@@ -2516,6 +2517,35 @@ describe("repo brief routes (issue #88)", () => {
     expect(job.pr_number).toBe(0);
     expect(store.listReviewerRuns(job.id)[0]?.role).toBe("repo_brief");
     log.mockRestore();
+  });
+
+  it("carries a model override from the picker through confirm into the run", async () => {
+    const { app, store } = testApp(
+      { ...oauthEnv, MODEL_CATALOG: "opencode/big-pickle,anthropic/claude-sonnet-4" },
+      briefGithub(),
+      mockOauthFetch({ id: 1001, login: "octocat" }),
+    );
+    const { session, csrfCookie, csrfToken, html } = await operatorBriefCsrf(app);
+    expect(html).toContain("data-model-picker");
+    expect(html).toContain('name="model"');
+
+    const preview = await app.request("/brief", {
+      method: "POST",
+      headers: { cookie: `${session}; ${csrfCookie}`, "content-type": "application/x-www-form-urlencoded" },
+      body: `repo=acme%2Fwidgets&ref=main&model=opencode%2Fbig-pickle&csrf_token=${encodeURIComponent(csrfToken)}`,
+    });
+    const previewHtml = await preview.text();
+    expect(hiddenValue(previewHtml, "model")).toBe("opencode/big-pickle");
+    expect(previewHtml).toContain("opencode/big-pickle"); // shown as the confirmed model
+
+    const queued = await app.request("/brief", {
+      method: "POST",
+      headers: { cookie: `${session}; ${csrfCookie}`, "content-type": "application/x-www-form-urlencoded" },
+      body: briefConfirmBody(previewHtml, csrfToken),
+    });
+    expect(queued.status).toBe(302);
+    const job = store.listJobs()[0]!;
+    expect(store.listReviewerRuns(job.id)[0]?.model).toBe("opencode/big-pickle");
   });
 
   it("falls back to the default branch head when no ref is typed", async () => {
