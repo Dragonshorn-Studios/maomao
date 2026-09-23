@@ -36,6 +36,7 @@ import {
   renderCancelConfirmPage,
   renderConfigPage,
   renderProfilesPage,
+  renderNewProfilePage,
   renderDraftEditPage,
   renderConfigAuditPage,
   renderProfileForm,
@@ -1202,7 +1203,7 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
     if (!gateOn) return c.redirect("/", 302);
     const snap = await ctx.modelDiscovery?.refresh();
     const key = snap?.error ? "models-refresh-failed" : "models-refreshed";
-    return c.redirect("/config/profiles?notice=" + key, 303);
+    return c.redirect("/config/profiles/new?notice=" + key, 303);
   });
 
   app.get("/config", (c) => {
@@ -1222,19 +1223,24 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
     );
   });
 
+  const profileNotices: Record<string, string> = {
+    "draft-created": "Draft created.",
+    "draft-saved": "Draft saved.",
+    activated: "Revision activated.",
+    "rolled-back": "Revision rolled back.",
+    imported: "Configuration imported as drafts.",
+    "models-refreshed": "Model list refreshed from opencode models.",
+    "models-refresh-failed": "Model list refresh failed — see the note in the profile editor for details.",
+  };
+
   app.get("/config/profiles", (c) => {
     if (!gateOn) return c.redirect("/", 302);
-    const notices: Record<string, string> = {
-      "draft-created": "Draft created.",
-      "draft-saved": "Draft saved.",
-      activated: "Revision activated.",
-      "rolled-back": "Revision rolled back.",
-      imported: "Configuration imported as drafts.",
-      "models-refreshed": "Model list refreshed from opencode models.",
-      "models-refresh-failed": "Model list refresh failed — see the note in the profile editor for details.",
-    };
-    const noticeKey = c.req.query("notice") ?? "";
-    return c.html(renderProfilesPage(profilesPageData(c, { notice: notices[noticeKey] })));
+    return c.html(renderProfilesPage(profilesPageData(c, { notice: profileNotices[c.req.query("notice") ?? ""] })));
+  });
+
+  app.get("/config/profiles/new", (c) => {
+    if (!gateOn) return c.redirect("/", 302);
+    return c.html(renderNewProfilePage(profilesPageData(c, { notice: profileNotices[c.req.query("notice") ?? ""] })));
   });
 
   app.get("/config/profiles/drafts/:id/edit", (c) => {
@@ -1341,7 +1347,7 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
     if (bodyPreview.editor === "structured") {
       const outcome = handleProfileForm(bodyPreview, (form, status) =>
         c.html(
-          renderProfilesPage(profilesPageData(c, { error: form.errors.form, form })),
+          renderNewProfilePage(profilesPageData(c, { error: form.errors.form, form })),
           status,
         ),
       );
@@ -1354,7 +1360,7 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
       if ("error" in result) {
         const values = decodeProfileForm(bodyPreview);
         return c.html(
-          renderProfilesPage(
+          renderNewProfilePage(
             profilesPageData(c, {
               error: result.issues.join("; "),
               form: { values, errors: { form: result.issues.join("; ") } },
@@ -1463,6 +1469,24 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
     const result = ctx.store.configs.activateRevision(Number(c.req.param("id")), actor.login);
     if ("error" in result) return renderProfilesWithError(c, result.error, 400);
     return c.redirect("/config/profiles?notice=activated", 302);
+  });
+
+  app.post("/config/revisions/:id/duplicate", (c) => {
+    if (!gateOn) return c.redirect("/", 302);
+    const actor = configActor(c);
+    if (!actor) return configWriteDenied(c);
+    const existing = ctx.store.configs.getRevision(Number(c.req.param("id")));
+    if (!existing) return renderProfilesWithError(c, "Revision not found.", 404);
+    const used = new Set(ctx.store.configs.listRevisions().map((revision) => revision.name));
+    let name = `${existing.name}-copy`;
+    for (let i = 2; used.has(name); i += 1) name = `${existing.name}-copy-${i}`;
+    const result = ctx.store.configs.createDraft({
+      definition: { ...existing.definition, name },
+      note: `Duplicated from #${existing.id} (${existing.name}).`,
+      createdBy: actor.login,
+    });
+    if ("error" in result) return renderProfilesWithError(c, result.issues.join("; "), 400);
+    return c.redirect(`/config/profiles/drafts/${result.revision.id}/edit`, 303);
   });
 
   app.post("/config/revisions/:id/rollback", (c) => {

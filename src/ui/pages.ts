@@ -1079,6 +1079,12 @@ function revisionCard(revision: ConfigRevisionView, data: ConfigPageData): strin
       <button type="submit" class="btn-secondary">Roll back to this revision</button>
     </form>`);
   }
+  if (data.canWrite) {
+    actions.push(`<form method="post" action="/config/revisions/${revision.id}/duplicate" class="inline-form">
+      ${csrf}
+      <button type="submit" class="btn-secondary">Duplicate</button>
+    </form>`);
+  }
   const definitionJson = JSON.stringify(revision.definition, null, 2);
   return `<article class="card config-revision">
     <header>
@@ -1312,23 +1318,9 @@ export function renderProfilesPage(data: ConfigPageData): string {
   const drafts = data.revisions.filter((revision) => revision.status === "draft");
   const retired = data.revisions.filter((revision) => revision.status === "retired");
   const csrf = csrfInput(data.csrfToken);
-  const createForm =
-    data.canWrite && data.profileEditor
-      ? data.profileEditor.form
-        ? // A failed create save re-renders the submitted values with errors.
-          renderProfileForm(data.profileEditor.form.values, data.profileEditor.form.errors, {
-            csrfToken: data.csrfToken ?? "",
-            knownRoles: data.profileEditor.knownRoles,
-            modelCatalog: data.profileEditor.modelCatalog,
-            discovery: data.profileEditor.discovery,
-          })
-        : renderProfileForm(initialProfileFormValues(), undefined, {
-            csrfToken: data.csrfToken ?? "",
-            knownRoles: data.profileEditor.knownRoles,
-            modelCatalog: data.profileEditor.modelCatalog,
-            discovery: data.profileEditor.discovery,
-          })
-      : `<p class="muted">Writing configuration requires an operator OAuth identity.</p>`;
+  const createLink = data.canWrite
+    ? `<p><a href="/config/profiles/new" class="btn">New draft</a></p>`
+    : `<p class="muted">Writing configuration requires an operator OAuth identity.</p>`;
   const importForm = data.canWrite
     ? `<details class="config-import">
         <summary>Import exported configuration</summary>
@@ -1345,8 +1337,7 @@ export function renderProfilesPage(data: ConfigPageData): string {
     ${configSubNav("profiles")}
     ${data.notice ? `<p class="notice" role="status">${escapeHtml(data.notice)}</p>` : ""}
     ${data.error ? `<p class="error" role="alert">${escapeHtml(data.error)}</p>` : ""}
-    <h2>Create a draft</h2>
-    ${createForm}
+    ${createLink}
     <h2>Active</h2>
     ${active.map((revision) => revisionCard(revision, data)).join("") || `<p class="muted">No active revision — env configuration applies.</p>`}
     <h2>Drafts</h2>
@@ -1419,6 +1410,35 @@ function configAuditTable(audit: ConfigPageData["audit"]): string {
     <thead><tr><th>When</th><th>Action</th><th>Actor</th><th>Revision</th><th>Detail</th></tr></thead>
     <tbody>${rows || `<tr><td colspan="5">No entries</td></tr>`}</tbody>
   </table>`;
+}
+
+/** /config/profiles/new — the create-draft editor on its own page so the
+ * profiles list stays a list as it grows. */
+export function renderNewProfilePage(data: ConfigPageData): string {
+  const editor = data.canWrite && data.profileEditor
+    ? renderProfileForm(
+        data.profileEditor.form?.values ?? initialProfileFormValues(),
+        data.profileEditor.form?.errors,
+        {
+          csrfToken: data.csrfToken ?? "",
+          knownRoles: data.profileEditor.knownRoles,
+          modelCatalog: data.profileEditor.modelCatalog,
+          discovery: data.profileEditor.discovery,
+        },
+      )
+    : `<p class="muted">Writing configuration requires an operator OAuth identity.</p>`;
+  const body = `
+    ${configSubNav("profiles")}
+    <p class="crumb"><a href="/config/profiles">Profiles</a> / New draft</p>
+    ${data.notice ? `<p class="notice" role="status">${escapeHtml(data.notice)}</p>` : ""}
+    ${data.error ? `<p class="error" role="alert">${escapeHtml(data.error)}</p>` : ""}
+    ${editor}`;
+  return layout("New draft", body, {
+    showLogout: data.canWrite || Boolean(data.csrfToken),
+    csrfToken: data.csrfToken,
+    identity: data.identity,
+    surface: "operator",
+  });
 }
 
 /** /config/audit: profile lifecycle transitions, most recent first. */

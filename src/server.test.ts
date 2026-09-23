@@ -1198,7 +1198,7 @@ describe("model discovery routes", () => {
     );
     const { session } = await loginSession(app);
 
-    const page = await app.request("/config/profiles", { headers: { cookie: session } });
+    const page = await app.request("/config/profiles/new", { headers: { cookie: session } });
     const html = await page.text();
     expect(html).toContain('value="catalog/curated" label="in MODEL_CATALOG"');
     expect(html).toContain('value="anthropic/claude-4.5-sonnet" label="key configured"');
@@ -1230,7 +1230,7 @@ describe("model discovery routes", () => {
       body: `csrf_token=${encodeURIComponent(csrfToken)}`,
     });
     expect(refreshed.status).toBe(303);
-    expect(refreshed.headers.get("location")).toBe("/config/profiles?notice=models-refreshed");
+    expect(refreshed.headers.get("location")).toBe("/config/profiles/new?notice=models-refreshed");
     expect(spawnFake.calls).toEqual([["opencode", "models"]]);
     expect(modelDiscovery.snapshot().models).toEqual(["openai/gpt-4o", "anthropic/claude-4.5-sonnet"]);
     log.mockRestore();
@@ -1256,9 +1256,11 @@ describe("model discovery routes", () => {
       body: `csrf_token=${encodeURIComponent(csrfToken)}`,
     });
     expect(refreshed.status).toBe(303);
-    expect(refreshed.headers.get("location")).toBe("/config/profiles?notice=models-refresh-failed");
-    const after = await app.request("/config/profiles", { headers: { cookie: session } });
-    expect(await after.text()).toContain("Live model discovery is unavailable");
+    expect(refreshed.headers.get("location")).toBe("/config/profiles/new?notice=models-refresh-failed");
+    const after = await app.request("/config/profiles/new?notice=models-refresh-failed", { headers: { cookie: session } });
+    const afterHtml = await after.text();
+    expect(afterHtml).toContain("Model list refresh failed");
+    expect(afterHtml).toContain("Live model discovery is unavailable");
     log.mockRestore();
   });
 });
@@ -1300,6 +1302,63 @@ describe("config page IA", () => {
     const audit = await (await app.request("/config/audit", { headers: { cookie: session } })).text();
     expect(audit).toContain("Configuration audit");
     expect(audit).toContain("draft_created");
+    log.mockRestore();
+  });
+
+  it("duplicates a revision (active included) into a new draft and lands on its editor", async () => {
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    const { app, store } = testApp(
+      {
+        UI_SESSION_SECRET: "session-secret-for-tests",
+        GITHUB_OAUTH_CLIENT_ID: "cid",
+        GITHUB_OAUTH_CLIENT_SECRET: "csecret",
+        MAOMAO_ADMIN_GITHUB_IDS: "1001",
+        MAOMAO_PUBLIC_URL: "https://maomao.example",
+      },
+      undefined,
+      mockOauthFetch({ id: 1001, login: "octocat" }),
+    );
+    const session = await operatorSession(app);
+    const created = store.configs.createDraft({
+      definition: { name: "default", reviewers: [{ role: "correctness" }], minPublishableSeverity: "info" },
+      createdBy: "system",
+    });
+    if ("error" in created) throw new Error(created.issues.join("; "));
+    const source = created.revision;
+    expect(store.configs.activateRevision(source.id, "system")).not.toHaveProperty("error");
+
+    const page = await app.request("/config/profiles", { headers: { cookie: session } });
+    const { html, csrfCookie, csrfToken } = await csrfArtifacts(page);
+    expect(html).toContain(`action="/config/revisions/${source.id}/duplicate"`);
+
+    const dup = await app.request(`/config/revisions/${source.id}/duplicate`, {
+      method: "POST",
+      headers: { cookie: `${session}; ${csrfCookie}`, "content-type": "application/x-www-form-urlencoded" },
+      body: `csrf_token=${encodeURIComponent(csrfToken)}`,
+    });
+    expect(dup.status).toBe(303);
+    const copy = store.configs.listRevisions().find((r) => r.name === "default-copy");
+    expect(copy?.status).toBe("draft");
+    expect(copy?.note).toContain(`#${source.id}`);
+    expect(dup.headers.get("location")).toBe(`/config/profiles/drafts/${copy?.id}/edit`);
+
+    // Duplicating again dedupes the name rather than colliding.
+    const page2 = await app.request("/config/profiles", { headers: { cookie: session } });
+    const artifacts2 = await csrfArtifacts(page2);
+    const dup2 = await app.request(`/config/revisions/${source.id}/duplicate`, {
+      method: "POST",
+      headers: { cookie: `${session}; ${artifacts2.csrfCookie}`, "content-type": "application/x-www-form-urlencoded" },
+      body: `csrf_token=${encodeURIComponent(artifacts2.csrfToken)}`,
+    });
+    expect(dup2.status).toBe(303);
+    expect(store.configs.listRevisions().map((r) => r.name)).toContain("default-copy-2");
+
+    const missing = await app.request("/config/revisions/999/duplicate", {
+      method: "POST",
+      headers: { cookie: `${session}; ${artifacts2.csrfCookie}`, "content-type": "application/x-www-form-urlencoded" },
+      body: `csrf_token=${encodeURIComponent(artifacts2.csrfToken)}`,
+    });
+    expect(missing.status).toBe(404);
     log.mockRestore();
   });
 });
@@ -3632,14 +3691,22 @@ describe("structured profile editor", () => {
     expect(store.configs.getRevision(draftId)?.definition.reviewers.map((r) => r.role)).toEqual(["correctness", "security"]);
   });
 
-  it("renders the structured create form on GET /config/profiles when the gate allows writes", async () => {
+  it("renders the structured create form on GET /config/profiles/new when the gate allows writes", async () => {
     const { app } = testApp(oauthEnv, undefined, mockOauthFetch({ id: 1001, login: "octocat" }));
     const session = await operatorSession(app);
-    const html = await (await app.request("/config/profiles", { headers: { cookie: session } })).text();
+    const html = await (await app.request("/config/profiles/new", { headers: { cookie: session } })).text();
     expect(html).toContain('name="editor" value="structured"');
     expect(html).toContain("Minimum publishable severity");
     expect(html).toContain('name="budget_behavior"');
     expect(html).toContain("Create a draft");
+  });
+
+  it("keeps the profiles list form-free and links to the create page", async () => {
+    const { app } = testApp(oauthEnv, undefined, mockOauthFetch({ id: 1001, login: "octocat" }));
+    const session = await operatorSession(app);
+    const html = await (await app.request("/config/profiles", { headers: { cookie: session } })).text();
+    expect(html).toContain('href="/config/profiles/new"');
+    expect(html).not.toContain('name="editor" value="structured"');
   });
 });
 
@@ -3682,7 +3749,7 @@ describe("structured profile editor review fixes", () => {
     expect(store.configs.listRevisions().length).toBe(before);
     const html = await response.text();
     // Full-page render with an explanation, not a bare fragment.
-    expect(html).toContain("Review profiles");
+    expect(html).toContain("New draft");
     expect(html).toContain("does not apply");
   });
 

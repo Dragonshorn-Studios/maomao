@@ -16,6 +16,7 @@ export {
 export {
   renderConfigPage,
   renderProfilesPage,
+  renderNewProfilePage,
   renderDraftEditPage,
   renderConfigAuditPage,
   renderProfileForm,

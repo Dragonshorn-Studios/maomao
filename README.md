@@ -248,7 +248,7 @@ OPENCODE_AGGREGATOR_MODEL=anthropic/claude-opus-4-6   # optional; defaults to re
 
 Use any `provider/model` string OpenCode understands (`opencode models`). Provider keys set in `.env` are passed through to the OpenCode child only when the variable matches a provider allowlist prefix (`src/opencode/env.ts`); GitHub App credentials never are.
 
-Model fields in the profile editor offer a pick-list: the configured `MODEL_CATALOG` merged with whatever `opencode models` reports for your configured providers (refreshed at boot and via the "Refresh model list" button on `/config/profiles`). Entries annotated "key configured" have a working credential. Free-text entry always remains allowed, and `MODEL_CATALOG` — when set — is still enforced on save.
+Model fields in the profile editor offer a pick-list: the configured `MODEL_CATALOG` merged with whatever `opencode models` reports for your configured providers (refreshed at boot and via the "Refresh model list" button in the profile editor). Entries annotated "key configured" have a working credential. Free-text entry always remains allowed, and `MODEL_CATALOG` — when set — is still enforced on save.
 
 ### Provider credentials
 
@@ -488,7 +488,7 @@ Set `MAOMAO_EXPLAIN_ENABLED=true` and each job page gains an **Ask Maomao** chat
 
 ## Review configuration (versioned profiles)
 
-Configuration lives under `/config` as a set of focused pages joined by a shared sub-nav: the landing page shows the **effective configuration** (the value actually running, its source — environment, default, or active profile — and a per-row pointer to where that value is changed), `/config/profiles` manages drafts/revisions, each draft is edited on its own page (`/config/profiles/drafts/:id/edit`), `/config/providers` holds provider API keys, `/config/prompts` the specialist prompts, and `/config/audit` the full lifecycle history.
+Configuration lives under `/config` as a set of focused pages joined by a shared sub-nav: the landing page shows the **effective configuration** (the value actually running, its source — environment, default, or active profile — and a per-row pointer to where that value is changed), `/config/profiles` lists drafts/revisions with per-card actions (activate, rollback, and **Duplicate** — cloning any revision, including the seeded default, into a new draft), new drafts are composed on `/config/profiles/new`, each draft is edited on its own page (`/config/profiles/drafts/:id/edit`), `/config/providers` holds provider API keys (filterable, with per-provider links to where the key is issued), `/config/prompts` the specialist prompts, and `/config/audit` the full lifecycle history.
 
 `/config/profiles` manages **versioned review profiles**: named revisions that pin which specialists run, their order, per-role models, the router model, a minimum publishable severity, and optional total cost/token budgets.
 
