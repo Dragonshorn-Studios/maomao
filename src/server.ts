@@ -27,7 +27,7 @@ import { KNOWN_REVIEWER_ROLES } from "./prompts.js";
 import { subscribe } from "./events.js";
 import { redactSecrets, truncate } from "./util.js";
 import { readFileSync } from "node:fs";
-import { mkdtemp } from "node:fs/promises";
+import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import {
@@ -276,6 +276,10 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
   };
   const rateLimiter = ctx.rateLimiter ?? new RepoRateLimiter();
   const authLimiter = new WindowRateLimiter();
+  const PROVIDER_TEST_LIMIT = 5;
+  const PROVIDER_TEST_WINDOW_MS = 10 * 60 * 1000;
+  const providerTestLimiter = new WindowRateLimiter();
+  let providerTestInFlight = false;
   const oauthStates = new OAuthStateStore();
 
   app.use("*", async (c, next) => {
@@ -1238,6 +1242,15 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
     if (!ctx.opencode) {
       return renderProviders(c, { error: "Provider test is unavailable on this process (no OpenCode runner).", status: 503 });
     }
+    // A test spawns a real (billable) opencode run: serialize them and cap the
+    // rate per client — this is operator verification, not a hot path.
+    if (!providerTestLimiter.wouldAllow(clientKey(c), PROVIDER_TEST_LIMIT, PROVIDER_TEST_WINDOW_MS)) {
+      return renderProviders(c, { error: "Too many provider tests — wait a few minutes before trying again.", status: 429 });
+    }
+    if (providerTestInFlight) {
+      return renderProviders(c, { error: "A provider test is already running — try again when it finishes.", status: 429 });
+    }
+    providerTestLimiter.record(clientKey(c), PROVIDER_TEST_LIMIT, PROVIDER_TEST_WINDOW_MS);
     const id = c.req.param("id");
     const model =
       ctx.modelDiscovery?.snapshot().models.find((m) => m.split("/")[0] === id) ??
@@ -1248,31 +1261,45 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
         status: 400,
       });
     }
+    providerTestInFlight = true;
     try {
       const workspace = await mkdtemp(join(tmpdir(), "maomao-provider-test-"));
-      const result = await ctx.opencode.run({
-        cwd: workspace,
-        model,
-        prompt: "Reply with exactly the word: ok",
-        timeoutMs: 60_000,
-        extraArgs: ctx.config.opencode.extraArgs,
-        title: `maomao-provider-test-${id}`,
-      });
-      if (result.exitCode !== 0) {
-        return renderProviders(c, {
-          error: `${model} exited ${result.exitCode}: ${truncate(result.stderr.trim() || "no stderr", 300)}`,
-          status: 400,
+      try {
+        const result = await ctx.opencode.run({
+          cwd: workspace,
+          model,
+          prompt: "Reply with exactly the word: ok",
+          timeoutMs: 60_000,
+          extraArgs: ctx.config.opencode.extraArgs,
+          title: `maomao-provider-test-${id}`,
+          signal: c.req.raw.signal,
         });
+        if (result.exitCode !== 0) {
+          return renderProviders(c, {
+            error: `${model} exited ${result.exitCode}: ${truncate(result.stderr.trim() || "no stderr", 300)}`,
+            status: 400,
+          });
+        }
+        if (!/\bok\b/i.test(result.text || "")) {
+          return renderProviders(c, {
+            error: `${model} exited 0 but did not answer as expected (replied: ${truncate((result.text || "").trim() || "nothing", 200)}).`,
+            status: 400,
+          });
+        }
+        return c.redirect(
+          "/config/providers?notice=" + encodeURIComponent(`${id} key verified — ${model} answered a real opencode run.`),
+          303,
+        );
+      } finally {
+        await rm(workspace, { recursive: true, force: true }).catch(() => {});
       }
-      return c.redirect(
-        "/config/providers?notice=" + encodeURIComponent(`${id} key verified — ${model} answered a real opencode run.`),
-        303,
-      );
     } catch (error) {
       return renderProviders(c, {
         error: `${id} test failed: ${error instanceof Error ? error.message : String(error)}`,
         status: 400,
       });
+    } finally {
+      providerTestInFlight = false;
     }
   });
 
