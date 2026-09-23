@@ -1265,6 +1265,7 @@ export function renderProfileForm(
             value: row.model,
             models: options.modelCatalog,
             emptyLabel: "— default —",
+            allowCustom: !options.catalogEnforced,
             attrs: modelError ? `aria-invalid="true" aria-describedby="reviewer_row_${index}-error"` : "",
           })}
         </label>
@@ -1343,6 +1344,7 @@ export function renderProfileForm(
             value: values.routerModel,
             models: options.modelCatalog,
             emptyLabel: "— default —",
+            allowCustom: !options.catalogEnforced,
             attrs: `${invalidAttr("router_model")} ${describedBy("router_model")}`.trim(),
           })}
         </label>

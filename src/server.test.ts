@@ -210,6 +210,10 @@ describe("HTTP app", () => {
     expect(typeaheadJs.status).toBe(200);
     expect(typeaheadJs.headers.get("content-type")).toContain("text/javascript");
     expect(await typeaheadJs.text()).toContain("__maomaoTypeahead");
+    const modelPickerJs = await app.request("/assets/model-picker.js");
+    expect(modelPickerJs.status).toBe(200);
+    expect(modelPickerJs.headers.get("content-type")).toContain("text/javascript");
+    expect(await modelPickerJs.text()).toContain("data-model-picker");
     const pierreJs = await app.request("/assets/vendor/pierre-diffs.js");
     expect(pierreJs.status).toBe(200);
     expect(pierreJs.headers.get("content-type")).toContain("text/javascript");

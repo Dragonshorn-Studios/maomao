@@ -9,17 +9,18 @@ export interface ModelPickerEntry {
 
 /**
  * Styled model dropdown — one shared picker for every model edit field
- * (profile reviewer overrides, router model, prompt evaluation). Renders a
- * button + grouped popover posting through a hidden input, progressively
- * enhanced by ${MODEL_PICKER_HREF}: without JS it stays an inert control,
- * so forms still submit the current value but picking needs the script.
+ * (profile reviewer overrides, router model, prompt evaluation). The markup
+ * starts as a plain text `<input>`; ${MODEL_PICKER_HREF} upgrades the
+ * wrapper with `is-js`, revealing a button + grouped popover that writes
+ * picks into the same input. Without JS — or when `models` is empty — the
+ * field is still a working free-text control, so nothing regresses.
  *
  * `provider/model` entries group under provider section headers in
  * first-seen order; a saved value not present in `models` stays selectable
- * as a marked "(custom)" option so existing profiles remain editable. When
- * `models` is empty the control degrades to a plain text input — an empty
- * picker would make the field impossible to set (no MODEL_CATALOG and live
- * discovery unavailable).
+ * as a marked "(custom)" option so existing profiles remain editable.
+ * `allowCustom` adds a "Type a custom model…" tail option that re-shows the
+ * input for arbitrary ids — omitted when a configured MODEL_CATALOG makes
+ * off-catalog values unsavable anyway.
  */
 export function modelPicker(options: {
   name: string;
@@ -27,14 +28,17 @@ export function modelPicker(options: {
   models: ModelPickerEntry[];
   /** Empty-option label for optional fields; omit it for required ones. */
   emptyLabel?: string;
-  /** Placeholder for the text-input fallback. */
+  /** Placeholder for the text input. */
   placeholder?: string;
+  /** Offer a "Type a custom model…" tail option (default true). */
+  allowCustom?: boolean;
   /** Extra attributes on the control, already escaped (e.g. aria-invalid). */
   attrs?: string;
 }): string {
   const attrs = options.attrs ? ` ${options.attrs}` : "";
+  const placeholder = options.placeholder ?? "provider/model";
   if (options.models.length === 0) {
-    return `<input name="${escapeHtml(options.name)}" value="${escapeHtml(options.value)}" placeholder="${escapeHtml(options.placeholder ?? "provider/model")}"${attrs}/>`;
+    return `<input name="${escapeHtml(options.name)}" value="${escapeHtml(options.value)}" placeholder="${escapeHtml(placeholder)}"${attrs}/>`;
   }
   const entries = [...options.models];
   if (options.value !== "" && !entries.some((entry) => entry.id === options.value)) {
@@ -68,13 +72,17 @@ export function modelPicker(options: {
         `<span class="model-picker-group" role="presentation">${escapeHtml(provider)}</span>${list.map(optionHtml).join("")}`,
     )
     .join("");
+  const customOption =
+    options.allowCustom === false
+      ? ""
+      : `<span class="model-picker-option model-picker-option-custom" role="option" data-custom data-label="Custom model" aria-selected="false" tabindex="-1"><span class="model-picker-check" aria-hidden="true">✓</span><span class="model-picker-text"><span class="model-picker-name">Type a custom model…</span><span class="model-picker-detail">enter any provider/model id</span></span></span>`;
   const buttonLabel = options.value === "" ? (options.emptyLabel ?? options.value) : options.value;
   return `<span class="model-picker" data-model-picker>
-    <input type="hidden" name="${escapeHtml(options.name)}" value="${escapeHtml(options.value)}"/>
+    <input type="text" class="model-picker-input" name="${escapeHtml(options.name)}" value="${escapeHtml(options.value)}" placeholder="${escapeHtml(placeholder)}"${attrs}/>
     <button type="button" class="model-picker-btn" aria-haspopup="listbox" aria-expanded="false"${attrs}>
       <span class="model-picker-label">${escapeHtml(buttonLabel)}</span><span class="model-picker-caret" aria-hidden="true">▾</span>
     </button>
-    <span class="model-picker-pop" role="listbox" hidden>${emptyOption}${groupsHtml}</span>
+    <span class="model-picker-pop" role="listbox" hidden>${emptyOption}${groupsHtml}${customOption}</span>
   </span>`;
 }
 
@@ -82,9 +90,11 @@ export function modelPicker(options: {
 export const MODEL_PICKER_HREF = "/assets/model-picker.js";
 
 /**
- * Wires every [data-model-picker] control: toggles the popover, picks an
- * option into the hidden input (button label follows the option's
- * data-label), Escape/outside-click closes, arrows + Enter navigate when
+ * Wires every [data-model-picker] control: stamps `is-js` so the button and
+ * popover render (the raw input alone serves no-JS use), toggles the
+ * popover, picks an option into the text input (button label follows the
+ * option's data-label), a `data-custom` option re-shows the input for
+ * free-text ids, Escape/outside-click closes, arrows + Enter navigate when
  * open. Plain string (no bundler) so it ships as a static asset; all option
  * text comes from server-rendered attributes, nothing is eval'd.
  */
@@ -135,8 +145,17 @@ export const MODEL_PICKER_JS = String.raw`(function () {
 
   function pick(picker, option) {
     if (!option) return;
-    var input = picker.querySelector('input[type="hidden"]');
+    var input = picker.querySelector(".model-picker-input");
     var label = picker.querySelector(".model-picker-label");
+    if (option.hasAttribute("data-custom")) {
+      picker.classList.add("is-custom");
+      if (label) label.textContent = option.getAttribute("data-label") || "Custom model";
+      options(picker).forEach(function (o) { o.setAttribute("aria-selected", "false"); });
+      close(picker);
+      if (input) input.focus();
+      return;
+    }
+    picker.classList.remove("is-custom");
     var value = option.getAttribute("data-value") || "";
     if (input) input.value = value;
     if (label) label.textContent = option.getAttribute("data-label") || value || "";
@@ -166,7 +185,7 @@ export const MODEL_PICKER_JS = String.raw`(function () {
       return;
     }
     // Pickers sit inside <label>s: without preventDefault the label forwards
-    // a synthesized click to the button, re-toggling the pop after a pick.
+    // a synthesized click to the control, re-toggling the pop after a pick.
     if (event.target.closest(".model-picker-pop")) {
       event.preventDefault();
       var option = event.target.closest(".model-picker-option");
@@ -202,6 +221,12 @@ export const MODEL_PICKER_JS = String.raw`(function () {
     } else if (event.key === "Tab") {
       close(picker);
     }
+  });
+
+  // Progressive enhancement: reveal the button/popover and hide the raw
+  // input once this script has actually run.
+  document.querySelectorAll("[data-model-picker]").forEach(function (picker) {
+    picker.classList.add("is-js");
   });
 })();
 `;
