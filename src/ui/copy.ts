@@ -135,8 +135,15 @@ export function cancelledBannerCopy(job: {
       text: `Review cancelled by ${who}. Work stopped at the next checkpoint; the review was not completed.`,
     };
   }
+  if (job.cancelled_reason === "repo_paused") {
+    const who = job.cancelled_by ?? "an operator";
+    return { text: `Cancelled — ${who} paused automatic reviews for this repository.` };
+  }
   if (job.job_type === "health_scan") {
     return { text: "Scan cancelled. Findings already saved, if any, remain listed on this page." };
+  }
+  if (job.job_type === "repo_brief") {
+    return { text: "Repo brief cancelled. A stored brief, if one was written, remains listed on this page." };
   }
   return { text: "Cancelled." };
 }
@@ -148,12 +155,13 @@ export function flavorForJob(state: string, prNumber: number, flavor: UiFlavor =
     if (state === "sniffing") return "Laboratory re-check in progress";
     return undefined;
   }
-  if (state === "reviewing" || state === "preparing") return `Examining PR #${prNumber}…`;
+  // pr_number 0 jobs (scans, repo briefs) are not pull requests.
+  if (state === "reviewing" || state === "preparing") return prNumber === 0 ? "Reading the checkout…" : `Examining PR #${prNumber}…`;
   if (state === "routing") return `Choosing specialists for PR #${prNumber}…`;
   if (state === "reconciling") return `Reconciling prior findings for PR #${prNumber}`;
   if (state === "aggregating") return "Aggregation in progress";
   if (state === "sniffing") return `Laboratory re-check for PR #${prNumber}`;
-  if (state === "queued") return `PR #${prNumber} is queued for examination`;
+  if (state === "queued") return prNumber === 0 ? "Job is queued for examination" : `PR #${prNumber} is queued for examination`;
   return undefined;
 }
 

@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import type { SqliteDb } from "../db.js";
 import type { CancelReason, JobState, ReviewerState } from "../config.js";
 import { JOBS_PAGE_SIZE_DEFAULT, JOBS_PAGE_SIZE_MAX, LIVE_JOB_STATES } from "../config.js";
@@ -44,8 +45,16 @@ export interface JobRow {
   cancelled_reason: CancelReason | null;
   cancelled_by: string | null;
   profile_revision_id: number | null;
-  job_type: "pr_review" | "health_scan";
+  job_type: "pr_review" | "health_scan" | "repo_brief" | "stack_review";
   scan_branch: string | null;
+  /** Repo-brief payload (TOC + persisted file fragments), JSON; null for other job types. */
+  brief_json: string | null;
+  /**
+   * Dedup discriminator for the jobs UNIQUE key: '' for PR reviews and scans
+   * (one job per repo+PR+SHA), a per-request nonce for repo briefs — every
+   * confirmed brief is its own job and repeats hit repo_brief_cache instead.
+   */
+  dedup_key: string;
   aggregator_raw: string | null;
   aggregator_normalized: string | null;
   aggregator_model: string | null;
@@ -151,6 +160,45 @@ export interface JobLogRow {
   created_at: string;
 }
 
+export interface RepoPauseRow {
+  id: number;
+  provider: string;
+  provider_instance: string;
+  repo_full_name: string;
+  actor: string;
+  created_at: string;
+  expires_at: string;
+  ended_at: string | null;
+  ended_by: string | null;
+}
+
+export interface StackDeclarationRow {
+  id: number;
+  provider: string;
+  provider_instance: string;
+  repo_full_name: string;
+  stack_id: string;
+  pr_number: number;
+  position: number;
+  expected_count: number;
+  actor: string;
+  comment_id: string | null;
+  created_at: string;
+}
+
+export interface StackMemberRow {
+  id: number;
+  job_id: number;
+  position: number;
+  pr_number: number;
+  base_ref: string;
+  head_ref: string;
+  base_sha: string;
+  head_sha: string;
+  member_job_id: number | null;
+  state: string;
+}
+
 export interface NewJobInput {
   repoFullName: string;
   repoOwner: string;
@@ -174,8 +222,10 @@ export interface NewJobInput {
   webhookDeliveryId?: string;
   webhookEvent?: string;
   reviewers: { role: string; title: string; model?: string }[];
-  jobType?: "pr_review" | "health_scan";
+  jobType?: "pr_review" | "health_scan" | "repo_brief" | "stack_review";
   scanBranch?: string | null;
+  /** Dedup discriminator inside the jobs UNIQUE; repo_brief overrides this with a nonce. */
+  dedupKey?: string;
 }
 
 export interface EnqueueResult {
@@ -292,6 +342,7 @@ const JOB_PATCH_KEYS = new Set<string>([
   "reconciliation_json",
   "risk_profile",
   "risk_reason",
+  "brief_json",
 ]);
 
 export class JobStore {
@@ -313,23 +364,36 @@ export class JobStore {
     const staleJobIds: number[] = [];
     const scope = normalizeScope({ provider: input.provider, instance: input.providerInstance });
 
+    const jobType = input.jobType ?? "pr_review";
+    // Repo briefs are per-request jobs: a fresh nonce keeps every confirmed
+    // brief distinct, and identical repeats are served by repo_brief_cache.
+    // Stack reviews key dedup on `stack:<id>` so a retrigger after heads moved
+    // supersedes the earlier run while identical triggers dedup onto it.
+    const dedupKey = jobType === "repo_brief" ? randomUUID() : (input.dedupKey ?? "");
+
     const result = this.db.transaction(() => {
-      const stale = this.db
-        .prepare(
-          `UPDATE jobs
-           SET state = 'stale', updated_at = ?, finished_at = COALESCE(finished_at, ?)
-           WHERE provider = ? AND provider_instance = ? AND repo_full_name = ? AND pr_number = ? AND head_sha != ?
-             AND state NOT IN ('stale', 'cancelled')
-           RETURNING id`,
-        )
-        .all(createdAt, createdAt, scope.provider, scope.instance, input.repoFullName, input.prNumber, input.headSha) as { id: number }[];
-      staleJobIds.push(...stale.map((row) => row.id));
+      // Briefs are pinned to an immutable SHA, so a newer SHA can never stale
+      // one — and marking an in-flight brief stale would abort it mid-run.
+      // dedup_key joins the stale scope so two stacks sharing a top PR never
+      // abort each other ('' preserves the pr_review/scan behavior).
+      if (jobType !== "repo_brief") {
+        const stale = this.db
+          .prepare(
+            `UPDATE jobs
+             SET state = 'stale', updated_at = ?, finished_at = COALESCE(finished_at, ?)
+             WHERE provider = ? AND provider_instance = ? AND repo_full_name = ? AND pr_number = ? AND head_sha != ?
+               AND job_type = ? AND dedup_key = ? AND state NOT IN ('stale', 'cancelled')
+             RETURNING id`,
+          )
+          .all(createdAt, createdAt, scope.provider, scope.instance, input.repoFullName, input.prNumber, input.headSha, jobType, dedupKey) as { id: number }[];
+        staleJobIds.push(...stale.map((row) => row.id));
+      }
 
       const existing = this.db
         .prepare(
-          `SELECT * FROM jobs WHERE provider = ? AND provider_instance = ? AND repo_full_name = ? AND pr_number = ? AND head_sha = ?`,
+          `SELECT * FROM jobs WHERE provider = ? AND provider_instance = ? AND repo_full_name = ? AND pr_number = ? AND head_sha = ? AND job_type = ? AND dedup_key = ?`,
         )
-        .get(scope.provider, scope.instance, input.repoFullName, input.prNumber, input.headSha) as JobRow | undefined;
+        .get(scope.provider, scope.instance, input.repoFullName, input.prNumber, input.headSha, jobType, dedupKey) as JobRow | undefined;
 
       if (existing) {
         const skippedReason = skipReason(existing);
@@ -342,8 +406,8 @@ export class JobStore {
             repo_full_name, repo_owner, repo_name, installation_id, provider, provider_instance, forge_connection_id,
             github_account_id, github_repository_id, pr_number,
             pr_title, pr_body, pr_html_url, pr_author, base_sha, head_sha, base_ref, head_ref,
-            webhook_delivery_id, webhook_event, profile_revision_id, job_type, scan_branch, state, created_at, updated_at
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?)`,
+            webhook_delivery_id, webhook_event, profile_revision_id, job_type, scan_branch, dedup_key, state, created_at, updated_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?)`,
         )
         .run(
           input.repoFullName,
@@ -367,8 +431,9 @@ export class JobStore {
           input.webhookDeliveryId ?? null,
           input.webhookEvent ?? null,
           input.profileRevisionId ?? this.configs.getActiveRevision("default")?.id ?? null,
-          input.jobType ?? "pr_review",
+          jobType,
           input.scanBranch ?? null,
+          dedupKey,
           createdAt,
           createdAt,
         );
@@ -390,6 +455,198 @@ export class JobStore {
     for (const id of staleJobIds) publish({ type: "job", jobId: id });
     if (result.job) publish({ type: "job", jobId: result.job.id });
     return result;
+  }
+
+  /**
+   * Repo-brief cache (issue #89): the persisted brief payload (TOC + file
+   * fragments) for one forge/repo pinned at one exact SHA. A new SHA is a
+   * different key, so moved tips miss by construction; there is no cross-repo
+   * or cross-forge bleed because the key carries all three identifiers.
+   */
+  getRepoBriefCache(
+    provider: string,
+    providerInstance: string,
+    repoFullName: string,
+    sha: string,
+  ): { payload: string; created_at: string } | undefined {
+    const scope = normalizeScope({ provider, instance: providerInstance });
+    return this.db
+      .prepare(`SELECT payload, created_at FROM repo_brief_cache WHERE provider = ? AND provider_instance = ? AND repo_full_name = ? AND sha = ?`)
+      .get(scope.provider, scope.instance, repoFullName, sha) as { payload: string; created_at: string } | undefined;
+  }
+
+  putRepoBriefCache(provider: string, providerInstance: string, repoFullName: string, sha: string, payload: string): void {
+    const scope = normalizeScope({ provider, instance: providerInstance });
+    this.db
+      .prepare(
+        `INSERT OR REPLACE INTO repo_brief_cache (provider, provider_instance, repo_full_name, sha, payload, created_at)
+         VALUES (?, ?, ?, ?, ?, ?)`,
+      )
+      .run(scope.provider, scope.instance, repoFullName, sha, payload, nowIso());
+  }
+
+  /**
+   * Timed automatic-review pause (issue #99). Durable and expiring: one
+   * pause per repo at a time — creating a new one supersedes an active row
+   * (operator "extend"), and expiry is checked on read so lapsed pauses
+   * silently stop gating future webhooks.
+   */
+  createPause(input: {
+    repoFullName: string;
+    actor: string;
+    durationMs: number;
+    provider?: string;
+    providerInstance?: string;
+  }): RepoPauseRow {
+    const scope = normalizeScope({ provider: input.provider, instance: input.providerInstance });
+    const now = nowIso();
+    const expiresAt = new Date(Date.now() + input.durationMs).toISOString();
+    this.db
+      .prepare(
+        `UPDATE repo_pauses SET ended_at = ?, ended_by = ?
+         WHERE provider = ? AND provider_instance = ? AND repo_full_name = ? AND ended_at IS NULL`,
+      )
+      .run(now, `${input.actor} (superseded)`, scope.provider, scope.instance, input.repoFullName);
+    const insert = this.db
+      .prepare(
+        `INSERT INTO repo_pauses (provider, provider_instance, repo_full_name, actor, created_at, expires_at)
+         VALUES (?, ?, ?, ?, ?, ?)`,
+      )
+      .run(scope.provider, scope.instance, input.repoFullName, input.actor, now, expiresAt);
+    return this.db.prepare(`SELECT * FROM repo_pauses WHERE id = ?`).get(insert.lastInsertRowid) as RepoPauseRow;
+  }
+
+  getActivePause(repoFullName: string, provider?: string, providerInstance?: string): RepoPauseRow | undefined {
+    const scope = normalizeScope({ provider, instance: providerInstance });
+    return this.db
+      .prepare(
+        `SELECT * FROM repo_pauses
+         WHERE provider = ? AND provider_instance = ? AND repo_full_name = ?
+           AND ended_at IS NULL AND expires_at > ?
+         ORDER BY id DESC LIMIT 1`,
+      )
+      .get(scope.provider, scope.instance, repoFullName, nowIso()) as RepoPauseRow | undefined;
+  }
+
+  listActivePauses(): RepoPauseRow[] {
+    return this.db
+      .prepare(
+        `SELECT * FROM repo_pauses WHERE ended_at IS NULL AND expires_at > ? ORDER BY repo_full_name`,
+      )
+      .all(nowIso()) as RepoPauseRow[];
+  }
+
+  endPause(id: number, actor: string): boolean {
+    const updated = this.db
+      .prepare(`UPDATE repo_pauses SET ended_at = ?, ended_by = ? WHERE id = ? AND ended_at IS NULL`)
+      .run(nowIso(), actor, id);
+    return updated.changes > 0;
+  }
+
+  /**
+   * Records one stack member declaration (issue #99). Idempotent on an
+   * identical repeat; fails closed on conflicting declarations so an
+   * ambiguous stack is rejected before any model work.
+   */
+  upsertStackDeclaration(input: {
+    repoFullName: string;
+    stackId: string;
+    prNumber: number;
+    position: number;
+    expectedCount: number;
+    actor: string;
+    commentId?: string;
+    provider?: string;
+    providerInstance?: string;
+  }): { ok: true; created: boolean } | { ok: false; error: string } {
+    const scope = normalizeScope({ provider: input.provider, instance: input.providerInstance });
+    const existing = this.db
+      .prepare(
+        `SELECT * FROM stack_declarations
+         WHERE provider = ? AND provider_instance = ? AND repo_full_name = ? AND stack_id = ? AND pr_number = ?`,
+      )
+      .get(scope.provider, scope.instance, input.repoFullName, input.stackId, input.prNumber) as StackDeclarationRow | undefined;
+    if (existing) {
+      if (existing.position === input.position && existing.expected_count === input.expectedCount) {
+        return { ok: true, created: false };
+      }
+      return {
+        ok: false,
+        error: `PR #${input.prNumber} is already declared as issue ${existing.position} of ${existing.expected_count} in stack "${input.stackId}"`,
+      };
+    }
+    const occupant = this.db
+      .prepare(
+        `SELECT pr_number FROM stack_declarations
+         WHERE provider = ? AND provider_instance = ? AND repo_full_name = ? AND stack_id = ? AND position = ?`,
+      )
+      .get(scope.provider, scope.instance, input.repoFullName, input.stackId, input.position) as { pr_number: number } | undefined;
+    if (occupant && occupant.pr_number !== input.prNumber) {
+      return {
+        ok: false,
+        error: `position ${input.position} in stack "${input.stackId}" is already declared by PR #${occupant.pr_number}`,
+      };
+    }
+    this.db
+      .prepare(
+        `INSERT INTO stack_declarations (provider, provider_instance, repo_full_name, stack_id, pr_number, position, expected_count, actor, comment_id, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        scope.provider,
+        scope.instance,
+        input.repoFullName,
+        input.stackId,
+        input.prNumber,
+        input.position,
+        input.expectedCount,
+        input.actor,
+        input.commentId ?? null,
+        nowIso(),
+      );
+    return { ok: true, created: true };
+  }
+
+  listStackDeclarations(repoFullName: string, stackId: string, provider?: string, providerInstance?: string): StackDeclarationRow[] {
+    const scope = normalizeScope({ provider, instance: providerInstance });
+    return this.db
+      .prepare(
+        `SELECT * FROM stack_declarations
+         WHERE provider = ? AND provider_instance = ? AND repo_full_name = ? AND stack_id = ?
+         ORDER BY position`,
+      )
+      .all(scope.provider, scope.instance, repoFullName, stackId) as StackDeclarationRow[];
+  }
+
+  /** Ordered SHA vector snapshot for a stack_review job (issue #99). */
+  insertStackMembers(
+    jobId: number,
+    members: { position: number; prNumber: number; baseRef: string; headRef: string; baseSha: string; headSha: string }[],
+  ): void {
+    const insert = this.db.prepare(
+      `INSERT INTO stack_run_members (job_id, position, pr_number, base_ref, head_ref, base_sha, head_sha)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+    );
+    for (const member of members) {
+      insert.run(jobId, member.position, member.prNumber, member.baseRef, member.headRef, member.baseSha, member.headSha);
+    }
+  }
+
+  listStackMembers(jobId: number): StackMemberRow[] {
+    return this.db
+      .prepare(`SELECT * FROM stack_run_members WHERE job_id = ? ORDER BY position`)
+      .all(jobId) as StackMemberRow[];
+  }
+
+  patchStackMember(id: number, patch: { baseSha?: string; headSha?: string; memberJobId?: number; state?: string }): void {
+    if (patch.baseSha === undefined && patch.headSha === undefined && patch.memberJobId === undefined && patch.state === undefined) return;
+    this.db
+      .prepare(
+        `UPDATE stack_run_members
+         SET base_sha = COALESCE(?, base_sha), head_sha = COALESCE(?, head_sha), member_job_id = COALESCE(?, member_job_id), state = COALESCE(?, state)
+         WHERE id = ?`,
+      )
+      .run(patch.baseSha ?? null, patch.headSha ?? null, patch.memberJobId ?? null, patch.state ?? null, id);
   }
 
   getJob(id: number): JobRow | undefined {
@@ -562,7 +819,10 @@ export class JobStore {
    * cancellation unrepresentable.
    */
   cancelJobs(
-    where: { jobId: number } | { repoFullName: string; prNumber: number; scope?: Partial<ForgeScope> },
+    where:
+      | { jobId: number }
+      | { repoFullName: string; prNumber: number; scope?: Partial<ForgeScope> }
+      | { repoFullName: string; jobType: string; scope?: Partial<ForgeScope> },
     reason: CancelReason,
     actor: string | null,
   ): number[] {
@@ -573,6 +833,9 @@ export class JobStore {
     if ("jobId" in where) {
       clauses.push("id = ?");
       values.push(where.jobId);
+    } else if ("jobType" in where) {
+      clauses.push("repo_full_name = ?", "job_type = ?");
+      values.push(where.repoFullName, where.jobType);
     } else {
       clauses.push("repo_full_name = ?", "pr_number = ?");
       values.push(where.repoFullName, where.prNumber);

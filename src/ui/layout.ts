@@ -162,6 +162,8 @@ function accountMenu(options: PageOptions): string {
         <a href="/config#effective">Configuration</a>
         <a href="/health">Health</a>
         <a href="/scan">Scan</a>
+        <a href="/brief">Brief</a>
+        <a href="/pause">Pause</a>
         ${logout}
       </nav>
     </details>`;

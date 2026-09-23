@@ -18,7 +18,7 @@ import { authorizeGithubAccount, authorizeGithubRepository, authorizeGithubTarge
 import { repoRateLimitActive, RepoRateLimiter, WindowRateLimiter } from "./github/rate-limit.js";
 import { parseGithubPullUrl, PullUrlError } from "./github/pull-url.js";
 import { dispatchEnqueue, enqueuePullJob } from "./jobs/enqueue.js";
-import { cancelJob } from "./jobs/cancel.js";
+import { cancelJob, cancelJobsForRepoType } from "./jobs/cancel.js";
 import { LIVE_JOB_STATES } from "./config.js";
 import { effectiveConfigEntries } from "./config-effective.js";
 import type { ProfileFieldErrors, ProfileFormValues } from "./config-form.js";
@@ -33,6 +33,11 @@ import {
   renderScanConfirmPage,
   renderScanIssuePreviewPage,
   renderScanPage,
+  renderBriefPage,
+  renderBriefConfirmPage,
+  renderBriefTabPage,
+  renderPausePage,
+  PAUSE_DURATIONS,
   renderCancelConfirmPage,
   renderConfigPage,
   renderProfilesPage,
@@ -59,10 +64,14 @@ import {
   type ScanIssueCreationData,
   type ScanIssuePreviewItem,
   type ScanPageData,
+  type BriefConfirmNotice,
+  type BriefPageData,
+  type PausePageData,
 } from "./ui/index.js";
 import { renderProvidersPage } from "./ui/providers.js";
 import { ProviderCredentialStore, opencodeAuthPath } from "./opencode/credentials.js";
 import { ModelDiscovery } from "./opencode/models.js";
+import { parseBriefPayload } from "./jobs/brief.js";
 import type { JobRow } from "./jobs/store.js";
 import type { FindingRow } from "./findings/types.js";
 import type { ConfigPageData } from "./ui/index.js";
@@ -956,6 +965,7 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
         }),
         scanIssueCreation: scanIssueCreationData(job),
         scanIssues: job.job_type === "health_scan" ? ctx.store.listScanIssues(job.id) : undefined,
+        stackMembers: job.job_type === "stack_review" ? ctx.store.listStackMembers(job.id) : undefined,
       }),
     );
   });
@@ -1939,6 +1949,336 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
     }
   });
 
+  // ---- Repo briefs (/brief) — a read-only TOC of one commit (issue #88) ----
+
+  const briefPageData = (c: Context<AppEnv>, extra: Pick<BriefPageData, "error"> = {}): BriefPageData => {
+    const recentBriefs = ctx.store
+      .listJobs(75)
+      .filter((job) => job.job_type === "repo_brief" && job.state === "completed")
+      .slice(0, 8)
+      .map((job) => ({ id: job.id, repoFullName: job.repo_full_name, headSha: job.head_sha }));
+    return {
+      canBrief: Boolean(c.get("identity")),
+      identity: c.get("identity"),
+      csrfToken: gateOn ? ensureCsrfToken(c, ctx.config.uiSessionSecret) : undefined,
+      recentBriefs,
+      model: ctx.config.chat.model || ctx.config.opencode.reviewerModel,
+      timeoutMs: ctx.config.chat.timeoutMs,
+      ...extra,
+    };
+  };
+  const renderBriefDenied = (c: Context<AppEnv>, message: string) =>
+    c.html(renderBriefPage(briefPageData(c, { error: message })), 403);
+
+  app.get("/brief", (c) => {
+    if (!gateOn) return c.redirect("/", 302);
+    return c.html(renderBriefPage(briefPageData(c)));
+  });
+
+  app.post("/brief", async (c) => {
+    if (!gateOn) return c.redirect("/", 302);
+    const actor = configActor(c);
+    if (!actor) {
+      return c.html(
+        renderBriefPage(briefPageData(c, { error: "Repo briefs require an operator GitHub OAuth identity." })),
+        403,
+      );
+    }
+    if (!ctx.github || !isReviewGithub(ctx.github)) {
+      return c.html(
+        renderBriefPage(briefPageData(c, { error: "GitHub App client is not configured on this process." })),
+        503,
+      );
+    }
+    const body = await c.req.parseBody();
+    const parsed = parseRepoInput(typeof body.repo === "string" ? body.repo : "");
+    if (!parsed) {
+      return c.html(
+        renderBriefPage(briefPageData(c, { error: "Enter a repository as owner/repo or a GitHub URL." })),
+        400,
+      );
+    }
+    try {
+      const installation = await ctx.github.getRepoInstallation(parsed.owner, parsed.repo);
+      const accountAuth = authorizeGithubAccount(ctx.config, {
+        installationId: installation.installationId,
+        accountId: installation.accountId,
+      });
+      if (!accountAuth.ok) {
+        logAuthorizationRejection({ installationId: installation.installationId, reason: accountAuth.reason });
+        return renderBriefDenied(c, "Not authorized to brief this installation or repository.");
+      }
+      const repository = await ctx.github.getRepository(parsed.owner, parsed.repo, installation.installationId);
+      const repoAuth = rejectUnauthorized(ctx.config, {
+        installationId: installation.installationId,
+        accountId: installation.accountId,
+        repositoryId: repository.id,
+      });
+      if (!repoAuth.ok) {
+        return renderBriefDenied(c, "Not authorized to brief this installation or repository.");
+      }
+      if (!Number.isSafeInteger(repository.id) || repository.id <= 0) {
+        return c.html(
+          renderBriefPage(briefPageData(c, { error: "Could not resolve a valid repository id for this brief." })),
+          502,
+        );
+      }
+      if (!ctx.github.getRepositoryHead || !ctx.github.getCommit) {
+        return renderBriefDenied(c, "This GitHub client does not support repo briefs.");
+      }
+
+      // The operator may name a SHA, short SHA, branch, or tag; an empty field
+      // means the default branch head. Either way it resolves to one exact
+      // commit the confirmation shows and the checkout pins.
+      const refInput = typeof body.ref === "string" ? body.ref.trim() : "";
+      let resolvedRef: string;
+      let resolvedSha: string;
+      if (refInput) {
+        const commit = await ctx.github
+          .getCommit(installation.installationId, parsed.owner, parsed.repo, refInput)
+          // 404/422 are the only "this ref does not resolve" answers; a 5xx or
+          // rate-limit failure must surface as itself, not as a bad ref.
+          .catch((error: unknown) => {
+            const status =
+              error && typeof error === "object" && "status" in error
+                ? Number((error as { status: unknown }).status)
+                : undefined;
+            if (status === 404 || status === 422) return undefined;
+            throw error;
+          });
+        if (!commit?.sha) {
+          return c.html(
+            renderBriefPage(briefPageData(c, { error: `Could not resolve "${refInput}" to a commit in ${parsed.owner}/${parsed.repo}.` })),
+            400,
+          );
+        }
+        resolvedRef = refInput;
+        resolvedSha = commit.sha;
+      } else {
+        const head = await ctx.github.getRepositoryHead(installation.installationId, parsed.owner, parsed.repo);
+        resolvedRef = head.defaultBranch;
+        resolvedSha = head.headSha;
+      }
+
+      // Same per-repository budget as scans and manual PR reviews; the preview
+      // probes with wouldAllow and the hit is recorded only on creation.
+      const rateOn = repoRateLimitActive(ctx.config.repoRateLimitPerWindow, ctx.config.repoRateWindowMs);
+      if (
+        rateOn &&
+        !rateLimiter.wouldAllow(repository.id, ctx.config.repoRateLimitPerWindow, ctx.config.repoRateWindowMs)
+      ) {
+        logRateLimited({ installationId: installation.installationId, repositoryId: repository.id });
+        return c.html(
+          renderBriefPage(briefPageData(c, { error: "Rate limited for this repository; try again later." })),
+          429,
+        );
+      }
+
+      // Two-step start, same contract as /scan: the operator sees the resolved
+      // commit, then confirms it. A confirming POST is valid only for the ref
+      // and SHA it was shown; anything else re-renders with fresh values.
+      const confirmedSha = typeof body.sha === "string" ? body.sha.trim() : "";
+      const confirmedRef = typeof body.ref === "string" ? body.ref.trim() : "";
+      const refLabel = refInput || resolvedRef;
+      const shaConfirmed = confirmedSha === resolvedSha;
+      const refConfirmed = confirmedRef === refLabel;
+      if (!shaConfirmed || !refConfirmed) {
+        // A POST with no `sha` field came from the step-1 form (repo + optional
+        // ref) — a preview, not a confirmation attempt — so it gets the plain
+        // page rather than a warning. Notices are only for real confirms that
+        // carried a `sha` field and did not match.
+        const notice: BriefConfirmNotice | undefined =
+          typeof body.sha !== "string"
+            ? undefined
+            : confirmedSha !== "" && confirmedSha !== resolvedSha
+              ? { kind: "sha", fromSha: confirmedSha }
+              : confirmedRef !== "" && confirmedRef !== refLabel
+                ? { kind: "ref", fromRef: confirmedRef }
+                : { kind: "incomplete" };
+        return c.html(
+          renderBriefConfirmPage({
+            identity: c.get("identity"),
+            csrfToken: ensureCsrfToken(c, ctx.config.uiSessionSecret),
+            repo: `${parsed.owner}/${parsed.repo}`,
+            ref: refLabel,
+            sha: resolvedSha,
+            model: ctx.config.chat.model || ctx.config.opencode.reviewerModel,
+            timeoutMs: ctx.config.chat.timeoutMs,
+            notice,
+          }),
+        );
+      }
+
+      const created = ctx.store.enqueue({
+        repoFullName: `${parsed.owner}/${parsed.repo}`,
+        repoOwner: parsed.owner,
+        repoName: parsed.repo,
+        installationId: installation.installationId,
+        githubAccountId: installation.accountId,
+        githubRepositoryId: repository.id,
+        prNumber: 0,
+        prTitle: `Repo brief (${refLabel})`,
+        prBody: `Manual repo brief of ${refLabel} at a pinned SHA.`,
+        prHtmlUrl: `https://github.com/${parsed.owner}/${parsed.repo}`,
+        prAuthor: actor.login,
+        baseSha: resolvedSha,
+        headSha: resolvedSha,
+        baseRef: refLabel,
+        headRef: refLabel,
+        webhookEvent: "manual.brief",
+        jobType: "repo_brief",
+        reviewers: [{ role: "repo_brief", title: "Repo brief" }],
+      });
+      if (created.created && rateOn) {
+        rateLimiter.record(repository.id, ctx.config.repoRateLimitPerWindow, ctx.config.repoRateWindowMs);
+      }
+      ctx.store.log(created.job.id, `Repo brief enqueued by ${actor.login} for ${refLabel} @ ${resolvedSha}`);
+      dispatchEnqueue(ctx.queue, created);
+      return c.redirect(`/jobs/${created.job.id}?notice=${created.created ? "brief-queued" : "exists"}`, 302);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      console.error(`brief: could not start brief for ${parsed.owner}/${parsed.repo}: ${message}`);
+      return c.html(renderBriefPage(briefPageData(c, { error: message })), 400);
+    }
+  });
+
+  /** The in-job brief tab: TOC on /jobs/:id/brief, one fragment on ?section=N. */
+  app.get("/jobs/:id/brief", (c) => {
+    const id = Number(c.req.param("id"));
+    const job = ctx.store.getJob(id);
+    if (!job || job.job_type !== "repo_brief") return c.text("Not found", 404);
+    const payload = parseBriefPayload(job.brief_json);
+    const sectionParam = c.req.query("section");
+    const sectionIndex =
+      sectionParam !== undefined && /^\d+$/.test(sectionParam) ? Number(sectionParam) : undefined;
+    return c.html(
+      renderBriefTabPage({
+        job,
+        payload,
+        sectionIndex,
+        identity: c.get("identity"),
+        csrfToken: gateOn ? ensureCsrfToken(c, ctx.config.uiSessionSecret) : undefined,
+      }),
+    );
+  });
+
+  const pausePageData = (
+    c: Context<AppEnv>,
+    extra: { error?: string; notice?: string } = {},
+  ): PausePageData => ({
+    canOperate: Boolean(configActor(c)),
+    identity: c.get("identity"),
+    csrfToken: ensureCsrfToken(c, ctx.config.uiSessionSecret),
+    pauses: ctx.store.listActivePauses().map((pause) => ({
+      id: pause.id,
+      repoFullName: pause.repo_full_name,
+      expiresAt: pause.expires_at,
+      actor: pause.actor,
+    })),
+    ...extra,
+  });
+
+  // Timed automatic-review pause (issue #99): an operator gates pull_request
+  // webhook enqueue for one repository until an expiry; manual forms and
+  // stack commands are unaffected, and enabling cancels pending pr_review
+  // jobs so queued work never starts expensive reviewers inside the window.
+  app.get("/pause", (c) => {
+    if (!gateOn) return c.redirect("/", 302);
+    return c.html(renderPausePage(pausePageData(c, { notice: c.req.query("notice") })));
+  });
+
+  app.post("/pause", async (c) => {
+    if (!gateOn) return c.redirect("/", 302);
+    const actor = configActor(c);
+    if (!actor) {
+      return c.html(
+        renderPausePage(pausePageData(c, { error: "Managing review pauses requires an operator GitHub OAuth identity." })),
+        403,
+      );
+    }
+    if (!ctx.github || !isReviewGithub(ctx.github)) {
+      return c.html(
+        renderPausePage(pausePageData(c, { error: "GitHub App client is not configured on this process." })),
+        503,
+      );
+    }
+    const body = await c.req.parseBody();
+    const parsed = parseRepoInput(typeof body.repo === "string" ? body.repo : "");
+    if (!parsed) {
+      return c.html(renderPausePage(pausePageData(c, { error: "Enter a repository as owner/repo or a GitHub URL." })), 400);
+    }
+    const hours = Number(body.duration_hours);
+    if (!PAUSE_DURATIONS.some((d) => d.hours === hours)) {
+      return c.html(renderPausePage(pausePageData(c, { error: "Pick one of the offered pause durations." })), 400);
+    }
+    try {
+      const installation = await ctx.github.getRepoInstallation(parsed.owner, parsed.repo);
+      const accountAuth = authorizeGithubAccount(ctx.config, {
+        installationId: installation.installationId,
+        accountId: installation.accountId,
+      });
+      const repository = accountAuth.ok
+        ? await ctx.github.getRepository(parsed.owner, parsed.repo, installation.installationId)
+        : undefined;
+      const repoAuth =
+        accountAuth.ok && repository
+          ? rejectUnauthorized(ctx.config, {
+              installationId: installation.installationId,
+              accountId: installation.accountId,
+              repositoryId: repository.id,
+            })
+          : accountAuth;
+      if (!repoAuth.ok) {
+        logAuthorizationRejection({ installationId: installation.installationId, reason: repoAuth.reason });
+        return c.html(
+          renderPausePage(pausePageData(c, { error: "Not authorized to pause reviews on this installation or repository." })),
+          403,
+        );
+      }
+      const repoFullName = `${parsed.owner}/${parsed.repo}`;
+      const pause = ctx.store.createPause({
+        repoFullName,
+        actor: actor.login,
+        durationMs: hours * 60 * 60 * 1000,
+      });
+      // Queued and in-flight automatic reviews for the repo are cancelled at
+      // the same moment the pause takes effect; scans, briefs, and stack
+      // reviews are explicit operator actions and are never touched.
+      const { cancelledJobIds } = cancelJobsForRepoType(ctx.store, {
+        repoFullName,
+        jobType: "pr_review",
+        reason: "repo_paused",
+        actor: actor.login,
+        note: `paused until ${pause.expires_at}`,
+        onCancelled: (ids) => ctx.queue.abortMany(ids),
+      });
+      return c.redirect(
+        `/pause?notice=${encodeURIComponent(
+          `Automatic reviews for ${repoFullName} paused until ${pause.expires_at}` +
+            (cancelledJobIds.length ? ` — cancelled ${cancelledJobIds.length} job(s)` : ""),
+        )}`,
+        302,
+      );
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      console.error(`pause: could not pause ${parsed.owner}/${parsed.repo}: ${message}`);
+      return c.html(renderPausePage(pausePageData(c, { error: message })), 400);
+    }
+  });
+
+  app.post("/pause/:id/end", (c) => {
+    if (!gateOn) return c.redirect("/", 302);
+    const actor = configActor(c);
+    if (!actor) {
+      return c.html(
+        renderPausePage(pausePageData(c, { error: "Managing review pauses requires an operator GitHub OAuth identity." })),
+        403,
+      );
+    }
+    ctx.store.endPause(Number(c.req.param("id")), actor.login);
+    return c.redirect("/pause", 302);
+  });
+
   type ScanIssuePort = ManualTriggerPort & {
     createIssue: NonNullable<GithubPort["createIssue"]>;
     listOpenIssuesByMarker: NonNullable<GithubPort["listOpenIssuesByMarker"]>;
@@ -2386,6 +2726,9 @@ function noticeText(
   }
   if (code === "scan-queued") {
     return "Health scan queued for the pinned default-branch head SHA.";
+  }
+  if (code === "brief-queued") {
+    return "Repo brief queued for the pinned commit.";
   }
   if (code === "issues-created") {
     return "GitHub issues created for the selected findings (deduplicated).";

@@ -121,7 +121,10 @@ function migrate(db: SqliteDb): void {
       escalation_id TEXT,
       poison_alert_policy TEXT,
       manual_escalate_requested INTEGER NOT NULL DEFAULT 0,
-      UNIQUE (provider, provider_instance, repo_full_name, pr_number, head_sha)
+      job_type TEXT NOT NULL DEFAULT 'pr_review',
+      brief_json TEXT,
+      dedup_key TEXT NOT NULL DEFAULT '',
+      UNIQUE (provider, provider_instance, repo_full_name, pr_number, head_sha, job_type, dedup_key)
     );
 
     CREATE TABLE IF NOT EXISTS escalation_dispatches (
@@ -375,6 +378,54 @@ function migrate(db: SqliteDb): void {
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL
     );
+
+    CREATE TABLE IF NOT EXISTS repo_brief_cache (
+      provider TEXT NOT NULL,
+      provider_instance TEXT NOT NULL,
+      repo_full_name TEXT NOT NULL,
+      sha TEXT NOT NULL,
+      payload TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      PRIMARY KEY (provider, provider_instance, repo_full_name, sha)
+    );
+
+    CREATE TABLE IF NOT EXISTS repo_pauses (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      ${PROVIDER_COLUMNS},
+      repo_full_name TEXT NOT NULL,
+      actor TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      expires_at TEXT NOT NULL,
+      ended_at TEXT,
+      ended_by TEXT
+    );
+
+    CREATE TABLE IF NOT EXISTS stack_declarations (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      ${PROVIDER_COLUMNS},
+      repo_full_name TEXT NOT NULL,
+      stack_id TEXT NOT NULL,
+      pr_number INTEGER NOT NULL,
+      position INTEGER NOT NULL,
+      expected_count INTEGER NOT NULL,
+      actor TEXT NOT NULL,
+      comment_id TEXT,
+      created_at TEXT NOT NULL,
+      UNIQUE (provider, provider_instance, repo_full_name, stack_id, pr_number)
+    );
+
+    CREATE TABLE IF NOT EXISTS stack_run_members (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      job_id INTEGER NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
+      position INTEGER NOT NULL,
+      pr_number INTEGER NOT NULL,
+      base_ref TEXT NOT NULL DEFAULT '',
+      head_ref TEXT NOT NULL DEFAULT '',
+      base_sha TEXT NOT NULL,
+      head_sha TEXT NOT NULL,
+      member_job_id INTEGER,
+      state TEXT NOT NULL DEFAULT 'queued'
+    );
   `);
 
     // Legacy (pre-multi-forge) databases: rebuild the provider-scoped tables so
@@ -423,6 +474,7 @@ function migrate(db: SqliteDb): void {
     ensureColumn(db, "jobs", "cancelled_by", "TEXT");
     ensureColumn(db, "jobs", "forge_connection_id", "TEXT");
     const jobColumns: Array<[string, string]> = [
+      ["brief_json", "TEXT"],
       ["routing_state", "TEXT NOT NULL DEFAULT 'queued'"],
       ["routing_mode", "TEXT"],
       ["routing_profile", "TEXT"],
@@ -466,8 +518,17 @@ function migrate(db: SqliteDb): void {
       ["profile_revision_id", "INTEGER"],
       ["job_type", "TEXT NOT NULL DEFAULT 'pr_review'"],
       ["scan_branch", "TEXT"],
+      ["dedup_key", "TEXT NOT NULL DEFAULT ''"],
     ];
     for (const [name, ddl] of jobColumns) ensureColumn(db, "jobs", name, ddl);
+
+    // Scans and repo briefs both live at pr_number 0, so job_type must be
+    // part of the dedup key — otherwise a brief would collapse into a
+    // health scan (or vice versa) on the same repo+SHA. dedup_key gives
+    // repo briefs a per-request nonce: every confirmed brief is its own
+    // job, and repeats on the same SHA are served by repo_brief_cache
+    // instead of collapsing onto the first job.
+    rebuildJobsForScopedJobType(db);
 
     const findingColumns: [string, string][] = [
       ["diff_hunk", "TEXT"],
@@ -478,7 +539,7 @@ function migrate(db: SqliteDb): void {
     db.pragma("foreign_keys = ON");
     db.pragma("legacy_alter_table = OFF");
   }
-  db.pragma(`user_version = 2`);
+  db.pragma(`user_version = 3`);
 }
 
 /**
@@ -551,6 +612,50 @@ interface ColumnInfo {
  * and all data are preserved; indexes die with the rename and are recreated
  * by `migrate` afterwards.
  */
+const JOBS_DEDUP_UNIQUE =
+  "UNIQUE (provider, provider_instance, repo_full_name, pr_number, head_sha, job_type, dedup_key)";
+
+function rebuildJobsForScopedJobType(db: SqliteDb): void {
+  const row = db
+    .prepare(`SELECT sql FROM sqlite_master WHERE type='table' AND name='jobs'`)
+    .get() as { sql: string } | undefined;
+  if (!row?.sql) return;
+  if (row.sql.includes(JOBS_DEDUP_UNIQUE)) return;
+  // Legacy shapes: the pre-provider UNIQUE ended at `head_sha)`; the v2 shape
+  // added `, job_type)`. Both rebuild to the canonical dedup key. An unrelated
+  // constraint fails closed rather than guessing.
+  const legacyPattern =
+    /UNIQUE\s*\(provider,\s*provider_instance,\s*repo_full_name,\s*pr_number,\s*head_sha(\s*,\s*job_type)?\)/;
+  if (!legacyPattern.test(row.sql)) {
+    throw new Error(
+      `Cannot migrate: expected the legacy jobs uniqueness constraint, got: ${row.sql}. Refusing to rebuild the jobs table.`,
+    );
+  }
+  const newSql = row.sql.replace(legacyPattern, JOBS_DEDUP_UNIQUE);
+  applyTableRebuild(db, "jobs", newSql);
+}
+
+function applyTableRebuild(db: SqliteDb, table: string, newSql: string): void {
+  const legacyColumns = columnNames(db, table);
+  const legacyName = `${table}__legacy_pre_scope`;
+  db.transaction(() => {
+    db.exec(`ALTER TABLE ${table} RENAME TO ${legacyName}`);
+    db.exec(newSql);
+    // Columns ensured after the stored CREATE text was written exist only in
+    // table_info; re-add them before copying so no data is lost.
+    const recreated = columnNames(db, table);
+    const legacyInfo = db.prepare(`PRAGMA table_info(${legacyName})`).all() as ColumnInfo[];
+    for (const info of legacyInfo) {
+      if (recreated.has(info.name)) continue;
+      const ddl = `${info.type}${info.notnull ? " NOT NULL" : ""}${info.dflt_value != null ? ` DEFAULT ${info.dflt_value}` : ""}`;
+      db.exec(`ALTER TABLE ${table} ADD COLUMN "${info.name}" ${ddl}`);
+    }
+    const columnList = [...legacyColumns].map((name) => `"${name}"`).join(", ");
+    db.exec(`INSERT INTO ${table} (${columnList}) SELECT ${columnList} FROM ${legacyName}`);
+    db.exec(`DROP TABLE ${legacyName}`);
+  })();
+}
+
 function rebuildTableScoped(db: SqliteDb, rebuild: ScopedRebuild): void {
   // Already scoped (fresh v2 database, or rebuilt in an earlier pass).
   if (columnNames(db, rebuild.table).has("provider")) return;

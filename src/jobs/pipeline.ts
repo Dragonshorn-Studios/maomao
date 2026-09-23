@@ -14,21 +14,24 @@ import {
   type OpenCodePort,
   type OpenCodeRunResult,
 } from "../opencode/parse.js";
-import { buildAggregatorPrompt, buildReviewerPrompt } from "../prompts.js";
+import { buildAggregatorPrompt, buildBriefPrompt, buildReviewerPrompt, buildStackCumulativePrompt, KNOWN_REVIEWER_ROLES } from "../prompts.js";
 import { applyProfileToSpecs, reviewerSpecs } from "./enqueue.js";
 import type { ProfileDefinition } from "../config-revisions.js";
 import {
   fallbackAggregator,
   parseAggregatorResult,
+  parseBriefResult,
   parseReviewerResult,
   severityRank,
   SchemaValidationError,
   extractJsonFromText,
   formatSchemaError,
   type AggregatorResult,
+  type BriefResult,
   type ReviewerResult,
   type Severity,
 } from "../schema.js";
+import { buildBriefPayload, parseBriefPayload } from "./brief.js";
 import { classifyPriorFindings, collectPriorFindings, findingsForPublish } from "../findings/reconcile.js";
 import {
   collectHumanOverrides,
@@ -110,6 +113,10 @@ export function createPipeline(deps: PipelineDeps) {
         const job = deps.store.getJob(jobId);
         if (job?.job_type === "health_scan") {
           await runScanJob(deps, forge, jobId, controller.signal);
+        } else if (job?.job_type === "repo_brief") {
+          await runBriefJob(deps, forge, jobId, controller.signal);
+        } else if (job?.job_type === "stack_review") {
+          await runStackJob(deps, forge, jobId, controller.signal);
         } else {
           await runJob(deps, forge, jobId, controller.signal);
         }
@@ -821,6 +828,567 @@ async function runScanJob(deps: PipelineDeps, forge: ForgeRegistry, jobId: numbe
   }
 }
 
+/**
+ * Repo-brief job (issue #88): a forge-aware checkout of the chosen SHA, then a
+ * single read-only OpenCode run producing a 5–15-section TOC. The pipeline
+ * reads bounded fragments of each section's file into `jobs.brief_json` before
+ * the workspace is swept, so the TOC keeps working after retention cleans up.
+ * No findings, no aggregation, nothing posted to the forge.
+ *
+ * Issue #89: payloads also persist into repo_brief_cache keyed by
+ * forge/repo/SHA, so a repeat brief on the same tip skips both the checkout
+ * and the OpenCode run — the new job is its own run that happens to be served
+ * from cache. Ask still works on cache-hit jobs: it lazily prepares its own
+ * chat workspace when the job has none.
+ */
+async function runBriefJob(deps: PipelineDeps, forge: ForgeRegistry, jobId: number, signal: AbortSignal): Promise<void> {
+  const store = deps.store;
+  const config = deps.config;
+  const job = store.getJob(jobId);
+  if (!job) return;
+  try {
+    // Repo briefs are a GitHub feature like health scans.
+    if (job.provider !== "github") {
+      store.setJobState(jobId, "failed", {
+        failure_reason: `repo briefs are not available for ${job.provider}:${job.provider_instance}`,
+        finished_at: nowIso(),
+      });
+      return;
+    }
+    // Allowlists can change after enqueue; re-check before doing any work.
+    const auth = authorizeGithubTarget(config, {
+      installationId: job.installation_id,
+      accountId: job.github_account_id ?? undefined,
+      repositoryId: job.github_repository_id ?? undefined,
+    });
+    if (!auth.ok) {
+      logAuthorizationRejection({ installationId: job.installation_id, reason: auth.reason });
+      store.setJobState(jobId, "failed", { failure_reason: `unauthorized: ${auth.reason}`, finished_at: nowIso() });
+      return;
+    }
+    store.setJobState(jobId, "preparing", { started_at: nowIso() });
+    store.log(jobId, `Repo brief of ${job.repo_full_name} at ${job.head_sha}`);
+    const run = store.listReviewerRuns(jobId).find((entry) => entry.role === "repo_brief");
+    if (!run) throw new Error("repo brief run was not enqueued");
+
+    // A cache hit for this exact forge/repo/SHA skips the clone and the
+    // OpenCode pass entirely; the stored payload's own sha is re-checked
+    // before serving so a mismatched row can never produce a wrong brief.
+    if (config.brief.cacheEnabled) {
+      const cached = store.getRepoBriefCache(job.provider, job.provider_instance, job.repo_full_name, job.head_sha);
+      const cachedPayload = cached ? parseBriefPayload(cached.payload) : undefined;
+      if (cachedPayload && cachedPayload.sha === job.head_sha) {
+        store.patchJob(jobId, { brief_json: JSON.stringify({ ...cachedPayload, served_from_cache: true }) });
+        store.patchReviewer(run.id, { state: "done", finished_at: nowIso() });
+        store.setJobState(jobId, "completed", { finished_at: nowIso() });
+        store.log(
+          jobId,
+          `Repo brief served from the brief cache (generated ${cachedPayload.generated_at}): ${cachedPayload.sections.length} section(s), no OpenCode run`,
+        );
+        return;
+      }
+    }
+
+    const provider = forge.forJob(job);
+    const target = forgeTargetOf(job);
+    const clone = await provider.cloneSpec(target, { anonymous: job.installation_id === 0 });
+    const workspace = await deps.checkout.prepare({
+      jobId,
+      cloneUrl: clone.cloneUrl,
+      gitAuthArgs: clone.gitAuthArgs,
+      remoteRef: clone.remoteRef,
+      secrets: [...clone.secrets, ...globalSecrets(config)],
+      baseSha: job.head_sha,
+      headSha: job.head_sha,
+      signal,
+      // Briefs read the tree, not a diff; the PR ref fetch (refs/pull/0/head)
+      // fails and the checkout falls back to the head SHA refspec.
+      fetchDiff: async () => "",
+      metadata: {
+        repo: job.repo_full_name,
+        pr: 0,
+        title: job.pr_title,
+        baseSha: job.head_sha,
+        headSha: job.head_sha,
+      },
+    });
+    store.patchJob(jobId, { workspace_path: workspace.dir });
+    throwIfStale(store, jobId, signal);
+
+    store.setJobState(jobId, "reviewing");
+    const brief = await runBriefRun(deps, job, run, workspace.repoDir, signal);
+    const finished = store.getReviewerRun(run.id);
+    if (!brief || finished?.state !== "done") {
+      throw new Error(finished?.validation_error ?? "repo brief run failed");
+    }
+    throwIfStale(store, jobId, signal);
+
+    const payload = await buildBriefPayload(workspace.repoDir, {
+      repo: job.repo_full_name,
+      sha: job.head_sha,
+      brief,
+    });
+    store.patchJob(jobId, { brief_json: JSON.stringify(payload) });
+    if (config.brief.cacheEnabled) {
+      store.putRepoBriefCache(job.provider, job.provider_instance, job.repo_full_name, job.head_sha, JSON.stringify(payload));
+    }
+    store.setJobState(jobId, "completed", { finished_at: nowIso() });
+    store.log(
+      jobId,
+      `Repo brief completed: ${payload.sections.length} section(s), ${payload.sections.filter((section) => section.fragment != null).length} fragment(s) persisted`,
+    );
+  } catch (error) {
+    if (store.isStale(jobId) || signal.aborted) {
+      const cancelled = store.getJob(jobId)?.state === "cancelled";
+      store.log(jobId, cancelled ? "Repo brief cancelled" : "Repo brief aborted or marked stale", "warn");
+      if (!store.isStale(jobId)) store.setJobState(jobId, "stale", { finished_at: nowIso() });
+      return;
+    }
+    const message = error instanceof Error ? error.message : String(error);
+    for (const run of store.listReviewerRuns(jobId)) {
+      if (run.state === "queued" || run.state === "running") {
+        store.patchReviewer(run.id, {
+          state: "failed",
+          validation_error: "job ended before this run finished",
+          finished_at: nowIso(),
+        });
+      }
+    }
+    store.setJobState(jobId, "failed", {
+      failure_reason: message,
+      finished_at: nowIso(),
+    });
+    store.log(jobId, `Repo brief failed: ${message}`, "error");
+  }
+}
+
+// Stack reviews (issue #99): one job orchestrates a whole stack. It re-pins
+// member SHAs at run start, reviews each member in dependency order as a
+// normal pr_review job (same budgets, limits, and per-PR publishing), then
+// re-checks every head and — only when nothing moved — runs one cumulative
+// OpenCode pass for cross-PR breakage and posts the stack summary plus
+// cross-PR findings on the top PR.
+async function runStackJob(deps: PipelineDeps, forge: ForgeRegistry, jobId: number, signal: AbortSignal): Promise<void> {
+  const { store, config } = deps;
+  const job = store.getJob(jobId);
+  if (!job) return;
+  if (["stale", "cancelled"].includes(job.state)) {
+    store.log(jobId, `Skipped run: job is ${job.state}`, "warn");
+    return;
+  }
+  if (job.state === "completed") return;
+  try {
+    if (job.provider !== "github") {
+      store.setJobState(jobId, "failed", {
+        failure_reason: `stack reviews are not available for ${job.provider}:${job.provider_instance}`,
+        finished_at: nowIso(),
+      });
+      return;
+    }
+    const auth = authorizeGithubTarget(config, {
+      installationId: job.installation_id,
+      accountId: job.github_account_id ?? undefined,
+      repositoryId: job.github_repository_id ?? undefined,
+    });
+    if (!auth.ok) {
+      logAuthorizationRejection({ installationId: job.installation_id, reason: auth.reason });
+      store.setJobState(jobId, "failed", { failure_reason: `unauthorized: ${auth.reason}`, finished_at: nowIso() });
+      return;
+    }
+    const provider = forge.forJob(job);
+    const members = store.listStackMembers(jobId);
+    if (!members.length) {
+      store.setJobState(jobId, "failed", { failure_reason: "stack review has no recorded members", finished_at: nowIso() });
+      return;
+    }
+    const stackId = job.dedup_key.startsWith("stack:") ? job.dedup_key.slice("stack:".length) : job.dedup_key;
+    const memberTarget = (prNumber: number) => ({ ...forgeTargetOf(job), changeNumber: prNumber });
+    store.setJobState(jobId, "preparing", { started_at: nowIso() });
+
+    // Phase 1 — re-resolve and pin every member's base/head at run start.
+    // Heads that moved before the run began simply update the pins; a move
+    // detected later (pre-publish) marks the result stale instead.
+    const meta = new Map<number, { title: string; body: string; htmlUrl: string; author: string }>();
+    for (const member of members) {
+      throwIfStale(store, jobId, signal);
+      const change = await provider.getChange(memberTarget(member.pr_number));
+      meta.set(member.pr_number, { title: change.title, body: change.body, htmlUrl: change.htmlUrl, author: change.author });
+      if (change.baseSha !== member.base_sha || change.headSha !== member.head_sha) {
+        store.patchStackMember(member.id, { baseSha: change.baseSha, headSha: change.headSha });
+        member.base_sha = change.baseSha;
+        member.head_sha = change.headSha;
+        store.log(
+          jobId,
+          `Re-pinned #${member.pr_number} at ${change.headSha.slice(0, 8)} (base ${change.baseSha.slice(0, 8)}) before review`,
+        );
+      }
+    }
+
+    // Phase 2 — member reviews in dependency order. Each runs as a standard
+    // pr_review job so the existing budget, concurrency, dedup, and publish
+    // paths apply unchanged; a matching completed job is reused as-is.
+    store.setJobState(jobId, "reviewing");
+    const memberJobs: { member: (typeof members)[number]; jobId: number }[] = [];
+    for (const member of members) {
+      throwIfStale(store, jobId, signal);
+      store.patchStackMember(member.id, { state: "reviewing" });
+      const info = meta.get(member.pr_number)!;
+      const enqueued = store.enqueue({
+        repoFullName: job.repo_full_name,
+        repoOwner: job.repo_owner,
+        repoName: job.repo_name,
+        installationId: job.installation_id,
+        githubAccountId: job.github_account_id ?? undefined,
+        githubRepositoryId: job.github_repository_id ?? undefined,
+        prNumber: member.pr_number,
+        prTitle: info.title,
+        prBody: info.body,
+        prHtmlUrl: info.htmlUrl,
+        prAuthor: info.author,
+        baseSha: member.base_sha,
+        headSha: member.head_sha,
+        baseRef: member.base_ref,
+        headRef: member.head_ref,
+        webhookDeliveryId: job.webhook_delivery_id ?? undefined,
+        webhookEvent: "stack_review",
+        reviewers: reviewerSpecs(config),
+        jobType: "pr_review",
+      });
+      const memberJobId = enqueued.job.id;
+      memberJobs.push({ member, jobId: memberJobId });
+      store.patchStackMember(member.id, { memberJobId, state: "reviewing" });
+      if (enqueued.created) {
+        store.log(jobId, `Reviewing stack member #${member.pr_number} as job ${memberJobId}`);
+        await runJob(deps, forge, memberJobId, signal);
+      } else {
+        store.log(
+          jobId,
+          `Stack member #${member.pr_number} reuses existing job ${memberJobId} (${enqueued.job.state})`,
+        );
+      }
+      const outcome = await waitForJob(deps.store, memberJobId, jobId, signal);
+      if (outcome !== "completed") {
+        store.patchStackMember(member.id, { state: "failed" });
+        throw new Error(`stack member #${member.pr_number} review ended ${outcome} (job ${memberJobId})`);
+      }
+      store.patchStackMember(member.id, { state: "done" });
+    }
+
+    // Phase 3 — re-check every head before anything stack-level is published.
+    // A moved head makes this run's view inconsistent: mark it stale and post
+    // nothing; the next trigger re-pins at run start instead.
+    const diffs = new Map<number, string>();
+    for (const member of members) {
+      throwIfStale(store, jobId, signal);
+      const change = await provider.getChange(memberTarget(member.pr_number));
+      if (change.headSha !== member.head_sha) {
+        store.setJobState(jobId, "stale", { finished_at: nowIso() });
+        store.log(
+          jobId,
+          `PR #${member.pr_number} head moved ${member.head_sha.slice(0, 8)} → ${change.headSha.slice(0, 8)} after review; stack result stale, nothing published`,
+          "warn",
+        );
+        return;
+      }
+      diffs.set(member.pr_number, await provider.getChangeDiff(memberTarget(member.pr_number), config.maxDiffBytes));
+    }
+
+    // Phase 4 — cumulative pass over the stack tip plus every member diff.
+    const cumulativeRun = store.listReviewerRuns(jobId).find((entry) => entry.role === "stack_cumulative");
+    const clone = await provider.cloneSpec(memberTarget(members[members.length - 1]!.pr_number), {
+      anonymous: job.installation_id === 0,
+    });
+    const top = members[members.length - 1]!;
+    const workspace = await deps.checkout.prepare({
+      jobId,
+      cloneUrl: clone.cloneUrl,
+      gitAuthArgs: clone.gitAuthArgs,
+      remoteRef: clone.remoteRef,
+      secrets: [...clone.secrets, ...globalSecrets(config)],
+      baseSha: top.head_sha,
+      headSha: top.head_sha,
+      signal,
+      fetchDiff: async () => diffs.get(top.pr_number) ?? "",
+      metadata: {
+        repo: job.repo_full_name,
+        pr: top.pr_number,
+        title: job.pr_title,
+        baseSha: top.head_sha,
+        headSha: top.head_sha,
+      },
+    });
+    store.patchJob(jobId, { workspace_path: workspace.dir });
+    throwIfStale(store, jobId, signal);
+    const cumulative = await runStackCumulativeRun(deps, job, cumulativeRun, workspace.repoDir, stackId, members, diffs, meta, signal);
+    if (!cumulative) {
+      throw new Error("stack cumulative pass failed");
+    }
+
+    // Phase 5 — publish the stack summary and each cross-PR finding as issue
+    // comments on the top PR, naming every PR and SHA involved.
+    store.setJobState(jobId, "publishing");
+    const ordered = members
+      .map((member) => `#${member.pr_number}@${member.head_sha.slice(0, 8)}`)
+      .join(" → ");
+    const summaryBody =
+      `**Stack review "${stackId}"** — reviewed ${members.length} pull request(s) in order: ${ordered}.\n\n` +
+      `Member reviews: ${memberJobs.map((entry) => `#${entry.member.pr_number} (job ${entry.jobId})`).join(", ")}.\n\n` +
+      (cumulative.summary ? `${cumulative.summary}\n\n` : "") +
+      `Cross-PR findings: ${cumulative.findings.length}.`;
+    await postStackComment(deps, job, top.pr_number, summaryBody);
+    for (const finding of cumulative.findings) {
+      const location = finding.file ? `\`${finding.file}${finding.line ? `:${finding.line}` : ""}\`\n\n` : "";
+      await postStackComment(
+        deps,
+        job,
+        top.pr_number,
+        `**Cross-PR finding (${finding.severity})** — ${finding.summary}\n\n${location}${finding.reason}\n\n_Stack "${stackId}" · members ${ordered}_`,
+      );
+    }
+    store.setJobState(jobId, "completed", { finished_at: nowIso() });
+    store.log(
+      jobId,
+      `Stack review completed: ${members.length} member(s), ${cumulative.findings.length} cross-PR finding(s)`,
+    );
+  } catch (error) {
+    if (store.isStale(jobId) || signal.aborted) {
+      const cancelled = store.getJob(jobId)?.state === "cancelled";
+      store.log(jobId, cancelled ? "Stack review cancelled" : "Stack review aborted or marked stale", "warn");
+      if (!store.isStale(jobId)) store.setJobState(jobId, "stale", { finished_at: nowIso() });
+      return;
+    }
+    const message = error instanceof Error ? error.message : String(error);
+    for (const run of store.listReviewerRuns(jobId)) {
+      if (run.state === "queued" || run.state === "running") {
+        store.patchReviewer(run.id, {
+          state: "failed",
+          validation_error: "job ended before this run finished",
+          finished_at: nowIso(),
+        });
+      }
+    }
+    store.setJobState(jobId, "failed", { failure_reason: message, finished_at: nowIso() });
+    store.log(jobId, `Stack review failed: ${message}`, "error");
+  }
+}
+
+/** Await a member review job; the stack job's own staleness/abort still wins. */
+async function waitForJob(store: JobStore, memberJobId: number, stackJobId: number, signal: AbortSignal): Promise<string> {
+  for (;;) {
+    throwIfStale(store, stackJobId, signal);
+    const member = store.getJob(memberJobId);
+    if (!member) return "missing";
+    if (["completed", "failed", "stale", "cancelled"].includes(member.state)) return member.state;
+    await sleep(2000, signal);
+  }
+}
+
+/**
+ * Post an issue comment on a member PR. Publishing is the stack review's
+ * whole purpose: a failure must fail the job (visible to the operator, and
+ * retried as a fresh run once a head moves) rather than silently complete
+ * with nothing posted.
+ */
+async function postStackComment(deps: PipelineDeps, job: JobRow, prNumber: number, body: string): Promise<void> {
+  if (typeof deps.github.createIssueComment !== "function") {
+    throw new Error("stack review cannot publish: GitHub client has no issue-comment port");
+  }
+  try {
+    await deps.github.createIssueComment({
+      installationId: job.installation_id,
+      owner: job.repo_owner,
+      repo: job.repo_name,
+      pullNumber: prNumber,
+      body,
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    deps.store.log(job.id, `Stack comment for #${prNumber} failed: ${message}`, "error");
+    throw new Error(`failed to publish stack review on #${prNumber}: ${message}`);
+  }
+}
+
+/** The cumulative OpenCode pass; retries follow the standard reviewer budget. */
+async function runStackCumulativeRun(
+  deps: PipelineDeps,
+  job: JobRow,
+  run: ReviewerRunRow | undefined,
+  cwd: string,
+  stackId: string,
+  members: { pr_number: number; base_sha: string; head_sha: string }[],
+  diffs: Map<number, string>,
+  meta: Map<number, { title: string }>,
+  signal: AbortSignal,
+): Promise<ReviewerResult | undefined> {
+  const model = run?.model || deps.config.chat.model || deps.config.opencode.reviewerModel;
+  const retries = Math.max(0, deps.config.opencode.maxRetries);
+  const prompt = buildStackCumulativePrompt({
+    repoFullName: job.repo_full_name,
+    stackId,
+    members: members.map((member) => ({
+      prNumber: member.pr_number,
+      prTitle: meta.get(member.pr_number)?.title ?? "",
+      baseSha: member.base_sha,
+      headSha: member.head_sha,
+      diff: truncate(diffs.get(member.pr_number) ?? "(diff unavailable)", Math.max(10_000, deps.config.maxDiffBytes)),
+    })),
+  });
+  let lastError = "unknown error";
+  for (let attempt = 1; attempt <= retries + 1; attempt++) {
+    throwIfStale(deps.store, job.id, signal);
+    const started = Date.now();
+    if (run) {
+      deps.store.patchReviewer(run.id, {
+        state: "running",
+        attempt,
+        model: model || null,
+        provider: model.includes("/") ? model.split("/")[0] : null,
+        started_at: nowIso(),
+      });
+    }
+    deps.store.log(job.id, `Stack cumulative attempt ${attempt}/${retries + 1} model=${model || "(default)"}`, "info", run?.id);
+    let result: OpenCodeRunResult | undefined;
+    try {
+      result = await deps.opencode.run({
+        cwd,
+        model,
+        prompt,
+        files: [],
+        timeoutMs: deps.config.chat.timeoutMs,
+        extraArgs: deps.config.opencode.extraArgs,
+        bin: deps.config.opencode.bin,
+        title: `maomao-stack-${job.id}`,
+        signal,
+      });
+      const parsed = parseReviewerResult(result.text || result.stdout, "stack_cumulative");
+      if (run) {
+        deps.store.patchReviewer(run.id, {
+          state: "done",
+          raw_output: truncate(result.text || result.stdout, 200_000),
+          normalized_json: JSON.stringify(parsed, null, 2),
+          stdout: truncate(result.stdout, 80_000),
+          stderr: truncate(result.stderr, 20_000),
+          exit_code: result.exitCode,
+          finished_at: nowIso(),
+          duration_ms: Date.now() - started,
+          ...usagePersistence(result.usage),
+          validation_error: null,
+        });
+      }
+      deps.store.log(job.id, `Stack cumulative done: ${parsed.findings.length} cross-PR finding(s)`, "info", run?.id);
+      return parsed;
+    } catch (error) {
+      lastError = formatError(error);
+      if (run) {
+        deps.store.patchReviewer(run.id, {
+          state: "failed",
+          validation_error: lastError,
+          raw_output: result ? truncate(result.text || result.stdout, 200_000) : null,
+          stdout: result ? truncate(result.stdout, 80_000) : null,
+          stderr: result ? truncate(result.stderr, 20_000) : null,
+          exit_code: result?.exitCode ?? null,
+          finished_at: nowIso(),
+          duration_ms: Date.now() - started,
+          ...(result ? usagePersistence(result.usage) : {}),
+        });
+      }
+      deps.store.log(job.id, `Stack cumulative attempt ${attempt} failed: ${lastError}`, "warn", run?.id);
+      if (attempt <= retries) await sleep(500 * attempt, signal);
+    }
+  }
+  return undefined;
+}
+
+/**
+ * The single OpenCode run behind a repo brief. Shares the reviewers' deny list
+ * (applied in opencode spawn for every run) and the Ask budget knob: timeout
+ * comes from `config.chat` so briefs and Ask are bounded the same way.
+ */
+async function runBriefRun(
+  deps: PipelineDeps,
+  job: JobRow,
+  run: ReviewerRunRow,
+  cwd: string,
+  signal: AbortSignal,
+): Promise<BriefResult | undefined> {
+  // The run's stored model wins; otherwise follow the Ask model, then the
+  // generic reviewer default.
+  const model = run.model || deps.config.chat.model || deps.config.opencode.reviewerModel;
+  const retries = Math.max(0, deps.config.opencode.maxRetries);
+  let lastError = "unknown error";
+
+  for (let attempt = 1; attempt <= retries + 1; attempt++) {
+    throwIfStale(deps.store, job.id, signal);
+    const started = Date.now();
+    deps.store.patchReviewer(run.id, {
+      state: "running",
+      attempt,
+      model: model || null,
+      provider: model.includes("/") ? model.split("/")[0] : null,
+      started_at: nowIso(),
+    });
+    deps.store.log(job.id, `Repo brief attempt ${attempt}/${retries + 1} model=${model || "(default)"}`, "info", run.id);
+
+    let result: OpenCodeRunResult | undefined;
+    try {
+      result = await deps.opencode.run({
+        cwd,
+        model,
+        prompt: buildBriefPrompt({ repoFullName: job.repo_full_name, sha: job.head_sha }),
+        files: [],
+        timeoutMs: deps.config.chat.timeoutMs,
+        extraArgs: deps.config.opencode.extraArgs,
+        bin: deps.config.opencode.bin,
+        title: `maomao-brief-${job.id}`,
+        signal,
+        onStdout: (chunk) => {
+          if (chunk.includes("error")) deps.store.log(job.id, chunk.slice(0, 500), "debug", run.id);
+        },
+      });
+      const parsed = parseBriefResult(result.text || result.stdout);
+      deps.store.patchReviewer(run.id, {
+        state: "done",
+        raw_output: truncate(result.text || result.stdout, 200_000),
+        normalized_json: JSON.stringify(parsed, null, 2),
+        stdout: truncate(result.stdout, 80_000),
+        stderr: truncate(result.stderr, 20_000),
+        exit_code: result.exitCode,
+        finished_at: nowIso(),
+        duration_ms: Date.now() - started,
+        ...usagePersistence(result.usage),
+        validation_error: null,
+      });
+      deps.store.log(job.id, `Repo brief done: ${parsed.sections.length} section(s)`, "info", run.id);
+      if (result.usage.complete === false && result.usage.warning) {
+        deps.store.log(job.id, result.usage.warning, "warn", run.id);
+      }
+      return parsed;
+    } catch (error) {
+      lastError = formatError(error);
+      const cliDump = result ? truncate(result.stderr.trim() || result.stdout.trim(), 500) : "";
+      deps.store.patchReviewer(run.id, {
+        state: "failed",
+        validation_error: lastError,
+        raw_output: result ? truncate(result.text || result.stdout, 200_000) : null,
+        stdout: result ? truncate(result.stdout, 80_000) : null,
+        stderr: result ? truncate(result.stderr, 20_000) : null,
+        exit_code: result?.exitCode ?? null,
+        finished_at: nowIso(),
+        duration_ms: Date.now() - started,
+        ...(result ? usagePersistence(result.usage) : {}),
+      });
+      deps.store.log(
+        job.id,
+        `Repo brief attempt ${attempt} failed: ${lastError}${cliDump ? ` — ${cliDump}` : ""}`,
+        "warn",
+        run.id,
+      );
+      if (attempt <= retries) await sleep(500 * attempt, signal);
+    }
+  }
+  return undefined;
+}
+
 function globalSecrets(config: Config): string[] {
   return [config.github.privateKey, config.github.webhookSecret].filter((value) => value.length > 4);
 }
@@ -868,11 +1436,16 @@ async function routeSpecialists(
 ): Promise<void> {
   const { store, config } = deps;
   const existing = store.listReviewerRuns(job.id);
-  const allowlist = config.reviewers.map((role) => role.id);
+  // A profile revision stamped on the job is the reviewer universe: the GUI
+  // profile overrides env REVIEWER_ROLES for role selection and routing alike.
+  const profileDefinition = profileDefinitionForJob(store, job);
+  const allowlist = profileDefinition?.reviewers.length
+    ? profileDefinition.reviewers.map((reviewer) => reviewer.role)
+    : config.reviewers.map((role) => role.id);
 
   if (config.routing.mode === "fixed") {
     if (existing.length === 0) {
-      store.ensureReviewerRuns(job.id, applyProfileToSpecs(store, config, reviewerSpecs(config), job.profile_revision_id));
+      store.ensureReviewerRuns(job.id, applyProfileToSpecs(store, config, reviewerSpecs(config), job.profile_revision_id, { wholeProfileSet: true }));
     }
     const roles = store.listReviewerRuns(job.id).map((run) => run.role);
     persistDecision(store, job.id, {
@@ -911,7 +1484,7 @@ async function routeSpecialists(
   store.setJobState(job.id, "routing", { routing_state: "running", routing_mode: config.routing.mode });
   const signals = scanRoutingSignals({ diff, title: job.pr_title, body: job.pr_body });
   let decision: RoutingDecision;
-  const profileRouterModel = profileDefinitionForJob(store, job)?.routerModel;
+  const profileRouterModel = profileDefinition?.routerModel;
   const routerModel = profileRouterModel || config.routing.model || config.opencode.reviewerModel;
   const useModel = (config.routing.mode === "model" || config.routing.mode === "hybrid") && Boolean(routerModel);
 
@@ -986,7 +1559,9 @@ async function routeSpecialists(
   );
   store.ensureReviewerRuns(
     job.id,
-    applyProfileToSpecs(store, config, reviewerSpecs(config, decision.reviewers), job.profile_revision_id),
+    // Pass the router's raw picks: reviewerSpecs filters by env membership,
+    // which would silently drop a profile-only role the router chose.
+    applyProfileToSpecs(store, config, reviewerSpecs(config, decision.reviewers), job.profile_revision_id, { requestedRoles: decision.reviewers }),
   );
   store.log(
     job.id,
@@ -1059,7 +1634,11 @@ async function runReviewer(
   profileBudget?: ProfileBudget,
   humanOverrides?: HumanOverrideContext,
 ): Promise<void> {
-  const role = deps.config.reviewers.find((item) => item.id === run.role);
+  // Profile-added roles may not appear in env REVIEWER_ROLES; fall back to the
+  // built-in catalog so they still get their authored prompt body.
+  const role =
+    deps.config.reviewers.find((item) => item.id === run.role) ??
+    KNOWN_REVIEWER_ROLES.find((item) => item.id === run.role);
   // The run's stored model (profile revision / enqueue spec) wins over config defaults.
   const model = run.model || role?.model || deps.config.opencode.reviewerModel;
   // An active prompt revision overrides the role's authored body; guardrails stay composed here.

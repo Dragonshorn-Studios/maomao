@@ -283,7 +283,7 @@ Notes:
 
 - Providers not in the table still work via a custom provider in the OpenCode global config on the volume (`/opt/opencode/.config/opencode/opencode.json`) with `"apiKey": "{env:OPENCODE_<NAME>_API_KEY}"` — `OPENCODE_`-prefixed vars always pass. `HTTP_PROXY`/`HTTPS_PROXY`/`NO_PROXY` pass too.
 
-Default specialist roles (override with `REVIEWER_ROLES`):
+Default specialist roles (override with `REVIEWER_ROLES`; an active profile revision overrides that list — see *Review configuration*):
 
 - `correctness` — regressions / broken logic
 - `security` — trust boundaries
@@ -378,7 +378,7 @@ Aliases: `MAOMAO_UI_PASSWORD`, `MAOMAO_UI_SESSION_SECRET`. Setting `UI_PASSWORD`
 
 With the password gate on, GET/POST `/login` issues an **HttpOnly**, **SameSite=Lax** cookie (`maomao_session`), signed with `UI_SESSION_SECRET`. The cookie is **Secure** when the request is HTTPS (including `X-Forwarded-Proto: https`). Unauthenticated HTML pages redirect to `/login`; `/api/*` and `/events` return 401. `/webhooks/github`, `/health`, and `/assets/maomao.css` stay public (no cookie).
 
-**CSRF protection.** While the gate is on, every `POST` request except the GitHub webhook must carry a valid CSRF token — today that is every UI form (`POST /login`, `/logout`, `/reviews`, `/scan`, `/scan/issues/*`, `/config/*`, and the job retry forms). The token is a signed double-submit cookie (`maomao_csrf`, HttpOnly, SameSite=Lax, Secure on HTTPS — same as the session cookie, signed with `UI_SESSION_SECRET`, valid for 7 days) whose value must also be present in the form's hidden `csrf_token` field. Requests without a matching, unexpired token are rejected with 403 and logged. A page load issues a new token only when the cookie is missing or expired; otherwise the existing token is reused, so several tabs or a stale form can share one token. The GitHub webhook is exempt — it is authenticated by its own `x-hub-signature-256` signature. When the gate is off (local development), no tokens are issued or enforced.
+**CSRF protection.** While the gate is on, every `POST` request except the GitHub webhook must carry a valid CSRF token — today that is every UI form (`POST /login`, `/logout`, `/reviews`, `/scan`, `/scan/issues/*`, `/brief`, `/config/*`, and the job retry forms). The token is a signed double-submit cookie (`maomao_csrf`, HttpOnly, SameSite=Lax, Secure on HTTPS — same as the session cookie, signed with `UI_SESSION_SECRET`, valid for 7 days) whose value must also be present in the form's hidden `csrf_token` field. Requests without a matching, unexpired token are rejected with 403 and logged. A page load issues a new token only when the cookie is missing or expired; otherwise the existing token is reused, so several tabs or a stale form can share one token. The GitHub webhook is exempt — it is authenticated by its own `x-hub-signature-256` signature. When the gate is off (local development), no tokens are issued or enforced.
 
 If both variables are unset, the UI stays open so `npm run dev` on loopback still works. Do not ship that configuration on a public address.
 
@@ -478,6 +478,34 @@ Set `MAOMAO_EXPLAIN_ENABLED=true` and each job page gains an **Ask Maomao** chat
 - Published issues use the App installation identity (never the human OAuth token), carry the exact reviewed SHA and a hidden machine-readable marker, and deduplicate by stable fingerprint: already-linked issues are skipped, retries are idempotent, permission denials stop the run with an explicit notice, and partial failures are visible and safely retryable. The job page shows every resulting issue with its finding fingerprint (credential-free audit trail), and pending claims orphaned by a crash are cleared at startup.
 - A later scan of the same repository re-checks **prior** scan findings that this run did not rediscover, using the same verifier as pull-request reconciliation (absence from the new generative review is not enough). Verified-resolved findings are stored as `resolved`. Linked **Maomao-created** GitHub issues (body contains the scan-issue marker) are closed; human-authored issues and pull requests are never closed. The job log records why a close was skipped.
 
+## Repo briefs (manual, `Repo brief`)
+
+`/brief` (operator UI) runs a one-off **repo brief** of an allowlisted repository at a chosen commit — a SHA, branch, tag, or (empty field) the default branch head. The ref resolves to one exact commit before the job is enqueued; the checkout pins that SHA. Manual only, read-only: nothing is published to GitHub.
+
+- Same gates as a scan: operator OAuth identity, installation/repository allowlists re-checked at run time, the per-repository rate limit, and a two-step confirm that shows the resolved commit before any job is created.
+- The brief is one OpenCode run on a forge-aware checkout of the commit, with the same deny list as Ask/reviewers (read/glob/grep only; bash, edit, write, and network tools denied) and the Ask run timeout (`MAOMAO_EXPLAIN_TIMEOUT_MS`, default 180000).
+- The result is a table of contents of 5–15 sections — the files that matter for understanding what this SHA holds, in reading order. Each job page gains a **Repo brief** tab (`/jobs/<id>/brief`); opening a section shows the bounded file fragment the pipeline captured at run time, so the tab keeps working after the workspace is swept. Paths come from model output and are treated as untrusted — absolute, escaping, or symlinked paths are rejected server-side.
+- Every confirmed brief is its own job ("this run / this SHA"). A completed payload is also kept in the `repo_brief_cache` table keyed by forge + repository + exact SHA, so a second brief on the same tip is served from cache — no clone, no OpenCode run — and the tab notes that it was served from cache. A different SHA is a different key and always re-runs; there is no cross-repo or cross-forge bleed. Set `MAOMAO_BRIEF_CACHE_ENABLED=false` to opt out and always re-run. The cache is an optimization, not an index — there is no sidebar or persistent tree.
+
+## Review pause and PR stacks
+
+`/pause` (operator UI) sets a **timed automatic-review pause** for one repository while a stack is being built. It is durable (SQLite row), expiring (2/8/24/72 hours), operator-only (OAuth identity + installation/repository allowlists), and visible on the page until it expires or an operator ends it early.
+
+- While a pause is active, `pull_request` webhook deliveries for that repository are skipped — recorded on the delivery row — and never enqueue work or spend reviewer budget. Manual URL reviews, health scans, repo briefs, and stack commands are unaffected: the pause gates *automatic* reviews only.
+- Starting a pause cancels queued and in-flight `pr_review` jobs for the repository (cancel reason `repo_paused`); scans, briefs, and stack reviews are never touched. Starting a new pause on a paused repository supersedes the old one (extend).
+- An expired pause simply stops matching — there is no backfill and no replay of intermediate pushes; a `ready_for_review` or the next push resumes normal handling. Pauses can only be managed from `/pause` or by expiry — PR comments cannot create, extend, or end a pause.
+
+**Stack commands** are deterministic comments on pull requests (no model is involved in parsing or scheduling):
+
+- `issue X of Y in stack <id>` — declares the PR it is posted on as member `X` of `Y` of stack `<id>`; recorded idempotently, conflicts (same PR, different position) get an error comment. Declarations never touch the pause.
+- `top of stack <id>: #a, #b, #c` — posted on the **top** PR; validates that every listed PR resolves in the same repository, is declared for the stack at its listed position with a matching count, and chains (`#b` bases on `#a`'s head branch). An invalid trigger gets one actionable error comment; a valid one pins the ordered base/head SHA vector and enqueues exactly one `stack_review` job (deduped per stack id — re-triggers stale a pending run for the same stack, never double-run).
+
+Every declared member PR also carries one **stack-position comment** maomao keeps up to date (a hidden `maomao-stack:<id>` marker): it names the PR's position — "issue X of Y", 🍃 on the row for that PR — plus the ordered member list, and gains the pinned SHA vector once a valid trigger resolves. New declarations and triggers edit that comment in place rather than posting new ones — successful commands post no reply; the marker comment is the only trace.
+
+Authorization: humans need the same collaborator permission as other commands; automation identities (bot logins) are admitted only via `MAOMAO_STACK_AUTHORS`. Duplicate comment deliveries and duplicate webhook deliveries are deduped — they can never double-post or double-enqueue.
+
+A **stack review** job is one logical operation: it re-pins each member's SHAs at run start (heads that moved early are re-pinned, not failed), reviews each member in order as a normal `pr_review` job (reusing existing budget, dedup, and publish paths — a matching completed review is reused, not re-run), then re-checks every head before publishing anything stack-level. If a head moved after pinning, the run is marked **stale** and posts nothing. Otherwise one cumulative OpenCode pass hunts cross-PR breakage (contracts a lower PR changes that a higher PR still uses), and the stack summary plus each cross-PR finding is posted as an issue comment on the top PR — every finding names the PRs and SHAs involved. The job page's **Stack members** table shows the pinned SHA vector, per-member state, and links to each member review job.
+
 ## Specialist prompts, fixtures, and offline evaluation
 
 `/config/prompts` manages **versioned specialist prompts**: per-role revisions with an operator-editable body. Security guardrails (the hard rules and JSON schema) are composed at runtime and are never part of an editable revision — the UI shows them separately.
@@ -496,6 +524,7 @@ Configuration lives under `/config` as a set of focused pages joined by a shared
 - Drafts are validated against a schema plus system caps (≤12 reviewers, ≤30-minute timeouts, ≤5 retries, ≤$5 / 2M-token budgets). Invalid drafts cannot be activated.
 - Activation is explicit and audited; activating a new revision retires the previous active one of the same name. Rollback re-activates a retired revision — history is never rewritten.
 - Every job snapshots the revision it ran with (`profile_revision_id` on the job), so later edits never change historical jobs. Specialist selection, per-role models, and the minimum publishable severity are applied from the active revision; total budgets are enforced as warnings.
+- **The active profile overrides the environment.** Its reviewer list is the effective set in every routing mode — fixed mode runs it verbatim and the router chooses within it — so `REVIEWER_ROLES` no longer gates which specialists run once a profile is active. Env values only remain defaults where the profile is silent: a role the profile lists without a model keeps the env role/global model, and roles not enabled in env still get their built-in titles and prompt bodies.
 - Draft edits use optimistic concurrency: saving against an older revision returns a conflict instead of overwriting a teammate's change.
 - `MODEL_CATALOG` (comma-separated `provider/model` values) optionally restricts models to an operator-approved catalog. Configuration contains no credentials; export/import is schema-versioned JSON, and imports always land as drafts.
 - All write actions require an operator GitHub OAuth identity and are recorded in the audit history (`/config/audit`).

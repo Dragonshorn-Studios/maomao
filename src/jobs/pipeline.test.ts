@@ -10,6 +10,7 @@ import type { OpenCodePort } from "../opencode/parse.js";
 import { profileBudgetExceeded } from "../routing/policy.js";
 import { findingMarker, fingerprintFinding } from "../findings/identity.js";
 import { createPipeline } from "./pipeline.js";
+import { parseBriefPayload } from "./brief.js";
 import { JobStore } from "./store.js";
 import { DiffTooLargeError } from "../github/diff-limit.js";
 
@@ -89,6 +90,38 @@ describe("JobStore enqueue", () => {
     expect(next.created).toBe(true);
     expect(store.getJob(first.job.id)?.state).toBe("stale");
     expect(store.listReviewerRuns(first.job.id)).toHaveLength(1);
+  });
+
+  it("scopes dedup and staling by job_type so a brief coexists with a scan on the same SHA", () => {
+    const store = new JobStore(openDb(":memory:"));
+    const base = {
+      repoFullName: "acme/widgets",
+      repoOwner: "acme",
+      repoName: "widgets",
+      installationId: 1,
+      prNumber: 0,
+      prTitle: "t",
+      prBody: "",
+      prHtmlUrl: "",
+      prAuthor: "a",
+      baseSha: "sha1",
+      baseRef: "main",
+      headRef: "main",
+      reviewers: [],
+    };
+    const scan = store.enqueue({ ...base, headSha: "sha1", jobType: "health_scan" });
+    const scanDup = store.enqueue({ ...base, headSha: "sha1", jobType: "health_scan" });
+    const brief = store.enqueue({ ...base, headSha: "sha1", jobType: "repo_brief" });
+    const briefDup = store.enqueue({ ...base, headSha: "sha1", jobType: "repo_brief" });
+    const briefMoved = store.enqueue({ ...base, headSha: "sha2", jobType: "repo_brief" });
+    expect(scan.created).toBe(true);
+    expect(scanDup.created).toBe(false); // scans still dedup on repo+SHA
+    expect(brief.created).toBe(true); // same repo+SHA, different job type: no collision
+    expect(briefDup.created).toBe(true); // briefs are per-request jobs; repeats hit the cache instead
+    expect(briefDup.job.id).not.toBe(brief.job.id);
+    expect(briefMoved.created).toBe(true);
+    expect(store.getJob(brief.job.id)?.state).toBe("queued"); // a brief is immutable history, never staled
+    expect(store.getJob(scan.job.id)?.state).toBe("queued"); // scan untouched by brief enqueues
   });
 });
 
@@ -3035,6 +3068,119 @@ describe("profile revision consumption", () => {
     expect(store.getJob(created.job.id)?.profile_revision_id).toBe(draft.revision.id);
   });
 
+  it("runs profile roles the env does not enable — the GUI-set profile overrides REVIEWER_ROLES", async () => {
+    const config = loadConfig({
+      REVIEWER_ROUTING: "fixed",
+      REVIEWER_ROLES: "correctness,security",
+      OPENCODE_REVIEWER_MODEL: "test/model",
+      POST_EMPTY_REVIEW: "true",
+      GITHUB_APP_ID: "1",
+      GITHUB_WEBHOOK_SECRET: "s",
+      GITHUB_APP_PRIVATE_KEY: "k",
+    });
+    const store = new JobStore(openDb(":memory:"));
+    const draft = store.configs.createDraft({
+      definition: {
+        name: "default",
+        reviewers: [{ role: "api" }, { role: "security", model: "test/override" }],
+        minPublishableSeverity: "info",
+      },
+      createdBy: "octocat",
+    });
+    if (!("revision" in draft)) throw new Error("draft failed");
+    store.configs.activateRevision(draft.revision.id, "octocat");
+
+    const ran: { role?: string; model?: string }[] = [];
+    const github: GithubPort = githubPort({
+      getPullDiff: async () => "diff --git a/example.ts b/example.ts\n",
+      listReviews: async () => [],
+      createCommentReview: async () => ({ id: "5", url: "u" }),
+    });
+    const opencode: OpenCodePort = {
+      async run(input) {
+        const roleMatch = input.prompt.match(/Role id: (\w+)/);
+        ran.push({ role: roleMatch?.[1], model: input.model });
+        const text = roleMatch
+          ? reviewerJson(roleMatch[1], "clean")
+          : JSON.stringify({ schema_version: 1, verdict: "clean", summary: "clean", findings: [] });
+        return { stdout: text, stderr: "", exitCode: 0, text, usage: {} };
+      },
+    };
+    const created = store.enqueue({ ...jobInput("revsha"), reviewers: [] });
+    await createPipeline({ config, store, github, checkout: await fixtureCheckout(), opencode }).run(created.job.id);
+
+    // api is absent from REVIEWER_ROLES but still ran — and with its built-in
+    // authored prompt (the "Role id:" marker only exists in real role bodies)
+    // plus the env default model, which the profile did not pin.
+    const api = ran.find((entry) => entry.role === "api");
+    expect(api).toBeTruthy();
+    expect(api?.model).toBe("test/model");
+    const security = ran.find((entry) => entry.role === "security");
+    expect(security?.model).toBe("test/override");
+    expect(ran.some((entry) => entry.role === "correctness")).toBe(false);
+    expect(store.listReviewerRuns(created.job.id).map((run) => run.role)).toEqual(["api", "security"]);
+  });
+
+  it("restricts the router allowlist to profile roles when a revision is active", async () => {
+    const config = loadConfig({
+      REVIEWER_ROUTING: "model",
+      REVIEWER_ROLES: "correctness,security,tests",
+      OPENCODE_REVIEWER_MODEL: "test/model",
+      OPENCODE_ROUTER_MODEL: "test/router",
+      POST_EMPTY_REVIEW: "true",
+      GITHUB_APP_ID: "1",
+      GITHUB_WEBHOOK_SECRET: "s",
+      GITHUB_APP_PRIVATE_KEY: "k",
+    });
+    const store = new JobStore(openDb(":memory:"));
+    const draft = store.configs.createDraft({
+      definition: {
+        name: "default",
+        reviewers: [{ role: "security" }, { role: "api" }],
+        minPublishableSeverity: "info",
+      },
+      createdBy: "octocat",
+    });
+    if (!("revision" in draft)) throw new Error("draft failed");
+    store.configs.activateRevision(draft.revision.id, "octocat");
+
+    let routerPrompt = "";
+    const github: GithubPort = githubPort({
+      getPullDiff: async () => "diff --git a/example.ts b/example.ts\n",
+      listReviews: async () => [],
+      createCommentReview: async () => ({ id: "5", url: "u" }),
+    });
+    // The router picks api — a profile role absent from env REVIEWER_ROLES.
+    // It must still run (previously it was env-filtered out of the request).
+    const routerText = JSON.stringify({
+      profile: "diagnosis",
+      reviewers: ["api"],
+      reason: "picks within the profile",
+      confidence: 0.9,
+    });
+    const opencode: OpenCodePort = {
+      async run(input) {
+        if (input.title?.includes("maomao-router")) {
+          routerPrompt = input.prompt;
+          return { stdout: routerText, stderr: "", exitCode: 0, text: routerText, usage: {} };
+        }
+        const roleMatch = input.prompt.match(/Role id: (\w+)/);
+        const text = roleMatch
+          ? reviewerJson(roleMatch[1], "clean")
+          : JSON.stringify({ schema_version: 1, verdict: "clean", summary: "clean", findings: [] });
+        return { stdout: text, stderr: "", exitCode: 0, text, usage: {} };
+      },
+    };
+    const created = store.enqueue({ ...jobInput("revsha"), reviewers: [] });
+    await createPipeline({ config, store, github, checkout: await fixtureCheckout(), opencode }).run(created.job.id);
+
+    // Env enables correctness/security/tests, but the router was only offered
+    // the GUI profile's roles.
+    const allowlistLine = routerPrompt.split("Allowed role ids:")[1]?.split("\n")[1];
+    expect(allowlistLine).toBe('["security","api"]');
+    expect(store.listReviewerRuns(created.job.id).map((run) => run.role)).toEqual(["api"]);
+  });
+
   it("filters published findings by the revision's minimum publishable severity", async () => {
     const config = loadConfig({
       REVIEWER_ROUTING: "fixed",
@@ -3880,6 +4026,239 @@ describe("repository health scan", () => {
     }).run(created.job.id);
     expect(store.getJob(created.job.id)?.state).toBe("stale");
     expect(closed).toEqual([]);
+  });
+});
+
+describe("repo brief (issue #88)", () => {
+  const briefJson = JSON.stringify({
+    schema_version: 1,
+    summary: "what this tree holds",
+    sections: [
+      { title: "Entry", path: "example.ts", summary: "entry point", start_line: 1, end_line: 1 },
+      { title: "Missing", path: "src/missing.ts", summary: "described but absent" },
+      { title: "Escape", path: "../outside.ts", summary: "traversal attempt" },
+      { title: "Absolute", path: "/etc/passwd", summary: "absolute path" },
+      { title: "Again", path: "example.ts", summary: "second reference" },
+    ],
+  });
+
+  function briefOpencode(): OpenCodePort {
+    return {
+      async run() {
+        return { stdout: briefJson, stderr: "", exitCode: 0, text: briefJson, usage: { cost: 0.01, totalTokens: 10, complete: true } };
+      },
+    };
+  }
+
+  function briefConfig(overrides: Record<string, string> = {}) {
+    return loadConfig({
+      OPENCODE_REVIEWER_MODEL: "test/model",
+      GITHUB_APP_ID: "1",
+      GITHUB_WEBHOOK_SECRET: "s",
+      GITHUB_APP_PRIVATE_KEY: "k",
+      ...overrides,
+    });
+  }
+
+  function enqueueBrief(store: JobStore, sha = "brief000brief000brief000brief000") {
+    return store.enqueue({
+      ...jobInput(sha),
+      reviewers: [{ role: "repo_brief", title: "Repo brief" }],
+      jobType: "repo_brief",
+      prNumber: 0,
+      headSha: sha,
+      baseSha: sha,
+    });
+  }
+
+  it("completes: persists a brief payload with bounded fragments and finishes the run", async () => {
+    const store = new JobStore(openDb(":memory:"));
+    const created = enqueueBrief(store);
+    await createPipeline({
+      config: briefConfig(),
+      store,
+      github: githubPort(),
+      checkout: await fixtureCheckout(),
+      opencode: briefOpencode(),
+    }).run(created.job.id);
+
+    const job = store.getJob(created.job.id);
+    expect(job?.state).toBe("completed");
+    const payload = parseBriefPayload(job?.brief_json);
+    expect(payload?.sections).toHaveLength(5);
+    expect(payload?.sections[0]?.fragment).toContain("export const n = 1");
+    expect(payload?.sections[1]?.fragmentNote).toBe("not found");
+    expect(payload?.sections[2]?.fragmentNote).toBe("outside repo");
+    expect(payload?.sections[3]?.fragmentNote).toBe("outside repo");
+    const runs = store.listReviewerRuns(created.job.id);
+    expect(runs[0]?.state).toBe("done");
+    expect(runs[0]?.role).toBe("repo_brief");
+    expect(runs[0]?.normalized_json).toContain('"sections"');
+  });
+
+  it("fails the job when the model never returns a valid brief", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const store = new JobStore(openDb(":memory:"));
+    const created = enqueueBrief(store);
+    await createPipeline({
+      config: briefConfig(),
+      store,
+      github: githubPort(),
+      checkout: await fixtureCheckout(),
+      opencode: {
+        async run() {
+          return { stdout: "oops", stderr: "", exitCode: 0, text: "oops", usage: {} };
+        },
+      },
+    }).run(created.job.id);
+    const job = store.getJob(created.job.id);
+    expect(job?.state).toBe("failed");
+    expect(job?.brief_json).toBeNull();
+    expect(store.listReviewerRuns(created.job.id)[0]?.state).toBe("failed");
+    warn.mockRestore();
+  });
+
+  it("fails fast for non-github brief jobs before any checkout", async () => {
+    const store = new JobStore(openDb(":memory:"));
+    const created = store.enqueue({
+      ...jobInput("brief000brief000brief000brief000"),
+      reviewers: [{ role: "repo_brief", title: "Repo brief" }],
+      jobType: "repo_brief",
+      prNumber: 0,
+      headSha: "brief000brief000brief000brief000",
+      baseSha: "brief000brief000brief000brief000",
+      provider: "gitlab",
+      providerInstance: "https://gitlab.example",
+    });
+    await createPipeline({
+      config: briefConfig(),
+      store,
+      github: githubPort(),
+      checkout: await fixtureCheckout(),
+      opencode: briefOpencode(),
+    }).run(created.job.id);
+    const job = store.getJob(created.job.id);
+    expect(job?.state).toBe("failed");
+    expect(job?.failure_reason).toContain("not available");
+  });
+
+  describe("cache (issue #89)", () => {
+    function countingOpencode(counter: { runs: number }): OpenCodePort {
+      return {
+        async run() {
+          counter.runs += 1;
+          return { stdout: briefJson, stderr: "", exitCode: 0, text: briefJson, usage: { cost: 0.01, totalTokens: 10, complete: true } };
+        },
+      };
+    }
+
+    it("serves a repeat brief on the same SHA from cache — a new job, no checkout, no OpenCode run", async () => {
+      const store = new JobStore(openDb(":memory:"));
+      const counter = { runs: 0 };
+      const checkout = await fixtureCheckout();
+      const prepare = vi.spyOn(checkout, "prepare");
+      const pipeline = createPipeline({
+        config: briefConfig(),
+        store,
+        github: githubPort(),
+        checkout,
+        opencode: countingOpencode(counter),
+      });
+
+      const first = enqueueBrief(store);
+      await pipeline.run(first.job.id);
+      expect(counter.runs).toBe(1);
+
+      // The repeat request is its own job (per-request dedup key), not the
+      // first job deduped back.
+      const second = enqueueBrief(store);
+      expect(second.created).toBe(true);
+      expect(second.job.id).not.toBe(first.job.id);
+
+      await pipeline.run(second.job.id);
+      const job = store.getJob(second.job.id);
+      expect(job?.state).toBe("completed");
+      expect(prepare).toHaveBeenCalledTimes(1);
+      expect(counter.runs).toBe(1);
+      const payload = parseBriefPayload(job?.brief_json);
+      expect(payload?.served_from_cache).toBe(true);
+      expect(payload?.sections).toHaveLength(5);
+      expect(payload?.sections[0]?.fragment).toContain("export const n = 1");
+      expect(store.listReviewerRuns(second.job.id)[0]?.state).toBe("done");
+      expect(store.getJob(second.job.id)?.workspace_path).toBeNull();
+      const logs = store.listReviewerRuns(second.job.id);
+      expect(logs[0]?.role).toBe("repo_brief");
+    });
+
+    it("never serves the cached brief for a different SHA", async () => {
+      const store = new JobStore(openDb(":memory:"));
+      const counter = { runs: 0 };
+      const pipeline = createPipeline({
+        config: briefConfig(),
+        store,
+        github: githubPort(),
+        checkout: await fixtureCheckout(),
+        opencode: countingOpencode(counter),
+      });
+
+      const first = enqueueBrief(store, "aaaa0000aaaa0000aaaa0000aaaa0000aaaa0000");
+      await pipeline.run(first.job.id);
+      const second = enqueueBrief(store, "bbbb1111bbbb1111bbbb1111bbbb1111bbbb1111");
+      await pipeline.run(second.job.id);
+
+      expect(counter.runs).toBe(2);
+      const payload = parseBriefPayload(store.getJob(second.job.id)?.brief_json);
+      expect(payload?.served_from_cache).toBeUndefined();
+      expect(payload?.sha).toBe("bbbb1111bbbb1111bbbb1111bbbb1111bbbb1111");
+    });
+
+    it("re-runs every brief when the cache is disabled", async () => {
+      const store = new JobStore(openDb(":memory:"));
+      const counter = { runs: 0 };
+      const pipeline = createPipeline({
+        config: briefConfig({ MAOMAO_BRIEF_CACHE_ENABLED: "false" }),
+        store,
+        github: githubPort(),
+        checkout: await fixtureCheckout(),
+        opencode: countingOpencode(counter),
+      });
+
+      const first = enqueueBrief(store);
+      await pipeline.run(first.job.id);
+      const second = enqueueBrief(store);
+      await pipeline.run(second.job.id);
+
+      expect(counter.runs).toBe(2);
+      expect(store.getRepoBriefCache("github", "github.com", first.job.repo_full_name, first.job.head_sha)).toBeUndefined();
+    });
+
+    it("two confirmed briefs coexist as distinct jobs on the same repo+SHA, and a newer brief never stales an older one", () => {
+      const store = new JobStore(openDb(":memory:"));
+      const first = enqueueBrief(store, "aaaa0000aaaa0000aaaa0000aaaa0000aaaa0000");
+      const second = enqueueBrief(store, "aaaa0000aaaa0000aaaa0000aaaa0000aaaa0000");
+      expect(first.created).toBe(true);
+      expect(second.created).toBe(true);
+      expect(second.job.id).not.toBe(first.job.id);
+      expect(store.getJob(first.job.id)?.dedup_key).not.toBe("");
+      expect(store.getJob(second.job.id)?.dedup_key).not.toBe(store.getJob(first.job.id)?.dedup_key);
+
+      // A brief on a different SHA is immutable history, not a superseded job.
+      const other = enqueueBrief(store, "bbbb1111bbbb1111bbbb1111bbbb1111bbbb1111");
+      expect(other.created).toBe(true);
+      expect(store.getJob(first.job.id)?.state).toBe("queued");
+      expect(store.getJob(second.job.id)?.state).toBe("queued");
+    });
+
+    it("stores and reads back a cached payload scoped to forge/repo/SHA", () => {
+      const store = new JobStore(openDb(":memory:"));
+      store.putRepoBriefCache("github", "github.com", "acme/widgets", "sha1", '{"k":1}');
+      expect(store.getRepoBriefCache("github", "github.com", "acme/widgets", "sha1")?.payload).toBe('{"k":1}');
+      expect(store.getRepoBriefCache("github", "github.com", "acme/widgets", "sha2")).toBeUndefined();
+      expect(store.getRepoBriefCache("github", "github.com", "acme/other", "sha1")).toBeUndefined();
+      expect(store.getRepoBriefCache("gitlab", "gitlab.example", "acme/widgets", "sha1")).toBeUndefined();
+      store.putRepoBriefCache("github", "github.com", "acme/widgets", "sha1", '{"k":2}');
+      expect(store.getRepoBriefCache("github", "github.com", "acme/widgets", "sha1")?.payload).toBe('{"k":2}');
+    });
   });
 });
 
@@ -4921,5 +5300,161 @@ describe("non-github health scans", () => {
     const job = store.getJob(created.job.id);
     expect(job?.state).toBe("failed");
     expect(job?.failure_reason).toMatch(/health scans are not available for gitlab:gitlab.com/);
+  });
+});
+
+describe("stack reviews (issue #99)", () => {
+  function stackConfig() {
+    return loadConfig({
+      REVIEWER_ROLES: "correctness",
+      OPENCODE_REVIEWER_MODEL: "test/model",
+      OPENCODE_TIMEOUT_MS: "5000",
+      POST_EMPTY_REVIEW: "true",
+      GITHUB_APP_ID: "1",
+      GITHUB_WEBHOOK_SECRET: "s",
+      GITHUB_APP_PRIVATE_KEY: "k",
+    });
+  }
+
+  function enqueueStackJob(store: JobStore) {
+    const stack = store.enqueue({
+      repoFullName: "acme/widgets",
+      repoOwner: "acme",
+      repoName: "widgets",
+      installationId: 9,
+      prNumber: 42,
+      prTitle: "top of stack",
+      prBody: "",
+      prHtmlUrl: "",
+      prAuthor: "alice",
+      baseSha: "b41",
+      headSha: "h42",
+      baseRef: "main",
+      headRef: "feat-b",
+      reviewers: [{ role: "stack_cumulative", title: "Stack cumulative" }],
+      jobType: "stack_review",
+      dedupKey: "stack:s1",
+    });
+    store.insertStackMembers(stack.job.id, [
+      { position: 1, prNumber: 41, baseRef: "main", headRef: "feat-a", baseSha: "b41", headSha: "h41" },
+      { position: 2, prNumber: 42, baseRef: "feat-a", headRef: "feat-b", baseSha: "h41", headSha: "h42" },
+    ]);
+    return stack;
+  }
+
+  function resolvedPull(prNumber: number, headSha: string) {
+    const bases: Record<number, [string, string]> = { 41: ["main", "feat-a"], 42: ["feat-a", "feat-b"] };
+    const [baseRef, headRef] = bases[prNumber]!;
+    return {
+      installationId: 9,
+      accountId: 1001,
+      repositoryId: 2002,
+      repoOwner: "acme",
+      repoName: "widgets",
+      repoFullName: "acme/widgets",
+      prNumber,
+      prTitle: `PR ${prNumber}`,
+      prBody: "",
+      prHtmlUrl: `https://example.test/pull/${prNumber}`,
+      prAuthor: "alice",
+      baseSha: `b${prNumber}`,
+      headSha,
+      baseRef,
+      headRef,
+      draft: false,
+    };
+  }
+
+  const stackOpencode: OpenCodePort = {
+    async run(input) {
+      const text = /stack reviewer/i.test(input.prompt)
+        ? JSON.stringify({
+            schema_version: 1,
+            reviewer: "stack_cumulative",
+            verdict: "findings",
+            summary: "the stack is coherent except one cross-PR break",
+            findings: [
+              {
+                severity: "high",
+                confidence: 0.9,
+                category: "cross_pr",
+                file: "example.ts",
+                line: 1,
+                summary: "#41 removes the helper #42 calls",
+                reason: "#42's diff still invokes the symbol deleted in #41",
+              },
+            ],
+          })
+        : input.prompt.match(/Role id: (\w+)/)
+          ? reviewerJson("correctness")
+          : JSON.stringify({ schema_version: 1, verdict: "approve", summary: "fine", findings: [] });
+      return { stdout: text, stderr: "", exitCode: 0, text, usage: { promptTokens: 3, completionTokens: 2 } };
+    },
+  };
+
+  it("reviews each member in order, then publishes the cumulative summary and findings on the top PR", async () => {
+    const config = stackConfig();
+    const store = new JobStore(openDb(":memory:"));
+    const stack = enqueueStackJob(store);
+    const issueComments: { pullNumber: number; body: string }[] = [];
+    const reviews: number[] = [];
+    const github = {
+      ...githubPort(),
+      getPull: async (_i: number, _o: string, _r: string, n: number) => resolvedPull(n, `h${n}`),
+      createCommentReview: async (input: { pullNumber: number }) => {
+        reviews.push(input.pullNumber);
+        return { id: "9", url: "u" };
+      },
+      createIssueComment: async (input: { pullNumber: number; body: string }) => {
+        issueComments.push({ pullNumber: input.pullNumber, body: input.body });
+        return { id: "1", url: "u" };
+      },
+    } as unknown as GithubPort;
+    const pipeline = createPipeline({ config, store, github, checkout: await fixtureCheckout(), opencode: stackOpencode });
+    await pipeline.run(stack.job.id);
+
+    expect(store.getJob(stack.job.id)?.state).toBe("completed");
+    const memberJobs = store.listJobs(20).filter((j) => j.job_type === "pr_review");
+    expect(memberJobs.map((j) => j.pr_number).sort()).toEqual([41, 42]);
+    expect(memberJobs.every((j) => j.state === "completed")).toBe(true);
+    // Members were reviewed as normal pr_review jobs (one GitHub review each).
+    expect(reviews.sort()).toEqual([41, 42]);
+    const members = store.listStackMembers(stack.job.id);
+    expect(members.every((m) => m.state === "done" && m.member_job_id)).toBe(true);
+    // Stack-level output lands on the top PR only: summary + one finding.
+    expect(issueComments.every((c) => c.pullNumber === 42)).toBe(true);
+    expect(issueComments[0]?.body).toContain('Stack review "s1"');
+    expect(issueComments[0]?.body).toContain("#41@h41");
+    expect(issueComments.some((c) => /Cross-PR finding \(high\).*#41 removes the helper #42 calls/s.test(c.body))).toBe(true);
+    const cumulative = store.listReviewerRuns(stack.job.id).find((r) => r.role === "stack_cumulative");
+    expect(cumulative?.state).toBe("done");
+  });
+
+  it("marks the job stale and posts nothing when a member head moved before publish", async () => {
+    const config = stackConfig();
+    const store = new JobStore(openDb(":memory:"));
+    const stack = enqueueStackJob(store);
+    const issueComments: number[] = [];
+    // PR 41's head moves between the run-start pin and the pre-publish check.
+    const pullCalls: Record<number, number> = {};
+    const github = {
+      ...githubPort(),
+      getPull: async (_i: number, _o: string, _r: string, n: number) => {
+        pullCalls[n] = (pullCalls[n] ?? 0) + 1;
+        return resolvedPull(n, n === 41 && pullCalls[n]! > 1 ? "h41b" : `h${n}`);
+      },
+      createCommentReview: async () => ({ id: "9", url: "u" }),
+      createIssueComment: async (input: { pullNumber: number }) => {
+        issueComments.push(input.pullNumber);
+        return { id: "1", url: "u" };
+      },
+    } as unknown as GithubPort;
+    const pipeline = createPipeline({ config, store, github, checkout: await fixtureCheckout(), opencode: stackOpencode });
+    await pipeline.run(stack.job.id);
+
+    expect(store.getJob(stack.job.id)?.state).toBe("stale");
+    expect(issueComments).toHaveLength(0);
+    const logs = store.listLogs(stack.job.id).map((l) => l.message).join("\n");
+    expect(logs).toMatch(/head moved h41 → h41b/);
   });
 });

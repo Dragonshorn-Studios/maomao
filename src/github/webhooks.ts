@@ -8,10 +8,14 @@ import {
   parseThreadFindingMarker,
   threadContainsComment,
   type GithubPort,
+  type ManualTriggerPort,
   type ReviewThread,
 } from "./client.js";
 import type { EnqueueResult, JobStore } from "../jobs/store.js";
 import { enqueuePullJob } from "../jobs/enqueue.js";
+import { parseStackCommand, validateStackMembers, type StackCommand } from "../stacks/commands.js";
+import { upsertStackComment } from "../stacks/comments.js";
+import type { ResolvedPull } from "./client.js";
 import { cancelJobsForPull } from "../jobs/cancel.js";
 import { logAuthorizationRejection, logRateLimited, positiveGithubId, rejectUnauthorized } from "./authorize.js";
 import { describeThreadResolveError } from "./errors.js";
@@ -38,11 +42,12 @@ export type WebhookHandleResult = {
 
 export interface IssueCommentWebhookPayload {
   action?: string;
-  installation?: { id?: number };
+  installation?: { id?: number; account?: { id?: number } };
   repository?: {
+    id?: number;
     full_name?: string;
     name?: string;
-    owner?: { login?: string };
+    owner?: { login?: string; id?: number };
   };
   issue?: {
     number?: number;
@@ -259,7 +264,7 @@ export async function handleGithubWebhook(input: {
   store: JobStore;
   request: WebhookRequest;
   rateLimiter?: RepoRateLimiter;
-  github?: GithubPort;
+  github?: GithubPort & Partial<ManualTriggerPort>;
   /** Queue hook so cancelled jobs are dropped from memory before the claim/audit steps. */
   abortJobs?: (jobIds: number[]) => void;
 }): Promise<WebhookHandleResult> {
@@ -325,6 +330,25 @@ export async function handleGithubWebhook(input: {
         `webhook: ignoring ${input.request.event}.${payload.action} for merged ${parsed.repoFullName}#${parsed.prNumber} (delivery ${input.request.deliveryId || "unknown"})`,
       );
       return ignored("pull request already merged; not enqueueing");
+    }
+
+    // Timed repository pause (issue #99): while active, automatic
+    // pull_request deliveries enqueue nothing and spend nothing. The skip is
+    // claimed on the delivery row (idempotent across redelivery) and logged;
+    // manual forms, scans, briefs, and stack commands are unaffected. An
+    // expired pause falls through with no backfill of intermediate SHAs.
+    const pause = input.store.getActivePause(parsed.repoFullName);
+    if (pause) {
+      input.store.claimWebhookDelivery(
+        input.request.deliveryId,
+        input.request.event,
+        `paused (expires ${pause.expires_at})`,
+      );
+      console.warn(
+        `webhook: skipped ${input.request.event}.${payload.action} for paused ${parsed.repoFullName} ` +
+          `(pause expires ${pause.expires_at}, delivery ${input.request.deliveryId || "unknown"})`,
+      );
+      return ignored(`automatic reviews paused until ${pause.expires_at}`);
     }
 
     const rateOn = repoRateLimitActive(input.config.repoRateLimitPerWindow, input.config.repoRateWindowMs);
@@ -397,7 +421,7 @@ async function handleIssueComment(input: {
   config: Config;
   store: JobStore;
   request: WebhookRequest;
-  github?: GithubPort;
+  github?: GithubPort & Partial<ManualTriggerPort>;
 }): Promise<WebhookHandleResult> {
   let payload: IssueCommentWebhookPayload;
   try {
@@ -413,6 +437,13 @@ async function handleIssueComment(input: {
   }
   const body = payload.comment?.body ?? "";
   const actor = payload.comment?.user ?? payload.sender;
+  // Stack commands run before the bot filter: allowlisted automation
+  // identities (MAOMAO_STACK_AUTHORS) may issue them; every other actor is
+  // authorized by collaborator permission inside the handler.
+  const stackCommand = parseStackCommand(body);
+  if (stackCommand) {
+    return handleStackCommand(input, payload, stackCommand);
+  }
   if (isBotActor({ login: actor?.login, type: actor?.type })) {
     return { status: 202, body: { ok: true, ignored: true, reason: "ignored bot comment" } };
   }
@@ -454,6 +485,211 @@ async function handleIssueComment(input: {
     body: { ok: true, dispatchJobId: job.id, jobId: job.id, headSha: job.head_sha },
     dispatchJobId: job.id,
   };
+}
+
+// Stack commands (issue #99): "issue X of Y in stack <id>" declares a member,
+// "top of stack <id>: #n,…" validates the whole stack and enqueues exactly one
+// stack_review job. Success leaves one self-updating marker comment per member
+// PR (the only visible trace — no chatter); rejections get one actionable
+// error comment. Duplicate comment deliveries are deduped by comment id so
+// they can never double-post or double-enqueue.
+async function handleStackCommand(
+  input: {
+    config: Config;
+    store: JobStore;
+    request: WebhookRequest;
+    github?: GithubPort & Partial<ManualTriggerPort>;
+  },
+  payload: IssueCommentWebhookPayload,
+  command: StackCommand,
+): Promise<WebhookHandleResult> {
+  const actor = payload.comment?.user ?? payload.sender;
+  const actorLogin = actor?.login;
+  const installationId = payload.installation?.id;
+  const repoOwner = payload.repository?.owner?.login;
+  const repoName = payload.repository?.name;
+  const repoFullName = payload.repository?.full_name;
+  const prNumber = payload.issue?.number;
+  if (!installationId || !repoOwner || !repoName || !repoFullName || !prNumber || !actorLogin || !input.github) {
+    return { status: 202, body: { ok: true, ignored: true, reason: "missing github context" } };
+  }
+  // Stack commands only make sense on pull requests — the same text on a
+  // plain issue must not record a declaration against an issue number.
+  if (!payload.issue?.pull_request) {
+    return { status: 202, body: { ok: true, ignored: true, reason: "stack commands require a pull request comment" } };
+  }
+
+  if (isBotActor({ login: actor?.login, type: actor?.type })) {
+    // Automation identities are admitted only via the explicit allowlist.
+    if (!input.config.stackCommandAuthors.includes(actorLogin.toLowerCase())) {
+      return { status: 202, body: { ok: true, ignored: true, reason: "bot actor is not an allowlisted stack command author", actor: actorLogin } };
+    }
+  } else {
+    const permission = await input.github.getCollaboratorPermission(installationId, repoOwner, repoName, actorLogin);
+    if (!canIssueOverride(permission, payload.comment?.author_association)) {
+      return {
+        status: 202,
+        body: { ok: true, ignored: true, reason: "actor is not authorized for stack commands", actor: actorLogin, permission },
+      };
+    }
+  }
+
+  const commentId = payload.comment?.id;
+  if (commentId != null && input.store.hasReviewCommand(String(commentId))) {
+    input.store.claimWebhookDelivery(input.request.deliveryId, input.request.event, "duplicate-stack-command");
+    return { status: 200, body: { ok: true, duplicate: true, reason: "duplicate command comment" } };
+  }
+  const finish = (result: string, body: Record<string, unknown>): WebhookHandleResult => {
+    input.store.claimWebhookDelivery(input.request.deliveryId, input.request.event, result);
+    if (commentId != null) input.store.claimReviewCommand(String(commentId), input.request.deliveryId, "stack-command", result);
+    return { status: 200, body };
+  };
+  const reply = async (text: string): Promise<void> => {
+    try {
+      await input.github?.createIssueComment?.({
+        installationId,
+        owner: repoOwner,
+        repo: repoName,
+        pullNumber: prNumber,
+        body: text,
+      });
+    } catch (error) {
+      console.warn(`stack command: could not post reply on ${repoFullName}#${prNumber}: ${error instanceof Error ? error.message : error}`);
+    }
+  };
+  // Every member PR carries one marker comment naming its position in the
+  // stack; each accepted declare/trigger rewrites all of them so a partial
+  // declaration set still shows the same shared picture. Per-member failures
+  // warn only — the comment is informational, the command still stands.
+  const refreshStackComments = async (
+    members: { position: number; prNumber: number; headSha?: string; expectedCount: number }[],
+  ): Promise<void> => {
+    for (const member of members) {
+      try {
+        await upsertStackComment({
+          github: input.github!,
+          installationId,
+          repoOwner,
+          repoName,
+          selfPrNumber: member.prNumber,
+          stackId: command.stackId,
+          expectedCount: member.expectedCount,
+          members,
+        });
+      } catch (error) {
+        console.warn(`stack command: could not update stack comment on ${repoFullName}#${member.prNumber}: ${error instanceof Error ? error.message : error}`);
+      }
+    }
+  };
+
+  if (command.kind === "declare") {
+    const result = input.store.upsertStackDeclaration({
+      repoFullName,
+      stackId: command.stackId,
+      prNumber,
+      position: command.position,
+      expectedCount: command.expectedCount,
+      actor: actorLogin,
+      commentId: commentId != null ? String(commentId) : undefined,
+    });
+    if (!result.ok) {
+      await reply(`Could not record stack membership: ${result.error}.`);
+      return finish("declare-conflict", { ok: true, command: "declare", stackId: command.stackId, recorded: false, error: result.error });
+    }
+    if (result.created) {
+      const declarations = input.store.listStackDeclarations(repoFullName, command.stackId);
+      await refreshStackComments(
+        declarations.map((d) => ({ position: d.position, prNumber: d.pr_number, expectedCount: d.expected_count })),
+      );
+    }
+    return finish(result.created ? "declare-recorded" : "declare-duplicate", {
+      ok: true,
+      command: "declare",
+      stackId: command.stackId,
+      recorded: result.created,
+    });
+  }
+
+  if (typeof input.github.getPull !== "function") {
+    return { status: 202, body: { ok: true, ignored: true, reason: "github client cannot resolve pull requests" } };
+  }
+  const getPull = input.github.getPull.bind(input.github);
+  const pulls: ResolvedPull[] = [];
+  for (const n of command.prNumbers) {
+    try {
+      pulls.push(await getPull(installationId, repoOwner, repoName, n));
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      await reply(`Could not run stack "${command.stackId}": PR #${n} does not resolve in ${repoFullName} (${message}).`);
+      return finish("top-unresolved", { ok: true, command: "top", stackId: command.stackId, enqueued: false, error: `PR #${n} unresolved` });
+    }
+  }
+  const declarations = input.store.listStackDeclarations(repoFullName, command.stackId);
+  const validation = validateStackMembers({
+    stackId: command.stackId,
+    prNumbers: command.prNumbers,
+    pulls,
+    declarations,
+    repoFullName,
+    commentPrNumber: prNumber,
+  });
+  if (!validation.ok) {
+    await reply(`Could not run stack "${command.stackId}": ${validation.error}.`);
+    return finish("top-invalid", { ok: true, command: "top", stackId: command.stackId, enqueued: false, error: validation.error });
+  }
+
+  const top = validation.members[validation.members.length - 1]!;
+  const bottom = validation.members[0]!;
+  const topPull = pulls[pulls.length - 1]!;
+  const enqueue = input.store.enqueue({
+    repoFullName,
+    repoOwner,
+    repoName,
+    installationId,
+    githubAccountId: numericId(payload.installation?.account?.id) ?? numericId(payload.repository?.owner?.id),
+    githubRepositoryId: numericId(payload.repository?.id),
+    prNumber: top.prNumber,
+    prTitle: topPull.prTitle,
+    prBody: topPull.prBody,
+    prHtmlUrl: topPull.prHtmlUrl,
+    prAuthor: topPull.prAuthor,
+    baseSha: bottom.baseSha,
+    headSha: top.headSha,
+    baseRef: bottom.baseRef,
+    headRef: top.headRef,
+    webhookDeliveryId: input.request.deliveryId,
+    webhookEvent: "issue_comment",
+    // One placeholder run row for the cumulative pass; member reviews get the
+    // profile reviewers when runStackJob enqueues them as pr_review jobs.
+    reviewers: [{ role: "stack_cumulative", title: "Stack cumulative" }],
+    jobType: "stack_review",
+    dedupKey: `stack:${command.stackId}`,
+  });
+  await refreshStackComments(
+    validation.members.map((m) => ({
+      position: m.position,
+      prNumber: m.prNumber,
+      headSha: m.headSha,
+      expectedCount: validation.members.length,
+    })),
+  );
+  if (enqueue.created) {
+    input.store.insertStackMembers(enqueue.job.id, validation.members);
+    input.store.log(
+      enqueue.job.id,
+      `Stack "${command.stackId}" of ${validation.members.length} triggered by ${actorLogin}: ` +
+        validation.members.map((m) => `#${m.prNumber}@${m.headSha.slice(0, 8)}`).join(" → "),
+    );
+  }
+  const result = finish(enqueue.created ? "top-enqueued" : "top-deduped", {
+    ok: true,
+    command: "top",
+    stackId: command.stackId,
+    enqueued: enqueue.created,
+    jobId: enqueue.job.id,
+    staleJobIds: enqueue.staleJobIds,
+  });
+  return { ...result, enqueue };
 }
 
 async function handleReviewCommentWebhook(input: {

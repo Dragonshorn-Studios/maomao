@@ -1948,6 +1948,352 @@ describe("health scan routes", () => {
   });
 });
 
+describe("repo brief routes (issue #88)", () => {
+  const oauthEnv = {
+    UI_SESSION_SECRET: "session-secret-for-tests",
+    GITHUB_OAUTH_CLIENT_ID: "cid",
+    GITHUB_OAUTH_CLIENT_SECRET: "csecret",
+    MAOMAO_ADMIN_GITHUB_IDS: "1001",
+    MAOMAO_PUBLIC_URL: "https://maomao.example",
+  };
+  const RESOLVED_SHA = "c0ffee00000000000000000000000000000bad";
+
+  function briefGithub(): ManualTriggerPort & Partial<GithubPort> {
+    return {
+      getRepoInstallation: async () => ({ installationId: 42, accountId: 1001 }),
+      getRepository: async () => ({ id: 2002 }),
+      getRepositoryHead: async () => ({ defaultBranch: "main", headSha: RESOLVED_SHA }),
+      getCommit: async (_installationId: number, _owner: string, _repo: string, ref: string) => {
+        if (ref === "5f3aa1c" || ref === "main" || ref === RESOLVED_SHA) return { sha: RESOLVED_SHA, message: "commit msg" };
+        throw Object.assign(new Error(`Not Found - ${ref}`), { status: 404 });
+      },
+      listReviewThreads: async () => [],
+      resolveReviewThread: async () => {},
+      unresolveReviewThread: async () => {},
+      getCollaboratorPermission: async () => "write",
+      getInstallationToken: async () => "t",
+    } as unknown as ManualTriggerPort & Partial<GithubPort>;
+  }
+
+  async function operatorBriefCsrf(app: ReturnType<typeof createApp>) {
+    const session = await operatorSession(app);
+    const page = await app.request("/brief", { headers: { cookie: session } });
+    const artifacts = await csrfArtifacts(page);
+    return { session, ...artifacts, html: artifacts.html };
+  }
+
+  function briefConfirmBody(html: string, csrfToken: string, overrides: Record<string, string> = {}): string {
+    return new URLSearchParams({
+      repo: hiddenValue(html, "repo"),
+      ref: hiddenValue(html, "ref"),
+      sha: hiddenValue(html, "sha"),
+      csrf_token: csrfToken,
+      ...overrides,
+    }).toString();
+  }
+
+  it("shows the start page only to operators and enqueues one job for the confirmed SHA", async () => {
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    const { app, store } = testApp(oauthEnv, briefGithub(), mockOauthFetch({ id: 1001, login: "octocat" }));
+
+    const deniedGet = await app.request("/brief");
+    expect(deniedGet.status).toBe(302);
+    expect(deniedGet.headers.get("location")).toContain("/login");
+    const denied = await app.request("/brief", {
+      method: "POST",
+      headers: { "content-type": "application/x-www-form-urlencoded" },
+      body: "repo=acme/widgets&ref=5f3aa1c",
+    });
+    expect(denied.status).toBe(302);
+    expect(store.listJobs()).toEqual([]);
+
+    const { session, csrfCookie, csrfToken, html } = await operatorBriefCsrf(app);
+    expect(html).toContain("What this SHA holds.");
+    expect(html).toContain('href="/brief"'); // reachable from the operator menu
+
+    // Step 1 resolves the typed ref to an exact SHA and shows the confirmation.
+    const preview = await app.request("/brief", {
+      method: "POST",
+      headers: { cookie: `${session}; ${csrfCookie}`, "content-type": "application/x-www-form-urlencoded" },
+      body: `repo=acme%2Fwidgets&ref=5f3aa1c&csrf_token=${encodeURIComponent(csrfToken)}`,
+    });
+    expect(preview.status).toBe(200);
+    const previewHtml = await preview.text();
+    expect(previewHtml).toContain("Confirm repo brief");
+    expect(previewHtml).toContain(RESOLVED_SHA);
+    expect(hiddenValue(previewHtml, "ref")).toBe("5f3aa1c");
+    expect(store.listJobs()).toEqual([]);
+
+    // Step 2 confirms and enqueues the job, pinned to the resolved SHA.
+    const queued = await app.request("/brief", {
+      method: "POST",
+      headers: { cookie: `${session}; ${csrfCookie}`, "content-type": "application/x-www-form-urlencoded" },
+      body: briefConfirmBody(previewHtml, csrfToken),
+    });
+    expect(queued.status).toBe(302);
+    expect(queued.headers.get("location")).toContain("brief-queued");
+    const job = store.listJobs()[0]!;
+    expect(job.job_type).toBe("repo_brief");
+    expect(job.head_sha).toBe(RESOLVED_SHA);
+    expect(job.pr_number).toBe(0);
+    expect(store.listReviewerRuns(job.id)[0]?.role).toBe("repo_brief");
+    log.mockRestore();
+  });
+
+  it("falls back to the default branch head when no ref is typed", async () => {
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    const { app, store } = testApp(oauthEnv, briefGithub(), mockOauthFetch({ id: 1001, login: "octocat" }));
+    const { session, csrfCookie, csrfToken } = await operatorBriefCsrf(app);
+    const preview = await app.request("/brief", {
+      method: "POST",
+      headers: { cookie: `${session}; ${csrfCookie}`, "content-type": "application/x-www-form-urlencoded" },
+      body: `repo=acme%2Fwidgets&csrf_token=${encodeURIComponent(csrfToken)}`,
+    });
+    const previewHtml = await preview.text();
+    expect(hiddenValue(previewHtml, "ref")).toBe("main");
+    expect(hiddenValue(previewHtml, "sha")).toBe(RESOLVED_SHA);
+    const queued = await app.request("/brief", {
+      method: "POST",
+      headers: { cookie: `${session}; ${csrfCookie}`, "content-type": "application/x-www-form-urlencoded" },
+      body: briefConfirmBody(previewHtml, csrfToken),
+    });
+    expect(queued.status).toBe(302);
+    expect(store.listJobs()[0]?.job_type).toBe("repo_brief");
+    log.mockRestore();
+  });
+
+  it("re-renders the confirmation with a notice when the ref moved since it was shown", async () => {
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    const github = briefGithub();
+    github.getCommit = async () => ({ sha: "newsha".repeat(5), message: "moved" });
+    const { app, store } = testApp(oauthEnv, github, mockOauthFetch({ id: 1001, login: "octocat" }));
+    const { session, csrfCookie, csrfToken } = await operatorBriefCsrf(app);
+    const confirm = await app.request("/brief", {
+      method: "POST",
+      headers: { cookie: `${session}; ${csrfCookie}`, "content-type": "application/x-www-form-urlencoded" },
+      body: `repo=acme%2Fwidgets&ref=main&sha=${RESOLVED_SHA}&csrf_token=${encodeURIComponent(csrfToken)}`,
+    });
+    expect(confirm.status).toBe(200);
+    const confirmHtml = await confirm.text();
+    expect(confirmHtml).toContain("changed since you confirmed");
+    expect(store.listJobs()).toEqual([]);
+    log.mockRestore();
+  });
+
+  it("shows no warning on the first confirm render for a typed ref, only for a partial confirm", async () => {
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    const { app, store } = testApp(oauthEnv, briefGithub(), mockOauthFetch({ id: 1001, login: "octocat" }));
+    const { session, csrfCookie, csrfToken } = await operatorBriefCsrf(app);
+
+    // Step 1 with a typed ref submits no `sha` field — a preview, not a
+    // confirmation attempt — so the page renders without the warn banner.
+    const preview = await app.request("/brief", {
+      method: "POST",
+      headers: { cookie: `${session}; ${csrfCookie}`, "content-type": "application/x-www-form-urlencoded" },
+      body: `repo=acme%2Fwidgets&ref=main&csrf_token=${encodeURIComponent(csrfToken)}`,
+    });
+    const previewHtml = await preview.text();
+    expect(previewHtml).toContain("Confirm repo brief");
+    expect(previewHtml).not.toContain("Confirmation incomplete");
+
+    // A confirm POST that carried a `sha` field but left it blank did attempt
+    // a confirmation, so the warning applies.
+    const partial = await app.request("/brief", {
+      method: "POST",
+      headers: { cookie: `${session}; ${csrfCookie}`, "content-type": "application/x-www-form-urlencoded" },
+      body: `repo=acme%2Fwidgets&ref=main&sha=&csrf_token=${encodeURIComponent(csrfToken)}`,
+    });
+    expect(await partial.text()).toContain("Confirmation incomplete");
+    expect(store.listJobs()).toEqual([]);
+    log.mockRestore();
+  });
+
+  it("rejects an unresolvable ref with a plain-language error", async () => {
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    const { app } = testApp(oauthEnv, briefGithub(), mockOauthFetch({ id: 1001, login: "octocat" }));
+    const { session, csrfCookie, csrfToken } = await operatorBriefCsrf(app);
+    const res = await app.request("/brief", {
+      method: "POST",
+      headers: { cookie: `${session}; ${csrfCookie}`, "content-type": "application/x-www-form-urlencoded" },
+      body: `repo=acme%2Fwidgets&ref=nosuchref&csrf_token=${encodeURIComponent(csrfToken)}`,
+    });
+    expect(res.status).toBe(400);
+    expect(await res.text()).toContain("to a commit in acme/widgets");
+    log.mockRestore();
+  });
+
+  it("surfaces a GitHub failure as itself instead of blaming the ref", async () => {
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    const err = vi.spyOn(console, "error").mockImplementation(() => {});
+    const github = briefGithub();
+    github.getCommit = async () => {
+      throw Object.assign(new Error("upstream boom"), { status: 500 });
+    };
+    const { app } = testApp(oauthEnv, github, mockOauthFetch({ id: 1001, login: "octocat" }));
+    const { session, csrfCookie, csrfToken } = await operatorBriefCsrf(app);
+    const res = await app.request("/brief", {
+      method: "POST",
+      headers: { cookie: `${session}; ${csrfCookie}`, "content-type": "application/x-www-form-urlencoded" },
+      body: `repo=acme%2Fwidgets&ref=main&csrf_token=${encodeURIComponent(csrfToken)}`,
+    });
+    expect(res.status).toBe(400);
+    const html = await res.text();
+    expect(html).toContain("upstream boom");
+    expect(html).not.toContain("to a commit");
+    log.mockRestore();
+    err.mockRestore();
+  });
+
+  it("lets a brief coexist with a scan on the same repo and SHA", async () => {
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    const { app, store } = testApp(oauthEnv, briefGithub(), mockOauthFetch({ id: 1001, login: "octocat" }));
+    store.enqueue({
+      repoFullName: "acme/widgets",
+      repoOwner: "acme",
+      repoName: "widgets",
+      installationId: 42,
+      githubAccountId: 1001,
+      githubRepositoryId: 2002,
+      prNumber: 0,
+      prTitle: "Repository health scan (main)",
+      prBody: "",
+      prHtmlUrl: "",
+      prAuthor: "dev",
+      baseSha: RESOLVED_SHA,
+      headSha: RESOLVED_SHA,
+      baseRef: "main",
+      headRef: "main",
+      jobType: "health_scan",
+      reviewers: [],
+    });
+    const { session, csrfCookie, csrfToken } = await operatorBriefCsrf(app);
+    const preview = await app.request("/brief", {
+      method: "POST",
+      headers: { cookie: `${session}; ${csrfCookie}`, "content-type": "application/x-www-form-urlencoded" },
+      body: `repo=acme%2Fwidgets&csrf_token=${encodeURIComponent(csrfToken)}`,
+    });
+    const previewHtml = await preview.text();
+    const queued = await app.request("/brief", {
+      method: "POST",
+      headers: { cookie: `${session}; ${csrfCookie}`, "content-type": "application/x-www-form-urlencoded" },
+      body: briefConfirmBody(previewHtml, csrfToken),
+    });
+    expect(queued.status).toBe(302);
+    expect(queued.headers.get("location")).toContain("brief-queued"); // not "exists": the scan row must not collide
+    expect(store.listJobs()).toHaveLength(2);
+    log.mockRestore();
+  });
+
+  it("renders the in-job brief tab: TOC rows and a section fragment", async () => {
+    const { app, store } = testApp(oauthEnv, briefGithub(), mockOauthFetch({ id: 1001, login: "octocat" }));
+    const created = store.enqueue({
+      repoFullName: "acme/widgets",
+      repoOwner: "acme",
+      repoName: "widgets",
+      installationId: 42,
+      githubAccountId: 1001,
+      githubRepositoryId: 2002,
+      prNumber: 0,
+      prTitle: "Repo brief (main)",
+      prBody: "",
+      prHtmlUrl: "",
+      prAuthor: "dev",
+      baseSha: RESOLVED_SHA,
+      headSha: RESOLVED_SHA,
+      baseRef: "main",
+      headRef: "main",
+      jobType: "repo_brief",
+      reviewers: [{ role: "repo_brief", title: "Repo brief" }],
+    });
+    const payload = {
+      schema_version: 1,
+      kind: "repo_brief",
+      repo: "acme/widgets",
+      sha: RESOLVED_SHA,
+      generated_at: "2026-01-01T00:00:00.000Z",
+      summary: "what this tree holds",
+      served_from_cache: true,
+      sections: [
+        { title: "Entry", path: "src/a.ts", summary: "entry point", startLine: 1, endLine: 3, fragment: "line1\nline2\nline3" },
+        { title: "Readme", path: "README.md", summary: "docs", startLine: null, endLine: null, fragment: "# widgets" },
+      ],
+    };
+    store.patchJob(created.job.id, { brief_json: JSON.stringify(payload) });
+    store.setJobState(created.job.id, "completed", { finished_at: new Date().toISOString() });
+
+    const denied = await app.request(`/jobs/${created.job.id}/brief`);
+    expect(denied.status).toBe(302);
+
+    const { session } = await operatorBriefCsrf(app);
+    const toc = await app.request(`/jobs/${created.job.id}/brief`, { headers: { cookie: session } });
+    expect(toc.status).toBe(200);
+    const tocHtml = await toc.text();
+    expect(tocHtml).toContain(`Repo brief · acme/widgets @ ${RESOLVED_SHA.slice(0, 12)}`);
+    expect(tocHtml).toContain(`href="/jobs/${created.job.id}/brief?section=0"`);
+    expect(tocHtml).toContain("entry point");
+    expect(tocHtml).toContain("Served from the repo brief cache");
+
+    const section = await app.request(`/jobs/${created.job.id}/brief?section=0`, { headers: { cookie: session } });
+    const sectionHtml = await section.text();
+    expect(sectionHtml).toContain("src/a.ts");
+    expect(sectionHtml).toContain("line1");
+
+    // An out-of-range section index falls back to the TOC rather than crashing.
+    const outOfRange = await app.request(`/jobs/${created.job.id}/brief?section=9`, { headers: { cookie: session } });
+    expect(outOfRange.status).toBe(200);
+    expect(await outOfRange.text()).toContain("Entry");
+
+    // A non-brief job has no brief tab.
+    const other = store.enqueue({
+      repoFullName: "acme/widgets",
+      repoOwner: "acme",
+      repoName: "widgets",
+      installationId: 42,
+      githubAccountId: 1001,
+      githubRepositoryId: 2002,
+      prNumber: 7,
+      prTitle: "pr",
+      prBody: "",
+      prHtmlUrl: "",
+      prAuthor: "dev",
+      baseSha: "b",
+      headSha: "h",
+      baseRef: "main",
+      headRef: "f",
+      reviewers: [],
+    });
+    const missing = await app.request(`/jobs/${other.job.id}/brief`, { headers: { cookie: session } });
+    expect(missing.status).toBe(404);
+  });
+
+  it("gives every confirmed brief its own job — identical repeats are not deduped (issue #89)", async () => {
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    const { app, store } = testApp(oauthEnv, briefGithub(), mockOauthFetch({ id: 1001, login: "octocat" }));
+    const { session, csrfCookie, csrfToken } = await operatorBriefCsrf(app);
+
+    for (let i = 0; i < 2; i += 1) {
+      const preview = await app.request("/brief", {
+        method: "POST",
+        headers: { cookie: `${session}; ${csrfCookie}`, "content-type": "application/x-www-form-urlencoded" },
+        body: `repo=acme%2Fwidgets&csrf_token=${encodeURIComponent(csrfToken)}`,
+      });
+      const queued = await app.request("/brief", {
+        method: "POST",
+        headers: { cookie: `${session}; ${csrfCookie}`, "content-type": "application/x-www-form-urlencoded" },
+        body: briefConfirmBody(await preview.text(), csrfToken),
+      });
+      expect(queued.status).toBe(302);
+      expect(queued.headers.get("location")).toContain("brief-queued");
+    }
+
+    const jobs = store.listJobs();
+    expect(jobs).toHaveLength(2);
+    expect(new Set(jobs.map((job) => job.id)).size).toBe(2);
+    expect(jobs.every((job) => job.job_type === "repo_brief")).toBe(true);
+    log.mockRestore();
+  });
+});
+
 describe("scan issue creation", () => {
   const oauthEnv = {
     UI_SESSION_SECRET: "session-secret-for-tests",
