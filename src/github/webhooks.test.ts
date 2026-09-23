@@ -1324,6 +1324,49 @@ describe("timed review pause (issue #99)", () => {
     expect(expired.body.created).toBe(true);
     expect(store.listJobs(10)).toHaveLength(1);
   });
+
+  it("skips every pull_request delivery while the global pause switch is on", async () => {
+    const secret = "s3cret";
+    const config = loadConfig({
+      GITHUB_WEBHOOK_SECRET: secret,
+      GITHUB_APP_ID: "1",
+      GITHUB_APP_PRIVATE_KEY: "k",
+      REVIEWER_ROLES: "correctness",
+    });
+    const store = new JobStore(openDb(":memory:"));
+    store.setGlobalPause("alice");
+
+    const body = JSON.stringify(prPayload());
+    const paused = await handleGithubWebhook({
+      config,
+      store,
+      request: { event: "pull_request", deliveryId: "g1", signature: sign(secret, body), rawBody: body },
+    });
+    expect(paused.body.ignored).toBe(true);
+    expect(String(paused.body.reason)).toMatch(/paused globally/);
+    expect(store.listJobs(10)).toHaveLength(0);
+    expect(store.hasWebhookDelivery("g1")).toBe(true);
+
+    // A different repo is skipped the same way — the switch is instance-wide.
+    const other = JSON.stringify(prPayload({ repository: { full_name: "acme/other", name: "other", owner: { login: "acme" } } }));
+    const second = await handleGithubWebhook({
+      config,
+      store,
+      request: { event: "pull_request", deliveryId: "g2", signature: sign(secret, other), rawBody: other },
+    });
+    expect(second.body.ignored).toBe(true);
+    expect(store.listJobs(10)).toHaveLength(0);
+
+    // Resuming restores normal handling of new deliveries.
+    store.endGlobalPause("alice");
+    const resumed = await handleGithubWebhook({
+      config,
+      store,
+      request: { event: "pull_request", deliveryId: "g3", signature: sign(secret, body), rawBody: body },
+    });
+    expect(resumed.body.created).toBe(true);
+    expect(store.listJobs(10)).toHaveLength(1);
+  });
 });
 
 describe("stack commands (issue #99)", () => {

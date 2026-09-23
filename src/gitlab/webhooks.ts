@@ -184,6 +184,16 @@ function enqueueMergeRequestJob(input: {
 }): GitLabWebhookHandleResult {
   const { store, config, connection, payload } = input;
   const scope = { provider: "gitlab", instance: connection.instance.hostname };
+  // Instance-wide review pause: same gate as the GitHub path — automatic
+  // merge-request deliveries enqueue nothing while the switch is on.
+  const globalPause = store.getGlobalPause();
+  if (globalPause) {
+    store.claimWebhookDelivery(input.deliveryId, input.event, "paused (global)", {
+      provider: "gitlab",
+      instance: connection.instance.hostname,
+    });
+    return ignored("reviews paused globally");
+  }
   if (store.hasMergedPull(payload.projectPath, payload.mrIid, scope)) {
     return ignored("merge request already merged; not enqueueing");
   }

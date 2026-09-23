@@ -42,6 +42,22 @@ export function csrfInput(token: string | undefined): string {
   return token ? `<input type="hidden" name="${CSRF_FIELD}" value="${escapeHtml(token)}"/>` : "";
 }
 
+export interface GlobalPauseInfo {
+  actor: string;
+  since: string;
+}
+
+let globalPauseProvider: (() => GlobalPauseInfo | undefined) | undefined;
+
+/**
+ * Wired once at app start so every page renders the global pause banner
+ * without each render call site plumbing the store through itself.
+ * Tests set and clear this around each case.
+ */
+export function setGlobalPauseProvider(provider: (() => GlobalPauseInfo | undefined) | undefined): void {
+  globalPauseProvider = provider;
+}
+
 const APPEARANCE_BOOT = `
 (function () {
   var KEY = "maomao-appearance";
@@ -242,6 +258,12 @@ export function layout(title: string, body: string, options: PageOptions = {}): 
     </div>
     ${accountMenu(options)}
   </header>
+  ${(() => {
+    const pause = globalPauseProvider?.();
+    return pause
+      ? `<div class="pause-banner" role="status">Reviews paused by ${escapeHtml(pause.actor)} — no reviews will be enqueued or run. <a href="/pause">Manage</a></div>`
+      : "";
+  })()}
   <main id="main">${body}</main>
   ${script}
 </body>

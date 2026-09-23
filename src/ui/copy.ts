@@ -139,6 +139,10 @@ export function cancelledBannerCopy(job: {
     const who = job.cancelled_by ?? "an operator";
     return { text: `Cancelled — ${who} paused automatic reviews for this repository.` };
   }
+  if (job.cancelled_reason === "reviews_paused") {
+    const who = job.cancelled_by ?? "an operator";
+    return { text: `Cancelled — ${who} paused all reviews instance-wide.` };
+  }
   if (job.job_type === "health_scan") {
     return { text: "Scan cancelled. Findings already saved, if any, remain listed on this page." };
   }

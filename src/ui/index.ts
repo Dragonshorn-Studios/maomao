@@ -1,4 +1,4 @@
-export { layout, type PageOptions } from "./layout.js";
+export { layout, setGlobalPauseProvider, type GlobalPauseInfo, type PageOptions } from "./layout.js";
 export {
   renderHome,
   renderJob,

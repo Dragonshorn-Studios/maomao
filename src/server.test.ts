@@ -5456,3 +5456,127 @@ describe("ask-maomao chat routes", () => {
     expect(page).not.toContain("/jobs/" + offJob + "/chat");
   });
 });
+
+describe("global review pause", () => {
+  const oauthEnv = {
+    UI_SESSION_SECRET: "session-secret-for-tests",
+    GITHUB_OAUTH_CLIENT_ID: "cid",
+    GITHUB_OAUTH_CLIENT_SECRET: "csecret",
+    MAOMAO_ADMIN_GITHUB_IDS: "1001",
+    MAOMAO_PUBLIC_URL: "https://maomao.example",
+  };
+
+  function enqueueReview(store: JobStore, jobType: "pr_review" | "stack_review" = "pr_review") {
+    return store.enqueue({
+      repoFullName: "acme/widgets",
+      repoOwner: "acme",
+      repoName: "widgets",
+      installationId: 1,
+      prNumber: 8,
+      prTitle: "Hello",
+      prBody: "",
+      prHtmlUrl: "https://example.test",
+      prAuthor: "dev",
+      baseSha: "b",
+      headSha: "h",
+      baseRef: "main",
+      headRef: "f",
+      reviewers: [{ role: "correctness", title: "Correctness" }],
+      jobType,
+    });
+  }
+
+  it("toggles the switch, shows the banner everywhere, and blocks manual reviews", async () => {
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    const { app, store } = testApp(oauthEnv, undefined, mockOauthFetch({ id: 1001, login: "octocat" }));
+    const session = await operatorSession(app);
+
+    const page = await app.request("/pause", { headers: { cookie: session } });
+    const { csrfCookie, csrfToken, html } = await csrfArtifacts(page);
+    expect(html).toContain("Pause all reviews");
+    expect(html).not.toContain("pause-banner");
+
+    // Enabling cancels every non-terminal review of both review job types,
+    // across forge scopes (the GitLab-scoped job must die too).
+    const prJob = enqueueReview(store);
+    const stackJob = enqueueReview(store, "stack_review");
+    const gitlabJob = store.enqueue({
+      repoFullName: "acme/widgets",
+      repoOwner: "acme",
+      repoName: "widgets",
+      installationId: 1,
+      provider: "gitlab",
+      providerInstance: "gitlab.com",
+      prNumber: 9,
+      prTitle: "GL",
+      prBody: "",
+      prHtmlUrl: "https://gitlab.example/mr/9",
+      prAuthor: "dev",
+      baseSha: "b",
+      headSha: "h",
+      baseRef: "main",
+      headRef: "f",
+      reviewers: [{ role: "correctness", title: "Correctness" }],
+    });
+    const paused = await app.request("/pause/global", {
+      method: "POST",
+      headers: { cookie: `${session}; ${csrfCookie}`, "content-type": "application/x-www-form-urlencoded" },
+      body: `csrf_token=${encodeURIComponent(csrfToken)}`,
+    });
+    expect(paused.status).toBe(302);
+    expect(paused.headers.get("location")).toContain("/pause?notice=");
+    expect(store.getGlobalPause()?.actor).toBe("octocat");
+    expect(store.getJob(prJob.job.id)?.state).toBe("cancelled");
+    expect(store.getJob(prJob.job.id)?.cancelled_reason).toBe("reviews_paused");
+    expect(store.getJob(stackJob.job.id)?.state).toBe("cancelled");
+    expect(store.getJob(gitlabJob.job.id)?.state).toBe("cancelled");
+    expect(store.getJob(gitlabJob.job.id)?.cancelled_reason).toBe("reviews_paused");
+
+    // The banner renders on every page, including the home queue.
+    const home = await app.request("/", { headers: { cookie: session } });
+    expect(await home.text()).toContain("pause-banner");
+    const pausePage = await app.request("/pause", { headers: { cookie: session } });
+    const pauseHtml = await pausePage.text();
+    expect(pauseHtml).toContain("pause-banner");
+    expect(pauseHtml).toContain("All reviews paused");
+    expect(pauseHtml).toContain("octocat");
+
+    // The manual review form is blocked while paused.
+    const blocked = await app.request("/reviews", {
+      method: "POST",
+      headers: { cookie: `${session}; ${csrfCookie}`, "content-type": "application/x-www-form-urlencoded" },
+      body: `url=${encodeURIComponent("https://github.com/acme/widgets/pull/8")}&csrf_token=${encodeURIComponent(csrfToken)}`,
+    });
+    expect(blocked.status).toBe(400);
+    expect(await blocked.text()).toContain("paused globally");
+
+    // Resuming clears the row and the banner.
+    const resumed = await app.request("/pause/global/end", {
+      method: "POST",
+      headers: { cookie: `${session}; ${csrfCookie}`, "content-type": "application/x-www-form-urlencoded" },
+      body: `csrf_token=${encodeURIComponent(csrfToken)}`,
+    });
+    expect(resumed.status).toBe(302);
+    expect(store.getGlobalPause()).toBeUndefined();
+    const after = await app.request("/", { headers: { cookie: session } });
+    expect(await after.text()).not.toContain("pause-banner");
+    log.mockRestore();
+  });
+
+  it("rejects the global pause routes for password-only sessions", async () => {
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    const { app, store } = testApp({ UI_PASSWORD: "hunter2", UI_SESSION_SECRET: "session-secret-for-tests" });
+    const { session } = await loginSession(app);
+    const page = await app.request("/", { headers: { cookie: session } });
+    const { csrfCookie, csrfToken } = await csrfArtifacts(page);
+
+    const denied = await app.request("/pause/global", {
+      method: "POST",
+      headers: { cookie: `${session}; ${csrfCookie}`, "content-type": "application/x-www-form-urlencoded" },
+      body: `csrf_token=${encodeURIComponent(csrfToken)}`,
+    });
+    expect(denied.status).toBe(403);
+    expect(store.getGlobalPause()).toBeUndefined();
+    log.mockRestore();
+  });
+});

@@ -5458,3 +5458,43 @@ describe("stack reviews (issue #99)", () => {
     expect(logs).toMatch(/head moved h41 → h41b/);
   });
 });
+
+describe("global pause claim guard", () => {
+  it("cancels a queued review at claim time instead of running it", async () => {
+    const config = loadConfig({ REVIEWER_ROLES: "correctness" });
+    const store = new JobStore(openDb(":memory:"));
+    const created = store.enqueue({
+      repoFullName: "acme/widgets",
+      repoOwner: "acme",
+      repoName: "widgets",
+      installationId: 9,
+      prNumber: 4,
+      prTitle: "Change example",
+      prBody: "",
+      prHtmlUrl: "",
+      prAuthor: "dev",
+      baseSha: "base",
+      headSha: "cafebabe",
+      baseRef: "main",
+      headRef: "feat",
+      reviewers: [{ role: "correctness", title: "Correctness" }],
+    });
+    // The switch flips after the job is already queued — the claim-time
+    // guard must still stop it.
+    store.setGlobalPause("alice");
+
+    const pipeline = createPipeline({
+      config,
+      store,
+      github: githubPort(),
+      checkout: await fixtureCheckout(),
+      opencode: { async run() { throw new Error("must not spawn"); } },
+    });
+    await pipeline.run(created.job.id);
+
+    const job = store.getJob(created.job.id);
+    expect(job?.state).toBe("cancelled");
+    expect(job?.cancelled_reason).toBe("reviews_paused");
+    expect(store.listLogs(created.job.id).map((l) => l.message).join("\n")).toMatch(/paused globally/);
+  });
+});

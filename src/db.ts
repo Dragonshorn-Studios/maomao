@@ -400,6 +400,14 @@ function migrate(db: SqliteDb): void {
       ended_by TEXT
     );
 
+    CREATE TABLE IF NOT EXISTS global_pauses (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      actor TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      ended_at TEXT,
+      ended_by TEXT
+    );
+
     CREATE TABLE IF NOT EXISTS stack_declarations (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       ${PROVIDER_COLUMNS},

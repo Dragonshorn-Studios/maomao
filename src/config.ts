@@ -43,7 +43,7 @@ export const LIVE_JOB_STATES: readonly JobState[] = [
 ];
 
 /** Why a job reached the terminal `cancelled` state; persisted in jobs.cancelled_reason. */
-export type CancelReason = "pr_merged" | "manual_dequeue" | "manual_cancel" | "repo_paused";
+export type CancelReason = "pr_merged" | "manual_dequeue" | "manual_cancel" | "repo_paused" | "reviews_paused";
 
 /** Home-queue page size; JobStore.listJobsPage clamps limits into [1, JOBS_PAGE_SIZE_MAX]. */
 export const JOBS_PAGE_SIZE_DEFAULT = 25;

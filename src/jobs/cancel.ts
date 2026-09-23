@@ -124,6 +124,34 @@ export function cancelJobsForRepoType(
   return { cancelledJobIds };
 }
 
+export interface CancelJobsForTypeInput extends CancelInput {
+  /** Cancels only jobs of this type (e.g. "pr_review"), across every repo and forge scope. */
+  jobType: string;
+}
+
+/**
+ * Cancels every non-terminal job of one type instance-wide — the global pause
+ * policy: nothing of that type may start or keep running while the switch is
+ * on. Same atomic UPDATE + audit + publish path as cancelJobsForRepoType.
+ */
+export function cancelJobsForType(
+  store: JobStore,
+  input: CancelJobsForTypeInput,
+): { cancelledJobIds: number[] } {
+  const cancelledJobIds = store.cancelJobs({ jobType: input.jobType }, input.reason, input.actor ?? null);
+  abortJobsSafely(input, cancelledJobIds);
+  for (const id of cancelledJobIds) {
+    try {
+      logCancellation(store, id, input);
+    } catch (error) {
+      console.error(`cancel: could not write audit log for job ${id}: ${error instanceof Error ? error.message : String(error)}`);
+    }
+    publish({ type: "job", jobId: id });
+  }
+  if (cancelledJobIds.length > 0) publish({ type: "jobs" });
+  return { cancelledJobIds };
+}
+
 export type CancelJobResult =
   | { ok: true; already: boolean }
   | { ok: false; error: string };
