@@ -18,7 +18,7 @@ import { authorizeGithubAccount, authorizeGithubRepository, authorizeGithubTarge
 import { repoRateLimitActive, RepoRateLimiter, WindowRateLimiter } from "./github/rate-limit.js";
 import { parseGithubPullUrl, PullUrlError } from "./github/pull-url.js";
 import { dispatchEnqueue, enqueuePullJob } from "./jobs/enqueue.js";
-import { cancelJob, cancelJobsForRepoType } from "./jobs/cancel.js";
+import { cancelJob, cancelJobsForRepoType, cancelJobsForType } from "./jobs/cancel.js";
 import { LIVE_JOB_STATES } from "./config.js";
 import { effectiveConfigEntries } from "./config-effective.js";
 import type { ProfileFieldErrors, ProfileFormValues } from "./config-form.js";
@@ -49,6 +49,7 @@ import {
   renderProfileForm,
   renderHome,
   renderJob,
+  setGlobalPauseProvider,
   renderLogin,
   renderPromptConfigPage,
   renderHealthPage,
@@ -265,6 +266,12 @@ function setSessionCookie(c: Context<AppEnv>, value: string): void {
 
 export function createApp(ctx: ServerContext): Hono<AppEnv> {
   const app = new Hono<AppEnv>();
+  // Every page renders the top banner while the global pause switch is on;
+  // the provider reads the store live so toggles take effect on next load.
+  setGlobalPauseProvider(() => {
+    const pause = ctx.store.getGlobalPause();
+    return pause ? { actor: pause.actor, since: pause.created_at } : undefined;
+  });
   const oauthOn = oauthEnabled(ctx.config);
   const passwordGateOn = uiGateEnabled(ctx.config.uiPassword, ctx.config.uiSessionSecret);
   const gateOn = oauthOn || passwordGateOn;
@@ -659,6 +666,10 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
         }),
         extra.error ? 400 : 200,
       );
+
+    if (ctx.store.getGlobalPause()) {
+      return home({ error: "Reviews are paused globally — resume from the /pause page." });
+    }
 
     let parsed: { owner: string; repo: string; number: number };
     try {
@@ -2317,6 +2328,10 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
       expiresAt: pause.expires_at,
       actor: pause.actor,
     })),
+    globalPause: (() => {
+      const pause = ctx.store.getGlobalPause();
+      return pause ? { actor: pause.actor, since: pause.created_at } : undefined;
+    })(),
     ...extra,
   });
 
@@ -2406,6 +2421,50 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
       console.error(`pause: could not pause ${parsed.owner}/${parsed.repo}: ${message}`);
       return c.html(renderPausePage(pausePageData(c, { error: message })), 400);
     }
+  });
+
+  // Instance-wide switch: pauses every review enqueue (webhooks, manual
+  // form, stack trigger) until resumed, and cancels all non-terminal
+  // pr_review and stack_review jobs the moment it turns on.
+  app.post("/pause/global", (c) => {
+    if (!gateOn) return c.redirect("/", 302);
+    const actor = configActor(c);
+    if (!actor) {
+      return c.html(
+        renderPausePage(pausePageData(c, { error: "Managing review pauses requires an operator GitHub OAuth identity." })),
+        403,
+      );
+    }
+    ctx.store.setGlobalPause(actor.login);
+    const cancelled = ["pr_review", "stack_review"].flatMap(
+      (jobType) =>
+        cancelJobsForType(ctx.store, {
+          jobType,
+          reason: "reviews_paused",
+          actor: actor.login,
+          note: "global pause enabled",
+          onCancelled: (ids) => ctx.queue.abortMany(ids),
+        }).cancelledJobIds,
+    );
+    return c.redirect(
+      `/pause?notice=${encodeURIComponent(
+        "Reviews paused globally" + (cancelled.length ? ` — cancelled ${cancelled.length} job(s)` : ""),
+      )}`,
+      302,
+    );
+  });
+
+  app.post("/pause/global/end", (c) => {
+    if (!gateOn) return c.redirect("/", 302);
+    const actor = configActor(c);
+    if (!actor) {
+      return c.html(
+        renderPausePage(pausePageData(c, { error: "Managing review pauses requires an operator GitHub OAuth identity." })),
+        403,
+      );
+    }
+    ctx.store.endGlobalPause(actor.login);
+    return c.redirect(`/pause?notice=${encodeURIComponent("Reviews resumed")}`, 302);
   });
 
   app.post("/pause/:id/end", (c) => {

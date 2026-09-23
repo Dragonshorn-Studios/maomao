@@ -332,6 +332,23 @@ export async function handleGithubWebhook(input: {
       return ignored("pull request already merged; not enqueueing");
     }
 
+    // Instance-wide review pause: the operator's global switch stops every
+    // automatic enqueue regardless of repository, so it is checked before the
+    // per-repo pause. Same claim-and-log semantics as the repo pause below.
+    const globalPause = input.store.getGlobalPause();
+    if (globalPause) {
+      input.store.claimWebhookDelivery(
+        input.request.deliveryId,
+        input.request.event,
+        "paused (global)",
+      );
+      console.warn(
+        `webhook: skipped ${input.request.event}.${payload.action} for ${parsed.repoFullName} ` +
+          `(reviews paused globally since ${globalPause.created_at}, delivery ${input.request.deliveryId || "unknown"})`,
+      );
+      return ignored("reviews paused globally");
+    }
+
     // Timed repository pause (issue #99): while active, automatic
     // pull_request deliveries enqueue nothing and spend nothing. The skip is
     // claimed on the delivery row (idempotent across redelivery) and logged;
@@ -636,6 +653,13 @@ async function handleStackCommand(
   if (!validation.ok) {
     await reply(`Could not run stack "${command.stackId}": ${validation.error}.`);
     return finish("top-invalid", { ok: true, command: "top", stackId: command.stackId, enqueued: false, error: validation.error });
+  }
+
+  // A stack run is reviews: the global pause blocks it like any other enqueue.
+  // Checked after validation so the reply is still a useful error.
+  if (input.store.getGlobalPause()) {
+    await reply(`Could not run stack "${command.stackId}": reviews are paused globally — resume on /pause.`);
+    return finish("top-paused", { ok: true, command: "top", stackId: command.stackId, enqueued: false, error: "reviews paused globally" });
   }
 
   const top = validation.members[validation.members.length - 1]!;

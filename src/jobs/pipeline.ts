@@ -6,6 +6,7 @@ import { ForgeRegistry } from "../forge/registry.js";
 import type { ForgeConnectionStore } from "../forge/connections.js";
 import type { ForgeDiscussion, ForgeInlineComment, ForgeRepoTarget, ForgeSummary, ForgeVerdict } from "../forge/types.js";
 import { forgeTargetOf, scopeOf } from "../forge/types.js";
+import { publish } from "../events.js";
 import { buildReviewBody, findExistingReview, selectInlineComments, inlineCommentFingerprints } from "../forge/review-text.js";
 import type { CheckoutPort } from "../checkout.js";
 import {
@@ -111,6 +112,28 @@ export function createPipeline(deps: PipelineDeps) {
       aborts.set(jobId, controller);
       try {
         const job = deps.store.getJob(jobId);
+        // The global pause switch is a hard stop for review work: a job that
+        // slipped past the enqueue gates (the switch raced its creation, or a
+        // path forgot to check) is cancelled at claim time instead of run.
+        if (
+          job &&
+          (job.job_type === "pr_review" || job.job_type === "stack_review") &&
+          deps.store.getGlobalPause()
+        ) {
+          const cancelled = deps.store.cancelJobs({ jobId, scope: scopeOf(job) }, "reviews_paused", null);
+          deps.store.log(
+            jobId,
+            cancelled.length
+              ? "Cancelled: reviews are paused globally"
+              : "Skipped run: reviews are paused globally",
+            cancelled.length ? "info" : "warn",
+          );
+          if (cancelled.length) {
+            publish({ type: "job", jobId });
+            publish({ type: "jobs" });
+          }
+          return;
+        }
         if (job?.job_type === "health_scan") {
           await runScanJob(deps, forge, jobId, controller.signal);
         } else if (job?.job_type === "repo_brief") {

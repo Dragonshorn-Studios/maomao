@@ -344,6 +344,27 @@ button, summary {
   background: var(--surface);
 }
 .notice { border-color: var(--jade); background: var(--jade-soft); }
+.pause-banner {
+  background: var(--amber-soft);
+  border-bottom: 1px solid var(--amber);
+  color: var(--ink);
+  padding: 0.5rem 1rem;
+  text-align: center;
+  font-size: 0.85rem;
+}
+.pause-banner a { color: inherit; }
+.global-pause {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 1rem 1.1rem;
+  margin: 1rem 0;
+}
+.global-pause h2 { margin-top: 0; }
+.global-pause.is-paused {
+  border-color: var(--amber);
+  background: var(--amber-soft);
+}
 .error { border-color: var(--cinnabar); background: var(--cinnabar-soft); color: var(--ink); }
 .warn { border-color: var(--amber); background: var(--amber-soft); }
 .usage-incomplete { color: var(--amber); font-size: 0.9em; margin: 0.35rem 0 0; }

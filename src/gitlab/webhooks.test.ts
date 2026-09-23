@@ -299,6 +299,25 @@ describe("GitLab merge_request events", () => {
     expect(result.body.reason).toMatch(/draft/);
   });
 
+  it("skips merge_request deliveries while the global pause switch is on", async () => {
+    const connections = newConnections();
+    const { id, secret } = createConnection(connections);
+    const input = baseInput(connections, id, signedRequest(secret, "merge_request", JSON.stringify(mrPayload())));
+    input.store.setGlobalPause("alice");
+
+    const paused = await handleGitLabWebhook(input);
+    expect(paused.body.ignored).toBe(true);
+    expect(String(paused.body.reason)).toMatch(/paused globally/);
+    expect(input.store.listJobs(10)).toHaveLength(0);
+
+    input.store.endGlobalPause("alice");
+    const resumed = await handleGitLabWebhook({
+      ...input,
+      request: signedRequest(secret, "merge_request", JSON.stringify(mrPayload())),
+    });
+    expect(resumed.enqueue?.created).toBe(true);
+  });
+
   it("cancels and permanently marks merged merge requests", async () => {
     const connections = newConnections();
     const { id, secret } = createConnection(connections);

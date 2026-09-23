@@ -172,6 +172,14 @@ export interface RepoPauseRow {
   ended_by: string | null;
 }
 
+export interface GlobalPauseRow {
+  id: number;
+  actor: string;
+  created_at: string;
+  ended_at: string | null;
+  ended_by: string | null;
+}
+
 export interface StackDeclarationRow {
   id: number;
   provider: string;
@@ -544,6 +552,36 @@ export class JobStore {
   }
 
   /**
+   * Instance-wide review pause (operator "Pause reviews" switch). Durable and
+   * indefinite: unlike repo_pauses there is no expiry — reviews resume only
+   * when an operator ends it. One active row at a time; pausing while paused
+   * supersedes the previous row so the audit trail records both actors.
+   */
+  setGlobalPause(actor: string): GlobalPauseRow {
+    const now = nowIso();
+    this.db
+      .prepare(`UPDATE global_pauses SET ended_at = ?, ended_by = ? WHERE ended_at IS NULL`)
+      .run(now, `${actor} (superseded)`);
+    const insert = this.db
+      .prepare(`INSERT INTO global_pauses (actor, created_at) VALUES (?, ?)`)
+      .run(actor, now);
+    return this.db.prepare(`SELECT * FROM global_pauses WHERE id = ?`).get(insert.lastInsertRowid) as GlobalPauseRow;
+  }
+
+  getGlobalPause(): GlobalPauseRow | undefined {
+    return this.db
+      .prepare(`SELECT * FROM global_pauses WHERE ended_at IS NULL ORDER BY id DESC LIMIT 1`)
+      .get() as GlobalPauseRow | undefined;
+  }
+
+  endGlobalPause(actor: string): boolean {
+    const updated = this.db
+      .prepare(`UPDATE global_pauses SET ended_at = ?, ended_by = ? WHERE ended_at IS NULL`)
+      .run(nowIso(), actor);
+    return updated.changes > 0;
+  }
+
+  /**
    * Records one stack member declaration (issue #99). Idempotent on an
    * identical repeat; fails closed on conflicting declarations so an
    * ambiguous stack is rejected before any model work.
@@ -822,20 +860,31 @@ export class JobStore {
     where:
       | { jobId: number }
       | { repoFullName: string; prNumber: number; scope?: Partial<ForgeScope> }
-      | { repoFullName: string; jobType: string; scope?: Partial<ForgeScope> },
+      | { repoFullName?: string; jobType: string; scope?: Partial<ForgeScope> },
     reason: CancelReason,
     actor: string | null,
   ): number[] {
     const now = nowIso();
     const scope = normalizeScope("scope" in where ? where.scope : undefined);
-    const clauses = [`state IN (${ACTIVE_STATES_SQL})`, "provider = ?", "provider_instance = ?"];
-    const values: unknown[] = [reason, actor, now, now, scope.provider, scope.instance];
+    const clauses = [`state IN (${ACTIVE_STATES_SQL})`];
+    const values: unknown[] = [reason, actor, now, now];
+    // A type-wide (global) cancel targets every forge scope; all other
+    // variants stay inside the normalized scope like before.
+    const spansScopes = "jobType" in where && where.repoFullName == null;
+    if (!spansScopes) {
+      clauses.push("provider = ?", "provider_instance = ?");
+      values.push(scope.provider, scope.instance);
+    }
     if ("jobId" in where) {
       clauses.push("id = ?");
       values.push(where.jobId);
     } else if ("jobType" in where) {
-      clauses.push("repo_full_name = ?", "job_type = ?");
-      values.push(where.repoFullName, where.jobType);
+      clauses.push("job_type = ?");
+      values.push(where.jobType);
+      if (where.repoFullName != null) {
+        clauses.push("repo_full_name = ?");
+        values.push(where.repoFullName);
+      }
     } else {
       clauses.push("repo_full_name = ?", "pr_number = ?");
       values.push(where.repoFullName, where.prNumber);

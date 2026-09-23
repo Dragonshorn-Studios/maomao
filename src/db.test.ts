@@ -420,6 +420,25 @@ describe("repo pauses and stack state (issue #99)", () => {
     expect(store.listActivePauses()).toHaveLength(0);
   });
 
+  it("tracks the global pause switch with supersedes and explicit end", () => {
+    const store = new JobStore(openDb(":memory:"));
+    expect(store.getGlobalPause()).toBeUndefined();
+
+    const first = store.setGlobalPause("alice");
+    expect(store.getGlobalPause()?.id).toBe(first.id);
+    expect(store.getGlobalPause()?.actor).toBe("alice");
+
+    // Pausing again supersedes — the audit trail keeps both rows.
+    const second = store.setGlobalPause("bob");
+    expect(store.getGlobalPause()?.id).toBe(second.id);
+    expect(store.getGlobalPause()?.actor).toBe("bob");
+
+    expect(store.endGlobalPause("alice")).toBe(true);
+    expect(store.getGlobalPause()).toBeUndefined();
+    // Ending when nothing is active is a no-op.
+    expect(store.endGlobalPause("alice")).toBe(false);
+  });
+
   it("records stack declarations idempotently and rejects conflicting ones", () => {
     const store = new JobStore(openDb(":memory:"));
     const input = { repoFullName: "acme/widgets", stackId: "s1", prNumber: 7, position: 1, expectedCount: 2, actor: "alice" };
