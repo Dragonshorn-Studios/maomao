@@ -690,18 +690,15 @@ async function handleStackCommand(
         `(${enqueue.skippedReason ?? `job ${enqueue.job.state}`}); nothing enqueued.`,
     );
   }
-  return {
-    status: 200,
-    body: {
-      ok: true,
-      command: "top",
-      stackId: command.stackId,
-      enqueued: enqueue.created,
-      jobId: enqueue.job.id,
-      staleJobIds: enqueue.staleJobIds,
-    },
-    enqueue,
-  };
+  const result = finish(enqueue.created ? "top-enqueued" : "top-deduped", {
+    ok: true,
+    command: "top",
+    stackId: command.stackId,
+    enqueued: enqueue.created,
+    jobId: enqueue.job.id,
+    staleJobIds: enqueue.staleJobIds,
+  });
+  return { ...result, enqueue };
 }
 
 async function handleReviewCommentWebhook(input: {

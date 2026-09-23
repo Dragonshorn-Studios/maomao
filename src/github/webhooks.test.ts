@@ -1427,10 +1427,22 @@ describe("stack commands (issue #99)", () => {
       config,
       store,
       github,
-      request: { event: "issue_comment", deliveryId: "t2", signature: sign(secret, topBody.replace('"id":42', '"id":43')), rawBody: topBody.replace('"id":42', '"id":43') },
+      request: { event: "issue_comment", deliveryId: "t2", signature: sign(secret, topBody.replace('"id":42,"body"', '"id":43,"body"')), rawBody: topBody.replace('"id":42,"body"', '"id":43,"body"') },
     });
     expect(again.body.enqueued).toBe(false);
     expect(store.listJobs(10).filter((j) => j.job_type === "stack_review")).toHaveLength(1);
+    const commentCountAfter = comments.length;
+
+    // A redelivery of the SAME trigger comment is deduped by comment id: no
+    // second reply, no extra work.
+    const redelivered = await handleGithubWebhook({
+      config,
+      store,
+      github,
+      request: { event: "issue_comment", deliveryId: "t3", signature: sign(secret, topBody), rawBody: topBody },
+    });
+    expect(redelivered.body.duplicate).toBe(true);
+    expect(comments.length).toBe(commentCountAfter);
   });
 
   it("posts one actionable error comment on an invalid trigger and enqueues nothing", async () => {
