@@ -14,7 +14,7 @@ import {
   type OpenCodePort,
   type OpenCodeRunResult,
 } from "../opencode/parse.js";
-import { buildAggregatorPrompt, buildBriefPrompt, buildReviewerPrompt, buildStackCumulativePrompt } from "../prompts.js";
+import { buildAggregatorPrompt, buildBriefPrompt, buildReviewerPrompt, buildStackCumulativePrompt, KNOWN_REVIEWER_ROLES } from "../prompts.js";
 import { applyProfileToSpecs, reviewerSpecs } from "./enqueue.js";
 import type { ProfileDefinition } from "../config-revisions.js";
 import {
@@ -1436,11 +1436,16 @@ async function routeSpecialists(
 ): Promise<void> {
   const { store, config } = deps;
   const existing = store.listReviewerRuns(job.id);
-  const allowlist = config.reviewers.map((role) => role.id);
+  // A profile revision stamped on the job is the reviewer universe: the GUI
+  // profile overrides env REVIEWER_ROLES for role selection and routing alike.
+  const profileDefinition = profileDefinitionForJob(store, job);
+  const allowlist = profileDefinition?.reviewers.length
+    ? profileDefinition.reviewers.map((reviewer) => reviewer.role)
+    : config.reviewers.map((role) => role.id);
 
   if (config.routing.mode === "fixed") {
     if (existing.length === 0) {
-      store.ensureReviewerRuns(job.id, applyProfileToSpecs(store, config, reviewerSpecs(config), job.profile_revision_id));
+      store.ensureReviewerRuns(job.id, applyProfileToSpecs(store, config, reviewerSpecs(config), job.profile_revision_id, { wholeProfileSet: true }));
     }
     const roles = store.listReviewerRuns(job.id).map((run) => run.role);
     persistDecision(store, job.id, {
@@ -1479,7 +1484,7 @@ async function routeSpecialists(
   store.setJobState(job.id, "routing", { routing_state: "running", routing_mode: config.routing.mode });
   const signals = scanRoutingSignals({ diff, title: job.pr_title, body: job.pr_body });
   let decision: RoutingDecision;
-  const profileRouterModel = profileDefinitionForJob(store, job)?.routerModel;
+  const profileRouterModel = profileDefinition?.routerModel;
   const routerModel = profileRouterModel || config.routing.model || config.opencode.reviewerModel;
   const useModel = (config.routing.mode === "model" || config.routing.mode === "hybrid") && Boolean(routerModel);
 
@@ -1554,7 +1559,9 @@ async function routeSpecialists(
   );
   store.ensureReviewerRuns(
     job.id,
-    applyProfileToSpecs(store, config, reviewerSpecs(config, decision.reviewers), job.profile_revision_id),
+    // Pass the router's raw picks: reviewerSpecs filters by env membership,
+    // which would silently drop a profile-only role the router chose.
+    applyProfileToSpecs(store, config, reviewerSpecs(config, decision.reviewers), job.profile_revision_id, { requestedRoles: decision.reviewers }),
   );
   store.log(
     job.id,
@@ -1627,7 +1634,11 @@ async function runReviewer(
   profileBudget?: ProfileBudget,
   humanOverrides?: HumanOverrideContext,
 ): Promise<void> {
-  const role = deps.config.reviewers.find((item) => item.id === run.role);
+  // Profile-added roles may not appear in env REVIEWER_ROLES; fall back to the
+  // built-in catalog so they still get their authored prompt body.
+  const role =
+    deps.config.reviewers.find((item) => item.id === run.role) ??
+    KNOWN_REVIEWER_ROLES.find((item) => item.id === run.role);
   // The run's stored model (profile revision / enqueue spec) wins over config defaults.
   const model = run.model || role?.model || deps.config.opencode.reviewerModel;
   // An active prompt revision overrides the role's authored body; guardrails stay composed here.

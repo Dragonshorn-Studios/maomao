@@ -3068,6 +3068,119 @@ describe("profile revision consumption", () => {
     expect(store.getJob(created.job.id)?.profile_revision_id).toBe(draft.revision.id);
   });
 
+  it("runs profile roles the env does not enable — the GUI-set profile overrides REVIEWER_ROLES", async () => {
+    const config = loadConfig({
+      REVIEWER_ROUTING: "fixed",
+      REVIEWER_ROLES: "correctness,security",
+      OPENCODE_REVIEWER_MODEL: "test/model",
+      POST_EMPTY_REVIEW: "true",
+      GITHUB_APP_ID: "1",
+      GITHUB_WEBHOOK_SECRET: "s",
+      GITHUB_APP_PRIVATE_KEY: "k",
+    });
+    const store = new JobStore(openDb(":memory:"));
+    const draft = store.configs.createDraft({
+      definition: {
+        name: "default",
+        reviewers: [{ role: "api" }, { role: "security", model: "test/override" }],
+        minPublishableSeverity: "info",
+      },
+      createdBy: "octocat",
+    });
+    if (!("revision" in draft)) throw new Error("draft failed");
+    store.configs.activateRevision(draft.revision.id, "octocat");
+
+    const ran: { role?: string; model?: string }[] = [];
+    const github: GithubPort = githubPort({
+      getPullDiff: async () => "diff --git a/example.ts b/example.ts\n",
+      listReviews: async () => [],
+      createCommentReview: async () => ({ id: "5", url: "u" }),
+    });
+    const opencode: OpenCodePort = {
+      async run(input) {
+        const roleMatch = input.prompt.match(/Role id: (\w+)/);
+        ran.push({ role: roleMatch?.[1], model: input.model });
+        const text = roleMatch
+          ? reviewerJson(roleMatch[1], "clean")
+          : JSON.stringify({ schema_version: 1, verdict: "clean", summary: "clean", findings: [] });
+        return { stdout: text, stderr: "", exitCode: 0, text, usage: {} };
+      },
+    };
+    const created = store.enqueue({ ...jobInput("revsha"), reviewers: [] });
+    await createPipeline({ config, store, github, checkout: await fixtureCheckout(), opencode }).run(created.job.id);
+
+    // api is absent from REVIEWER_ROLES but still ran — and with its built-in
+    // authored prompt (the "Role id:" marker only exists in real role bodies)
+    // plus the env default model, which the profile did not pin.
+    const api = ran.find((entry) => entry.role === "api");
+    expect(api).toBeTruthy();
+    expect(api?.model).toBe("test/model");
+    const security = ran.find((entry) => entry.role === "security");
+    expect(security?.model).toBe("test/override");
+    expect(ran.some((entry) => entry.role === "correctness")).toBe(false);
+    expect(store.listReviewerRuns(created.job.id).map((run) => run.role)).toEqual(["api", "security"]);
+  });
+
+  it("restricts the router allowlist to profile roles when a revision is active", async () => {
+    const config = loadConfig({
+      REVIEWER_ROUTING: "model",
+      REVIEWER_ROLES: "correctness,security,tests",
+      OPENCODE_REVIEWER_MODEL: "test/model",
+      OPENCODE_ROUTER_MODEL: "test/router",
+      POST_EMPTY_REVIEW: "true",
+      GITHUB_APP_ID: "1",
+      GITHUB_WEBHOOK_SECRET: "s",
+      GITHUB_APP_PRIVATE_KEY: "k",
+    });
+    const store = new JobStore(openDb(":memory:"));
+    const draft = store.configs.createDraft({
+      definition: {
+        name: "default",
+        reviewers: [{ role: "security" }, { role: "api" }],
+        minPublishableSeverity: "info",
+      },
+      createdBy: "octocat",
+    });
+    if (!("revision" in draft)) throw new Error("draft failed");
+    store.configs.activateRevision(draft.revision.id, "octocat");
+
+    let routerPrompt = "";
+    const github: GithubPort = githubPort({
+      getPullDiff: async () => "diff --git a/example.ts b/example.ts\n",
+      listReviews: async () => [],
+      createCommentReview: async () => ({ id: "5", url: "u" }),
+    });
+    // The router picks api — a profile role absent from env REVIEWER_ROLES.
+    // It must still run (previously it was env-filtered out of the request).
+    const routerText = JSON.stringify({
+      profile: "diagnosis",
+      reviewers: ["api"],
+      reason: "picks within the profile",
+      confidence: 0.9,
+    });
+    const opencode: OpenCodePort = {
+      async run(input) {
+        if (input.title?.includes("maomao-router")) {
+          routerPrompt = input.prompt;
+          return { stdout: routerText, stderr: "", exitCode: 0, text: routerText, usage: {} };
+        }
+        const roleMatch = input.prompt.match(/Role id: (\w+)/);
+        const text = roleMatch
+          ? reviewerJson(roleMatch[1], "clean")
+          : JSON.stringify({ schema_version: 1, verdict: "clean", summary: "clean", findings: [] });
+        return { stdout: text, stderr: "", exitCode: 0, text, usage: {} };
+      },
+    };
+    const created = store.enqueue({ ...jobInput("revsha"), reviewers: [] });
+    await createPipeline({ config, store, github, checkout: await fixtureCheckout(), opencode }).run(created.job.id);
+
+    // Env enables correctness/security/tests, but the router was only offered
+    // the GUI profile's roles.
+    const allowlistLine = routerPrompt.split("Allowed role ids:")[1]?.split("\n")[1];
+    expect(allowlistLine).toBe('["security","api"]');
+    expect(store.listReviewerRuns(created.job.id).map((run) => run.role)).toEqual(["api"]);
+  });
+
   it("filters published findings by the revision's minimum publishable severity", async () => {
     const config = loadConfig({
       REVIEWER_ROUTING: "fixed",

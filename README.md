@@ -283,7 +283,7 @@ Notes:
 
 - Providers not in the table still work via a custom provider in the OpenCode global config on the volume (`/opt/opencode/.config/opencode/opencode.json`) with `"apiKey": "{env:OPENCODE_<NAME>_API_KEY}"` — `OPENCODE_`-prefixed vars always pass. `HTTP_PROXY`/`HTTPS_PROXY`/`NO_PROXY` pass too.
 
-Default specialist roles (override with `REVIEWER_ROLES`):
+Default specialist roles (override with `REVIEWER_ROLES`; an active profile revision overrides that list — see *Review configuration*):
 
 - `correctness` — regressions / broken logic
 - `security` — trust boundaries
@@ -524,6 +524,7 @@ Configuration lives under `/config` as a set of focused pages joined by a shared
 - Drafts are validated against a schema plus system caps (≤12 reviewers, ≤30-minute timeouts, ≤5 retries, ≤$5 / 2M-token budgets). Invalid drafts cannot be activated.
 - Activation is explicit and audited; activating a new revision retires the previous active one of the same name. Rollback re-activates a retired revision — history is never rewritten.
 - Every job snapshots the revision it ran with (`profile_revision_id` on the job), so later edits never change historical jobs. Specialist selection, per-role models, and the minimum publishable severity are applied from the active revision; total budgets are enforced as warnings.
+- **The active profile overrides the environment.** Its reviewer list is the effective set in every routing mode — fixed mode runs it verbatim and the router chooses within it — so `REVIEWER_ROLES` no longer gates which specialists run once a profile is active. Env values only remain defaults where the profile is silent: a role the profile lists without a model keeps the env role/global model, and roles not enabled in env still get their built-in titles and prompt bodies.
 - Draft edits use optimistic concurrency: saving against an older revision returns a conflict instead of overwriting a teammate's change.
 - `MODEL_CATALOG` (comma-separated `provider/model` values) optionally restricts models to an operator-approved catalog. Configuration contains no credentials; export/import is schema-versioned JSON, and imports always land as drafts.
 - All write actions require an operator GitHub OAuth identity and are recorded in the audit history (`/config/audit`).
