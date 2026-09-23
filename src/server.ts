@@ -21,7 +21,7 @@ import { dispatchEnqueue, enqueuePullJob } from "./jobs/enqueue.js";
 import { cancelJob } from "./jobs/cancel.js";
 import { LIVE_JOB_STATES } from "./config.js";
 import { effectiveConfigEntries } from "./config-effective.js";
-import type { ProfileFieldErrors } from "./config-form.js";
+import type { ProfileFieldErrors, ProfileFormValues } from "./config-form.js";
 import { decodeProfileAction, decodeProfileForm, applyProfileAction, profileFormToDefinition } from "./config-form.js";
 import { KNOWN_REVIEWER_ROLES } from "./prompts.js";
 import { subscribe } from "./events.js";
@@ -35,6 +35,10 @@ import {
   renderScanPage,
   renderCancelConfirmPage,
   renderConfigPage,
+  renderProfilesPage,
+  renderNewProfilePage,
+  renderDraftEditPage,
+  renderConfigAuditPage,
   renderProfileForm,
   renderHome,
   renderJob,
@@ -58,6 +62,7 @@ import {
 } from "./ui/index.js";
 import { renderProvidersPage } from "./ui/providers.js";
 import { ProviderCredentialStore, opencodeAuthPath } from "./opencode/credentials.js";
+import { ModelDiscovery } from "./opencode/models.js";
 import type { JobRow } from "./jobs/store.js";
 import type { FindingRow } from "./findings/types.js";
 import type { ConfigPageData } from "./ui/index.js";
@@ -107,6 +112,8 @@ export interface ServerContext {
   forgeConnections?: ForgeConnectionStore;
   /** OpenCode provider credential store (auth.json). Defaults to the path the spawned child resolves. */
   providerCredentials?: ProviderCredentialStore;
+  /** Live model discovery via `opencode models`; the editor falls back to MODEL_CATALOG when unset. */
+  modelDiscovery?: ModelDiscovery;
   /** "Ask Maomao" explainer backend; undefined until MAOMAO_EXPLAIN_ENABLED. */
   chat?: { service: ChatService; store: ChatStore };
   /** The environment loadConfig consumed; defaults to process.env. Injectable for tests. */
@@ -967,13 +974,12 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
   // ---- Versioned review-profile configuration (/config) ----
   const configWriteDenied = (c: Context<AppEnv>) =>
     c.html(
-      renderConfigPage({
-        identity: c.get("identity"),
-        revisions: ctx.store.configs.listRevisions(),
-        audit: ctx.store.configs.listAudit(),
-        canWrite: false,
-        error: "Writing configuration requires an operator GitHub OAuth identity.",
-      }),
+      renderProfilesPage(
+        profilesPageData(c, {
+          error: "Writing configuration requires an operator GitHub OAuth identity.",
+          canWrite: false,
+        }),
+      ),
       403,
     );
   const configActor = (c: Context<AppEnv>): { login: string } | undefined => c.get("identity");
@@ -987,35 +993,62 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
     }
   };
   const KNOWN_ROLE_OPTIONS = KNOWN_REVIEWER_ROLES.map((role) => ({ id: role.id, title: role.title }));
-  const profileEditorBase = () => ({
-    knownRoles: KNOWN_ROLE_OPTIONS,
-    modelCatalog: ctx.config.modelCatalog,
+  const profileEditorBase = () => {
+    const discovered = ctx.modelDiscovery?.snapshot();
+    const configured = new Set(
+      providerCreds()
+        .list()
+        .filter((status) => status.source !== "none")
+        .map((status) => status.id),
+    );
+    const seen = new Set<string>();
+    const modelCatalog: Array<{ id: string; hint?: string }> = [];
+    for (const id of ctx.config.modelCatalog) {
+      if (seen.has(id)) continue;
+      seen.add(id);
+      modelCatalog.push({ id, hint: "in MODEL_CATALOG" });
+    }
+    for (const id of discovered?.models ?? []) {
+      if (seen.has(id)) continue;
+      seen.add(id);
+      modelCatalog.push({
+        id,
+        hint: configured.has(id.split("/")[0] ?? "") ? "key configured" : "discovered via opencode models",
+      });
+    }
+    return {
+      knownRoles: KNOWN_ROLE_OPTIONS,
+      modelCatalog,
+      discovery: ctx.modelDiscovery
+        ? { count: discovered?.models.length ?? 0, fetchedAt: discovered?.fetchedAt ?? 0, error: discovered?.error }
+        : undefined,
+    };
+  };
+
+  const profilesPageData = (
+    c: Context<AppEnv>,
+    opts: {
+      notice?: string;
+      error?: string;
+      canWrite?: boolean;
+      form?: { values: ProfileFormValues; errors?: ProfileFieldErrors };
+    } = {},
+  ): ConfigPageData => ({
+    identity: c.get("identity"),
+    revisions: ctx.store.configs.listRevisions(),
+    audit: [],
+    canWrite: opts.canWrite ?? gateOn,
+    csrfToken: gateOn ? ensureCsrfToken(c, ctx.config.uiSessionSecret) : undefined,
+    notice: opts.notice,
+    error: opts.error,
+    profileEditor: { ...profileEditorBase(), ...(opts.form ? { form: opts.form } : {}) },
   });
 
-  const renderConfigWithError = (
+  const renderProfilesWithError = (
     c: Context<AppEnv>,
     message: string,
     status: 400 | 403 | 404 | 409,
-    profileEditor?: ConfigPageData["profileEditor"],
-  ) => {
-    return c.html(
-      renderConfigPage({
-        identity: c.get("identity"),
-        revisions: ctx.store.configs.listRevisions(),
-        audit: ctx.store.configs.listAudit(),
-        canWrite: gateOn,
-        error: message,
-        csrfToken: gateOn ? ensureCsrfToken(c, ctx.config.uiSessionSecret) : undefined,
-        effectiveConfig: effectiveConfigEntries(
-          ctx.config,
-          ctx.env ?? process.env,
-          ctx.store.configs.getActiveRevision("default") ?? null,
-        ),
-        profileEditor: profileEditor ?? profileEditorBase(),
-      }),
-      status,
-    );
-  };
+  ) => c.html(renderProfilesPage(profilesPageData(c, { error: message })), status);
 
 
   // ---- Forge connections (GitLab) ----
@@ -1163,30 +1196,79 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
     return c.redirect("/config/providers?notice=" + encodeURIComponent(note), 303);
   });
 
+  // Re-runs `opencode models` so the profile editor's datalist picks up newly
+  // configured providers (a stored key in auth.json only appears in the list
+  // after a refresh).
+  app.post("/config/models/refresh", async (c) => {
+    if (!gateOn) return c.redirect("/", 302);
+    const snap = await ctx.modelDiscovery?.refresh();
+    const key = snap?.error ? "models-refresh-failed" : "models-refreshed";
+    return c.redirect("/config/profiles/new?notice=" + key, 303);
+  });
+
   app.get("/config", (c) => {
     if (!gateOn) return c.redirect("/", 302);
-    const notices: Record<string, string> = {
-      "draft-created": "Draft created.",
-      "draft-saved": "Draft saved.",
-      activated: "Revision activated.",
-      "rolled-back": "Revision rolled back.",
-      imported: "Configuration imported as drafts.",
-    };
-    const noticeKey = c.req.query("notice") ?? "";
     return c.html(
       renderConfigPage({
         identity: c.get("identity"),
-        revisions: ctx.store.configs.listRevisions(),
-        audit: ctx.store.configs.listAudit(),
+        revisions: [],
+        audit: [],
         canWrite: gateOn,
-        csrfToken: gateOn ? ensureCsrfToken(c, ctx.config.uiSessionSecret) : undefined,
-        notice: notices[noticeKey],
         effectiveConfig: effectiveConfigEntries(
           ctx.config,
           ctx.env ?? process.env,
           ctx.store.configs.getActiveRevision("default") ?? null,
         ),
+      }),
+    );
+  });
+
+  const profileNotices: Record<string, string> = {
+    "draft-created": "Draft created.",
+    "draft-saved": "Draft saved.",
+    activated: "Revision activated.",
+    "rolled-back": "Revision rolled back.",
+    imported: "Configuration imported as drafts.",
+    "models-refreshed": "Model list refreshed from opencode models.",
+    "models-refresh-failed": "Model list refresh failed — see the note in the profile editor for details.",
+  };
+
+  app.get("/config/profiles", (c) => {
+    if (!gateOn) return c.redirect("/", 302);
+    return c.html(renderProfilesPage(profilesPageData(c, { notice: profileNotices[c.req.query("notice") ?? ""] })));
+  });
+
+  app.get("/config/profiles/new", (c) => {
+    if (!gateOn) return c.redirect("/", 302);
+    return c.html(renderNewProfilePage(profilesPageData(c, { notice: profileNotices[c.req.query("notice") ?? ""] })));
+  });
+
+  app.get("/config/profiles/drafts/:id/edit", (c) => {
+    if (!gateOn) return c.redirect("/", 302);
+    const revision = ctx.store.configs.getRevision(Number(c.req.param("id")));
+    if (!revision || revision.status !== "draft") {
+      return renderProfilesWithError(c, "Draft not found.", 404);
+    }
+    return c.html(
+      renderDraftEditPage({
+        revision,
+        identity: c.get("identity"),
+        canWrite: gateOn,
+        csrfToken: ensureCsrfToken(c, ctx.config.uiSessionSecret),
+        notice: c.req.query("notice") ?? undefined,
         profileEditor: profileEditorBase(),
+      }),
+    );
+  });
+
+  app.get("/config/audit", (c) => {
+    if (!gateOn) return c.redirect("/", 302);
+    return c.html(
+      renderConfigAuditPage({
+        identity: c.get("identity"),
+        revisions: [],
+        audit: ctx.store.configs.listAudit(100),
+        canWrite: gateOn,
       }),
     );
   });
@@ -1202,16 +1284,20 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
     | { kind: "save"; definition: unknown; note?: string };
 
   /**
-   * Structural actions and validation failures re-render the full config
-   * page (chrome, audit, effective config) with the in-progress form state
-   * applied — never a bare fragment, and never a persistence side effect:
-   * noop actions (boundary/malformed clicks) also land here untouched.
+   * Structural actions and validation failures re-render the page the form
+   * lives on — via the caller's `renderForm` callback (the profiles page for
+   * creates, the draft-edit page for updates) — with the in-progress form
+   * state applied, never a bare fragment, and never a persistence side
+   * effect: noop actions (boundary/malformed clicks) also land there
+   * untouched.
    */
-  const handleProfileForm = async (
-    c: Context<AppEnv>,
+  const handleProfileForm = (
     body: Record<string, unknown>,
-    existing?: { id: number; editSeq: number },
-  ): Promise<ProfileFormOutcome> => {
+    renderForm: (
+      form: { values: ProfileFormValues; errors: ProfileFieldErrors },
+      status: 200 | 400,
+    ) => Response,
+  ): ProfileFormOutcome => {
     let values = decodeProfileForm(body);
     let definition: unknown;
     const action = decodeProfileAction(body);
@@ -1244,32 +1330,11 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
         });
       }
     }
-    // Structural actions and failures re-render the full page; a noop click
-    // is a harmless no-op (200 with a status note), validation failures 400.
+    // Structural actions and failures re-render the caller's page; a noop
+    // click is a harmless no-op (200 with a status note), validation
+    // failures 400.
     if (isStructural || Object.keys(errors).length > 0) {
-      return {
-        kind: "render",
-        response: c.html(
-          renderConfigPage({
-            identity: c.get("identity"),
-            revisions: ctx.store.configs.listRevisions(),
-            audit: ctx.store.configs.listAudit(),
-            canWrite: gateOn,
-            error: errors.form,
-            csrfToken: ensureCsrfToken(c, ctx.config.uiSessionSecret),
-            effectiveConfig: effectiveConfigEntries(
-              ctx.config,
-              ctx.env ?? process.env,
-              ctx.store.configs.getActiveRevision("default") ?? null,
-            ),
-            profileEditor: {
-              ...profileEditorBase(),
-              form: { values, errors, revision: existing },
-            },
-          }),
-          isStructural ? 200 : 400,
-        ),
-      };
+      return { kind: "render", response: renderForm({ values, errors }, isStructural ? 200 : 400) };
     }
     return { kind: "save", definition, note: values.note };
   };
@@ -1280,7 +1345,12 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
     if (!actor) return configWriteDenied(c);
     const bodyPreview = await c.req.parseBody();
     if (bodyPreview.editor === "structured") {
-      const outcome = await handleProfileForm(c, bodyPreview);
+      const outcome = handleProfileForm(bodyPreview, (form, status) =>
+        c.html(
+          renderNewProfilePage(profilesPageData(c, { error: form.errors.form, form })),
+          status,
+        ),
+      );
       if (outcome.kind === "render") return outcome.response;
       const result = ctx.store.configs.createDraft({
         definition: outcome.definition,
@@ -1290,36 +1360,25 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
       if ("error" in result) {
         const values = decodeProfileForm(bodyPreview);
         return c.html(
-          renderConfigPage({
-            identity: c.get("identity"),
-            revisions: ctx.store.configs.listRevisions(),
-            audit: ctx.store.configs.listAudit(),
-            canWrite: gateOn,
-            error: result.issues.join("; "),
-            csrfToken: ensureCsrfToken(c, ctx.config.uiSessionSecret),
-            effectiveConfig: effectiveConfigEntries(
-              ctx.config,
-              ctx.env ?? process.env,
-              ctx.store.configs.getActiveRevision("default") ?? null,
-            ),
-            profileEditor: {
-              ...profileEditorBase(),
+          renderNewProfilePage(
+            profilesPageData(c, {
+              error: result.issues.join("; "),
               form: { values, errors: { form: result.issues.join("; ") } },
-            },
-          }),
+            }),
+          ),
           400,
         );
       }
-      return c.redirect("/config?notice=draft-created", 302);
+      return c.redirect("/config/profiles?notice=draft-created", 302);
     }
     const parsed = parseDefinition(typeof bodyPreview.definition === "string" ? bodyPreview.definition : undefined);
-    if (!parsed.ok) return renderConfigWithError(c, parsed.error, 400);
+    if (!parsed.ok) return renderProfilesWithError(c, parsed.error, 400);
     const result = ctx.store.configs.createDraft({
       definition: parsed.definition,
       createdBy: actor.login,
     });
-    if ("error" in result) return renderConfigWithError(c, result.issues.join("; "), 400);
-    return c.redirect("/config?notice=draft-created", 302);
+    if ("error" in result) return renderProfilesWithError(c, result.issues.join("; "), 400);
+    return c.redirect("/config/profiles?notice=draft-created", 302);
   });
 
   app.post("/config/drafts/:id", async (c) => {
@@ -1332,16 +1391,29 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
     if (bodyPreview.editor === "structured") {
       const existing = ctx.store.configs.getRevision(revisionId);
       if (!existing || existing.status !== "draft") {
-        return renderConfigWithError(c, "Draft not found.", 404);
+        return renderProfilesWithError(c, "Draft not found.", 404);
       }
       // A malformed hidden field (NaN binds as NULL in SQLite and never
       // matches) is treated as the sequence the form was rendered with,
       // rather than a misleading concurrency conflict.
       const editSeq = Number.isFinite(rawEditSeq) ? rawEditSeq : existing.editSeq;
-      const outcome = await handleProfileForm(c, bodyPreview, {
-        id: revisionId,
-        editSeq,
-      });
+      const renderEditPage = (
+        form: { values: ProfileFormValues; errors: ProfileFieldErrors },
+        status: 200 | 400,
+      ) =>
+        c.html(
+          renderDraftEditPage({
+            revision: existing,
+            identity: c.get("identity"),
+            canWrite: gateOn,
+            csrfToken: ensureCsrfToken(c, ctx.config.uiSessionSecret),
+            error: form.errors.form,
+            profileEditor: profileEditorBase(),
+            form,
+          }),
+          status,
+        );
+      const outcome = handleProfileForm(bodyPreview, renderEditPage);
       if (outcome.kind === "render") return outcome.response;
       const result = ctx.store.configs.updateDraft({
         id: revisionId,
@@ -1351,7 +1423,7 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
         updatedBy: actor.login,
       });
       if ("error" in result && result.error === "conflict") {
-        return renderConfigWithError(
+        return renderProfilesWithError(
           c,
           "Conflict: this draft was saved by someone else. Reload and re-apply your edit.",
           409,
@@ -1359,38 +1431,18 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
       }
       if ("error" in result) {
         if (result.error !== "invalid") {
-          return renderConfigWithError(c, "Draft not found.", 404);
+          return renderProfilesWithError(c, "Draft not found.", 404);
         }
         const values = decodeProfileForm(bodyPreview);
-        return c.html(
-          renderConfigPage({
-            identity: c.get("identity"),
-            revisions: ctx.store.configs.listRevisions(),
-            audit: ctx.store.configs.listAudit(),
-            canWrite: gateOn,
-            error: result.issues.join("; "),
-            csrfToken: ensureCsrfToken(c, ctx.config.uiSessionSecret),
-            effectiveConfig: effectiveConfigEntries(
-              ctx.config,
-              ctx.env ?? process.env,
-              ctx.store.configs.getActiveRevision("default") ?? null,
-            ),
-            profileEditor: {
-              ...profileEditorBase(),
-              form: {
-                values,
-                errors: { form: result.issues.join("; ") },
-                revision: { id: revisionId, editSeq },
-              },
-            },
-          }),
+        return renderEditPage(
+          { values, errors: { form: result.issues.join("; ") } },
           400,
         );
       }
-      return c.redirect("/config?notice=draft-saved", 302);
+      return c.redirect("/config/profiles?notice=draft-saved", 302);
     }
     const parsed = parseDefinition(typeof bodyPreview.definition === "string" ? bodyPreview.definition : undefined);
-    if (!parsed.ok) return renderConfigWithError(c, parsed.error, 400);
+    if (!parsed.ok) return renderProfilesWithError(c, parsed.error, 400);
     const rawJsonExisting = ctx.store.configs.getRevision(revisionId);
     const rawJsonEditSeq = Number.isFinite(rawEditSeq) ? rawEditSeq : rawJsonExisting?.editSeq ?? -1;
     const result = ctx.store.configs.updateDraft({
@@ -1400,14 +1452,14 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
       updatedBy: actor.login,
     });
     if ("error" in result && result.error === "conflict") {
-      return renderConfigWithError(
+      return renderProfilesWithError(
         c,
         "Conflict: this draft was saved by someone else. Reload and re-apply your edit.",
         409,
       );
     }
-    if ("error" in result) return renderConfigWithError(c, result.error === "invalid" ? result.issues.join("; ") : "Draft not found.", 400);
-    return c.redirect("/config?notice=draft-saved", 302);
+    if ("error" in result) return renderProfilesWithError(c, result.error === "invalid" ? result.issues.join("; ") : "Draft not found.", 400);
+    return c.redirect("/config/profiles?notice=draft-saved", 302);
   });
 
   app.post("/config/revisions/:id/activate", (c) => {
@@ -1415,8 +1467,26 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
     const actor = configActor(c);
     if (!actor) return configWriteDenied(c);
     const result = ctx.store.configs.activateRevision(Number(c.req.param("id")), actor.login);
-    if ("error" in result) return renderConfigWithError(c, result.error, 400);
-    return c.redirect("/config?notice=activated", 302);
+    if ("error" in result) return renderProfilesWithError(c, result.error, 400);
+    return c.redirect("/config/profiles?notice=activated", 302);
+  });
+
+  app.post("/config/revisions/:id/duplicate", (c) => {
+    if (!gateOn) return c.redirect("/", 302);
+    const actor = configActor(c);
+    if (!actor) return configWriteDenied(c);
+    const existing = ctx.store.configs.getRevision(Number(c.req.param("id")));
+    if (!existing) return renderProfilesWithError(c, "Revision not found.", 404);
+    const used = new Set(ctx.store.configs.listRevisions().map((revision) => revision.name));
+    let name = `${existing.name}-copy`;
+    for (let i = 2; used.has(name); i += 1) name = `${existing.name}-copy-${i}`;
+    const result = ctx.store.configs.createDraft({
+      definition: { ...existing.definition, name },
+      note: `Duplicated from #${existing.id} (${existing.name}).`,
+      createdBy: actor.login,
+    });
+    if ("error" in result) return renderProfilesWithError(c, result.issues.join("; "), 400);
+    return c.redirect(`/config/profiles/drafts/${result.revision.id}/edit`, 303);
   });
 
   app.post("/config/revisions/:id/rollback", (c) => {
@@ -1424,8 +1494,8 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
     const actor = configActor(c);
     if (!actor) return configWriteDenied(c);
     const result = ctx.store.configs.rollbackRevision(Number(c.req.param("id")), actor.login);
-    if ("error" in result) return renderConfigWithError(c, result.error, 400);
-    return c.redirect("/config?notice=rolled-back", 302);
+    if ("error" in result) return renderProfilesWithError(c, result.error, 400);
+    return c.redirect("/config/profiles?notice=rolled-back", 302);
   });
 
   app.get("/config/export", (c) => {
@@ -1443,11 +1513,11 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
     try {
       payload = JSON.parse(raw);
     } catch {
-      return renderConfigWithError(c, "Import payload must be valid JSON.", 400);
+      return renderProfilesWithError(c, "Import payload must be valid JSON.", 400);
     }
     const result = ctx.store.configs.importConfig({ payload, actor: actor.login });
-    if ("error" in result) return renderConfigWithError(c, result.error, 400);
-    return c.redirect("/config?notice=imported", 302);
+    if ("error" in result) return renderProfilesWithError(c, result.error, 400);
+    return c.redirect("/config/profiles?notice=imported", 302);
   });
 
   // ---- Versioned specialist prompts, fixtures, and evaluation (/config/prompts) ----

@@ -1,6 +1,15 @@
 import { describe, expect, it } from "vitest";
 import { openDb } from "./db.js";
-import { ReviewConfigStore, validateModelCatalog, validateProfileDefinition } from "./config-revisions.js";
+import { loadConfig } from "./config.js";
+import {
+  ReviewConfigStore,
+  envProfileDefinition,
+  seedDefaultProfileRevision,
+  validateModelCatalog,
+  validateProfileDefinition,
+} from "./config-revisions.js";
+import { JobStore } from "./jobs/store.js";
+import { applyProfileToSpecs, reviewerSpecs } from "./jobs/enqueue.js";
 
 function store() {
   return new ReviewConfigStore(openDb(":memory:"));
@@ -172,5 +181,56 @@ describe("profile validation and caps", () => {
       createdBy: "octocat",
     });
     expect("error" in bad && bad.error === "invalid").toBe(true);
+  });
+});
+
+describe("default profile seed", () => {
+  it("seeds a `default` draft mirroring the env configuration, audited as system", () => {
+    const configs = store();
+    const config = loadConfig({ OPENCODE_REVIEWER_MODEL: "env/model" });
+    expect(seedDefaultProfileRevision(configs, config)).toBe(true);
+    const draft = configs.listRevisions().find((row) => row.name === "default");
+    expect(draft?.status).toBe("draft");
+    expect(draft?.created_by).toBe("system");
+    expect(draft?.definition.minPublishableSeverity).toBe("info");
+    expect(draft?.definition.onBudgetExceeded).toBe("degrade");
+    expect(draft?.definition.routerModel).toBe("env/model");
+    expect(draft?.definition.reviewers).toHaveLength(config.reviewers.length);
+    for (const reviewer of draft?.definition.reviewers ?? []) {
+      expect(reviewer.model).toBe("env/model");
+    }
+    const seededAudit = configs.listAudit().find((entry) => entry.action === "draft_created");
+    expect(seededAudit?.actor).toBe("system");
+    expect(seededAudit?.revision_id).toBe(draft?.id);
+  });
+
+  it("is idempotent — an existing `default` revision is never touched", () => {
+    const configs = store();
+    const config = loadConfig({});
+    expect(seedDefaultProfileRevision(configs, config)).toBe(true);
+    expect(seedDefaultProfileRevision(configs, config)).toBe(false);
+    expect(configs.listRevisions()).toHaveLength(1);
+    // Even when the earlier default was activated or deleted by an operator,
+    // the name is enough: seeding never revives a second revision.
+    expect(configs.listRevisions()[0]?.status).toBe("draft");
+  });
+
+  it("omits models entirely when the env has none (specs fall through like env)", () => {
+    const def = envProfileDefinition(loadConfig({}));
+    expect(def.reviewers.length).toBeGreaterThan(0);
+    expect(def.reviewers.every((reviewer) => reviewer.model === undefined)).toBe(true);
+    expect(def.routerModel).toBeUndefined();
+  });
+
+  it("activating the untouched v0 revision leaves reviewer specs unchanged", () => {
+    const jobs = new JobStore(openDb(":memory:"));
+    const config = loadConfig({ OPENCODE_REVIEWER_MODEL: "env/model" });
+    expect(seedDefaultProfileRevision(jobs.configs, config)).toBe(true);
+    const draft = jobs.configs.listRevisions()[0];
+    const activated = jobs.configs.activateRevision(draft.id, "system");
+    if (!("revision" in activated)) throw new Error("activate failed");
+    const envSpecs = reviewerSpecs(config);
+    expect(envSpecs.length).toBeGreaterThan(0);
+    expect(applyProfileToSpecs(jobs, config, envSpecs, draft.id)).toEqual(envSpecs);
   });
 });

@@ -31,6 +31,8 @@ export interface EffectiveConfigEntry {
   source: ConfigValueSource;
   /** Extra provenance, e.g. revision label "#12 (name)" or an inheritance note. */
   sourceDetail?: string;
+  /** The env var that supplies or would override this value, when one exists. */
+  envKey?: string;
   /** The value is honored by the schema but not enforced at runtime yet. */
   notEnforced?: boolean;
 }
@@ -58,7 +60,7 @@ export function effectiveConfigEntries(
   const add = (entry: EffectiveConfigEntry) => entries.push(entry);
   /** A plain env-or-default row. */
   const row = (group: string, label: string, envKey: string, value: string) => {
-    add({ group, label, value, source: src(envKey) });
+    add({ group, label, value, source: src(envKey), envKey });
   };
   /** A profile-backed row; the caller has already checked the precondition. */
   const addProfile = (
@@ -82,6 +84,7 @@ export function effectiveConfigEntries(
     label: "Enabled roles",
     value: config.reviewers.map((role) => role.id).join(", "),
     source: src("REVIEWER_ROLES"),
+    envKey: "REVIEWER_ROLES",
   });
   const envRoleModels = config.reviewers.filter((role) => role.model);
   if (envRoleModels.length > 0) {
@@ -90,6 +93,7 @@ export function effectiveConfigEntries(
       label: "Per-role env models",
       value: envRoleModels.map((role) => `${role.id}: ${role.model}`).join(", "),
       source: "environment",
+      envKey: "REVIEWER_MODEL_<ROLE>",
     });
   }
   if (activeRevision) {
@@ -160,12 +164,14 @@ export function effectiveConfigEntries(
     label: "Reviewer model",
     value: config.opencode.reviewerModel || "(empty — provider default)",
     source: src("OPENCODE_REVIEWER_MODEL"),
+    envKey: "OPENCODE_REVIEWER_MODEL",
   });
   const inheritedDetail = "inherited from OPENCODE_REVIEWER_MODEL";
   add({
     group: "Models",
     label: "Aggregator model",
     value: config.opencode.aggregatorModel || "(empty — runs the reviewer model)",
+    envKey: "OPENCODE_AGGREGATOR_MODEL",
     source: envSet(env.OPENCODE_AGGREGATOR_MODEL)
       ? "environment"
       : envSet(env.OPENCODE_REVIEWER_MODEL)
@@ -179,6 +185,7 @@ export function effectiveConfigEntries(
     group: "Models",
     label: "Verifier model",
     value: config.opencode.verifierModel || "(empty — reconciliation verification disabled; priors left open)",
+    envKey: "OPENCODE_VERIFIER_MODEL",
     source: envSet(env.OPENCODE_VERIFIER_MODEL)
       ? "environment"
       : envSet(env.OPENCODE_REVIEWER_MODEL)
@@ -199,6 +206,7 @@ export function effectiveConfigEntries(
         ? config.routing.model || config.opencode.reviewerModel
         : "(empty — deterministic routing in hybrid mode)",
     source: routerEnvSet ? "environment" : "default",
+    envKey: "OPENCODE_ROUTER_MODEL",
     sourceDetail: routerShadowed
       ? `not in effect — overridden by profile #${activeRevision!.id}`
       : undefined,
@@ -219,6 +227,7 @@ export function effectiveConfigEntries(
       ? config.modelCatalog.join(", ")
       : "(empty — any well-formed model allowed)",
     source: src("MODEL_CATALOG"),
+    envKey: "MODEL_CATALOG",
     sourceDetail: config.modelCatalog.length > 0 ? "applies to profile revisions only" : undefined,
   });
 
@@ -252,6 +261,7 @@ export function effectiveConfigEntries(
     label: "Webhook actions that enqueue reviews",
     value: actions || "(none)",
     source: src("PULL_REQUEST_ACTIONS"),
+    envKey: "PULL_REQUEST_ACTIONS",
   });
   add({
     group: "Webhooks and access",
@@ -260,6 +270,7 @@ export function effectiveConfigEntries(
       ? config.allowedGithubAccountIds.join(", ")
       : "(empty — any installation; fail-closed per payload only when set)",
     source: src("ALLOWED_GITHUB_ACCOUNT_IDS"),
+    envKey: "ALLOWED_GITHUB_ACCOUNT_IDS",
   });
   add({
     group: "Webhooks and access",
@@ -268,6 +279,7 @@ export function effectiveConfigEntries(
       ? config.allowedGithubRepositoryIds.join(", ")
       : "(empty — any repository on an allowed account)",
     source: src("ALLOWED_GITHUB_REPOSITORY_IDS"),
+    envKey: "ALLOWED_GITHUB_REPOSITORY_IDS",
   });
   add({
     group: "Webhooks and access",
@@ -276,6 +288,7 @@ export function effectiveConfigEntries(
       ? config.overrideAuthors.join(", ")
       : "(empty — write/maintain/admin collaborators)",
     source: src("MAOMAO_OVERRIDE_AUTHORS"),
+    envKey: "MAOMAO_OVERRIDE_AUTHORS",
   });
   row(
     "Webhooks and access",
@@ -395,18 +408,21 @@ export function effectiveConfigEntries(
     label: "GitHub App credentials",
     value: configured(Boolean(config.github.appId) && config.github.privateKey.length > 0),
     source: "environment",
+    envKey: "GITHUB_APP_ID",
   });
   add({
     group: "Credentials",
     label: "GitHub webhook secret",
     value: configured(config.github.webhookSecret.length > 0),
     source: "environment",
+    envKey: "GITHUB_WEBHOOK_SECRET",
   });
   add({
     group: "Credentials",
     label: "GitHub OAuth operator login",
     value: configured(Boolean(config.oauthClientId) && Boolean(config.oauthClientSecret)),
     source: "environment",
+    envKey: "GITHUB_OAUTH_CLIENT_ID",
   });
   const oauthOn = Boolean(config.oauthClientId) && Boolean(config.oauthClientSecret);
   const passwordFormServed = config.uiPassword.length > 0 && (!oauthOn || config.uiLocalLogin);
@@ -419,6 +435,7 @@ export function effectiveConfigEntries(
         ? "inactive (password form not shown while OAuth login is enabled; set UI_LOCAL_LOGIN=true)"
         : "not configured",
     source: "environment",
+    envKey: "UI_PASSWORD",
   });
 
   row("Ask Maomao", "Explainer enabled", "MAOMAO_EXPLAIN_ENABLED", String(config.chat.enabled));

@@ -9,6 +9,8 @@ import { createApp } from "./server.js";
 import { GithubClient } from "./github/client.js";
 import { chatWorkspaceRoot, createCheckout, sweepWorkspaces } from "./checkout.js";
 import { createOpenCodeRunner } from "./opencode/spawn.js";
+import { ModelDiscovery } from "./opencode/models.js";
+import { seedDefaultProfileRevision } from "./config-revisions.js";
 import { ChatService } from "./chat/service.js";
 import { ChatStore } from "./chat/store.js";
 import { oauthCallbackUrl, oauthEnabled } from "./oauth.js";
@@ -50,8 +52,24 @@ const orphanedClaims = store.clearOrphanedScanIssueClaims();
 if (orphanedClaims > 0) {
   console.log(`Cleared ${orphanedClaims} orphaned scan-issue claim(s) from a previous run`);
 }
+// First-boot seed: a `default` draft mirroring the env config, so operators
+// edit a prefilled baseline instead of a blank form. Idempotent, audited as a
+// system action; activating it unchanged is a no-op by construction.
+if (seedDefaultProfileRevision(store.configs, config)) {
+  console.log("Seeded default profile revision from environment configuration");
+}
 const github = new GithubClient(config);
 const opencode = createOpenCodeRunner(config.opencode.bin);
+// Discover the model list once at boot so the profile editor's datalist is
+// populated before the first visit; operators can re-run it from the UI.
+const modelDiscovery = new ModelDiscovery(config.opencode.bin);
+void modelDiscovery.refresh().then((snap) => {
+  if (snap.error) {
+    console.warn(`Model discovery failed (${snap.error}); the profile editor falls back to MODEL_CATALOG.`);
+  } else {
+    console.log(`Discovered ${snap.models.length} model(s) via opencode models`);
+  }
+});
 const getInstallationToken = (installationId: number) => github.getInstallationToken(installationId);
 const forge = new ForgeRegistry(github, config.github.appSlug, getInstallationToken, forgeConnections);
 const pipeline = createPipeline({
@@ -82,7 +100,18 @@ const chat = chatStore
     }
   : undefined;
 
-const app = createApp({ config, store, queue, github, opencode, forgeConnections, chat, startedAt: Date.now(), env: process.env });
+const app = createApp({
+  config,
+  store,
+  queue,
+  github,
+  opencode,
+  forgeConnections,
+  chat,
+  modelDiscovery,
+  startedAt: Date.now(),
+  env: process.env,
+});
 
 serve({ fetch: app.fetch, hostname: config.host, port: config.port }, (info) => {
   console.log(`Maomao listening on http://${info.address}:${info.port}`);
