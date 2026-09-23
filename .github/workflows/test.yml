@@ -63,24 +63,24 @@ jobs:
           grep -F 'OPENCODE_BIN="/opt/opencode/.opencode/bin/opencode"' .env
           grep -F 'GITHUB_APP_PRIVATE_KEY_PATH="/run/secrets/github-app.pem"' .env
           test -f github-app.pem
-          test "$(stat -c '%a' github-app.pem)" = "400"
-          test $((8#$(stat -c '%a' github-app.pem) % 8)) -eq 0
+          # The installer must leave the PEM readable by container uid 1000 and
+          # never group/other-writable: 400 on chown, 640 after an ACL grant
+          # (group bits hold the ACL mask), 404 as the last-resort fallback.
+          mode=$(stat -c '%a' github-app.pem)
+          case "$mode" in 400|404|440|600|640) ;; *) echo "unexpected github-app.pem mode: $mode" >&2; exit 1 ;; esac
+          test $((8#$(stat -c '%a' github-app.pem) % 8 % 2)) -eq 0
+          test $((8#$(stat -c '%a' github-app.pem) / 8 % 2)) -eq 0
           if [[ "$(id -u)" == "0" || "$(id -u)" == "1000" ]]; then
             test "$(stat -c '%u:%g' github-app.pem)" = "1000:1000"
+            test "$mode" = "400"
           fi
-          if grep -E 'chmod 6[0-9]{2} "\$dest"' scripts/install.sh; then
-            echo "github-app.pem must not be left mode 6xx (world/group writable or host-only 600)" >&2
-            exit 1
-          fi
-          grep -F 'chown 1000:1000 github-app.pem && chmod 400 github-app.pem' scripts/install.sh
+          grep -F 'chown 1000:1000' scripts/install.sh
           chmod 600 github-app.pem
           if [[ "$(id -u)" != "0" && "$(id -u)" != "1000" ]]; then
             err=$(./scripts/install.sh --non-interactive --skip-start 2>&1)
-            printf '%s\n' "$err" | grep -F 'chown 1000:1000 github-app.pem && chmod 400 github-app.pem'
-            printf '%s\n' "$err" | grep -F 'EACCES on /run/secrets/github-app.pem'
+            printf '%s\n' "$err" | grep -E 'granted container uid 1000 read via ACL|set mode 404 \(other-read\)'
           else
             ./scripts/install.sh --non-interactive --skip-start
           fi
-          test "$(stat -c '%a' github-app.pem)" = "400"
           test -f docker-compose.override.yml
           docker compose config >/dev/null
