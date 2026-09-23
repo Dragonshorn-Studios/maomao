@@ -1212,6 +1212,9 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
         providers: providerCreds().list(),
         csrfToken: gateOn ? ensureCsrfToken(c, ctx.config.uiSessionSecret) : undefined,
         canWrite: gateOn,
+        modelCatalog: mergedModelCatalog(),
+        modelsFetchedAt: ctx.modelDiscovery?.snapshot().fetchedAt,
+        modelsError: ctx.modelDiscovery?.snapshot().error,
         options: { ...pageOpts, identity: c.get("identity"), notice: extra.notice, error: extra.error },
       }),
       (extra.status ?? 200) as 200 | 400 | 403 | 429 | 503,
@@ -1228,16 +1231,19 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
     const key = typeof body.key === "string" ? body.key : "";
     const result = providerCreds().set(c.req.param("id"), key);
     if (!result.ok) return renderProviders(c, { error: result.error, status: 400 });
+    // Re-run discovery so the new key's models (and Test key) work immediately.
+    await ctx.modelDiscovery?.refresh();
     return c.redirect("/config/providers?notice=" + encodeURIComponent(`Key for ${c.req.param("id")} saved to auth.json.`), 303);
   });
 
-  app.post("/config/providers/:id/delete", (c) => {
+  app.post("/config/providers/:id/delete", async (c) => {
     if (!gateOn) return c.redirect("/", 302);
     const result = providerCreds().delete(c.req.param("id"));
     if (!result.ok) return renderProviders(c, { error: result.error, status: 400 });
     const note = result.removed
       ? `Stored key for ${c.req.param("id")} removed.`
       : `No stored key for ${c.req.param("id")}.`;
+    await ctx.modelDiscovery?.refresh();
     return c.redirect("/config/providers?notice=" + encodeURIComponent(note), 303);
   });
 
@@ -1344,7 +1350,9 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
     if (!gateOn) return c.redirect("/", 302);
     const snap = await ctx.modelDiscovery?.refresh();
     const key = snap?.error ? "models-refresh-failed" : "models-refreshed";
-    return c.redirect("/config/profiles/new?notice=" + key, 303);
+    // The providers page's refresh button lands back there, not on the editor.
+    const base = c.req.query("next") === "providers" ? "/config/providers" : "/config/profiles/new";
+    return c.redirect(base + "?notice=" + key, 303);
   });
 
   app.get("/config", (c) => {

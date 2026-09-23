@@ -1323,6 +1323,40 @@ body.operator main th {
 }
 .connection-actions form { margin: 0; }
 .provider-filter input { width: 100%; max-width: 22rem; }
+.model-list { margin-top: 2rem; }
+.model-list-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 1rem;
+  flex-wrap: wrap;
+}
+.model-list-head h2 { margin-bottom: 0.15rem; }
+.model-list-head p { margin-top: 0; }
+.model-refresh { margin: 0; align-self: center; }
+.model-group-head {
+  margin: 1.1rem 0 0.35rem;
+  font-size: 0.95rem;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+.model-group-count { font-weight: normal; }
+.model-grid {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(16rem, 1fr));
+  gap: 0.15rem 1rem;
+}
+.model-item {
+  font-family: var(--font-mono);
+  font-size: 0.78rem;
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+}
+.model-item .muted { font-family: var(--font-body, inherit); font-size: 0.72rem; }
 .provider-help { margin: 0.35rem 0 0.6rem; }
 .provider-key-form {
   display: flex;
