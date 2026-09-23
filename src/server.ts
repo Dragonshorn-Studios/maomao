@@ -55,6 +55,8 @@ import {
   CHAT_BUNDLE_HREF,
   TYPEAHEAD_HREF,
   TYPEAHEAD_JS,
+  MODEL_PICKER_HREF,
+  MODEL_PICKER_JS,
   FAVICON_SVG,
   FAVICON_PNG_BASE64,
   LARGE_ICON_SVG,
@@ -531,6 +533,13 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
 
   app.get(TYPEAHEAD_HREF, (c) =>
     c.newResponse(TYPEAHEAD_JS, 200, {
+      "content-type": "text/javascript; charset=utf-8",
+      "cache-control": "public, max-age=3600",
+    }),
+  );
+
+  app.get(MODEL_PICKER_HREF, (c) =>
+    c.newResponse(MODEL_PICKER_JS, 200, {
       "content-type": "text/javascript; charset=utf-8",
       "cache-control": "public, max-age=3600",
     }),

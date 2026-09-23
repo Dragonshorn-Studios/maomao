@@ -1200,16 +1200,14 @@ describe("model discovery routes", () => {
 
     const page = await app.request("/config/profiles/new", { headers: { cookie: session } });
     const html = await page.text();
-    expect(html).toContain('<optgroup label="catalog">');
-    expect(html).toContain('<option value="catalog/curated">catalog/curated (in MODEL_CATALOG)</option>');
-    expect(html).toContain('<optgroup label="anthropic">');
-    expect(html).toContain(
-      '<option value="anthropic/claude-4.5-sonnet">anthropic/claude-4.5-sonnet (key configured)</option>',
-    );
-    expect(html).toContain('<optgroup label="openai">');
-    expect(html).toContain(
-      '<option value="openai/gpt-4o">openai/gpt-4o (discovered via opencode models)</option>',
-    );
+    expect(html).toContain('<span class="model-picker-group" role="presentation">catalog</span>');
+    expect(html).toContain('data-value="catalog/curated"');
+    expect(html).toContain('catalog/curated · in MODEL_CATALOG');
+    expect(html).toContain('<span class="model-picker-group" role="presentation">anthropic</span>');
+    expect(html).toContain('data-value="anthropic/claude-4.5-sonnet"');
+    expect(html).toContain('anthropic/claude-4.5-sonnet · key configured');
+    expect(html).toContain('<span class="model-picker-group" role="presentation">openai</span>');
+    expect(html).toContain('data-value="openai/gpt-4o"');
     expect(html).toContain("2 models discovered");
     log.mockRestore();
   });

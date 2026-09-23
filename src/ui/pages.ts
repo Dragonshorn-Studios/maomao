@@ -1,6 +1,6 @@
 import type { JobRow, JobStore, ReviewerRunRow } from "../jobs/store.js";
 import { forgeBadgeTitle, forgeBadgeTitleHtml, forgeChipLabel, providerLabel } from "./forge-badge.js";
-import { modelPicker } from "./model-picker.js";
+import { MODEL_PICKER_HREF, modelPicker } from "./model-picker.js";
 import type { FindingRow } from "../findings/types.js";
 import { fingerprintFinding, stripHtmlComments } from "../findings/identity.js";
 import { POLICIES_WITH_EXTERNAL, POLICIES_WITH_INTERNAL } from "../routing/types.js";
@@ -1362,6 +1362,7 @@ export function renderProfileForm(
       <a href="/config/profiles">Cancel</a>
     </form>
     ${discoveryStatus}
+    <script src="${MODEL_PICKER_HREF}" defer></script>
   </section>`;
 }
 
@@ -1767,7 +1768,8 @@ export function renderPromptConfigPage(data: PromptConfigPageData): string {
     ${data.fixtures.length > 0 ? `<table class="config-audit"><thead><tr><th>ID</th><th>Name</th><th>Diff chars</th><th>Expectations</th><th>Saved by</th></tr></thead><tbody>${fixtureRows}</tbody></table>` : `<p class="muted">No fixtures saved.</p>`}
     <h2>Evaluations</h2>
     ${evalForm}
-    ${data.evaluations.length > 0 ? `<table class="config-audit"><thead><tr><th>ID</th><th>Prompt</th><th>Fixture</th><th>Model</th><th>Status</th><th>Result</th></tr></thead><tbody>${evaluationRows}</tbody></table>` : `<p class="muted">No evaluations recorded.</p>`}`;
+    ${data.evaluations.length > 0 ? `<table class="config-audit"><thead><tr><th>ID</th><th>Prompt</th><th>Fixture</th><th>Model</th><th>Status</th><th>Result</th></tr></thead><tbody>${evaluationRows}</tbody></table>` : `<p class="muted">No evaluations recorded.</p>`}
+    <script src="${MODEL_PICKER_HREF}" defer></script>`;
   return layout("Specialist prompts", body, {
     showLogout: data.canWrite || Boolean(data.csrfToken),
     csrfToken: data.csrfToken,

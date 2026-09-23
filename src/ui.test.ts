@@ -1644,31 +1644,32 @@ describe("model picker", () => {
     { id: "openai/gpt-4o", hint: "discovered via opencode models" },
   ];
 
-  it("groups options under a provider optgroup and selects the current value", () => {
+  it("groups options under provider headers and marks the current value selected", () => {
     const html = modelPicker({
       name: "reviewer_model_0",
       value: "anthropic/claude-4.5-haiku",
       models,
       emptyLabel: "— default —",
     });
-    expect(html).toContain('<select name="reviewer_model_0">');
-    expect(html).toContain('<option value="">— default —</option>');
-    expect(html.indexOf('<optgroup label="anthropic">')).toBeLessThan(html.indexOf('<optgroup label="openai">'));
-    expect(html).toContain(
-      '<option value="anthropic/claude-4.5-haiku" selected>anthropic/claude-4.5-haiku</option>',
-    );
-    expect(html).toContain("(key configured)");
+    expect(html).toContain('data-model-picker');
+    expect(html).toContain('<input type="hidden" name="reviewer_model_0" value="anthropic/claude-4.5-haiku"');
+    expect(html).toContain('data-value="" data-label="— default —" aria-selected="false"');
+    expect(html.indexOf('>anthropic</span>')).toBeLessThan(html.indexOf('>openai</span>'));
+    expect(html).toContain('data-value="anthropic/claude-4.5-haiku" data-label="anthropic/claude-4.5-haiku" aria-selected="true"');
+    expect(html).toContain('anthropic/claude-4.5-sonnet · key configured');
     expect(html).not.toContain("datalist");
   });
 
   it("preserves a saved value that is not in the catalog as a custom option", () => {
     const html = modelPicker({ name: "router_model", value: "local/llama", models, emptyLabel: "— default —" });
-    expect(html).toContain('<option value="local/llama" selected>local/llama (custom)</option>');
+    expect(html).toContain('data-value="local/llama"');
+    expect(html).toContain('local/llama · custom');
+    expect(html).toContain('aria-selected="true"');
   });
 
   it("degrades to a text input when the model list is empty", () => {
     const html = modelPicker({ name: "model", value: "x/y", models: [], emptyLabel: "— default —" });
     expect(html).toContain('<input name="model" value="x/y"');
-    expect(html).not.toContain("<select");
+    expect(html).not.toContain("data-model-picker");
   });
 });
