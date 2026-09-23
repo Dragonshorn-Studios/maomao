@@ -25,9 +25,11 @@ import type { ProfileFieldErrors, ProfileFormValues } from "./config-form.js";
 import { decodeProfileAction, decodeProfileForm, applyProfileAction, profileFormToDefinition } from "./config-form.js";
 import { KNOWN_REVIEWER_ROLES } from "./prompts.js";
 import { subscribe } from "./events.js";
-import { redactSecrets } from "./util.js";
+import { redactSecrets, truncate } from "./util.js";
 import { readFileSync } from "node:fs";
-import { resolve } from "node:path";
+import { mkdtemp } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join, resolve } from "node:path";
 import {
   renderConnectionsPage,
   renderScanConfirmPage,
@@ -1226,6 +1228,52 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
       ? `Stored key for ${c.req.param("id")} removed.`
       : `No stored key for ${c.req.param("id")}.`;
     return c.redirect("/config/providers?notice=" + encodeURIComponent(note), 303);
+  });
+
+  // Spawns a real `opencode run` against one discovered/catalogued model of
+  // the provider — the same runner reviews use — so a saved key is proven
+  // against the actual spawn path, not just the auth.json write.
+  app.post("/config/providers/:id/test", async (c) => {
+    if (!gateOn) return c.redirect("/", 302);
+    if (!ctx.opencode) {
+      return renderProviders(c, { error: "Provider test is unavailable on this process (no OpenCode runner).", status: 503 });
+    }
+    const id = c.req.param("id");
+    const model =
+      ctx.modelDiscovery?.snapshot().models.find((m) => m.split("/")[0] === id) ??
+      ctx.config.modelCatalog.find((m) => m.split("/")[0] === id);
+    if (!model) {
+      return renderProviders(c, {
+        error: `No model known for ${id} yet — run "Refresh model list" on the profile editor or add one to MODEL_CATALOG first.`,
+        status: 400,
+      });
+    }
+    try {
+      const workspace = await mkdtemp(join(tmpdir(), "maomao-provider-test-"));
+      const result = await ctx.opencode.run({
+        cwd: workspace,
+        model,
+        prompt: "Reply with exactly the word: ok",
+        timeoutMs: 60_000,
+        extraArgs: ctx.config.opencode.extraArgs,
+        title: `maomao-provider-test-${id}`,
+      });
+      if (result.exitCode !== 0) {
+        return renderProviders(c, {
+          error: `${model} exited ${result.exitCode}: ${truncate(result.stderr.trim() || "no stderr", 300)}`,
+          status: 400,
+        });
+      }
+      return c.redirect(
+        "/config/providers?notice=" + encodeURIComponent(`${id} key verified — ${model} answered a real opencode run.`),
+        303,
+      );
+    } catch (error) {
+      return renderProviders(c, {
+        error: `${id} test failed: ${error instanceof Error ? error.message : String(error)}`,
+        status: 400,
+      });
+    }
   });
 
   // Re-runs `opencode models` so the profile editor's datalist picks up newly

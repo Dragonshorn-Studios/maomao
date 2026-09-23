@@ -1163,6 +1163,98 @@ describe("provider credential routes", () => {
     expect(existsSync(authPath)).toBe(false);
     log.mockRestore();
   });
+
+  it("spawns a real opencode run for the configured provider and reports success", async () => {
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    const dir = mkdtempSync(join(tmpdir(), "maomao-prov-"));
+    const providerCredentials = new ProviderCredentialStore(join(dir, "opencode", "auth.json"), {});
+    expect(providerCredentials.set("anthropic", "sk-ant-test-value-9").ok).toBe(true);
+    const calls: string[] = [];
+    const opencode: OpenCodeLike = {
+      async run(input) {
+        calls.push(input.model);
+        return { stdout: "ok", stderr: "", exitCode: 0, text: "ok", usage: undefined as never };
+      },
+    };
+    const { app } = testApp(
+      { UI_PASSWORD: "hunter2", UI_SESSION_SECRET: "session-secret-for-tests", MODEL_CATALOG: "anthropic/claude-4.5-sonnet" },
+      undefined,
+      undefined,
+      { providerCredentials, opencode },
+    );
+    const { session } = await loginSession(app);
+    const page = await app.request("/config/providers", { headers: { cookie: session } });
+    const { csrfCookie, csrfToken, html } = await csrfArtifacts(page);
+    expect(html).toContain('formaction="/config/providers/anthropic/test"');
+
+    const tested = await app.request("/config/providers/anthropic/test", {
+      method: "POST",
+      headers: { cookie: `${session}; ${csrfCookie}`, "content-type": "application/x-www-form-urlencoded" },
+      body: `csrf_token=${encodeURIComponent(csrfToken)}`,
+    });
+    expect(tested.status).toBe(303);
+    expect(tested.headers.get("location")).toContain("verified");
+    expect(calls).toEqual(["anthropic/claude-4.5-sonnet"]);
+    log.mockRestore();
+  });
+
+  it("reports a failed provider test with the runner's stderr", async () => {
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    const dir = mkdtempSync(join(tmpdir(), "maomao-prov-"));
+    const providerCredentials = new ProviderCredentialStore(join(dir, "opencode", "auth.json"), {});
+    expect(providerCredentials.set("anthropic", "sk-ant-bad-key").ok).toBe(true);
+    const opencode: OpenCodeLike = {
+      async run() {
+        return { stdout: "", stderr: "401 Unauthorized: bad api key", exitCode: 1, text: "", usage: undefined as never };
+      },
+    };
+    const { app } = testApp(
+      { UI_PASSWORD: "hunter2", UI_SESSION_SECRET: "session-secret-for-tests", MODEL_CATALOG: "anthropic/claude-4.5-sonnet" },
+      undefined,
+      undefined,
+      { providerCredentials, opencode },
+    );
+    const { session } = await loginSession(app);
+    const page = await app.request("/config/providers", { headers: { cookie: session } });
+    const { csrfCookie, csrfToken } = await csrfArtifacts(page);
+    const tested = await app.request("/config/providers/anthropic/test", {
+      method: "POST",
+      headers: { cookie: `${session}; ${csrfCookie}`, "content-type": "application/x-www-form-urlencoded" },
+      body: `csrf_token=${encodeURIComponent(csrfToken)}`,
+    });
+    expect(tested.status).toBe(400);
+    expect(await tested.text()).toContain("401 Unauthorized");
+    log.mockRestore();
+  });
+
+  it("refuses the provider test when no model is known for it", async () => {
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    const dir = mkdtempSync(join(tmpdir(), "maomao-prov-"));
+    const providerCredentials = new ProviderCredentialStore(join(dir, "opencode", "auth.json"), {});
+    expect(providerCredentials.set("anthropic", "sk-ant-test-value-9").ok).toBe(true);
+    const opencode: OpenCodeLike = {
+      async run() {
+        throw new Error("should not run");
+      },
+    };
+    const { app } = testApp(
+      { UI_PASSWORD: "hunter2", UI_SESSION_SECRET: "session-secret-for-tests" },
+      undefined,
+      undefined,
+      { providerCredentials, opencode },
+    );
+    const { session } = await loginSession(app);
+    const page = await app.request("/config/providers", { headers: { cookie: session } });
+    const { csrfCookie, csrfToken } = await csrfArtifacts(page);
+    const tested = await app.request("/config/providers/anthropic/test", {
+      method: "POST",
+      headers: { cookie: `${session}; ${csrfCookie}`, "content-type": "application/x-www-form-urlencoded" },
+      body: `csrf_token=${encodeURIComponent(csrfToken)}`,
+    });
+    expect(tested.status).toBe(400);
+    expect(await tested.text()).toContain("No model known for anthropic");
+    log.mockRestore();
+  });
 });
 
 describe("model discovery routes", () => {
