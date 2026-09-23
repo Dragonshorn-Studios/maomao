@@ -1163,6 +1163,418 @@ describe("provider credential routes", () => {
     expect(existsSync(authPath)).toBe(false);
     log.mockRestore();
   });
+
+  it("spawns a real opencode run for the configured provider and reports success", async () => {
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    const dir = mkdtempSync(join(tmpdir(), "maomao-prov-"));
+    const providerCredentials = new ProviderCredentialStore(join(dir, "opencode", "auth.json"), {});
+    expect(providerCredentials.set("anthropic", "sk-ant-test-value-9").ok).toBe(true);
+    const calls: Parameters<OpenCodePort["run"]>[0][] = [];
+    const opencode: OpenCodeLike = {
+      async run(input) {
+        calls.push(input);
+        return { stdout: "ok", stderr: "", exitCode: 0, text: "ok", usage: undefined as never };
+      },
+    };
+    const { app } = testApp(
+      {
+        UI_PASSWORD: "hunter2",
+        UI_SESSION_SECRET: "session-secret-for-tests",
+        MODEL_CATALOG: "anthropic/claude-4.5-sonnet",
+        OPENCODE_EXTRA_ARGS: "--json",
+      },
+      undefined,
+      undefined,
+      { providerCredentials, opencode },
+    );
+    const { session } = await loginSession(app);
+    const page = await app.request("/config/providers", { headers: { cookie: session } });
+    const { csrfCookie, csrfToken, html } = await csrfArtifacts(page);
+    expect(html).toContain('formaction="/config/providers/anthropic/test"');
+    expect(html).not.toContain('formaction="/config/providers/openai/test"');
+
+    const tested = await app.request("/config/providers/anthropic/test", {
+      method: "POST",
+      headers: { cookie: `${session}; ${csrfCookie}`, "content-type": "application/x-www-form-urlencoded" },
+      body: `csrf_token=${encodeURIComponent(csrfToken)}`,
+    });
+    expect(tested.status).toBe(303);
+    expect(tested.headers.get("location")).toContain("verified");
+    expect(calls).toHaveLength(1);
+    expect(calls[0].model).toBe("anthropic/claude-4.5-sonnet");
+    expect(calls[0].cwd).toContain("maomao-provider-test-");
+    expect(calls[0].prompt).toContain("Reply with exactly the word: ok");
+    expect(calls[0].timeoutMs).toBe(60_000);
+    expect(calls[0].title).toBe("maomao-provider-test-anthropic");
+    expect(calls[0].signal).toBeInstanceOf(AbortSignal);
+    expect(calls[0].extraArgs).toEqual(["--json"]);
+    log.mockRestore();
+  });
+
+  it("reports a failed provider test, falling back to stdout when stderr is empty", async () => {
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    const dir = mkdtempSync(join(tmpdir(), "maomao-prov-"));
+    const providerCredentials = new ProviderCredentialStore(join(dir, "opencode", "auth.json"), {});
+    expect(providerCredentials.set("anthropic", "sk-ant-bad-key").ok).toBe(true);
+    let lastCwd = "";
+    const opencode: OpenCodeLike = {
+      async run(input) {
+        lastCwd = input.cwd;
+        return { stdout: "401 Unauthorized: bad api key", stderr: "", exitCode: 1, text: "", usage: undefined as never };
+      },
+    };
+    const { app } = testApp(
+      { UI_PASSWORD: "hunter2", UI_SESSION_SECRET: "session-secret-for-tests", MODEL_CATALOG: "anthropic/claude-4.5-sonnet" },
+      undefined,
+      undefined,
+      { providerCredentials, opencode },
+    );
+    const { session } = await loginSession(app);
+    const page = await app.request("/config/providers", { headers: { cookie: session } });
+    const { csrfCookie, csrfToken } = await csrfArtifacts(page);
+    const tested = await app.request("/config/providers/anthropic/test", {
+      method: "POST",
+      headers: { cookie: `${session}; ${csrfCookie}`, "content-type": "application/x-www-form-urlencoded" },
+      body: `csrf_token=${encodeURIComponent(csrfToken)}`,
+    });
+    expect(tested.status).toBe(400);
+    expect(await tested.text()).toContain("401 Unauthorized");
+    // The workspace is cleaned up after failures too.
+    expect(existsSync(lastCwd)).toBe(false);
+    log.mockRestore();
+  });
+
+  it("reports a 400 when the provider test runner rejects", async () => {
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    const dir = mkdtempSync(join(tmpdir(), "maomao-prov-"));
+    const providerCredentials = new ProviderCredentialStore(join(dir, "opencode", "auth.json"), {});
+    expect(providerCredentials.set("anthropic", "sk-ant-test-value-9").ok).toBe(true);
+    const opencode: OpenCodeLike = {
+      async run() {
+        throw new Error("spawn opencode ENOENT");
+      },
+    };
+    const { app } = testApp(
+      { UI_PASSWORD: "hunter2", UI_SESSION_SECRET: "session-secret-for-tests", MODEL_CATALOG: "anthropic/claude-4.5-sonnet" },
+      undefined,
+      undefined,
+      { providerCredentials, opencode },
+    );
+    const { session } = await loginSession(app);
+    const page = await app.request("/config/providers", { headers: { cookie: session } });
+    const { csrfCookie, csrfToken } = await csrfArtifacts(page);
+    const tested = await app.request("/config/providers/anthropic/test", {
+      method: "POST",
+      headers: { cookie: `${session}; ${csrfCookie}`, "content-type": "application/x-www-form-urlencoded" },
+      body: `csrf_token=${encodeURIComponent(csrfToken)}`,
+    });
+    expect(tested.status).toBe(400);
+    expect(await tested.text()).toContain("spawn opencode ENOENT");
+    log.mockRestore();
+  });
+
+  it("prefers a discovered model over the catalog and accepts verbose exit-0 replies", async () => {
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    const dir = mkdtempSync(join(tmpdir(), "maomao-prov-"));
+    const providerCredentials = new ProviderCredentialStore(join(dir, "opencode", "auth.json"), {});
+    expect(providerCredentials.set("anthropic", "sk-ant-test-value-9").ok).toBe(true);
+    const modelsSpawned: string[] = [];
+    const spawnFn = ((bin: string, args: string[]) => {
+      modelsSpawned.push(args.join(" "));
+      const child = new EventEmitter() as ChildProcess & { stdout: PassThrough; stderr: PassThrough };
+      child.stdout = new PassThrough();
+      child.stderr = new PassThrough();
+      queueMicrotask(() => {
+        child.stdout.end("anthropic/claude-4.6-opus\n");
+        child.emit("close", 0);
+      });
+      return child;
+    }) as never;
+    const modelDiscovery = new ModelDiscovery("opencode", {}, spawnFn, 1000);
+    await modelDiscovery.refresh();
+    let reply = "ok";
+    const opencode: OpenCodeLike = {
+      async run(input) {
+        calls.push(input.model);
+        return { stdout: reply, stderr: "", exitCode: 0, text: reply, usage: undefined as never };
+      },
+    };
+    const calls: string[] = [];
+    const { app } = testApp(
+      { UI_PASSWORD: "hunter2", UI_SESSION_SECRET: "session-secret-for-tests", MODEL_CATALOG: "anthropic/claude-4.5-sonnet" },
+      undefined,
+      undefined,
+      { providerCredentials, opencode, modelDiscovery },
+    );
+    const { session } = await loginSession(app);
+    const page = await app.request("/config/providers", { headers: { cookie: session } });
+    const artifacts = await csrfArtifacts(page);
+    const post = async (csrf: typeof artifacts) =>
+      app.request("/config/providers/anthropic/test", {
+        method: "POST",
+        headers: { cookie: `${session}; ${csrf.csrfCookie}`, "content-type": "application/x-www-form-urlencoded" },
+        body: `csrf_token=${encodeURIComponent(csrf.csrfToken)}`,
+      });
+    const first = await post(artifacts);
+    expect(first.status).toBe(303);
+    // Discovery's claude-4.6-opus wins over the catalog's claude-4.5-sonnet.
+    expect(calls).toEqual(["anthropic/claude-4.6-opus"]);
+
+    // A verbose-but-coherent reply still proves the key authenticated.
+    reply = "OK, verified — the key works.";
+    const second = await post(await csrfArtifacts(await app.request("/config/providers", { headers: { cookie: session } })));
+    expect(second.status).toBe(303);
+
+    // An empty reply is the only exit-0 failure left.
+    reply = "";
+    const third = await post(await csrfArtifacts(await app.request("/config/providers", { headers: { cookie: session } })));
+    expect(third.status).toBe(400);
+    expect(await third.text()).toContain("produced no reply");
+    log.mockRestore();
+  });
+
+  it("renders the test button for an env-sourced provider key", async () => {
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    const dir = mkdtempSync(join(tmpdir(), "maomao-prov-"));
+    const providerCredentials = new ProviderCredentialStore(join(dir, "opencode", "auth.json"), {
+      ANTHROPIC_API_KEY: "sk-ant-env-value",
+    });
+    const { app } = testApp(
+      { UI_PASSWORD: "hunter2", UI_SESSION_SECRET: "session-secret-for-tests" },
+      undefined,
+      undefined,
+      { providerCredentials },
+    );
+    const { session } = await loginSession(app);
+    const page = await app.request("/config/providers", { headers: { cookie: session } });
+    const html = await page.text();
+    expect(html).toContain('formaction="/config/providers/anthropic/test"');
+    expect(html).not.toContain('formaction="/config/providers/openai/test"');
+    log.mockRestore();
+  });
+
+  it("503s the provider test without a runner and refuses a pasted-but-unsaved key", async () => {
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    const dir = mkdtempSync(join(tmpdir(), "maomao-prov-"));
+    const providerCredentials = new ProviderCredentialStore(join(dir, "opencode", "auth.json"), {});
+    expect(providerCredentials.set("anthropic", "sk-ant-test-value-9").ok).toBe(true);
+    const post = async (app: ReturnType<typeof testApp>["app"], session: string, body = "") => {
+      const { csrfCookie, csrfToken } = await csrfArtifacts(
+        await app.request("/config/providers", { headers: { cookie: session } }),
+      );
+      return app.request("/config/providers/anthropic/test", {
+        method: "POST",
+        headers: { cookie: `${session}; ${csrfCookie}`, "content-type": "application/x-www-form-urlencoded" },
+        body: `csrf_token=${encodeURIComponent(csrfToken)}${body}`,
+      });
+    };
+
+    const noRunner = testApp(
+      { UI_PASSWORD: "hunter2", UI_SESSION_SECRET: "session-secret-for-tests", MODEL_CATALOG: "anthropic/claude-4.5-sonnet" },
+      undefined,
+      undefined,
+      { providerCredentials },
+    );
+    const { session: s1 } = await loginSession(noRunner.app);
+    expect((await post(noRunner.app, s1)).status).toBe(503);
+
+    const opencode: OpenCodeLike = {
+      async run() {
+        return { stdout: "ok", stderr: "", exitCode: 0, text: "ok", usage: undefined as never };
+      },
+    };
+    const withRunner = testApp(
+      { UI_PASSWORD: "hunter2", UI_SESSION_SECRET: "session-secret-for-tests", MODEL_CATALOG: "anthropic/claude-4.5-sonnet" },
+      undefined,
+      undefined,
+      { providerCredentials, opencode },
+    );
+    const { session: s2 } = await loginSession(withRunner.app);
+    const pasted = await post(withRunner.app, s2, `&key=${encodeURIComponent("sk-ant-new-unsaved")}`);
+    expect(pasted.status).toBe(400);
+    expect(await pasted.text()).toContain("Save or clear the pasted key first");
+    log.mockRestore();
+  });
+
+  it("serializes concurrent provider tests and removes the workspace afterwards", async () => {
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    const dir = mkdtempSync(join(tmpdir(), "maomao-prov-"));
+    const providerCredentials = new ProviderCredentialStore(join(dir, "opencode", "auth.json"), {});
+    expect(providerCredentials.set("anthropic", "sk-ant-test-value-9").ok).toBe(true);
+    let release!: () => void;
+    let call = 0;
+    let lastCwd = "";
+    const opencode: OpenCodeLike = {
+      async run(input) {
+        lastCwd = input.cwd;
+        if (call++ === 0) await new Promise<void>((r) => (release = r));
+        return { stdout: "ok", stderr: "", exitCode: 0, text: "ok", usage: undefined as never };
+      },
+    };
+    const { app } = testApp(
+      { UI_PASSWORD: "hunter2", UI_SESSION_SECRET: "session-secret-for-tests", MODEL_CATALOG: "anthropic/claude-4.5-sonnet" },
+      undefined,
+      undefined,
+      { providerCredentials, opencode },
+    );
+    const { session } = await loginSession(app);
+    const post = async () => {
+      const { csrfCookie, csrfToken } = await csrfArtifacts(
+        await app.request("/config/providers", { headers: { cookie: session } }),
+      );
+      return app.request("/config/providers/anthropic/test", {
+        method: "POST",
+        headers: { cookie: `${session}; ${csrfCookie}`, "content-type": "application/x-www-form-urlencoded" },
+        body: `csrf_token=${encodeURIComponent(csrfToken)}`,
+      });
+    };
+    const first = post();
+    // Let the first request reach the blocking run() before firing the second.
+    await new Promise((r) => setTimeout(r, 50));
+    const second = await post();
+    expect(second.status).toBe(429);
+    expect(await second.text()).toContain("already running");
+    release();
+    expect((await first).status).toBe(303);
+    // Only the first request reached the runner.
+    expect(call).toBe(1);
+    expect(existsSync(lastCwd)).toBe(false);
+    log.mockRestore();
+  });
+
+  it("redacts key material echoed in the model's wrong reply", async () => {
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    const dir = mkdtempSync(join(tmpdir(), "maomao-prov-"));
+    const providerCredentials = new ProviderCredentialStore(join(dir, "opencode", "auth.json"), {});
+    expect(providerCredentials.set("anthropic", "sk-ant-test-value-9").ok).toBe(true);
+    const opencode: OpenCodeLike = {
+      async run() {
+        return {
+          stdout: "Authorization: Bearer sk-ant-test-value-9",
+          stderr: "401 Unauthorized: Bearer sk-ant-test-value-9",
+          exitCode: 1,
+          text: "Authorization: Bearer sk-ant-test-value-9",
+          usage: undefined as never,
+        };
+      },
+    };
+    const { app } = testApp(
+      { UI_PASSWORD: "hunter2", UI_SESSION_SECRET: "session-secret-for-tests", MODEL_CATALOG: "anthropic/claude-4.5-sonnet" },
+      undefined,
+      undefined,
+      { providerCredentials, opencode },
+    );
+    const { session } = await loginSession(app);
+    const { csrfCookie, csrfToken } = await csrfArtifacts(
+      await app.request("/config/providers", { headers: { cookie: session } }),
+    );
+    const tested = await app.request("/config/providers/anthropic/test", {
+      method: "POST",
+      headers: { cookie: `${session}; ${csrfCookie}`, "content-type": "application/x-www-form-urlencoded" },
+      body: `csrf_token=${encodeURIComponent(csrfToken)}`,
+    });
+    expect(tested.status).toBe(400);
+    const html = await tested.text();
+    expect(html).not.toContain("sk-ant-test-value-9");
+    expect(html).toContain("[redacted]");
+    log.mockRestore();
+  });
+
+  it("refuses a provider test when no key is configured for it", async () => {
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    const dir = mkdtempSync(join(tmpdir(), "maomao-prov-"));
+    const providerCredentials = new ProviderCredentialStore(join(dir, "opencode", "auth.json"), {});
+    const opencode: OpenCodeLike = {
+      async run() {
+        throw new Error("must not be called");
+      },
+    };
+    const { app } = testApp(
+      {
+        UI_PASSWORD: "hunter2",
+        UI_SESSION_SECRET: "session-secret-for-tests",
+        MODEL_CATALOG: "anthropic/claude-4.5-sonnet,openai/gpt-5",
+      },
+      undefined,
+      undefined,
+      { providerCredentials, opencode },
+    );
+    const { session } = await loginSession(app);
+    const { csrfCookie, csrfToken } = await csrfArtifacts(
+      await app.request("/config/providers", { headers: { cookie: session } }),
+    );
+    const tested = await app.request("/config/providers/openai/test", {
+      method: "POST",
+      headers: { cookie: `${session}; ${csrfCookie}`, "content-type": "application/x-www-form-urlencoded" },
+      body: `csrf_token=${encodeURIComponent(csrfToken)}`,
+    });
+    expect(tested.status).toBe(400);
+    expect(await tested.text()).toContain("No key configured for openai");
+    log.mockRestore();
+  });
+
+  it("rate limits provider tests after five in a window", async () => {
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    const dir = mkdtempSync(join(tmpdir(), "maomao-prov-"));
+    const providerCredentials = new ProviderCredentialStore(join(dir, "opencode", "auth.json"), {});
+    expect(providerCredentials.set("anthropic", "sk-ant-test-value-9").ok).toBe(true);
+    const opencode: OpenCodeLike = {
+      async run() {
+        return { stdout: "ok", stderr: "", exitCode: 0, text: "ok", usage: undefined as never };
+      },
+    };
+    const { app } = testApp(
+      { UI_PASSWORD: "hunter2", UI_SESSION_SECRET: "session-secret-for-tests", MODEL_CATALOG: "anthropic/claude-4.5-sonnet" },
+      undefined,
+      undefined,
+      { providerCredentials, opencode },
+    );
+    const { session } = await loginSession(app);
+    const post = async () => {
+      const { csrfCookie, csrfToken } = await csrfArtifacts(
+        await app.request("/config/providers", { headers: { cookie: session } }),
+      );
+      return app.request("/config/providers/anthropic/test", {
+        method: "POST",
+        headers: { cookie: `${session}; ${csrfCookie}`, "content-type": "application/x-www-form-urlencoded" },
+        body: `csrf_token=${encodeURIComponent(csrfToken)}`,
+      });
+    };
+    for (let i = 0; i < 5; i++) expect((await post()).status).toBe(303);
+    const sixth = await post();
+    expect(sixth.status).toBe(429);
+    expect(await sixth.text()).toContain("Too many provider tests");
+    log.mockRestore();
+  });
+
+  it("refuses the provider test when no model is known for it", async () => {
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    const dir = mkdtempSync(join(tmpdir(), "maomao-prov-"));
+    const providerCredentials = new ProviderCredentialStore(join(dir, "opencode", "auth.json"), {});
+    expect(providerCredentials.set("anthropic", "sk-ant-test-value-9").ok).toBe(true);
+    const opencode: OpenCodeLike = {
+      async run() {
+        throw new Error("should not run");
+      },
+    };
+    const { app } = testApp(
+      { UI_PASSWORD: "hunter2", UI_SESSION_SECRET: "session-secret-for-tests" },
+      undefined,
+      undefined,
+      { providerCredentials, opencode },
+    );
+    const { session } = await loginSession(app);
+    const page = await app.request("/config/providers", { headers: { cookie: session } });
+    const { csrfCookie, csrfToken } = await csrfArtifacts(page);
+    const tested = await app.request("/config/providers/anthropic/test", {
+      method: "POST",
+      headers: { cookie: `${session}; ${csrfCookie}`, "content-type": "application/x-www-form-urlencoded" },
+      body: `csrf_token=${encodeURIComponent(csrfToken)}`,
+    });
+    expect(tested.status).toBe(400);
+    expect(await tested.text()).toContain("No model known for anthropic");
+    log.mockRestore();
+  });
 });
 
 describe("model discovery routes", () => {

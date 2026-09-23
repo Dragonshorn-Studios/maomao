@@ -25,9 +25,11 @@ import type { ProfileFieldErrors, ProfileFormValues } from "./config-form.js";
 import { decodeProfileAction, decodeProfileForm, applyProfileAction, profileFormToDefinition } from "./config-form.js";
 import { KNOWN_REVIEWER_ROLES } from "./prompts.js";
 import { subscribe } from "./events.js";
-import { redactSecrets } from "./util.js";
+import { redactSecrets, truncate } from "./util.js";
 import { readFileSync } from "node:fs";
-import { resolve } from "node:path";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join, resolve } from "node:path";
 import {
   renderConnectionsPage,
   renderScanConfirmPage,
@@ -71,7 +73,8 @@ import {
   type PausePageData,
 } from "./ui/index.js";
 import { renderProvidersPage } from "./ui/providers.js";
-import { ProviderCredentialStore, opencodeAuthPath } from "./opencode/credentials.js";
+import { ProviderCredentialStore, opencodeAuthPath, providerAuthSecrets } from "./opencode/credentials.js";
+import { opencodeEnvSecrets } from "./opencode/spawn.js";
 import { ModelDiscovery } from "./opencode/models.js";
 import { parseBriefPayload } from "./jobs/brief.js";
 import type { JobRow } from "./jobs/store.js";
@@ -274,6 +277,10 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
   };
   const rateLimiter = ctx.rateLimiter ?? new RepoRateLimiter();
   const authLimiter = new WindowRateLimiter();
+  const PROVIDER_TEST_LIMIT = 5;
+  const PROVIDER_TEST_WINDOW_MS = 10 * 60 * 1000;
+  const providerTestLimiter = new WindowRateLimiter();
+  let providerTestInFlight = false;
   const oauthStates = new OAuthStateStore();
 
   app.use("*", async (c, next) => {
@@ -1190,6 +1197,12 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
 
   // ---- Provider API keys (/config/providers) — written to OpenCode's auth.json ----
   const providerCreds = () => ctx.providerCredentials ?? new ProviderCredentialStore(opencodeAuthPath(ctx.env ?? process.env), ctx.env ?? process.env);
+  const providerSecrets = () => [
+    ...githubSecrets(ctx.config),
+    ...opencodeEnvSecrets(ctx.env ?? process.env),
+    ...providerAuthSecrets(ctx.env ?? process.env),
+    ...providerCreds().storedSecrets(),
+  ];
   const renderProviders = (
     c: Context<AppEnv>,
     extra: { notice?: string; error?: string; status?: number } = {},
@@ -1201,7 +1214,7 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
         canWrite: gateOn,
         options: { ...pageOpts, identity: c.get("identity"), notice: extra.notice, error: extra.error },
       }),
-      (extra.status ?? 200) as 200 | 400 | 403,
+      (extra.status ?? 200) as 200 | 400 | 403 | 429 | 503,
     );
 
   app.get("/config/providers", (c) => {
@@ -1226,6 +1239,102 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
       ? `Stored key for ${c.req.param("id")} removed.`
       : `No stored key for ${c.req.param("id")}.`;
     return c.redirect("/config/providers?notice=" + encodeURIComponent(note), 303);
+  });
+
+  // Spawns a real `opencode run` against one discovered/catalogued model of
+  // the provider — the same runner reviews use — so a saved key is proven
+  // against the actual spawn path, not just the auth.json write.
+  app.post("/config/providers/:id/test", async (c) => {
+    if (!gateOn) return c.redirect("/", 302);
+    if (!ctx.opencode) {
+      return renderProviders(c, { error: "Provider test is unavailable on this process (no OpenCode runner).", status: 503 });
+    }
+    // A test spawns a real (billable) opencode run: serialize them and cap the
+    // rate — this is operator verification, not a hot path. Single-operator
+    // app: one global bucket, so a spoofed X-Forwarded-For gains nothing.
+    if (!providerTestLimiter.wouldAllow("provider-test", PROVIDER_TEST_LIMIT, PROVIDER_TEST_WINDOW_MS)) {
+      return renderProviders(c, { error: "Too many provider tests — wait a few minutes before trying again.", status: 429 });
+    }
+    if (providerTestInFlight) {
+      return renderProviders(c, { error: "A provider test is already running — try again when it finishes.", status: 429 });
+    }
+    const id = c.req.param("id");
+    providerTestInFlight = true;
+    try {
+      const model =
+        ctx.modelDiscovery?.snapshot().models.find((m) => m.split("/")[0] === id) ??
+        ctx.config.modelCatalog.find((m) => m.split("/")[0] === id);
+      if (!model) {
+        return renderProviders(c, {
+          error: `No model known for ${id} yet — run "Refresh model list" on the profile editor or add one to MODEL_CATALOG first.`,
+          status: 400,
+        });
+      }
+      // Mirror the button's own invariant: only spawn when a key exists — a
+      // stale tab or hand-crafted POST shouldn't burn a billable run.
+      const status = providerCreds().list().find((p) => p.id === id);
+      if (!status || status.source === "none") {
+        return renderProviders(c, {
+          error: `No key configured for ${id} — save one or set its environment variable first.`,
+          status: 400,
+        });
+      }
+      // The button submits the key field's current value, but the run verifies
+      // the stored/env key — refuse rather than silently verify the wrong key.
+      const body = await c.req.parseBody();
+      if (typeof body.key === "string" && body.key.trim()) {
+        return renderProviders(c, {
+          error: "Save or clear the pasted key first — 'Test key' verifies the stored/env key, not the one in the field.",
+          status: 400,
+        });
+      }
+      providerTestLimiter.record("provider-test", PROVIDER_TEST_LIMIT, PROVIDER_TEST_WINDOW_MS);
+      const secrets = providerSecrets();
+      const workspace = await mkdtemp(join(tmpdir(), "maomao-provider-test-"));
+      try {
+        const result = await ctx.opencode.run({
+          cwd: workspace,
+          model,
+          prompt: "Reply with exactly the word: ok",
+          timeoutMs: 60_000,
+          extraArgs: ctx.config.opencode.extraArgs,
+          title: `maomao-provider-test-${id}`,
+          signal: c.req.raw.signal,
+        });
+        if (result.exitCode !== 0) {
+          const detail = truncate(
+            redactSecrets(result.stderr.trim() || result.stdout.trim(), secrets) || "no output",
+            300,
+          );
+          return renderProviders(c, {
+            error: `${model} exited ${result.exitCode}: ${detail}`,
+            status: 400,
+          });
+        }
+        // Any non-empty reply means the key authenticated and the model
+        // responded — even a refusal proves the spawn path works.
+        if (!(result.text || "").trim()) {
+          return renderProviders(c, {
+            error: `${model} exited 0 but produced no reply — nothing confirms the key actually reached the model.`,
+            status: 400,
+          });
+        }
+        return c.redirect(
+          "/config/providers?notice=" + encodeURIComponent(`${id} key verified — ${model} answered a real opencode run.`),
+          303,
+        );
+      } finally {
+        await rm(workspace, { recursive: true, force: true }).catch(() => {});
+      }
+    } catch (error) {
+      const message = redactSecrets(error instanceof Error ? error.message : String(error), providerSecrets());
+      return renderProviders(c, {
+        error: `${id} test failed: ${message}`,
+        status: 400,
+      });
+    } finally {
+      providerTestInFlight = false;
+    }
   });
 
   // Re-runs `opencode models` so the profile editor's datalist picks up newly

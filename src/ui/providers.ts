@@ -36,6 +36,7 @@ function providerRow(provider: ProviderCredentialStatus, csrfToken: string | und
           placeholder="${stored ? "Replace stored key" : "Paste API key"}"
           aria-label="API key for ${escapeHtml(provider.label)}"/>
         <button type="submit" class="btn">${stored ? "Replace" : "Save"}</button>
+        ${stored || provider.source === "environment" ? `<button type="submit" formaction="/config/providers/${actionId}/test" formnovalidate class="btn-secondary" title="Spawn a real opencode run with the configured key">Test key</button>` : ""}
         ${stored ? `<button type="submit" formaction="/config/providers/${actionId}/delete" formnovalidate class="btn-danger">Remove</button>` : ""}
       </form>`
     : "";
