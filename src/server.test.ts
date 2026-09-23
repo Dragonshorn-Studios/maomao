@@ -1336,6 +1336,93 @@ describe("provider credential routes", () => {
     log.mockRestore();
   });
 
+  it("503s the provider test without a runner and refuses a pasted-but-unsaved key", async () => {
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    const dir = mkdtempSync(join(tmpdir(), "maomao-prov-"));
+    const providerCredentials = new ProviderCredentialStore(join(dir, "opencode", "auth.json"), {});
+    expect(providerCredentials.set("anthropic", "sk-ant-test-value-9").ok).toBe(true);
+    const post = async (app: ReturnType<typeof testApp>["app"], session: string, body = "") => {
+      const { csrfCookie, csrfToken } = await csrfArtifacts(
+        await app.request("/config/providers", { headers: { cookie: session } }),
+      );
+      return app.request("/config/providers/anthropic/test", {
+        method: "POST",
+        headers: { cookie: `${session}; ${csrfCookie}`, "content-type": "application/x-www-form-urlencoded" },
+        body: `csrf_token=${encodeURIComponent(csrfToken)}${body}`,
+      });
+    };
+
+    const noRunner = testApp(
+      { UI_PASSWORD: "hunter2", UI_SESSION_SECRET: "session-secret-for-tests", MODEL_CATALOG: "anthropic/claude-4.5-sonnet" },
+      undefined,
+      undefined,
+      { providerCredentials },
+    );
+    const { session: s1 } = await loginSession(noRunner.app);
+    expect((await post(noRunner.app, s1)).status).toBe(503);
+
+    const opencode: OpenCodeLike = {
+      async run() {
+        return { stdout: "ok", stderr: "", exitCode: 0, text: "ok", usage: undefined as never };
+      },
+    };
+    const withRunner = testApp(
+      { UI_PASSWORD: "hunter2", UI_SESSION_SECRET: "session-secret-for-tests", MODEL_CATALOG: "anthropic/claude-4.5-sonnet" },
+      undefined,
+      undefined,
+      { providerCredentials, opencode },
+    );
+    const { session: s2 } = await loginSession(withRunner.app);
+    const pasted = await post(withRunner.app, s2, `&key=${encodeURIComponent("sk-ant-new-unsaved")}`);
+    expect(pasted.status).toBe(400);
+    expect(await pasted.text()).toContain("Save or clear the pasted key first");
+    log.mockRestore();
+  });
+
+  it("serializes concurrent provider tests and removes the workspace afterwards", async () => {
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    const dir = mkdtempSync(join(tmpdir(), "maomao-prov-"));
+    const providerCredentials = new ProviderCredentialStore(join(dir, "opencode", "auth.json"), {});
+    expect(providerCredentials.set("anthropic", "sk-ant-test-value-9").ok).toBe(true);
+    let release!: () => void;
+    let call = 0;
+    let lastCwd = "";
+    const opencode: OpenCodeLike = {
+      async run(input) {
+        lastCwd = input.cwd;
+        if (call++ === 0) await new Promise<void>((r) => (release = r));
+        return { stdout: "ok", stderr: "", exitCode: 0, text: "ok", usage: undefined as never };
+      },
+    };
+    const { app } = testApp(
+      { UI_PASSWORD: "hunter2", UI_SESSION_SECRET: "session-secret-for-tests", MODEL_CATALOG: "anthropic/claude-4.5-sonnet" },
+      undefined,
+      undefined,
+      { providerCredentials, opencode },
+    );
+    const { session } = await loginSession(app);
+    const post = async () => {
+      const { csrfCookie, csrfToken } = await csrfArtifacts(
+        await app.request("/config/providers", { headers: { cookie: session } }),
+      );
+      return app.request("/config/providers/anthropic/test", {
+        method: "POST",
+        headers: { cookie: `${session}; ${csrfCookie}`, "content-type": "application/x-www-form-urlencoded" },
+        body: `csrf_token=${encodeURIComponent(csrfToken)}`,
+      });
+    };
+    const first = post();
+    // Let the first request reach the blocking run() before firing the second.
+    await new Promise((r) => setTimeout(r, 50));
+    const second = await post();
+    expect(second.status).toBe(429);
+    expect(await second.text()).toContain("already running");
+    release();
+    expect((await first).status).toBe(303);
+    expect(existsSync(lastCwd)).toBe(false);
+    log.mockRestore();
+  });
+
   it("rate limits provider tests after five in a window", async () => {
     const log = vi.spyOn(console, "log").mockImplementation(() => {});
     const dir = mkdtempSync(join(tmpdir(), "maomao-prov-"));

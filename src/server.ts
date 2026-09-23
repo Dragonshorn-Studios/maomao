@@ -73,7 +73,8 @@ import {
   type PausePageData,
 } from "./ui/index.js";
 import { renderProvidersPage } from "./ui/providers.js";
-import { ProviderCredentialStore, opencodeAuthPath } from "./opencode/credentials.js";
+import { ProviderCredentialStore, opencodeAuthPath, providerAuthSecrets } from "./opencode/credentials.js";
+import { opencodeEnvSecrets } from "./opencode/spawn.js";
 import { ModelDiscovery } from "./opencode/models.js";
 import { parseBriefPayload } from "./jobs/brief.js";
 import type { JobRow } from "./jobs/store.js";
@@ -1243,14 +1244,14 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
       return renderProviders(c, { error: "Provider test is unavailable on this process (no OpenCode runner).", status: 503 });
     }
     // A test spawns a real (billable) opencode run: serialize them and cap the
-    // rate per client — this is operator verification, not a hot path.
-    if (!providerTestLimiter.wouldAllow(clientKey(c), PROVIDER_TEST_LIMIT, PROVIDER_TEST_WINDOW_MS)) {
+    // rate — this is operator verification, not a hot path. Single-operator
+    // app: one global bucket, so a spoofed X-Forwarded-For gains nothing.
+    if (!providerTestLimiter.wouldAllow("provider-test", PROVIDER_TEST_LIMIT, PROVIDER_TEST_WINDOW_MS)) {
       return renderProviders(c, { error: "Too many provider tests — wait a few minutes before trying again.", status: 429 });
     }
     if (providerTestInFlight) {
       return renderProviders(c, { error: "A provider test is already running — try again when it finishes.", status: 429 });
     }
-    providerTestLimiter.record(clientKey(c), PROVIDER_TEST_LIMIT, PROVIDER_TEST_WINDOW_MS);
     const id = c.req.param("id");
     const model =
       ctx.modelDiscovery?.snapshot().models.find((m) => m.split("/")[0] === id) ??
@@ -1261,6 +1262,16 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
         status: 400,
       });
     }
+    // The button submits the key field's current value, but the run verifies
+    // the stored/env key — refuse rather than silently verify the wrong key.
+    const body = await c.req.parseBody();
+    if (typeof body.key === "string" && body.key.trim()) {
+      return renderProviders(c, {
+        error: "Save or clear the pasted key first — 'Test key' verifies the stored/env key, not the one in the field.",
+        status: 400,
+      });
+    }
+    providerTestLimiter.record("provider-test", PROVIDER_TEST_LIMIT, PROVIDER_TEST_WINDOW_MS);
     providerTestInFlight = true;
     try {
       const workspace = await mkdtemp(join(tmpdir(), "maomao-provider-test-"));
@@ -1281,8 +1292,15 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
           });
         }
         if (!/\bok\b/i.test(result.text || "")) {
+          const secrets = [
+            ...githubSecrets(ctx.config),
+            ...opencodeEnvSecrets(ctx.env ?? process.env),
+            ...providerAuthSecrets(ctx.env ?? process.env),
+            ...providerCreds().storedSecrets(),
+          ];
+          const replied = truncate(redactSecrets((result.text || "").trim(), secrets) || "nothing", 200);
           return renderProviders(c, {
-            error: `${model} exited 0 but did not answer as expected (replied: ${truncate((result.text || "").trim() || "nothing", 200)}).`,
+            error: `${model} exited 0 but did not answer as expected (replied: ${replied}).`,
             status: 400,
           });
         }
