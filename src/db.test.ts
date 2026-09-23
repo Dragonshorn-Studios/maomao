@@ -119,6 +119,137 @@ describe("usage schema migration", () => {
       rmSync(dir, { recursive: true, force: true });
     }
   });
+
+  it("rebuilds the jobs uniqueness to include job_type so a brief coexists with a scan", () => {
+    const dir = mkdtempSync(join(tmpdir(), "maomao-db-"));
+    const path = join(dir, "scoped-unique.sqlite");
+    try {
+      // A deployed v2 database: provider-scoped five-column UNIQUE, job_type
+      // carried as a plain column (exactly what the pre-brief schema looked like).
+      const legacy = new Database(path);
+      legacy.exec(`
+        CREATE TABLE jobs (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          repo_full_name TEXT NOT NULL,
+          repo_owner TEXT NOT NULL,
+          repo_name TEXT NOT NULL,
+          installation_id INTEGER NOT NULL,
+          provider TEXT NOT NULL DEFAULT 'github',
+          provider_instance TEXT NOT NULL DEFAULT 'github.com',
+          pr_number INTEGER NOT NULL,
+          pr_title TEXT NOT NULL DEFAULT '',
+          pr_body TEXT NOT NULL DEFAULT '',
+          pr_html_url TEXT NOT NULL DEFAULT '',
+          pr_author TEXT NOT NULL DEFAULT '',
+          forge_connection_id TEXT,
+          github_account_id INTEGER,
+          github_repository_id INTEGER,
+          webhook_delivery_id TEXT,
+          webhook_event TEXT,
+          profile_revision_id INTEGER,
+          base_sha TEXT NOT NULL,
+          head_sha TEXT NOT NULL,
+          base_ref TEXT NOT NULL DEFAULT '',
+          head_ref TEXT NOT NULL DEFAULT '',
+          state TEXT NOT NULL DEFAULT 'queued',
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          started_at TEXT,
+          finished_at TEXT,
+          job_type TEXT NOT NULL DEFAULT 'pr_review',
+          scan_branch TEXT,
+          UNIQUE (provider, provider_instance, repo_full_name, pr_number, head_sha)
+        );
+        CREATE TABLE reviewer_runs (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          job_id INTEGER NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
+          role TEXT NOT NULL,
+          title TEXT NOT NULL DEFAULT '',
+          model TEXT,
+          state TEXT NOT NULL DEFAULT 'queued',
+          attempt INTEGER NOT NULL DEFAULT 0,
+          UNIQUE (job_id, role)
+        );
+        CREATE TABLE job_logs (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          job_id INTEGER NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
+          reviewer_run_id INTEGER,
+          level TEXT NOT NULL,
+          message TEXT NOT NULL,
+          created_at TEXT NOT NULL
+        );
+      `);
+      legacy
+        .prepare(
+          `INSERT INTO jobs (repo_full_name, repo_owner, repo_name, installation_id, pr_number,
+            base_sha, head_sha, job_type, scan_branch, created_at, updated_at)
+           VALUES ('acme/widgets','acme','widgets',42,0,'sha1','sha1','health_scan','main',
+            '2026-01-01T00:00:00.000Z','2026-01-01T00:00:00.000Z')`,
+        )
+        .run();
+      legacy.close();
+
+      const store = new JobStore(openDb(path));
+      const schema = new Database(path)
+        .prepare(`SELECT sql FROM sqlite_master WHERE type='table' AND name='jobs'`)
+        .get() as { sql: string };
+      expect(schema.sql).toContain(
+        "UNIQUE (provider, provider_instance, repo_full_name, pr_number, head_sha, job_type, dedup_key)",
+      );
+
+      // The pre-existing scan row survived the rebuild with its type intact
+      // and the shared ('') dedup key, so scan/review dedup is unchanged.
+      const preserved = store.listJobs()[0];
+      expect(preserved?.job_type).toBe("health_scan");
+      expect(preserved?.scan_branch).toBe("main");
+      expect(preserved?.dedup_key).toBe("");
+
+      // And a brief on the same repo+SHA is a new job, not a collision.
+      const brief = store.enqueue({
+        repoFullName: "acme/widgets",
+        repoOwner: "acme",
+        repoName: "widgets",
+        installationId: 42,
+        prNumber: 0,
+        prTitle: "Repo brief (main)",
+        prBody: "",
+        prHtmlUrl: "",
+        prAuthor: "octocat",
+        baseSha: "sha1",
+        headSha: "sha1",
+        baseRef: "main",
+        headRef: "main",
+        jobType: "repo_brief",
+        reviewers: [{ role: "repo_brief", title: "Repo brief" }],
+      });
+      expect(brief.created).toBe(true);
+      expect(brief.job.id).not.toBe(preserved?.id);
+
+      // And a repeat brief on the same repo+SHA is ALSO its own job: briefs
+      // carry a per-request nonce, identical repeats hit repo_brief_cache.
+      const repeat = store.enqueue({
+        repoFullName: "acme/widgets",
+        repoOwner: "acme",
+        repoName: "widgets",
+        installationId: 42,
+        prNumber: 0,
+        prTitle: "Repo brief (main)",
+        prBody: "",
+        prHtmlUrl: "",
+        prAuthor: "octocat",
+        baseSha: "sha1",
+        headSha: "sha1",
+        baseRef: "main",
+        headRef: "main",
+        jobType: "repo_brief",
+        reviewers: [{ role: "repo_brief", title: "Repo brief" }],
+      });
+      expect(repeat.created).toBe(true);
+      expect(repeat.job.id).not.toBe(brief.job.id);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
 });
 
 describe("health-scan issue registry", () => {
@@ -253,5 +384,99 @@ describe("setFindingStatus", () => {
     expect(targeted?.reconciliation_reason).toBe("GitHub resolve failed; will retry next review");
     const untouched = store.getFinding("acme/widgets", 7, "fpother000000001");
     expect(untouched?.status).toBe("resolved");
+  });
+});
+
+describe("repo pauses and stack state (issue #99)", () => {
+  it("supersedes an active pause, expires by time, and ends explicitly", () => {
+    const store = new JobStore(openDb(":memory:"));
+    const first = store.createPause({ repoFullName: "acme/widgets", actor: "alice", durationMs: 60_000 });
+    expect(store.getActivePause("acme/widgets")?.id).toBe(first.id);
+    expect(store.listActivePauses()).toHaveLength(1);
+
+    // A new pause supersedes (extends) the active one for the same repo.
+    const second = store.createPause({ repoFullName: "acme/widgets", actor: "alice", durationMs: 120_000 });
+    expect(store.getActivePause("acme/widgets")?.id).toBe(second.id);
+    expect(store.listActivePauses()).toHaveLength(1);
+
+    expect(store.endPause(second.id, "bob")).toBe(true);
+    expect(store.getActivePause("acme/widgets")).toBeUndefined();
+    // Ending an already-ended pause is a no-op.
+    expect(store.endPause(second.id, "bob")).toBe(false);
+
+    store.createPause({ repoFullName: "acme/widgets", actor: "alice", durationMs: -1 });
+    expect(store.getActivePause("acme/widgets")).toBeUndefined();
+    expect(store.listActivePauses()).toHaveLength(0);
+  });
+
+  it("records stack declarations idempotently and rejects conflicting ones", () => {
+    const store = new JobStore(openDb(":memory:"));
+    const input = { repoFullName: "acme/widgets", stackId: "s1", prNumber: 7, position: 1, expectedCount: 2, actor: "alice" };
+    expect(store.upsertStackDeclaration(input)).toEqual({ ok: true, created: true });
+    // Same declaration again: idempotent, no new row.
+    expect(store.upsertStackDeclaration(input)).toEqual({ ok: true, created: false });
+    expect(store.listStackDeclarations("acme/widgets", "s1")).toHaveLength(1);
+
+    // Same PR at a different position is a conflict, not a move.
+    const conflict = store.upsertStackDeclaration({ ...input, position: 2 });
+    expect(conflict.ok).toBe(false);
+
+    // A different PR claiming the same position is also a conflict.
+    const occupied = store.upsertStackDeclaration({ ...input, prNumber: 8, position: 1 });
+    expect(occupied.ok).toBe(false);
+    expect(store.listStackDeclarations("acme/widgets", "s1")).toHaveLength(1);
+    expect(store.upsertStackDeclaration({ ...input, prNumber: 8, position: 2 })).toEqual({ ok: true, created: true });
+    expect(store.listStackDeclarations("acme/widgets", "s1").map((d) => d.pr_number)).toEqual([7, 8]);
+  });
+
+  it("pins and patches stack run members", () => {
+    const store = new JobStore(openDb(":memory:"));
+    const job = store.enqueue({
+      repoFullName: "acme/widgets",
+      repoOwner: "acme",
+      repoName: "widgets",
+      installationId: 42,
+      prNumber: 42,
+      prTitle: "top",
+      prBody: "",
+      prHtmlUrl: "u",
+      prAuthor: "alice",
+      baseSha: "b",
+      headSha: "h",
+      baseRef: "main",
+      headRef: "feat",
+      reviewers: [{ role: "stack_cumulative", title: "Stack cumulative" }],
+      jobType: "stack_review",
+      dedupKey: "stack:s1",
+    });
+    store.insertStackMembers(job.job.id, [
+      { position: 1, prNumber: 41, baseRef: "main", headRef: "a", baseSha: "b1", headSha: "h1" },
+      { position: 2, prNumber: 42, baseRef: "a", headRef: "b", baseSha: "h1", headSha: "h2" },
+    ]);
+    let members = store.listStackMembers(job.job.id);
+    expect(members.map((m) => m.pr_number)).toEqual([41, 42]);
+    store.patchStackMember(members[0]!.id, { headSha: "h1b", memberJobId: 99, state: "reviewing" });
+    members = store.listStackMembers(job.job.id);
+    expect(members[0]?.head_sha).toBe("h1b");
+    expect(members[0]?.member_job_id).toBe(99);
+    expect(members[0]?.state).toBe("reviewing");
+    expect(members[1]?.head_sha).toBe("h2");
+
+    // Same stack re-triggered on the same vector dedups; a different top SHA stales it.
+    const dup = store.enqueue({
+      repoFullName: "acme/widgets", repoOwner: "acme", repoName: "widgets", installationId: 42,
+      prNumber: 42, prTitle: "top", prBody: "", prHtmlUrl: "u", prAuthor: "alice",
+      baseSha: "b", headSha: "h", baseRef: "main", headRef: "feat",
+      reviewers: [], jobType: "stack_review", dedupKey: "stack:s1",
+    });
+    expect(dup.created).toBe(false);
+    const moved = store.enqueue({
+      repoFullName: "acme/widgets", repoOwner: "acme", repoName: "widgets", installationId: 42,
+      prNumber: 42, prTitle: "top", prBody: "", prHtmlUrl: "u", prAuthor: "alice",
+      baseSha: "b", headSha: "h9", baseRef: "main", headRef: "feat",
+      reviewers: [], jobType: "stack_review", dedupKey: "stack:s1",
+    });
+    expect(moved.created).toBe(true);
+    expect(moved.staleJobIds).toEqual([job.job.id]);
   });
 });

@@ -43,7 +43,7 @@ export const LIVE_JOB_STATES: readonly JobState[] = [
 ];
 
 /** Why a job reached the terminal `cancelled` state; persisted in jobs.cancelled_reason. */
-export type CancelReason = "pr_merged" | "manual_dequeue" | "manual_cancel";
+export type CancelReason = "pr_merged" | "manual_dequeue" | "manual_cancel" | "repo_paused";
 
 /** Home-queue page size; JobStore.listJobsPage clamps limits into [1, JOBS_PAGE_SIZE_MAX]. */
 export const JOBS_PAGE_SIZE_DEFAULT = 25;
@@ -123,6 +123,13 @@ export interface Config {
    * (`rejected by design`, `by design`, …). Empty = any write/maintain/admin collaborator.
    */
   overrideAuthors: string[];
+  /**
+   * Automation/bot logins allowed to post stack declarations and top triggers
+   * via PR comments (issue #99). Human commenters authorize by repository
+   * permission instead; a bot login outside this list can never command the
+   * stack flow. Empty = no automation identity is admitted.
+   */
+  stackCommandAuthors: string[];
   /** Max pull-request diff size in bytes; download aborts at this cap. `0` disables. */
   maxDiffBytes: number;
   /** Max created jobs per repository id inside `repoRateWindowMs` (per process). `0` disables. */
@@ -143,6 +150,11 @@ export interface Config {
     maxMessages: number;
     maxCostUsd: number;
     timeoutMs: number;
+  };
+  /** Repo-brief settings (issue #89). */
+  brief: {
+    /** When true, a completed brief payload is reused for repeat briefs on the same forge/repo/SHA. */
+    cacheEnabled: boolean;
   };
 }
 
@@ -316,6 +328,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     allowedGithubAccountIds: parseIdList(env.ALLOWED_GITHUB_ACCOUNT_IDS, "ALLOWED_GITHUB_ACCOUNT_IDS"),
     allowedGithubRepositoryIds: parseIdList(env.ALLOWED_GITHUB_REPOSITORY_IDS, "ALLOWED_GITHUB_REPOSITORY_IDS"),
     overrideAuthors: parseCsv(env.MAOMAO_OVERRIDE_AUTHORS).map((login) => login.toLowerCase()),
+    stackCommandAuthors: parseCsv(env.MAOMAO_STACK_AUTHORS).map((login) => login.toLowerCase()),
     maxDiffBytes: clamp(parseInteger(env.MAX_DIFF_BYTES, 1_048_576), 0, 50 * 1024 * 1024),
     repoRateLimitPerWindow: Math.max(0, parseInteger(env.REPO_RATE_LIMIT_PER_WINDOW, 6)),
     repoRateWindowMs: Math.max(0, parseInteger(env.REPO_RATE_WINDOW_MS, 60 * 60 * 1000)),
@@ -327,6 +340,9 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
       maxMessages: clamp(parseInteger(env.MAOMAO_EXPLAIN_MAX_MESSAGES, 20), 1, 200),
       maxCostUsd: Math.max(0, parseNumber(env.MAOMAO_EXPLAIN_MAX_COST_USD, 1)),
       timeoutMs: clamp(parseInteger(env.MAOMAO_EXPLAIN_TIMEOUT_MS, 180_000), 5_000, 600_000),
+    },
+    brief: {
+      cacheEnabled: parseBoolean(env.MAOMAO_BRIEF_CACHE_ENABLED, true),
     },
   };
 }

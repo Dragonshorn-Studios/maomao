@@ -102,6 +102,13 @@ export interface GithubPort {
     repo: string,
   ): Promise<{ defaultBranch: string; headSha: string }>;
   getCommitDiff?(installationId: number, owner: string, repo: string, sha: string): Promise<string>;
+  /** Resolve any git ref (SHA, short SHA, branch, tag) to its commit. */
+  getCommit?(
+    installationId: number,
+    owner: string,
+    repo: string,
+    ref: string,
+  ): Promise<{ sha: string; message: string }>;
   listOpenIssuesByMarker?(
     installationId: number,
     owner: string,
@@ -167,6 +174,13 @@ export interface GithubPort {
     owner: string;
     repo: string;
     pullNumber: number;
+    body: string;
+  }): Promise<{ id: string; url: string }>;
+  updateIssueComment?(input: {
+    installationId: number;
+    owner: string;
+    repo: string;
+    commentId: number;
     body: string;
   }): Promise<{ id: string; url: string }>;
   listReviewThreads(
@@ -377,6 +391,12 @@ export class GithubClient implements GithubPort, ManualTriggerPort {
     return String(response.data);
   }
 
+  async getCommit(installationId: number, owner: string, repo: string, ref: string) {
+    const octokit = this.installationOctokit(installationId);
+    const response = await octokit.rest.repos.getCommit({ owner, repo, ref });
+    return { sha: response.data.sha, message: response.data.commit?.message ?? "" };
+  }
+
   async listOpenIssuesByMarker(installationId: number, owner: string, repo: string, marker: string) {
     const octokit = this.installationOctokit(installationId);
     const issues = await octokit.paginate(octokit.rest.issues.listForRepo, {
@@ -566,6 +586,23 @@ export class GithubClient implements GithubPort, ManualTriggerPort {
       owner: input.owner,
       repo: input.repo,
       issue_number: input.pullNumber,
+      body: input.body,
+    });
+    return { id: String(response.data.id), url: response.data.html_url ?? "" };
+  }
+
+  async updateIssueComment(input: {
+    installationId: number;
+    owner: string;
+    repo: string;
+    commentId: number;
+    body: string;
+  }): Promise<{ id: string; url: string }> {
+    const octokit = this.installationOctokit(input.installationId);
+    const response = await octokit.rest.issues.updateComment({
+      owner: input.owner,
+      repo: input.repo,
+      comment_id: input.commentId,
       body: input.body,
     });
     return { id: String(response.data.id), url: response.data.html_url ?? "" };
