@@ -1,6 +1,6 @@
 import type { JobRow, JobStore, ReviewerRunRow } from "../jobs/store.js";
 import { forgeBadgeTitle, forgeBadgeTitleHtml, forgeChipLabel, providerLabel } from "./forge-badge.js";
-import { MODEL_PICKER_HREF, modelPicker } from "./model-picker.js";
+import { MODEL_PICKER_HREF, modelPicker, type ModelPickerEntry } from "./model-picker.js";
 import type { FindingRow } from "../findings/types.js";
 import { fingerprintFinding, stripHtmlComments } from "../findings/identity.js";
 import { POLICIES_WITH_EXTERNAL, POLICIES_WITH_INTERNAL } from "../routing/types.js";
@@ -2090,6 +2090,8 @@ export interface BriefPageData {
   /** Resolved model shown as the run's limits; empty string means the server default. */
   model: string;
   timeoutMs: number;
+  /** Catalog for the optional model-override picker. */
+  modelCatalog: ModelPickerEntry[];
   error?: string;
 }
 
@@ -2106,6 +2108,8 @@ export interface BriefConfirmData {
   ref: string;
   sha: string;
   model: string;
+  /** Operator's model override carried between the two confirm steps; empty = default. */
+  modelOverride?: string;
   timeoutMs: number;
   notice?: BriefConfirmNotice;
 }
@@ -2147,7 +2151,7 @@ export function renderBriefConfirmPage(data: BriefConfirmData): string {
       </div>
       <div>
         <dt>Model</dt>
-        <dd><code class="metric">${escapeHtml(data.model || "(server default)")}</code></dd>
+        <dd><code class="metric">${escapeHtml(data.modelOverride || data.model || "(server default)")}</code></dd>
       </div>
       <div>
         <dt>Limits</dt>
@@ -2159,6 +2163,7 @@ export function renderBriefConfirmPage(data: BriefConfirmData): string {
       <input type="hidden" name="repo" value="${escapeHtml(data.repo)}"/>
       <input type="hidden" name="ref" value="${escapeHtml(data.ref)}"/>
       <input type="hidden" name="sha" value="${escapeHtml(data.sha)}"/>
+      <input type="hidden" name="model" value="${escapeHtml(data.modelOverride ?? "")}"/>
       <button type="submit" aria-label="Run repo brief">Repo brief</button>
       <a href="/brief">Cancel</a>
     </form>`;
@@ -2188,6 +2193,7 @@ export function renderBriefPage(data: BriefPageData): string {
     <form class="trigger" method="post" action="/brief">
       ${csrf}
       <label for="brief-repo-input">Repository (owner/repo — must be an allowlisted installation)
+
         <span class="typeahead-wrap">
           <input id="brief-repo-input" name="repo" placeholder="owner/repo — start typing to search" required autocomplete="off"
             role="combobox" aria-expanded="false" aria-controls="repo-listbox" aria-autocomplete="list"
@@ -2198,12 +2204,16 @@ export function renderBriefPage(data: BriefPageData): string {
       <label for="brief-ref-input">Commit (SHA, branch, or tag — leave empty for the default branch head)
         <input id="brief-ref-input" name="ref" placeholder="e.g. 5f3aa1c, main, v1.2.0" autocomplete="off"/>
       </label>
+      <label>Model (optional — overrides the default for this run only)
+        ${modelPicker({ name: "model", value: "", models: data.modelCatalog, emptyLabel: "— default —" })}
+      </label>
       <button type="submit" aria-label="Run repo brief">Repo brief</button>
     </form>
-    <p class="muted">Model: ${escapeHtml(data.model || "(server default)")} · timeout ${escapeHtml(formatDuration(data.timeoutMs))}.</p>
+    <p class="muted">Default model: ${escapeHtml(data.model || "(server default)")} · timeout ${escapeHtml(formatDuration(data.timeoutMs))}. An override brief is never read from or written to the shared brief cache.</p>
     <h2>Recent repo briefs</h2>
     ${recentBriefs}
-    <script src="${TYPEAHEAD_HREF}" defer></script>`
+    <script src="${TYPEAHEAD_HREF}" defer></script>
+    <script src="${MODEL_PICKER_HREF}" defer></script>`
     : `<p class="muted">Repo briefs require an operator GitHub OAuth identity.</p>`}`;
   return layout("Repo brief", body, {
     showLogout: data.canBrief || Boolean(data.csrfToken),

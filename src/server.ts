@@ -2117,6 +2117,7 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
       recentBriefs,
       model: ctx.config.chat.model || ctx.config.opencode.reviewerModel,
       timeoutMs: ctx.config.chat.timeoutMs,
+      modelCatalog: mergedModelCatalog(),
       ...extra,
     };
   };
@@ -2144,6 +2145,9 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
       );
     }
     const body = await c.req.parseBody();
+    // Optional model override for this run only; an override brief bypasses
+    // the shared brief cache entirely (see runBriefJob).
+    const modelInput = (typeof body.model === "string" ? body.model.trim() : "").slice(0, 200);
     const parsed = parseRepoInput(typeof body.repo === "string" ? body.repo : "");
     if (!parsed) {
       return c.html(
@@ -2256,6 +2260,7 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
             ref: refLabel,
             sha: resolvedSha,
             model: ctx.config.chat.model || ctx.config.opencode.reviewerModel,
+            modelOverride: modelInput,
             timeoutMs: ctx.config.chat.timeoutMs,
             notice,
           }),
@@ -2280,12 +2285,12 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
         headRef: refLabel,
         webhookEvent: "manual.brief",
         jobType: "repo_brief",
-        reviewers: [{ role: "repo_brief", title: "Repo brief" }],
+        reviewers: [{ role: "repo_brief", title: "Repo brief", ...(modelInput ? { model: modelInput } : {}) }],
       });
       if (created.created && rateOn) {
         rateLimiter.record(repository.id, ctx.config.repoRateLimitPerWindow, ctx.config.repoRateWindowMs);
       }
-      ctx.store.log(created.job.id, `Repo brief enqueued by ${actor.login} for ${refLabel} @ ${resolvedSha}`);
+      ctx.store.log(created.job.id, `Repo brief enqueued by ${actor.login} for ${refLabel} @ ${resolvedSha}${modelInput ? ` (model override: ${modelInput})` : ""}`);
       dispatchEnqueue(ctx.queue, created);
       return c.redirect(`/jobs/${created.job.id}?notice=${created.created ? "brief-queued" : "exists"}`, 302);
     } catch (error) {
