@@ -1266,6 +1266,7 @@ export function renderConfigPage(data: ConfigPageData): string {
   const body = `
     <h1>Review configuration</h1>
     <p class="lede">Versioned review profiles and specialist selection. Activation is explicit and audited; credentials are never part of this configuration.</p>
+    <p class="config-nav"><a href="/config/providers">Provider API keys</a> — keys written to OpenCode's credential file, no .env edits needed.</p>
     <p class="config-nav"><a href="/config/prompts">Specialist prompts</a> — see each role's built-in instructions and manage your overrides.</p>
     ${data.notice ? `<p class="notice" role="status">${escapeHtml(data.notice)}</p>` : ""}
     ${data.error ? `<p class="error" role="alert">${escapeHtml(data.error)}</p>` : ""}

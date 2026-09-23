@@ -272,6 +272,7 @@ Use any `provider/model` string OpenCode understands (`opencode models`). Provid
 Notes:
 
 - Vars matching `*_SECRET*`, `*_TOKEN`, `*PRIVATE_KEY*`, `GITHUB_*`, `MAOMAO_*`, `UI_*`, `WEBHOOK_*`, or `INSTALLATION_*` are stripped **before** the allowlist is applied — e.g. Bedrock's `AWS_SECRET_ACCESS_KEY` and `AWS_SESSION_TOKEN` never reach the child. For static AWS credentials use `AWS_PROFILE` with the credentials file on the `maomao-opencode` volume (`/opt/opencode/.aws/credentials` — OpenCode's `HOME` is `/opt/opencode`). `GOOGLE_APPLICATION_CREDENTIALS` must likewise point at a path visible inside the container.
+- **Recommended:** set provider keys from the UI at `/config/providers` — Maomao writes them into OpenCode's `auth.json` under the OpenCode data dir (`/opt/opencode/.local/share/opencode/auth.json` on the `maomao-opencode` volume), so they persist across restarts and need no `.env` edits. An env var of the same provider still wins over a stored key; the page shows which source is in effect.
 - OAuth-style providers can skip env vars entirely — run `opencode auth login` once inside the container; the credentials file persists on the `maomao-opencode` volume.
 
   ```bash

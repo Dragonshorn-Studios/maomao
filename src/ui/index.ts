@@ -16,6 +16,7 @@ export {
 export { renderConfigPage, renderProfileForm, type ConfigPageData, type ConfigRevisionView } from "./pages.js";
 export { renderPromptConfigPage, type PromptConfigPageData } from "./pages.js";
 export { renderConnectionsPage, type ConnectionsPageData } from "./connections.js";
+export { renderProvidersPage, type ProvidersPageData } from "./providers.js";
 export { renderHealthPage, type HealthPageData } from "./health.js";
 export {
   renderScanPage,

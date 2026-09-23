@@ -56,6 +56,8 @@ import {
   type ScanIssuePreviewItem,
   type ScanPageData,
 } from "./ui/index.js";
+import { renderProvidersPage } from "./ui/providers.js";
+import { ProviderCredentialStore, opencodeAuthPath } from "./opencode/credentials.js";
 import type { JobRow } from "./jobs/store.js";
 import type { FindingRow } from "./findings/types.js";
 import type { ConfigPageData } from "./ui/index.js";
@@ -103,6 +105,8 @@ export interface ServerContext {
   opencode?: OpenCodePort;
   /** Persisted forge connections (GitLab). Undefined until MAOMAO_FORGE_KEY is set. */
   forgeConnections?: ForgeConnectionStore;
+  /** OpenCode provider credential store (auth.json). Defaults to the path the spawned child resolves. */
+  providerCredentials?: ProviderCredentialStore;
   /** "Ask Maomao" explainer backend; undefined until MAOMAO_EXPLAIN_ENABLED. */
   chat?: { service: ChatService; store: ChatStore };
   /** The environment loadConfig consumed; defaults to process.env. Injectable for tests. */
@@ -1117,6 +1121,46 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
       return c.text("Not found", 404);
     }
     return c.redirect("/connections", 303);
+  });
+
+  // ---- Provider API keys (/config/providers) — written to OpenCode's auth.json ----
+  const providerCreds = () => ctx.providerCredentials ?? new ProviderCredentialStore(opencodeAuthPath(ctx.env ?? process.env), ctx.env ?? process.env);
+  const renderProviders = (
+    c: Context<AppEnv>,
+    extra: { notice?: string; error?: string; status?: number } = {},
+  ) =>
+    c.html(
+      renderProvidersPage({
+        providers: providerCreds().list(),
+        csrfToken: gateOn ? ensureCsrfToken(c, ctx.config.uiSessionSecret) : undefined,
+        canWrite: gateOn,
+        options: { ...pageOpts, identity: c.get("identity"), notice: extra.notice, error: extra.error },
+      }),
+      (extra.status ?? 200) as 200 | 400 | 403,
+    );
+
+  app.get("/config/providers", (c) => {
+    if (!gateOn) return c.redirect("/", 302);
+    return renderProviders(c, { notice: c.req.query("notice") ?? undefined, error: c.req.query("error") ?? undefined });
+  });
+
+  app.post("/config/providers/:id", async (c) => {
+    if (!gateOn) return c.redirect("/", 302);
+    const body = await c.req.parseBody();
+    const key = typeof body.key === "string" ? body.key : "";
+    const result = providerCreds().set(c.req.param("id"), key);
+    if (!result.ok) return renderProviders(c, { error: result.error, status: 400 });
+    return c.redirect("/config/providers?notice=" + encodeURIComponent(`Key for ${c.req.param("id")} saved to auth.json.`), 303);
+  });
+
+  app.post("/config/providers/:id/delete", (c) => {
+    if (!gateOn) return c.redirect("/", 302);
+    const result = providerCreds().delete(c.req.param("id"));
+    if (!result.ok) return renderProviders(c, { error: result.error, status: 400 });
+    const note = result.removed
+      ? `Stored key for ${c.req.param("id")} removed.`
+      : `No stored key for ${c.req.param("id")}.`;
+    return c.redirect("/config/providers?notice=" + encodeURIComponent(note), 303);
   });
 
   app.get("/config", (c) => {

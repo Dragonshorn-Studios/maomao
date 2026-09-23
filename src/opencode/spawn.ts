@@ -2,6 +2,7 @@ import { spawn } from "node:child_process";
 import type { OpenCodePort, OpenCodeRunInput, OpenCodeRunResult } from "./parse.js";
 import { parseOpenCodeOutput } from "./parse.js";
 import { reviewerPermissionConfig, sanitizeChildEnv } from "./env.js";
+import { providerAuthSecrets } from "./credentials.js";
 import { redactSecrets } from "../util.js";
 
 export class OpenCodeTimeoutError extends Error {
@@ -59,7 +60,7 @@ export function createOpenCodeRunner(defaultBin = "opencode"): OpenCodePort {
         TERM: "dumb",
       };
       const env = sanitizeChildEnv(process.env, { ...extras, ...(input.env ?? {}) });
-      const secrets = opencodeEnvSecrets(env);
+      const secrets = [...opencodeEnvSecrets(env), ...providerAuthSecrets(env)];
 
       return new Promise((resolve, reject) => {
         if (input.signal?.aborted) {

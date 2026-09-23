@@ -1,8 +1,9 @@
 import { createHmac } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
 import { loadConfig } from "./config.js";
-import { mkdirSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync } from "node:fs";
 import { join } from "node:path";
+import { tmpdir } from "node:os";
 import { openDb } from "./db.js";
 import { JobStore } from "./jobs/store.js";
 import type { JobQueue } from "./jobs/queue.js";
@@ -14,6 +15,7 @@ import { CHAT_BUNDLE_HREF } from "./ui/paths.js";
 type OpenCodeLike = OpenCodePort;
 import { createApp } from "./server.js";
 import { ForgeConnectionStore } from "./forge/connections.js";
+import { ProviderCredentialStore } from "./opencode/credentials.js";
 import { generateForgeKeyHex } from "./forge/secretbox.js";
 import { computeSignature } from "./gitlab/signature.js";
 import { fingerprintFinding } from "./findings/identity.js";
@@ -1074,6 +1076,83 @@ describe("review configuration routes", () => {
     };
     expect(exportData.schema_version).toBe(1);
     expect(JSON.stringify(exportData)).not.toContain("secret");
+    log.mockRestore();
+  });
+});
+
+describe("provider credential routes", () => {
+  it("saves, displays, and deletes provider keys without exposing the secret", async () => {
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    const dir = mkdtempSync(join(tmpdir(), "maomao-prov-"));
+    const authPath = join(dir, "opencode", "auth.json");
+    const providerCredentials = new ProviderCredentialStore(authPath, {});
+    const { app } = testApp(
+      { UI_PASSWORD: "hunter2", UI_SESSION_SECRET: "session-secret-for-tests" },
+      undefined,
+      undefined,
+      { providerCredentials },
+    );
+    const { session } = await loginSession(app);
+
+    const page = await app.request("/config/providers", { headers: { cookie: session } });
+    const { csrfCookie, csrfToken, html } = await csrfArtifacts(page);
+    expect(html).toContain("Provider API keys");
+    expect(html).toContain("no key");
+    expect(html).toContain('id="provider-filter"');
+    expect(html).toContain("console.anthropic.com/settings/keys");
+    expect(html).toContain('data-provider="anthropic anthropic"');
+
+    const saved = await app.request("/config/providers/anthropic", {
+      method: "POST",
+      headers: { cookie: `${session}; ${csrfCookie}`, "content-type": "application/x-www-form-urlencoded" },
+      body: `key=${encodeURIComponent("sk-ant-test-value-9")}&csrf_token=${encodeURIComponent(csrfToken)}`,
+    });
+    expect(saved.status).toBe(303);
+    const onDisk = JSON.parse(readFileSync(authPath, "utf8")) as Record<string, { type: string; key: string }>;
+    expect(onDisk.anthropic).toEqual({ type: "api", key: "sk-ant-test-value-9" });
+
+    const after = await app.request("/config/providers", { headers: { cookie: session } });
+    const afterHtml = await after.text();
+    expect(afterHtml).toContain("auth.json");
+    expect(afterHtml).not.toContain("sk-ant-test-value-9");
+    expect(afterHtml).toContain('formaction="/config/providers/anthropic/delete"');
+
+    const page2 = await app.request("/config/providers", { headers: { cookie: session } });
+    const artifacts2 = await csrfArtifacts(page2);
+    const deleted = await app.request("/config/providers/anthropic/delete", {
+      method: "POST",
+      headers: { cookie: `${session}; ${artifacts2.csrfCookie}`, "content-type": "application/x-www-form-urlencoded" },
+      body: `csrf_token=${encodeURIComponent(artifacts2.csrfToken)}`,
+    });
+    expect(deleted.status).toBe(303);
+    const onDiskAfter = JSON.parse(readFileSync(authPath, "utf8")) as Record<string, unknown>;
+    expect(onDiskAfter.anthropic).toBeUndefined();
+    log.mockRestore();
+  });
+
+  it("rejects a whitespace-bearing key with a 400 and writes nothing", async () => {
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    const dir = mkdtempSync(join(tmpdir(), "maomao-prov-"));
+    const authPath = join(dir, "opencode", "auth.json");
+    const providerCredentials = new ProviderCredentialStore(authPath, {});
+    const { app } = testApp(
+      { UI_PASSWORD: "hunter2", UI_SESSION_SECRET: "session-secret-for-tests" },
+      undefined,
+      undefined,
+      { providerCredentials },
+    );
+    const { session } = await loginSession(app);
+    const page = await app.request("/config/providers", { headers: { cookie: session } });
+    const { csrfCookie, csrfToken } = await csrfArtifacts(page);
+
+    const rejected = await app.request("/config/providers/openai", {
+      method: "POST",
+      headers: { cookie: `${session}; ${csrfCookie}`, "content-type": "application/x-www-form-urlencoded" },
+      body: `key=${encodeURIComponent("has a space")}&csrf_token=${encodeURIComponent(csrfToken)}`,
+    });
+    expect(rejected.status).toBe(400);
+    expect(await rejected.text()).toContain("whitespace");
+    expect(existsSync(authPath)).toBe(false);
     log.mockRestore();
   });
 });
