@@ -50,6 +50,7 @@ export {
 } from "./pages.js";
 export { THEME_CSS, THEME_HREF } from "./theme.js";
 export { TYPEAHEAD_JS, TYPEAHEAD_HREF } from "./typeahead.js";
+export { MODEL_PICKER_JS, MODEL_PICKER_HREF } from "./model-picker.js";
 export { PIERRE_DIFFS_HREF, CHAT_BUNDLE_HREF } from "./paths.js";
 export {
   FAVICON_SVG,

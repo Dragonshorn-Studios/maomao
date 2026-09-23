@@ -60,6 +60,7 @@ export function isPublicPath(path: string): boolean {
     path === PIERRE_DIFFS_HREF ||
     path === CHAT_BUNDLE_HREF ||
     path === "/assets/typeahead.js" ||
+    path === "/assets/model-picker.js" ||
     path === "/assets/favicon.svg" ||
     path === "/assets/favicon.png" ||
     path === "/assets/icon.svg" ||

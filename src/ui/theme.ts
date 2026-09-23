@@ -828,6 +828,97 @@ details.finding-diff > summary {
   background: transparent;
 }
 
+/* Model picker: provider-grouped popover (progressively enhanced by /assets/model-picker.js).
+   Without is-js the wrapper is just the text input — the field stays editable
+   with JavaScript disabled. is-js reveals the button and hides the input;
+   is-custom ("Type a custom model…") brings the input back. */
+.model-picker { position: relative; display: block; margin-top: 0.3rem; }
+.model-picker .model-picker-input { margin-top: 0; }
+.model-picker.is-js .model-picker-input { display: none; }
+.model-picker.is-js.is-custom .model-picker-input { display: block; margin-bottom: 0.3rem; }
+.model-picker-btn {
+  display: none;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  width: 100%;
+  padding: 0.45rem 0.5rem;
+  background: var(--paper);
+  color: var(--ink);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.model-picker-btn:hover { border-color: var(--jade); }
+.model-picker-btn[aria-expanded="true"] { border-color: var(--jade); }
+.model-picker-btn[aria-invalid="true"] { border-color: var(--cinnabar); }
+.model-picker-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--font-mono);
+  font-size: 0.86em;
+}
+.model-picker.is-js .model-picker-btn { display: flex; }
+.model-picker-caret { flex: none; color: var(--ink-muted); font-size: 0.75rem; }
+.model-picker-pop {
+  display: none;
+  position: absolute;
+  z-index: 20;
+  left: 0;
+  right: 0;
+  margin-top: 0.25rem;
+  padding: 0.3rem;
+  background: var(--surface-2);
+  border: 1px solid var(--line-strong);
+  border-radius: 8px;
+  box-shadow: var(--shadow);
+  max-height: 18rem;
+  overflow-y: auto;
+}
+/* :not([hidden]) keeps this reveal rule at equal specificity order under the
+   [hidden] guard below — otherwise pops paint open once is-js is stamped. */
+.model-picker.is-js .model-picker-pop:not([hidden]) { display: block; }
+.model-picker-pop[hidden] { display: none; }
+.model-picker-group {
+  display: block;
+  padding: 0.45rem 0.55rem 0.15rem;
+  color: var(--ink-muted);
+  font-size: 0.72rem;
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+.model-picker-option {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.35rem 0.55rem;
+  border-radius: 6px;
+  cursor: pointer;
+}
+.model-picker-option.is-active { background: color-mix(in srgb, var(--herb) 26%, transparent); }
+.model-picker-check { flex: none; width: 1em; color: var(--jade); visibility: hidden; }
+.model-picker-option[aria-selected="true"] .model-picker-check { visibility: visible; }
+.model-picker-text { display: flex; flex-direction: column; min-width: 0; }
+.model-picker-name {
+  font-family: var(--font-mono);
+  font-size: 0.85rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.model-picker-empty-label { color: var(--ink-muted); }
+.model-picker-detail {
+  color: var(--ink-muted);
+  font-size: 0.72rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .finding.is-buried,
 .finding.is-resolved {
   border-style: dashed;

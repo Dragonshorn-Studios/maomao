@@ -55,6 +55,8 @@ import {
   CHAT_BUNDLE_HREF,
   TYPEAHEAD_HREF,
   TYPEAHEAD_JS,
+  MODEL_PICKER_HREF,
+  MODEL_PICKER_JS,
   FAVICON_SVG,
   FAVICON_PNG_BASE64,
   LARGE_ICON_SVG,
@@ -536,6 +538,13 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
     }),
   );
 
+  app.get(MODEL_PICKER_HREF, (c) =>
+    c.newResponse(MODEL_PICKER_JS, 200, {
+      "content-type": "text/javascript; charset=utf-8",
+      "cache-control": "public, max-age=3600",
+    }),
+  );
+
   // Brand icons: fixed constants from src/ui/icons.ts (no filesystem, no traversal).
   const iconAssets: Array<[string, string, string]> = [
     // [path, content-type, source]
@@ -1003,7 +1012,8 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
     }
   };
   const KNOWN_ROLE_OPTIONS = KNOWN_REVIEWER_ROLES.map((role) => ({ id: role.id, title: role.title }));
-  const profileEditorBase = () => {
+  /** MODEL_CATALOG entries merged with live-discovered models (deduped). */
+  const mergedModelCatalog = () => {
     const discovered = ctx.modelDiscovery?.snapshot();
     const configured = new Set(
       providerCreds()
@@ -1026,9 +1036,21 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
         hint: configured.has(id.split("/")[0] ?? "") ? "key configured" : "discovered via opencode models",
       });
     }
+    return modelCatalog;
+  };
+  const profileEditorBase = () => {
+    const discovered = ctx.modelDiscovery?.snapshot();
+    // Discovered models only widen the picker when MODEL_CATALOG is unset:
+    // a configured catalog is the approved list — validateModelCatalog rejects
+    // anything else on save, so offering unsavable options is misleading.
+    const approved = new Set(ctx.config.modelCatalog);
+    const modelCatalog = mergedModelCatalog().filter(
+      (entry) => ctx.config.modelCatalog.length === 0 || approved.has(entry.id),
+    );
     return {
       knownRoles: KNOWN_ROLE_OPTIONS,
       modelCatalog,
+      catalogEnforced: ctx.config.modelCatalog.length > 0,
       discovery: ctx.modelDiscovery
         ? { count: discovered?.models.length ?? 0, fetchedAt: discovered?.fetchedAt ?? 0, error: discovered?.error }
         : undefined,
@@ -1584,6 +1606,7 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
         revisions: promptViews(),
         fixtures: fixtureViews(),
         evaluations: evaluationViews(),
+        modelCatalog: mergedModelCatalog(),
         canWrite: false,
         error: "Writing prompt configuration requires an operator GitHub OAuth identity.",
       }),
@@ -1597,6 +1620,7 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
         revisions: promptViews(),
         fixtures: fixtureViews(),
         evaluations: evaluationViews(),
+        modelCatalog: mergedModelCatalog(),
         canWrite: gateOn,
         error: message,
         csrfToken: gateOn ? ensureCsrfToken(c, ctx.config.uiSessionSecret) : undefined,
@@ -1620,6 +1644,7 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
         revisions: promptViews(),
         fixtures: fixtureViews(),
         evaluations: evaluationViews(),
+        modelCatalog: mergedModelCatalog(),
         canWrite: gateOn,
         csrfToken: gateOn ? ensureCsrfToken(c, ctx.config.uiSessionSecret) : undefined,
         notice: notices[c.req.query("notice") ?? ""],

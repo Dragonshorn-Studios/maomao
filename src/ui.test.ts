@@ -10,6 +10,7 @@ import { renderConnectionsPage } from "./ui/connections.js";
 import { renderHealthPage } from "./ui/health.js";
 import { renderChatPage } from "./ui/chat-page.js";
 import { jobStateLabel, settledFindingsCopy, findingOverrideNote } from "./ui/copy.js";
+import { modelPicker, MODEL_PICKER_JS } from "./ui/model-picker.js";
 import { formatCost, formatTokens, jobMetrics } from "./ui/metrics.js";
 
 function seededStore() {
@@ -1635,3 +1636,287 @@ describe("Ask Maomao page contracts", () => {
   });
 });
 
+
+describe("model picker markup", () => {
+  const models = [
+    { id: "anthropic/claude-4.5-sonnet", hint: "key configured" },
+    { id: "anthropic/claude-4.5-haiku" },
+    { id: "openai/gpt-4o", hint: "discovered via opencode models" },
+  ];
+
+  it("renders a progressive-enhancement picker: real input plus button/popover", () => {
+    const html = modelPicker({
+      name: "reviewer_model_0",
+      value: "anthropic/claude-4.5-haiku",
+      models,
+      emptyLabel: "— default —",
+    });
+    expect(html).toContain("data-model-picker");
+    expect(html).toContain('class="model-picker-input" name="reviewer_model_0" value="anthropic/claude-4.5-haiku"');
+    expect(html).toContain('class="model-picker-btn"');
+    expect(html).toContain('class="model-picker-pop" role="listbox" hidden');
+    expect(html).toContain('data-value="" data-label="— default —" aria-selected="false"');
+    expect(html.indexOf('>anthropic</span>')).toBeLessThan(html.indexOf('>openai</span>'));
+    expect(html).toContain('data-value="anthropic/claude-4.5-haiku" data-label="anthropic/claude-4.5-haiku" aria-selected="true"');
+    expect(html).toContain('anthropic/claude-4.5-sonnet · key configured');
+    expect(html).toContain('data-custom');
+    expect(html).not.toContain("datalist");
+  });
+
+  it("groups slash-less ids under 'other'", () => {
+    const html = modelPicker({ name: "m", value: "", models: [{ id: "lmstudio/qwen3" }, { id: "bare-model" }] });
+    expect(html).toContain(">lmstudio</span>");
+    expect(html).toContain(">other</span>");
+  });
+
+  it("omits the custom-entry option when allowCustom is false (catalog enforced)", () => {
+    const html = modelPicker({ name: "m", value: "", models, emptyLabel: "—", allowCustom: false });
+    expect(html).not.toContain("data-custom");
+  });
+
+  it("preserves a saved value that is not in the catalog as a custom option", () => {
+    const html = modelPicker({ name: "router_model", value: "local/llama", models, emptyLabel: "— default —" });
+    expect(html).toContain('data-value="local/llama"');
+    expect(html).toContain("local/llama · custom");
+    expect(html).toContain('aria-selected="true"');
+  });
+
+  it("degrades to a text input when the model list is empty, keeping attrs", () => {
+    const html = modelPicker({
+      name: "model",
+      value: "x/y",
+      models: [],
+      emptyLabel: "— default —",
+      attrs: 'aria-invalid="true"',
+    });
+    expect(html).toContain('<input name="model" value="x/y"');
+    expect(html).toContain('aria-invalid="true"');
+    expect(html).not.toContain("data-model-picker");
+  });
+
+  it("renders the prompts eval field picker and loads the picker script", () => {
+    const html = renderPromptConfigPage({
+      revisions: [],
+      fixtures: [],
+      evaluations: [],
+      canWrite: true,
+      csrfToken: "tok",
+      modelCatalog: models,
+    });
+    expect(html).toContain("data-model-picker");
+    expect(html).toContain('class="model-picker-input" name="model"');
+    expect(html).toContain('<script src="/assets/model-picker.js" defer></script>');
+  });
+});
+
+describe("model picker script", () => {
+  it("is DOM-safe: no innerHTML or remote fetches", () => {
+    expect(MODEL_PICKER_JS).not.toContain("innerHTML");
+    expect(MODEL_PICKER_JS).not.toMatch(/https?:\/\//);
+  });
+
+  // Minimal DOM covering everything MODEL_PICKER_JS touches — no jsdom.
+  function matches(el: any, sel: string): boolean {
+    if (!el || !el.tagName) return false;
+    return sel.split(",").some((part) => {
+      const s = part.trim();
+      if (s.startsWith("[") && s.endsWith("]")) {
+        const inner = s.slice(1, -1);
+        const eq = inner.indexOf("=");
+        if (eq === -1) return el.hasAttribute(inner);
+        const name = inner.slice(0, eq);
+        const value = inner.slice(eq + 1).replace(/^"|"$/g, "");
+        return el.getAttribute(name) === value;
+      }
+      if (!s.startsWith(".")) return false;
+      return s.slice(1).split(".").every((cls) => el.classList.contains(cls));
+    });
+  }
+
+  function fakeEl(tag: string, classes: string[] = []): any {
+    const attrs = new Map<string, string>();
+    const cls = new Set(classes);
+    const el: any = {
+      tagName: tag,
+      hidden: false,
+      value: "",
+      children: [] as any[],
+      parentElement: null as any,
+      _text: "",
+      scrollIntoView: vi.fn(),
+      focus: vi.fn(),
+      select: vi.fn(),
+      classList: {
+        add: (...ns: string[]) => ns.forEach((n) => cls.add(n)),
+        remove: (...ns: string[]) => ns.forEach((n) => cls.delete(n)),
+        contains: (n: string) => cls.has(n),
+      },
+      getAttribute: (n: string) => attrs.get(n),
+      setAttribute: (n: string, v: string) => void attrs.set(n, String(v)),
+      hasAttribute: (n: string) => attrs.has(n),
+      removeAttribute: (n: string) => void attrs.delete(n),
+      appendChild(child: any) {
+        child.parentElement = el;
+        el.children.push(child);
+        return child;
+      },
+      closest(sel: string) {
+        let node: any = el;
+        while (node) {
+          if (matches(node, sel)) return node;
+          node = node.parentElement;
+        }
+        return null;
+      },
+      querySelector(sel: string) {
+        return queryAll(el, sel)[0] ?? null;
+      },
+      querySelectorAll(sel: string) {
+        return queryAll(el, sel);
+      },
+    };
+    Object.defineProperty(el, "textContent", {
+      get: () => el._text,
+      set: (v: string) => {
+        el._text = v;
+        el.children = [];
+      },
+    });
+    return el;
+  }
+
+  function queryAll(root: any, sel: string): any[] {
+    const out: any[] = [];
+    const walk = (node: any) => {
+      for (const child of node.children) {
+        if (matches(child, sel)) out.push(child);
+        walk(child);
+      }
+    };
+    walk(root);
+    return out;
+  }
+
+  function boot() {
+    const picker = fakeEl("span", ["model-picker"]);
+    picker.setAttribute("data-model-picker", "");
+    const input = fakeEl("input", ["model-picker-input"]);
+    input.value = "";
+    const label = fakeEl("span", ["model-picker-label"]);
+    label.textContent = "— default —";
+    const btn = fakeEl("button", ["model-picker-btn"]);
+    btn.appendChild(label);
+    const pop = fakeEl("span", ["model-picker-pop"]);
+    pop.hidden = true;
+    const optEmpty = fakeEl("span", ["model-picker-option"]);
+    optEmpty.setAttribute("data-value", "");
+    optEmpty.setAttribute("data-label", "— default —");
+    optEmpty.setAttribute("aria-selected", "true");
+    const optA = fakeEl("span", ["model-picker-option"]);
+    optA.setAttribute("data-value", "a/x");
+    optA.setAttribute("data-label", "a/x");
+    optA.setAttribute("aria-selected", "false");
+    const optCustom = fakeEl("span", ["model-picker-option", "model-picker-option-custom"]);
+    optCustom.setAttribute("data-custom", "");
+    optCustom.setAttribute("data-label", "Custom model");
+    optCustom.setAttribute("aria-selected", "false");
+    for (const child of [optEmpty, optA, optCustom]) pop.appendChild(child);
+    for (const child of [input, btn, pop]) picker.appendChild(child);
+
+    const docListeners = new Map<string, Array<(e: any) => void>>();
+    const doc: any = {
+      querySelectorAll: (sel: string) => (sel === "[data-model-picker]" ? [picker] : []),
+      addEventListener: (type: string, fn: (e: any) => void) => {
+        const list = docListeners.get(type) ?? [];
+        list.push(fn);
+        docListeners.set(type, list);
+      },
+    };
+    new Function("document", MODEL_PICKER_JS)(doc);
+    const docFire = (type: string, event: any = {}) => {
+      event.preventDefault ??= vi.fn();
+      for (const fn of docListeners.get(type) ?? []) fn(event);
+      return event;
+    };
+    return { picker, input, label, btn, pop, optEmpty, optA, optCustom, docFire };
+  }
+
+  it("stamps is-js and toggles the popover on button click", () => {
+    const { picker, btn, pop, optEmpty, docFire } = boot();
+    expect(picker.classList.contains("is-js")).toBe(true);
+    docFire("click", { target: btn });
+    expect(pop.hidden).toBe(false);
+    expect(btn.getAttribute("aria-expanded")).toBe("true");
+    // Opening activates the selected option for keyboard navigation.
+    expect(optEmpty.classList.contains("is-active")).toBe(true);
+    docFire("click", { target: btn });
+    expect(pop.hidden).toBe(true);
+    expect(btn.getAttribute("aria-expanded")).toBe("false");
+  });
+
+  it("picks an option into the input, updates the label, and prevents label forwarding", () => {
+    const { input, label, pop, optA, docFire } = boot();
+    docFire("click", { target: optA.closest(".model-picker")!.querySelector(".model-picker-btn") });
+    const event = docFire("click", { target: optA });
+    expect(event.preventDefault).toHaveBeenCalled();
+    expect(input.value).toBe("a/x");
+    expect(label.textContent).toBe("a/x");
+    expect(optA.getAttribute("aria-selected")).toBe("true");
+    expect(pop.hidden).toBe(true);
+  });
+
+  it("closes on Escape and outside click", () => {
+    const { btn, pop, docFire } = boot();
+    docFire("click", { target: btn });
+    docFire("keydown", { key: "Escape", target: btn });
+    expect(pop.hidden).toBe(true);
+    docFire("click", { target: btn });
+    docFire("click", { target: fakeEl("div") });
+    expect(pop.hidden).toBe(true);
+  });
+
+  it("navigates with arrows and picks with Enter", () => {
+    const { btn, input, optA, optCustom, docFire } = boot();
+    docFire("keydown", { key: "Enter", target: btn });
+    docFire("keydown", { key: "ArrowDown", target: btn });
+    expect(optA.classList.contains("is-active")).toBe(true);
+    docFire("keydown", { key: "Enter", target: btn });
+    expect(input.value).toBe("a/x");
+    expect(btn.focus).toHaveBeenCalled();
+  });
+
+  it("wraps ArrowUp to the last option and closes on Tab", () => {
+    const { btn, pop, optEmpty, optCustom, docFire } = boot();
+    docFire("click", { target: btn });
+    docFire("keydown", { key: "ArrowUp", target: btn });
+    // From the first (selected) option, ArrowUp wraps to the tail (custom).
+    expect(optCustom.classList.contains("is-active")).toBe(true);
+    expect(optEmpty.classList.contains("is-active")).toBe(false);
+    docFire("keydown", { key: "Tab", target: btn });
+    expect(pop.hidden).toBe(true);
+  });
+
+  it("opens the popover from the button with Space and Down-arrow", () => {
+    const { btn, pop, docFire } = boot();
+    docFire("keydown", { key: " ", target: btn });
+    expect(pop.hidden).toBe(false);
+    docFire("keydown", { key: "Escape", target: btn });
+    docFire("keydown", { key: "ArrowDown", target: btn });
+    expect(pop.hidden).toBe(false);
+  });
+
+  it("the custom option reveals the text input for free entry", () => {
+    const { picker, input, pop, optCustom, btn, docFire } = boot();
+    docFire("click", { target: btn });
+    docFire("click", { target: optCustom });
+    expect(picker.classList.contains("is-custom")).toBe(true);
+    expect(pop.hidden).toBe(true);
+    expect(input.focus).toHaveBeenCalled();
+    expect(input.select).toHaveBeenCalled();
+    // Picking a listed option afterwards hides the input again.
+    docFire("click", { target: btn });
+    docFire("click", { target: picker.querySelectorAll(".model-picker-option")[1] });
+    expect(picker.classList.contains("is-custom")).toBe(false);
+    expect(input.value).toBe("a/x");
+  });
+});

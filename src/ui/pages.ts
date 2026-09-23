@@ -1,5 +1,6 @@
 import type { JobRow, JobStore, ReviewerRunRow } from "../jobs/store.js";
 import { forgeBadgeTitle, forgeBadgeTitleHtml, forgeChipLabel, providerLabel } from "./forge-badge.js";
+import { MODEL_PICKER_HREF, modelPicker } from "./model-picker.js";
 import type { FindingRow } from "../findings/types.js";
 import { fingerprintFinding, stripHtmlComments } from "../findings/identity.js";
 import { POLICIES_WITH_EXTERNAL, POLICIES_WITH_INTERNAL } from "../routing/types.js";
@@ -1058,10 +1059,12 @@ export interface ConfigPageData {
   /** Structured-editor inputs; required for the create/edit forms when canWrite. */
   profileEditor?: {
     knownRoles: Array<{ id: string; title: string }>;
-    /** Datalist entries: MODEL_CATALOG plus models discovered via `opencode models`. */
+    /** Picker entries: MODEL_CATALOG, or models discovered via `opencode models` when the catalog is unset. */
     modelCatalog: Array<{ id: string; hint?: string }>;
     /** Live-discovery status for the refresh control; undefined when discovery is not wired. */
     discovery?: ModelDiscoveryStatus;
+    /** Env MODEL_CATALOG is set — the picker offers only approved entries. */
+    catalogEnforced?: boolean;
     /** A failed create save re-renders submitted values with field errors in place. */
     form?: { values: ProfileFormValues; errors?: ProfileFieldErrors };
   };
@@ -1191,6 +1194,8 @@ export interface ProfileFormOptions {
   knownRoles: Array<{ id: string; title: string }>;
   modelCatalog: Array<{ id: string; hint?: string }>;
   discovery?: ModelDiscoveryStatus;
+  /** Env MODEL_CATALOG is set — the picker offers only approved entries. */
+  catalogEnforced?: boolean;
 }
 
 const SEVERITIES: readonly Severity[] = ["blocker", "high", "medium", "low", "info"];
@@ -1255,8 +1260,15 @@ export function renderProfileForm(
           <select name="${key("role")}" ${roleError ? `aria-invalid="true" aria-describedby="reviewer_row_${index}-error"` : ""}>${roleOptions(row.role)}</select>
         </label>
         <label>Model override (optional; provider/model)
-          <input list="profile-model-catalog" name="${key("model")}" value="${escapeHtml(row.model)}" placeholder="provider/model"
-            ${modelError ? `aria-invalid="true" aria-describedby="reviewer_row_${index}-error"` : ""}/>
+          ${modelPicker({
+            name: key("model"),
+            value: row.model,
+            models: options.modelCatalog,
+            emptyLabel: "— default —",
+            allowCustom: !options.catalogEnforced,
+            attrs: modelError ? `aria-invalid="true" aria-describedby="reviewer_row_${index}-error"` : "",
+            buttonAttrs: modelError ? `aria-invalid="true"` : "",
+          })}
         </label>
         <label>Timeout in seconds (optional, decimals allowed — caps this reviewer's run time; falls back to OPENCODE_TIMEOUT_MS)
           <input type="number" step="any" min="0" name="${key("timeout")}" value="${escapeHtml(row.timeoutSeconds)}"
@@ -1271,23 +1283,13 @@ export function renderProfileForm(
     })
     .join("");
 
-  const modelDatalist =
-    options.modelCatalog.length > 0
-      ? `<datalist id="profile-model-catalog">${options.modelCatalog
-          .map(
-            (model) =>
-              `<option value="${escapeHtml(model.id)}"${model.hint ? ` label="${escapeHtml(model.hint)}"` : ""}></option>`,
-          )
-          .join("")}</datalist>`
-      : "";
-
   const discoveryStatus = options.discovery
     ? (() => {
         const d = options.discovery;
         const line = d.error
           ? `Live model discovery is unavailable — the list above is MODEL_CATALOG only. (${d.error})`
           : d.fetchedAt
-            ? `${d.count} model${d.count === 1 ? "" : "s"} discovered via \`opencode models\`, last refreshed ${new Date(d.fetchedAt).toUTCString()}. Entries marked “key configured” have a provider key set.`
+            ? `${d.count} model${d.count === 1 ? "" : "s"} discovered via \`opencode models\`, last refreshed ${new Date(d.fetchedAt).toUTCString()}. Entries marked “key configured” have a provider key set.${options.catalogEnforced ? " MODEL_CATALOG is set — the picker offers the approved catalog only." : ""}`
             : "Model discovery has not run yet — the list above is MODEL_CATALOG only.";
         return `<div class="model-discovery">
           <p class="muted">${escapeHtml(line)}</p>
@@ -1329,7 +1331,6 @@ export function renderProfileForm(
         <legend>Reviewers (in order; roles not listed are disabled)</legend>
         ${reviewerRows}
         <button type="submit" name="action" value="add">Add reviewer</button>
-        ${modelDatalist}
       </fieldset>
       <fieldset>
         <legend>Publishing</legend>
@@ -1339,7 +1340,15 @@ export function renderProfileForm(
           </select>
         </label>
         <label>Router model override (optional; provider/model)
-          <input name="router_model" value="${escapeHtml(values.routerModel)}" list="profile-model-catalog" ${invalidAttr("router_model")} ${describedBy("router_model")}/>
+          ${modelPicker({
+            name: "router_model",
+            value: values.routerModel,
+            models: options.modelCatalog,
+            emptyLabel: "— default —",
+            allowCustom: !options.catalogEnforced,
+            attrs: `${invalidAttr("router_model")} ${describedBy("router_model")}`.trim(),
+            buttonAttrs: invalidAttr("router_model"),
+          })}
         </label>
         ${err("router_model")}
         <label>Total cost ceiling in USD (optional — enforced per job across reviewer, aggregation, and verification spend)
@@ -1361,6 +1370,7 @@ export function renderProfileForm(
       <a href="/config/profiles">Cancel</a>
     </form>
     ${discoveryStatus}
+    <script src="${MODEL_PICKER_HREF}" defer></script>
   </section>`;
 }
 
@@ -1442,6 +1452,8 @@ export interface DraftEditPageData {
     knownRoles: Array<{ id: string; title: string }>;
     modelCatalog: Array<{ id: string; hint?: string }>;
     discovery?: ModelDiscoveryStatus;
+    /** Env MODEL_CATALOG is set — the picker offers only approved entries. */
+    catalogEnforced?: boolean;
   };
   /** A failed save re-renders the submitted values with errors in place. */
   form?: { values: ProfileFormValues; errors?: ProfileFieldErrors };
@@ -1459,6 +1471,7 @@ export function renderDraftEditPage(data: DraftEditPageData): string {
           knownRoles: data.profileEditor.knownRoles,
           modelCatalog: data.profileEditor.modelCatalog,
           discovery: data.profileEditor.discovery,
+          catalogEnforced: data.profileEditor.catalogEnforced,
         },
       )
     : `<p class="muted">Writing configuration requires an operator OAuth identity.</p>`;
@@ -1501,6 +1514,7 @@ export function renderNewProfilePage(data: ConfigPageData): string {
           knownRoles: data.profileEditor.knownRoles,
           modelCatalog: data.profileEditor.modelCatalog,
           discovery: data.profileEditor.discovery,
+          catalogEnforced: data.profileEditor.catalogEnforced,
         },
       )
     : `<p class="muted">Writing configuration requires an operator OAuth identity.</p>`;
@@ -1575,6 +1589,14 @@ export interface PromptConfigPageData {
   revisions: PromptRevisionView[];
   fixtures: PromptFixtureView[];
   evaluations: PromptEvaluationView[];
+  /**
+   * Model catalog + discovered models for the evaluation model picker —
+   * intentionally unfiltered (evaluatePrompt accepts any model and the eval
+   * path never runs validateModelCatalog, so unlike the profile editor this
+   * picker keeps discovered entries and the custom option under
+   * MODEL_CATALOG).
+   */
+  modelCatalog?: Array<{ id: string; hint?: string }>;
   canWrite: boolean;
   csrfToken?: string;
   notice?: string;
@@ -1724,7 +1746,12 @@ export function renderPromptConfigPage(data: PromptConfigPageData): string {
           ${csrf}
           <p><label>Prompt revision <input name="prompt_revision_id" required/></label></p>
           <p><label>Fixture <input name="fixture_id" required/></label></p>
-          <p><label>Model <input name="model"/></label></p>
+          <p><label>Model ${modelPicker({
+            name: "model",
+            value: "",
+            models: data.modelCatalog ?? [],
+            emptyLabel: "— default —",
+          })}</label></p>
           <p><label>Max cost (USD) <input name="max_cost_usd"/></label></p>
           <p><button type="submit" class="btn">Evaluate</button></p>
         </form>
@@ -1759,7 +1786,8 @@ export function renderPromptConfigPage(data: PromptConfigPageData): string {
     ${data.fixtures.length > 0 ? `<table class="config-audit"><thead><tr><th>ID</th><th>Name</th><th>Diff chars</th><th>Expectations</th><th>Saved by</th></tr></thead><tbody>${fixtureRows}</tbody></table>` : `<p class="muted">No fixtures saved.</p>`}
     <h2>Evaluations</h2>
     ${evalForm}
-    ${data.evaluations.length > 0 ? `<table class="config-audit"><thead><tr><th>ID</th><th>Prompt</th><th>Fixture</th><th>Model</th><th>Status</th><th>Result</th></tr></thead><tbody>${evaluationRows}</tbody></table>` : `<p class="muted">No evaluations recorded.</p>`}`;
+    ${data.evaluations.length > 0 ? `<table class="config-audit"><thead><tr><th>ID</th><th>Prompt</th><th>Fixture</th><th>Model</th><th>Status</th><th>Result</th></tr></thead><tbody>${evaluationRows}</tbody></table>` : `<p class="muted">No evaluations recorded.</p>`}
+    <script src="${MODEL_PICKER_HREF}" defer></script>`;
   return layout("Specialist prompts", body, {
     showLogout: data.canWrite || Boolean(data.csrfToken),
     csrfToken: data.csrfToken,

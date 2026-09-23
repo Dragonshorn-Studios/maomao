@@ -436,8 +436,6 @@ function migrate(db: SqliteDb): void {
     }
 
     db.exec(`
-    CREATE INDEX IF NOT EXISTS idx_jobs_created ON jobs(created_at DESC);
-    CREATE INDEX IF NOT EXISTS idx_jobs_state ON jobs(state);
     CREATE INDEX IF NOT EXISTS idx_logs_job ON job_logs(job_id, id);
     CREATE INDEX IF NOT EXISTS idx_runs_job ON reviewer_runs(job_id);
 
@@ -529,6 +527,14 @@ function migrate(db: SqliteDb): void {
     // job, and repeats on the same SHA are served by repo_brief_cache
     // instead of collapsing onto the first job.
     rebuildJobsForScopedJobType(db);
+
+    // Jobs indexes come after the rebuild: applyTableRebuild renames then
+    // drops the legacy table, taking any earlier-created jobs indexes with it
+    // (and CREATE INDEX IF NOT EXISTS would not re-issue in this same pass).
+    db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_jobs_created ON jobs(created_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_jobs_state ON jobs(state);
+  `);
 
     const findingColumns: [string, string][] = [
       ["diff_hunk", "TEXT"],

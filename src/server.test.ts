@@ -210,6 +210,10 @@ describe("HTTP app", () => {
     expect(typeaheadJs.status).toBe(200);
     expect(typeaheadJs.headers.get("content-type")).toContain("text/javascript");
     expect(await typeaheadJs.text()).toContain("__maomaoTypeahead");
+    const modelPickerJs = await app.request("/assets/model-picker.js");
+    expect(modelPickerJs.status).toBe(200);
+    expect(modelPickerJs.headers.get("content-type")).toContain("text/javascript");
+    expect(await modelPickerJs.text()).toContain("data-model-picker");
     const pierreJs = await app.request("/assets/vendor/pierre-diffs.js");
     expect(pierreJs.status).toBe(200);
     expect(pierreJs.headers.get("content-type")).toContain("text/javascript");
@@ -1182,7 +1186,7 @@ describe("model discovery routes", () => {
     return { fn, calls };
   }
 
-  it("merges discovered models into the profile editor datalist with key hints", async () => {
+  it("merges discovered models into the profile editor model picker with key hints", async () => {
     const log = vi.spyOn(console, "log").mockImplementation(() => {});
     const dir = mkdtempSync(join(tmpdir(), "maomao-models-"));
     const providerCredentials = new ProviderCredentialStore(join(dir, "opencode", "auth.json"), {});
@@ -1191,7 +1195,7 @@ describe("model discovery routes", () => {
     const modelDiscovery = new ModelDiscovery("opencode", {}, spawnFake.fn, 1000);
     await modelDiscovery.refresh();
     const { app } = testApp(
-      { UI_PASSWORD: "hunter2", UI_SESSION_SECRET: "session-secret-for-tests", MODEL_CATALOG: "catalog/curated" },
+      { UI_PASSWORD: "hunter2", UI_SESSION_SECRET: "session-secret-for-tests" },
       undefined,
       undefined,
       { providerCredentials, modelDiscovery },
@@ -1200,10 +1204,36 @@ describe("model discovery routes", () => {
 
     const page = await app.request("/config/profiles/new", { headers: { cookie: session } });
     const html = await page.text();
-    expect(html).toContain('value="catalog/curated" label="in MODEL_CATALOG"');
-    expect(html).toContain('value="anthropic/claude-4.5-sonnet" label="key configured"');
-    expect(html).toContain('value="openai/gpt-4o" label="discovered via opencode models"');
+    expect(html).toContain('<span class="model-picker-group" role="presentation">anthropic</span>');
+    expect(html).toContain('data-value="anthropic/claude-4.5-sonnet"');
+    expect(html).toContain('anthropic/claude-4.5-sonnet · key configured');
+    expect(html).toContain('<span class="model-picker-group" role="presentation">openai</span>');
+    expect(html).toContain('data-value="openai/gpt-4o"');
     expect(html).toContain("2 models discovered");
+    log.mockRestore();
+  });
+
+  it("offers only the approved catalog when MODEL_CATALOG is set", async () => {
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    const spawnFake = modelsSpawn(["anthropic/claude-4.5-sonnet"]);
+    const modelDiscovery = new ModelDiscovery("opencode", {}, spawnFake.fn, 1000);
+    await modelDiscovery.refresh();
+    const { app } = testApp(
+      { UI_PASSWORD: "hunter2", UI_SESSION_SECRET: "session-secret-for-tests", MODEL_CATALOG: "catalog/curated" },
+      undefined,
+      undefined,
+      { modelDiscovery },
+    );
+    const { session } = await loginSession(app);
+
+    const page = await app.request("/config/profiles/new", { headers: { cookie: session } });
+    const html = await page.text();
+    expect(html).toContain('<span class="model-picker-group" role="presentation">catalog</span>');
+    expect(html).toContain('data-value="catalog/curated"');
+    // Discovered models are not savable when a catalog is configured, so
+    // the picker does not offer them.
+    expect(html).not.toContain('data-value="anthropic/claude-4.5-sonnet"');
+    expect(html).toContain("the picker offers the approved catalog only");
     log.mockRestore();
   });
 
