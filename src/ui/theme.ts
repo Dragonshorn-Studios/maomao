@@ -1218,6 +1218,17 @@ body.operator main th {
   border-top: 1px dashed var(--line);
 }
 .connection-actions form { margin: 0; }
+.provider-filter input { width: 100%; max-width: 22rem; }
+.provider-help { margin: 0.35rem 0 0.6rem; }
+.provider-key-form {
+  display: flex;
+  gap: 0.5rem;
+  align-items: center;
+  margin-top: 0.75rem;
+  padding-top: 0.7rem;
+  border-top: 1px dashed var(--line);
+}
+.provider-key-form input { flex: 1; min-width: 0; }
 .operator-form label { display: block; color: var(--ink-muted); font-size: 0.88rem; }
 
 .chat-thought { display: grid; gap: var(--space-2); }

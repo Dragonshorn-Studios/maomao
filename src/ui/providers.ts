@@ -27,28 +27,27 @@ function sourceBadge(provider: ProviderCredentialStatus): string {
 }
 
 function providerRow(provider: ProviderCredentialStatus, csrfToken: string | undefined, canWrite: boolean): string {
-  const csrf = csrfInput(csrfToken);
   const actionId = escapeHtml(encodeURIComponent(provider.id));
-  const setForm = canWrite
-    ? `<form method="post" action="/config/providers/${actionId}" class="inline-form provider-key-form">
-        ${csrf}
+  const stored = provider.source === "stored";
+  const keyForm = canWrite
+    ? `<form method="post" action="/config/providers/${actionId}" class="provider-key-form">
+        ${csrfInput(csrfToken)}
         <input type="password" name="key" required autocomplete="off" minlength="4"
-          placeholder="${provider.source === "stored" ? "Replace stored key" : "Paste API key"}"
+          placeholder="${stored ? "Replace stored key" : "Paste API key"}"
           aria-label="API key for ${escapeHtml(provider.label)}"/>
-        <button type="submit" class="btn">${provider.source === "stored" ? "Replace" : "Save"}</button>
+        <button type="submit" class="btn">${stored ? "Replace" : "Save"}</button>
+        ${stored ? `<button type="submit" formaction="/config/providers/${actionId}/delete" formnovalidate class="btn-danger">Remove</button>` : ""}
       </form>`
     : "";
-  const deleteForm =
-    canWrite && provider.source === "stored"
-      ? `<form method="post" action="/config/providers/${actionId}/delete" class="inline-form">
-          ${csrf}<button type="submit" class="btn-danger">Remove</button>
-        </form>`
-      : "";
+  const help = provider.helpUrl
+    ? `<p class="muted provider-help">${escapeHtml(provider.helpLabel ?? "Get a key")}:
+       <a href="${escapeHtml(provider.helpUrl)}" target="_blank" rel="noopener noreferrer">${escapeHtml(provider.helpUrl.replace(/^https?:\/\//, ""))}</a></p>`
+    : "";
   const envNote =
     provider.source === "environment"
       ? `<p class="muted">Set via environment — the env var wins over a stored key. Unset it to use the stored one.</p>`
       : "";
-  return `<article class="card provider-card">
+  return `<li class="card provider-card" data-provider="${escapeHtml(`${provider.id} ${provider.label}`.toLowerCase())}">
     <header class="connection-head">
       <div>
         <p class="label">${escapeHtml(provider.id)}</p>
@@ -56,9 +55,10 @@ function providerRow(provider: ProviderCredentialStatus, csrfToken: string | und
       </div>
       <div class="connection-chips">${sourceBadge(provider)}</div>
     </header>
+    ${help}
     ${envNote}
-    <div class="connection-actions">${setForm}${deleteForm}</div>
-  </article>`;
+    ${keyForm}
+  </li>`;
 }
 
 export function renderProvidersPage(data: ProvidersPageData): string {
@@ -74,7 +74,29 @@ export function renderProvidersPage(data: ProvidersPageData): string {
     ${data.options.notice ? `<p class="notice" role="status">${escapeHtml(data.options.notice)}</p>` : ""}
     ${data.options.error ? `<p class="error" role="alert">${escapeHtml(data.options.error)}</p>` : ""}
     ${data.canWrite ? "" : `<p class="muted">Writing provider keys requires an operator OAuth identity.</p>`}
-    <ul class="queue connection-list">${rows}</ul>
-  </section>`;
+    <p class="provider-filter">
+      <input type="search" id="provider-filter" placeholder="Filter providers…" aria-label="Filter providers"/>
+      <span class="muted" id="provider-filter-empty" hidden>No providers match.</span>
+    </p>
+    <ul class="queue connection-list" id="provider-list">${rows}</ul>
+  </section>
+  <script>
+  (() => {
+    const input = document.getElementById("provider-filter");
+    const empty = document.getElementById("provider-filter-empty");
+    const cards = document.querySelectorAll("#provider-list [data-provider]");
+    if (!input || !empty) return;
+    input.addEventListener("input", () => {
+      const q = input.value.trim().toLowerCase();
+      let visible = 0;
+      for (const card of cards) {
+        const show = !q || card.getAttribute("data-provider").includes(q);
+        card.style.display = show ? "" : "none";
+        if (show) visible += 1;
+      }
+      empty.hidden = visible !== 0;
+    });
+  })();
+  </script>`;
   return layout("Provider API keys", body, { ...data.options, surface: "operator" });
 }
