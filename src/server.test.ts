@@ -1649,6 +1649,42 @@ describe("model discovery routes", () => {
     log.mockRestore();
   });
 
+  it("re-runs discovery on key save and lists models with a refresh button on /config/providers", async () => {
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    const dir = mkdtempSync(join(tmpdir(), "maomao-models-"));
+    const providerCredentials = new ProviderCredentialStore(join(dir, "opencode", "auth.json"), {});
+    const spawnFake = modelsSpawn(["zai-coding-plan/glm-4.6", "anthropic/claude-4.5-sonnet"]);
+    const modelDiscovery = new ModelDiscovery("opencode", {}, spawnFake.fn, 1000);
+    const { app } = testApp(
+      { UI_PASSWORD: "hunter2", UI_SESSION_SECRET: "session-secret-for-tests" },
+      undefined,
+      undefined,
+      { providerCredentials, modelDiscovery },
+    );
+    const { session } = await loginSession(app);
+    const page = await app.request("/config/providers", { headers: { cookie: session } });
+    const { csrfCookie, csrfToken } = await csrfArtifacts(page);
+
+    const saved = await app.request("/config/providers/zai-coding-plan", {
+      method: "POST",
+      headers: { cookie: `${session}; ${csrfCookie}`, "content-type": "application/x-www-form-urlencoded" },
+      body: `csrf_token=${encodeURIComponent(csrfToken)}&key=${encodeURIComponent("zai-test-key-1")}`,
+    });
+    expect(saved.status).toBe(303);
+    // Saving the key re-ran `opencode models` automatically.
+    expect(spawnFake.calls.length).toBe(1);
+
+    const after = await app.request("/config/providers", { headers: { cookie: session } });
+    const html = await after.text();
+    expect(html).toContain('action="/config/models/refresh?next=providers"');
+    expect(html).toContain('id="model-filter"');
+    expect(html).toContain("<code>zai-coding-plan/glm-4.6</code>");
+    expect(html).toContain("<code>anthropic/claude-4.5-sonnet</code>");
+    // The zai group is badge-marked now that a key is stored.
+    expect(html).toContain("key set");
+    log.mockRestore();
+  });
+
   it("refresh re-runs opencode models and redirects back with a notice", async () => {
     const log = vi.spyOn(console, "log").mockImplementation(() => {});
     const models = ["openai/gpt-4o"];

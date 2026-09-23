@@ -13,6 +13,12 @@ export interface ProvidersPageData {
   providers: ProviderCredentialStatus[];
   csrfToken?: string;
   canWrite: boolean;
+  /** MODEL_CATALOG entries merged with live-discovered models (deduped). */
+  modelCatalog?: Array<{ id: string; hint?: string }>;
+  /** Epoch ms of the last successful `opencode models` refresh; 0 while none. */
+  modelsFetchedAt?: number;
+  /** Last discovery error, when refresh failed. */
+  modelsError?: string;
   options: PageOptions;
 }
 
@@ -62,6 +68,68 @@ function providerRow(provider: ProviderCredentialStatus, csrfToken: string | und
   </li>`;
 }
 
+function modelListSection(data: ProvidersPageData): string {
+  const catalog = data.modelCatalog ?? [];
+  const keyedProviders = new Set(data.providers.filter((p) => p.source !== "none").map((p) => p.id));
+  const groups = new Map<string, Array<{ id: string; hint?: string }>>();
+  for (const model of catalog) {
+    const provider = model.id.split("/")[0] ?? model.id;
+    const bucket = groups.get(provider) ?? [];
+    if (bucket.length === 0) groups.set(provider, bucket);
+    bucket.push(model);
+  }
+  const refreshed =
+    data.modelsFetchedAt && data.modelsFetchedAt > 0
+      ? `refreshed ${escapeHtml(new Date(data.modelsFetchedAt).toISOString().slice(0, 16).replace("T", " "))} UTC`
+      : "never refreshed";
+  const refreshForm = data.canWrite
+    ? `<form method="post" action="/config/models/refresh?next=providers" class="model-refresh">
+        ${csrfInput(data.csrfToken)}
+        <button type="submit" class="btn-secondary" title="Re-run opencode models so newly saved keys expose their models">Refresh model list</button>
+      </form>`
+    : "";
+  const errorNote = data.modelsError
+    ? `<p class="error" role="alert">Last model refresh failed: ${escapeHtml(data.modelsError)}</p>`
+    : "";
+  const groupHtml =
+    catalog.length === 0
+      ? `<p class="muted">No models known yet — save a key, then refresh the list.</p>`
+      : [...groups.entries()]
+          .sort(([a], [b]) => a.localeCompare(b))
+          .map(([provider, models]) => {
+            const badge = keyedProviders.has(provider) ? `<span class="state state-completed">key set</span>` : "";
+            const items = models
+              .map(
+                (model) =>
+                  `<li class="model-item" data-model="${escapeHtml(model.id.toLowerCase())}"><code>${escapeHtml(model.id)}</code>${
+                    model.hint ? ` <span class="muted">${escapeHtml(model.hint)}</span>` : ""
+                  }</li>`,
+              )
+              .join("");
+            return `<section class="model-group" data-model-group>
+              <h3 class="model-group-head">${escapeHtml(provider)} ${badge}<span class="muted model-group-count">${models.length}</span></h3>
+              <ul class="model-grid">${items}</ul>
+            </section>`;
+          })
+          .join("");
+  return `
+  <section class="model-list">
+    <header class="model-list-head">
+      <div>
+        <h2>Available models</h2>
+        <p class="muted">${catalog.length} models · ${refreshed} — from <code>opencode models</code> and MODEL_CATALOG.</p>
+      </div>
+      ${refreshForm}
+    </header>
+    ${errorNote}
+    <p class="provider-filter">
+      <input type="search" id="model-filter" placeholder="Search models…" aria-label="Search models"/>
+      <span class="muted" id="model-filter-empty" hidden>No models match.</span>
+    </p>
+    <div id="model-groups">${groupHtml}</div>
+  </section>`;
+}
+
 export function renderProvidersPage(data: ProvidersPageData): string {
   const rows = data.providers.map((provider) => providerRow(provider, data.csrfToken, data.canWrite)).join("");
   const body = `
@@ -81,13 +149,13 @@ export function renderProvidersPage(data: ProvidersPageData): string {
     </p>
     <ul class="queue connection-list" id="provider-list">${rows}</ul>
   </section>
+  ${modelListSection(data)}
   <script>
   (() => {
     const input = document.getElementById("provider-filter");
     const empty = document.getElementById("provider-filter-empty");
     const cards = document.querySelectorAll("#provider-list [data-provider]");
-    if (!input || !empty) return;
-    input.addEventListener("input", () => {
+    if (input && empty) input.addEventListener("input", () => {
       const q = input.value.trim().toLowerCase();
       let visible = 0;
       for (const card of cards) {
@@ -96,6 +164,23 @@ export function renderProvidersPage(data: ProvidersPageData): string {
         if (show) visible += 1;
       }
       empty.hidden = visible !== 0;
+    });
+    const modelInput = document.getElementById("model-filter");
+    const modelEmpty = document.getElementById("model-filter-empty");
+    const items = document.querySelectorAll("#model-groups [data-model]");
+    const groups = document.querySelectorAll("#model-groups [data-model-group]");
+    if (modelInput && modelEmpty) modelInput.addEventListener("input", () => {
+      const q = modelInput.value.trim().toLowerCase();
+      let visible = 0;
+      for (const item of items) {
+        const show = !q || item.getAttribute("data-model").includes(q);
+        item.style.display = show ? "" : "none";
+        if (show) visible += 1;
+      }
+      for (const group of groups) {
+        group.style.display = group.querySelector('[data-model]:not([style*="none"])') ? "" : "none";
+      }
+      modelEmpty.hidden = visible !== 0;
     });
   })();
   </script>`;
