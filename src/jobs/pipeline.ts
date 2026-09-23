@@ -899,11 +899,17 @@ async function runBriefJob(deps: PipelineDeps, forge: ForgeRegistry, jobId: numb
     // before serving so a mismatched row can never produce a wrong brief.
     // An operator-picked model bypasses the cache: the point of an override
     // is a different run, and a bespoke result must not replace the shared
-    // default-model copy either.
-    if (config.brief.cacheEnabled && run.model) {
+    // default-model copy either. run.model can't mark the override alone —
+    // runBriefRun rewrites it to the resolved value, so a retried default
+    // brief would look overridden; only a value that differs from the
+    // resolved default counts (an explicit pick of the default model is
+    // semantically a default run).
+    const defaultModel = deps.config.chat.model || deps.config.opencode.reviewerModel;
+    const modelOverride = run.model != null && run.model !== defaultModel;
+    if (config.brief.cacheEnabled && modelOverride) {
       store.log(jobId, `Model override (${run.model}) — bypassing the repo brief cache`);
     }
-    if (config.brief.cacheEnabled && !run.model) {
+    if (config.brief.cacheEnabled && !modelOverride) {
       const cached = store.getRepoBriefCache(job.provider, job.provider_instance, job.repo_full_name, job.head_sha);
       const cachedPayload = cached ? parseBriefPayload(cached.payload) : undefined;
       if (cachedPayload && cachedPayload.sha === job.head_sha) {
@@ -958,7 +964,7 @@ async function runBriefJob(deps: PipelineDeps, forge: ForgeRegistry, jobId: numb
       brief,
     });
     store.patchJob(jobId, { brief_json: JSON.stringify(payload) });
-    if (config.brief.cacheEnabled && !run.model) {
+    if (config.brief.cacheEnabled && !modelOverride) {
       store.putRepoBriefCache(job.provider, job.provider_instance, job.repo_full_name, job.head_sha, JSON.stringify(payload));
     }
     store.setJobState(jobId, "completed", { finished_at: nowIso() });
