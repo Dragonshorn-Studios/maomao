@@ -1,6 +1,7 @@
 import type { SqliteDb } from "./db.js";
 import { nowIso } from "./util.js";
 import { KNOWN_REVIEWER_ROLES } from "./prompts.js";
+import type { Config } from "./config.js";
 import type { Severity } from "./schema.js";
 import { severitySchema } from "./schema.js";
 import { z } from "zod";
@@ -256,6 +257,46 @@ export class ReviewConfigStore {
     this.audit("imported", input.actor, null, `${imported} imported as drafts, ${skipped} skipped`);
     return { imported, skipped };
   }
+}
+
+/**
+ * The env-derived configuration expressed as a profile definition — the
+ * seeded v0. Activating it unchanged is a behavior no-op: every field mirrors
+ * the value the pipeline would compute without a profile.
+ */
+export function envProfileDefinition(config: Config): ProfileDefinition {
+  const reviewers = config.reviewers.map((role) => {
+    const model = role.model || config.opencode.reviewerModel || undefined;
+    return model ? { role: role.id, model } : { role: role.id };
+  });
+  const routerModel = config.routing.model || config.opencode.reviewerModel || undefined;
+  return {
+    name: "default",
+    reviewers,
+    ...(routerModel ? { routerModel } : {}),
+    minPublishableSeverity: "info",
+    onBudgetExceeded: "degrade",
+  };
+}
+
+/**
+ * First-boot seed: creates the premade `default` draft (v0) so operators edit a
+ * prefilled baseline rather than a blank form. Idempotent — skips when any
+ * revision named `default` already exists. Recorded in the audit trail as a
+ * `system` action by createDraft.
+ */
+export function seedDefaultProfileRevision(store: ReviewConfigStore, config: Config): boolean {
+  if (store.listRevisions().some((revision) => revision.name === "default")) return false;
+  const result = store.createDraft({
+    definition: envProfileDefinition(config),
+    note: "Seeded from the environment configuration (v0). Edit it, then activate — activating it unchanged matches the env behavior exactly.",
+    createdBy: "system",
+  });
+  if ("error" in result) {
+    console.warn(`config: could not seed the default profile revision: ${result.issues.join("; ")}`);
+    return false;
+  }
+  return true;
 }
 
 /** Model names must come from the operator-approved catalog when one is configured. */

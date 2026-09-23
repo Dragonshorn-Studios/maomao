@@ -985,8 +985,8 @@ export interface ConfigPageData {
     modelCatalog: Array<{ id: string; hint?: string }>;
     /** Live-discovery status for the refresh control; undefined when discovery is not wired. */
     discovery?: ModelDiscoveryStatus;
-    /** A failed save re-renders submitted values with field errors in place. */
-    form?: { values: ProfileFormValues; errors?: ProfileFieldErrors; revision?: { id: number; editSeq: number } };
+    /** A failed create save re-renders submitted values with field errors in place. */
+    form?: { values: ProfileFormValues; errors?: ProfileFieldErrors };
   };
   identity?: UiIdentity;
 }
@@ -1000,8 +1000,8 @@ function clampConfigValue(value: string): string {
 }
 
 /** Renders the /config "Effective configuration" section: entries grouped by
- * `group`, each with a source badge. Escapes and clamps all entry text.
- * Returns "" when entries is empty. */
+ * `group`, each with a source badge and a "how to change this" hint. Escapes
+ * and clamps all entry text. Returns "" when entries is empty. */
 function renderEffectiveConfigSection(entries: EffectiveConfigEntry[]): string {
   if (entries.length === 0) return "";
   const groups = new Map<string, EffectiveConfigEntry[]>();
@@ -1016,6 +1016,16 @@ function renderEffectiveConfigSection(entries: EffectiveConfigEntry[]): string {
     if (entry.source === "environment") return `<span class="config-source">Environment</span>`;
     return `<span class="config-source">Default</span>`;
   };
+  /** Where an operator goes to change this value, derived from its source. */
+  const changeHint = (entry: EffectiveConfigEntry): string => {
+    if (entry.source === "profile") {
+      return `Comes from the active profile — change it under <a href="/config/profiles">Profiles</a>.`;
+    }
+    if (entry.source === "environment") {
+      return `Set by environment — change ${entry.envKey ? `<code>${escapeHtml(entry.envKey)}</code>` : "the variable"} in .env / service config and restart.`;
+    }
+    return `Built-in default — override via ${entry.envKey ? `<code>${escapeHtml(entry.envKey)}</code> or a ` : "an env var or a "}<a href="/config/profiles">profile</a>.`;
+  };
   const sections = [...groups.entries()]
     .map(([group, groupEntries]) => {
       const rows = groupEntries
@@ -1023,6 +1033,7 @@ function renderEffectiveConfigSection(entries: EffectiveConfigEntry[]): string {
           (entry) => `<div>
             <dt>${escapeHtml(entry.label)} ${sourceBadge(entry)}${entry.notEnforced ? ` <span class="config-source" title="Stored in the profile schema but not yet consumed by the pipeline">not enforced at runtime</span>` : ""}</dt>
             <dd><code class="metric">${escapeHtml(clampConfigValue(entry.value))}</code></dd>
+            <dd class="config-hint muted">${changeHint(entry)}</dd>
           </div>`,
         )
         .join("");
@@ -1034,10 +1045,29 @@ function renderEffectiveConfigSection(entries: EffectiveConfigEntry[]): string {
     ${sections}`;
 }
 
+/** Shared sub-nav across the /config pages so each section is one click away. */
+export type ConfigSection = "effective" | "profiles" | "providers" | "prompts" | "audit";
+
+export function configSubNav(active: ConfigSection): string {
+  const links: Array<[ConfigSection, string, string]> = [
+    ["effective", "/config", "Effective configuration"],
+    ["profiles", "/config/profiles", "Profiles"],
+    ["providers", "/config/providers", "Provider keys"],
+    ["prompts", "/config/prompts", "Specialist prompts"],
+    ["audit", "/config/audit", "Audit"],
+  ];
+  return `<p class="config-nav">${links
+    .map(([id, href, label]) =>
+      id === active ? `<strong>${escapeHtml(label)}</strong>` : `<a href="${href}">${escapeHtml(label)}</a>`,
+    )
+    .join(" · ")}</p>`;
+}
+
 function revisionCard(revision: ConfigRevisionView, data: ConfigPageData): string {
   const csrf = csrfInput(data.csrfToken);
   const actions: string[] = [];
   if (data.canWrite && revision.status === "draft") {
+    actions.push(`<a href="/config/profiles/drafts/${revision.id}/edit" class="btn-secondary">Edit draft</a>`);
     actions.push(`<form method="post" action="/config/revisions/${revision.id}/activate" class="inline-form">
       ${csrf}
       <button type="submit" class="btn">Activate</button>
@@ -1047,6 +1077,12 @@ function revisionCard(revision: ConfigRevisionView, data: ConfigPageData): strin
     actions.push(`<form method="post" action="/config/revisions/${revision.id}/rollback" class="inline-form">
       ${csrf}
       <button type="submit" class="btn-secondary">Roll back to this revision</button>
+    </form>`);
+  }
+  if (data.canWrite) {
+    actions.push(`<form method="post" action="/config/revisions/${revision.id}/duplicate" class="inline-form">
+      ${csrf}
+      <button type="submit" class="btn-secondary">Duplicate</button>
     </form>`);
   }
   const definitionJson = JSON.stringify(revision.definition, null, 2);
@@ -1060,15 +1096,6 @@ function revisionCard(revision: ConfigRevisionView, data: ConfigPageData): strin
       <summary>Definition</summary>
       <pre class="log-panel">${escapeHtml(definitionJson)}</pre>
     </details>
-    ${revision.status === "draft" && data.canWrite ? `<details>
-      <summary>Edit draft</summary>
-      <form method="post" action="/config/drafts/${revision.id}">
-        ${csrf}
-        <input type="hidden" name="expected_edit_seq" value="${revision.editSeq}"/>
-        <textarea name="definition" rows="12" cols="72">${escapeHtml(definitionJson)}</textarea>
-        <button type="submit" class="btn">Save draft</button>
-      </form>
-    </details>` : ""}
     <div class="config-actions">${actions.join("")}</div>
   </article>`;
 }
@@ -1254,34 +1281,46 @@ export function renderProfileForm(
         </label>
       </fieldset>
       <button type="submit" name="action" value="save" class="btn">Save draft</button>
-      <a href="/config">Cancel</a>
+      <a href="/config/profiles">Cancel</a>
     </form>
     ${discoveryStatus}
   </section>`;
 }
 
+/**
+ * /config landing: the effective configuration with per-row provenance and a
+ * "how to change this" pointer. Profiles, provider keys, prompts, and the audit
+ * trail each live on their own page (see configSubNav) so no single render can
+ * derail an unrelated flow.
+ */
 export function renderConfigPage(data: ConfigPageData): string {
+  const body = `
+    <h1>Review configuration</h1>
+    <p class="lede">What this process is actually running, with the source of every value and where to change it.</p>
+    ${configSubNav("effective")}
+    ${data.notice ? `<p class="notice" role="status">${escapeHtml(data.notice)}</p>` : ""}
+    ${data.error ? `<p class="error" role="alert">${escapeHtml(data.error)}</p>` : ""}
+    ${data.effectiveConfig ? renderEffectiveConfigSection(data.effectiveConfig) : ""}
+    <p class="muted">Service status and uptime live on the <a href="/health">health page</a>.</p>`;
+  return layout("Review configuration", body, {
+    showLogout: data.canWrite || Boolean(data.csrfToken),
+    csrfToken: data.csrfToken,
+    identity: data.identity,
+    surface: "operator",
+  });
+}
+
+/** /config/profiles: versioned review profiles — drafts are created here but
+ * edited on their own page (/config/profiles/drafts/:id/edit) so list-page
+ * re-renders cannot lose in-progress form state. */
+export function renderProfilesPage(data: ConfigPageData): string {
   const active = data.revisions.filter((revision) => revision.status === "active");
   const drafts = data.revisions.filter((revision) => revision.status === "draft");
   const retired = data.revisions.filter((revision) => revision.status === "retired");
   const csrf = csrfInput(data.csrfToken);
-  const createForm =
-    data.canWrite && data.profileEditor
-      ? data.profileEditor.form && !data.profileEditor.form.revision
-        ? // A failed create save re-renders the submitted values with errors.
-          renderProfileForm(data.profileEditor.form.values, data.profileEditor.form.errors, {
-            csrfToken: data.csrfToken ?? "",
-            knownRoles: data.profileEditor.knownRoles,
-            modelCatalog: data.profileEditor.modelCatalog,
-            discovery: data.profileEditor.discovery,
-          })
-        : renderProfileForm(initialProfileFormValues(), undefined, {
-            csrfToken: data.csrfToken ?? "",
-            knownRoles: data.profileEditor.knownRoles,
-            modelCatalog: data.profileEditor.modelCatalog,
-            discovery: data.profileEditor.discovery,
-          })
-      : `<p class="muted">Writing configuration requires an operator OAuth identity.</p>`;
+  const createLink = data.canWrite
+    ? `<p><a href="/config/profiles/new" class="btn">New draft</a></p>`
+    : `<p class="muted">Writing configuration requires an operator OAuth identity.</p>`;
   const importForm = data.canWrite
     ? `<details class="config-import">
         <summary>Import exported configuration</summary>
@@ -1292,57 +1331,126 @@ export function renderConfigPage(data: ConfigPageData): string {
         </form>
       </details>`
     : "";
-  const auditRows = data.audit
+  const body = `
+    <h1>Review profiles</h1>
+    <p class="lede">Versioned review profiles and specialist selection. Activation is explicit and audited; credentials are never part of a profile.</p>
+    ${configSubNav("profiles")}
+    ${data.notice ? `<p class="notice" role="status">${escapeHtml(data.notice)}</p>` : ""}
+    ${data.error ? `<p class="error" role="alert">${escapeHtml(data.error)}</p>` : ""}
+    ${createLink}
+    <h2>Active</h2>
+    ${active.map((revision) => revisionCard(revision, data)).join("") || `<p class="muted">No active revision — env configuration applies.</p>`}
+    <h2>Drafts</h2>
+    ${drafts.map((revision) => revisionCard(revision, data)).join("") || `<p class="muted">No open drafts.</p>`}
+    <h2>Retired</h2>
+    ${retired.map((revision) => revisionCard(revision, data)).join("") || `<p class="muted">No retired revisions.</p>`}
+    ${importForm}
+    <p><a href="/config/export">Export configuration (JSON)</a></p>`;
+  return layout("Review profiles", body, {
+    showLogout: data.canWrite || Boolean(data.csrfToken),
+    csrfToken: data.csrfToken,
+    identity: data.identity,
+    surface: "operator",
+  });
+}
+
+export interface DraftEditPageData {
+  revision: ConfigRevisionView;
+  identity?: UiIdentity;
+  csrfToken?: string;
+  canWrite: boolean;
+  notice?: string;
+  error?: string;
+  profileEditor: {
+    knownRoles: Array<{ id: string; title: string }>;
+    modelCatalog: Array<{ id: string; hint?: string }>;
+    discovery?: ModelDiscoveryStatus;
+  };
+  /** A failed save re-renders the submitted values with errors in place. */
+  form?: { values: ProfileFormValues; errors?: ProfileFieldErrors };
+}
+
+/** /config/profiles/drafts/:id/edit — the dedicated draft editor. */
+export function renderDraftEditPage(data: DraftEditPageData): string {
+  const editor = data.canWrite
+    ? renderProfileForm(
+        data.form?.values ?? profileFormValuesFromDefinition(data.revision.definition, data.revision.note),
+        data.form?.errors,
+        {
+          csrfToken: data.csrfToken ?? "",
+          revision: { id: data.revision.id, editSeq: data.revision.editSeq },
+          knownRoles: data.profileEditor.knownRoles,
+          modelCatalog: data.profileEditor.modelCatalog,
+          discovery: data.profileEditor.discovery,
+        },
+      )
+    : `<p class="muted">Writing configuration requires an operator OAuth identity.</p>`;
+  const body = `
+    ${configSubNav("profiles")}
+    <p class="crumb"><a href="/config/profiles">Profiles</a> / Draft #${data.revision.id}</p>
+    ${data.notice ? `<p class="notice" role="status">${escapeHtml(data.notice)}</p>` : ""}
+    ${data.error ? `<p class="error" role="alert">${escapeHtml(data.error)}</p>` : ""}
+    ${editor}`;
+  return layout(`Edit draft #${data.revision.id}`, body, {
+    showLogout: data.canWrite || Boolean(data.csrfToken),
+    csrfToken: data.csrfToken,
+    identity: data.identity,
+    surface: "operator",
+  });
+}
+
+function configAuditTable(audit: ConfigPageData["audit"]): string {
+  const rows = audit
     .map(
       (entry) =>
         `<tr><td>${escapeHtml(entry.created_at)}</td><td>${escapeHtml(entry.action)}</td><td>${escapeHtml(entry.actor)}</td><td>${entry.revision_id ?? "—"}</td><td>${escapeHtml(entry.detail ?? "")}</td></tr>`,
     )
     .join("");
+  return `<table class="config-audit">
+    <thead><tr><th>When</th><th>Action</th><th>Actor</th><th>Revision</th><th>Detail</th></tr></thead>
+    <tbody>${rows || `<tr><td colspan="5">No entries</td></tr>`}</tbody>
+  </table>`;
+}
+
+/** /config/profiles/new — the create-draft editor on its own page so the
+ * profiles list stays a list as it grows. */
+export function renderNewProfilePage(data: ConfigPageData): string {
+  const editor = data.canWrite && data.profileEditor
+    ? renderProfileForm(
+        data.profileEditor.form?.values ?? initialProfileFormValues(),
+        data.profileEditor.form?.errors,
+        {
+          csrfToken: data.csrfToken ?? "",
+          knownRoles: data.profileEditor.knownRoles,
+          modelCatalog: data.profileEditor.modelCatalog,
+          discovery: data.profileEditor.discovery,
+        },
+      )
+    : `<p class="muted">Writing configuration requires an operator OAuth identity.</p>`;
   const body = `
-    <h1>Review configuration</h1>
-    <p class="lede">Versioned review profiles and specialist selection. Activation is explicit and audited; credentials are never part of this configuration.</p>
-    <p class="config-nav"><a href="/config/providers">Provider API keys</a> — keys written to OpenCode's credential file, no .env edits needed.</p>
-    <p class="config-nav"><a href="/config/prompts">Specialist prompts</a> — see each role's built-in instructions and manage your overrides.</p>
+    ${configSubNav("profiles")}
+    <p class="crumb"><a href="/config/profiles">Profiles</a> / New draft</p>
     ${data.notice ? `<p class="notice" role="status">${escapeHtml(data.notice)}</p>` : ""}
     ${data.error ? `<p class="error" role="alert">${escapeHtml(data.error)}</p>` : ""}
-    ${data.effectiveConfig ? renderEffectiveConfigSection(data.effectiveConfig) : ""}
-    <p><a href="/config/export">Export configuration (JSON)</a></p>
-    <h2>Active</h2>
-    ${active.map((revision) => revisionCard(revision, data)).join("") || `<p class="muted">No active revision — env configuration applies.</p>`}
-    <h2>Drafts</h2>
-    ${createForm}
-    ${drafts
-      .map((revision) => {
-        const failingForm =
-          data.profileEditor?.form?.revision?.id === revision.id ? data.profileEditor.form : undefined;
-        const editor =
-          data.canWrite && data.profileEditor
-            ? renderProfileForm(
-                failingForm
-                  ? failingForm.values
-                  : profileFormValuesFromDefinition(revision.definition, revision.note),
-                failingForm?.errors,
-                {
-                  csrfToken: data.csrfToken ?? "",
-                  revision: { id: revision.id, editSeq: revision.editSeq },
-                  knownRoles: data.profileEditor.knownRoles,
-                  modelCatalog: data.profileEditor.modelCatalog,
-                  discovery: data.profileEditor.discovery,
-                },
-              )
-            : "";
-        return `${editor}${revisionCard(revision, data)}`;
-      })
-      .join("") || `<p class="muted">No open drafts.</p>`}
-    <h2>Retired</h2>
-    ${retired.map((revision) => revisionCard(revision, data)).join("") || `<p class="muted">No retired revisions.</p>`}
-    ${importForm}
-    <h2>Audit history</h2>
-    <table class="config-audit">
-      <thead><tr><th>When</th><th>Action</th><th>Actor</th><th>Revision</th><th>Detail</th></tr></thead>
-      <tbody>${auditRows || `<tr><td colspan="5">No entries</td></tr>`}</tbody>
-    </table>`;
-  return layout("Review configuration", body, {
+    ${editor}`;
+  return layout("New draft", body, {
+    showLogout: data.canWrite || Boolean(data.csrfToken),
+    csrfToken: data.csrfToken,
+    identity: data.identity,
+    surface: "operator",
+  });
+}
+
+/** /config/audit: profile lifecycle transitions, most recent first. */
+export function renderConfigAuditPage(data: ConfigPageData): string {
+  const body = `
+    <h1>Configuration audit</h1>
+    <p class="lede">The most recent profile lifecycle transitions — who did what, and when.</p>
+    ${configSubNav("audit")}
+    ${data.notice ? `<p class="notice" role="status">${escapeHtml(data.notice)}</p>` : ""}
+    ${data.error ? `<p class="error" role="alert">${escapeHtml(data.error)}</p>` : ""}
+    ${configAuditTable(data.audit)}`;
+  return layout("Configuration audit", body, {
     showLogout: data.canWrite || Boolean(data.csrfToken),
     csrfToken: data.csrfToken,
     identity: data.identity,
@@ -1561,7 +1669,7 @@ export function renderPromptConfigPage(data: PromptConfigPageData): string {
     })
     .join("");
   const body = `
-    <p class="crumb"><a href="/config">Review configuration</a> / Specialist prompts</p>
+    ${configSubNav("prompts")}
     <h1>Specialist prompts</h1>
     <p class="lede">Each specialist ships with built-in instructions. Override a role when you need different focus; the live override is the active revision, drafts stay private until you activate them. Security guardrails are composed at runtime and are not editable. Evaluation never publishes to GitHub.</p>
     ${data.notice ? `<p class="notice" role="status">${escapeHtml(data.notice)}</p>` : ""}

@@ -4,7 +4,7 @@ import { seedDemoJobs } from "./demo/fixtures.js";
 import { JobStore } from "./jobs/store.js";
 import { THEME_CSS } from "./ui/theme.js";
 import { TYPEAHEAD_JS } from "./ui/typeahead.js";
-import { renderConfigPage, renderHome, renderJob, renderLogin, renderPromptConfigPage, renderScanConfirmPage, renderScanIssuePreviewPage, renderScanPage } from "./ui/pages.js";
+import { renderConfigAuditPage, renderConfigPage, renderDraftEditPage, renderHome, renderJob, renderLogin, renderProfilesPage, renderPromptConfigPage, renderScanConfirmPage, renderScanIssuePreviewPage, renderScanPage } from "./ui/pages.js";
 import { layout } from "./ui/layout.js";
 import { renderConnectionsPage } from "./ui/connections.js";
 import { renderHealthPage } from "./ui/health.js";
@@ -583,42 +583,85 @@ describe("finding mini diffs", () => {
   });
 });
 
-describe("config page", () => {
+describe("config pages", () => {
+  const revision = {
+    id: 3,
+    name: "default",
+    status: "draft",
+    definition: { name: "default", reviewers: [{ role: "correctness" }], minPublishableSeverity: "info" },
+    note: null,
+    created_by: "octocat",
+    created_at: "2026-01-01T00:00:00Z",
+    updated_at: "2026-01-01T00:00:00Z",
+    activated_at: "2026-01-01T00:00:00Z",
+    editSeq: 2,
+  };
+
   it("renders revisions, write controls only for operators, and escapes definitions", () => {
     const data = {
-      revisions: [
-        {
-          id: 3,
-          name: "default",
-          status: "draft",
-          definition: { name: "default", reviewers: [{ role: "correctness" }], minPublishableSeverity: "info" },
-          note: null,
-          created_by: "octocat",
-          created_at: "2026-01-01T00:00:00Z",
-          updated_at: "2026-01-01T00:00:00Z",
-          activated_at: "2026-01-01T00:00:00Z",
-          editSeq: 2,
-        },
-      ],
-      audit: [{ id: 1, action: "draft_created", actor: "octocat", revision_id: 3, detail: "draft of default", created_at: "2026-01-01T00:00:00Z" }],
+      revisions: [revision],
+      audit: [],
       csrfToken: "tok",
       canWrite: true,
+      profileEditor: { knownRoles: [], modelCatalog: [] },
     };
-    const html = renderConfigPage(data);
-    expect(html).toContain("Review configuration");
+    const html = renderProfilesPage(data);
+    expect(html).toContain("Review profiles");
     expect(html).toContain('href="/config/prompts"');
     expect(html).toContain("Specialist prompts");
-    // The definition JSON is rendered escaped inside the edit textarea.
+    // The definition JSON is rendered escaped inside the summary <pre>.
     expect(html).toContain("&quot;reviewers&quot;");
     expect(html).toContain('name="csrf_token"');
     expect(html).toContain("Activate");
-    expect(html).toContain("expected_edit_seq");
-    expect(html).toContain("Audit history");
+    // Drafts link out to the dedicated edit page rather than editing inline.
+    expect(html).toContain('href="/config/profiles/drafts/3/edit"');
 
-    const readonly = renderConfigPage({ ...data, canWrite: false, csrfToken: undefined });
+    const readonly = renderProfilesPage({ ...data, canWrite: false, csrfToken: undefined });
     expect(readonly).not.toContain("Activate");
     expect(readonly).not.toContain('name="csrf_token"');
     expect(readonly).toContain("requires an operator OAuth identity");
+  });
+
+  it("renders the draft editor on its own page with the definition decoded", () => {
+    const html = renderDraftEditPage({
+      revision,
+      csrfToken: "tok",
+      canWrite: true,
+      profileEditor: { knownRoles: [], modelCatalog: [] },
+    });
+    expect(html).toContain('action="/config/drafts/3"');
+    expect(html).toContain('name="expected_edit_seq" value="2"');
+    expect(html).toContain('href="/config/profiles"');
+  });
+
+  it("renders the audit trail on its own page", () => {
+    const html = renderConfigAuditPage({
+      revisions: [],
+      audit: [{ id: 1, action: "draft_created", actor: "octocat", revision_id: 3, detail: "draft of default", created_at: "2026-01-01T00:00:00Z" }],
+      canWrite: true,
+    });
+    expect(html).toContain("Configuration audit");
+    expect(html).toContain("draft_created");
+    expect(html).toContain("octocat");
+  });
+
+  it("renders the landing page without any write forms", () => {
+    const html = renderConfigPage({
+      revisions: [],
+      audit: [],
+      canWrite: true,
+      effectiveConfig: [
+        { group: "g", label: "Reviewer model", value: "openai/gpt-4o", source: "environment", envKey: "OPENCODE_REVIEWER_MODEL" },
+        { group: "g", label: "Reviewer count", value: "4", source: "default" },
+      ],
+    });
+    expect(html).toContain("Review configuration");
+    expect(html).toContain('href="/config/profiles"');
+    expect(html).toContain('href="/health"');
+    expect(html).not.toContain('name="csrf_token"');
+    // Each row carries a "how to change this" pointer to where it lives.
+    expect(html).toContain("OPENCODE_REVIEWER_MODEL");
+    expect(html).toContain("config-hint");
   });
 });
 

@@ -6,6 +6,7 @@
  */
 import { escapeHtml } from "../util.js";
 import { csrfInput, layout, type PageOptions } from "./layout.js";
+import { configSubNav } from "./pages.js";
 import type { ProviderCredentialStatus } from "../opencode/credentials.js";
 
 export interface ProvidersPageData {
@@ -64,6 +65,7 @@ export function renderProvidersPage(data: ProvidersPageData): string {
   const rows = data.providers.map((provider) => providerRow(provider, data.csrfToken, data.canWrite)).join("");
   const body = `
   <section>
+    ${configSubNav("providers")}
     <h1>Provider API keys</h1>
     <p class="lede">Keys are written to OpenCode's credential file (<code>auth.json</code> in its data directory — the
     <code>maomao-opencode</code> volume in the Compose setup) and are read by OpenCode at each run. Keys are never
