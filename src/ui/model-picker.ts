@@ -165,8 +165,13 @@ export const MODEL_PICKER_JS = String.raw`(function () {
       isOpen(picker) ? close(picker) : open(picker);
       return;
     }
-    var option = event.target.closest(".model-picker-option");
-    if (option) pick(picker, option);
+    // Pickers sit inside <label>s: without preventDefault the label forwards
+    // a synthesized click to the button, re-toggling the pop after a pick.
+    if (event.target.closest(".model-picker-pop")) {
+      event.preventDefault();
+      var option = event.target.closest(".model-picker-option");
+      if (option) pick(picker, option);
+    }
   });
 
   document.addEventListener("keydown", function (event) {
