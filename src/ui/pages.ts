@@ -2267,7 +2267,7 @@ export function renderPausePage(data: PausePageData): string {
       : "";
   const body = `
     <h1>Review pause</h1>
-    <p class="lede">Pause automatic pull-request reviews for one repository while a stack is being built. Expiring a pause resumes normal handling of future webhooks — it does not backfill intermediate states. Manual reviews, scans, briefs, and an explicit stack trigger still work during a pause.</p>
+    <p class="lede">Pause automatic pull-request reviews for one repository while a stack is being built. Expiring a pause resumes normal handling of future webhooks — it does not backfill intermediate states. A repository pause still allows manual reviews, scans, briefs, and explicit stack triggers; the global switch above stops every kind of review.</p>
     ${globalCard}
     ${data.error ? `<p class="error" role="alert">${escapeHtml(data.error)}</p>` : ""}
     ${data.notice ? `<p class="notice" role="status">${escapeHtml(data.notice)}</p>` : ""}
