@@ -110,7 +110,7 @@ export const PROVIDER_CREDENTIAL_OPTIONS: ReadonlyArray<{
   {
     id: "opencode-go",
     label: "OpenCode Go",
-    envVars: ["OPENCODE_GO_API_KEY", "OPENCODE_API_KEY"],
+    envVars: ["OPENCODE_API_KEY"],
     helpUrl: "https://opencode.ai/zen",
     helpLabel: "Subscribe to Go in the OpenCode console, then copy the key",
   },
