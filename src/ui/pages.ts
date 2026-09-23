@@ -1267,6 +1267,7 @@ export function renderProfileForm(
             emptyLabel: "— default —",
             allowCustom: !options.catalogEnforced,
             attrs: modelError ? `aria-invalid="true" aria-describedby="reviewer_row_${index}-error"` : "",
+            buttonAttrs: modelError ? `aria-invalid="true"` : "",
           })}
         </label>
         <label>Timeout in seconds (optional, decimals allowed — caps this reviewer's run time; falls back to OPENCODE_TIMEOUT_MS)
@@ -1346,6 +1347,7 @@ export function renderProfileForm(
             emptyLabel: "— default —",
             allowCustom: !options.catalogEnforced,
             attrs: `${invalidAttr("router_model")} ${describedBy("router_model")}`.trim(),
+            buttonAttrs: invalidAttr("router_model"),
           })}
         </label>
         ${err("router_model")}
@@ -1587,7 +1589,13 @@ export interface PromptConfigPageData {
   revisions: PromptRevisionView[];
   fixtures: PromptFixtureView[];
   evaluations: PromptEvaluationView[];
-  /** Model catalog + discovered models for the evaluation model picker. */
+  /**
+   * Model catalog + discovered models for the evaluation model picker —
+   * intentionally unfiltered (evaluatePrompt accepts any model and the eval
+   * path never runs validateModelCatalog, so unlike the profile editor this
+   * picker keeps discovered entries and the custom option under
+   * MODEL_CATALOG).
+   */
   modelCatalog?: Array<{ id: string; hint?: string }>;
   canWrite: boolean;
   csrfToken?: string;

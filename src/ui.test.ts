@@ -1663,6 +1663,12 @@ describe("model picker markup", () => {
     expect(html).not.toContain("datalist");
   });
 
+  it("groups slash-less ids under 'other'", () => {
+    const html = modelPicker({ name: "m", value: "", models: [{ id: "lmstudio/qwen3" }, { id: "bare-model" }] });
+    expect(html).toContain(">lmstudio</span>");
+    expect(html).toContain(">other</span>");
+  });
+
   it("omits the custom-entry option when allowCustom is false (catalog enforced)", () => {
     const html = modelPicker({ name: "m", value: "", models, emptyLabel: "—", allowCustom: false });
     expect(html).not.toContain("data-custom");
@@ -1739,6 +1745,7 @@ describe("model picker script", () => {
       _text: "",
       scrollIntoView: vi.fn(),
       focus: vi.fn(),
+      select: vi.fn(),
       classList: {
         add: (...ns: string[]) => ns.forEach((n) => cls.add(n)),
         remove: (...ns: string[]) => ns.forEach((n) => cls.delete(n)),
@@ -1869,13 +1876,33 @@ describe("model picker script", () => {
   });
 
   it("navigates with arrows and picks with Enter", () => {
-    const { btn, input, optA, docFire } = boot();
+    const { btn, input, optA, optCustom, docFire } = boot();
     docFire("keydown", { key: "Enter", target: btn });
     docFire("keydown", { key: "ArrowDown", target: btn });
     expect(optA.classList.contains("is-active")).toBe(true);
     docFire("keydown", { key: "Enter", target: btn });
     expect(input.value).toBe("a/x");
     expect(btn.focus).toHaveBeenCalled();
+  });
+
+  it("wraps ArrowUp to the last option and closes on Tab", () => {
+    const { btn, pop, optEmpty, optCustom, docFire } = boot();
+    docFire("click", { target: btn });
+    docFire("keydown", { key: "ArrowUp", target: btn });
+    // From the first (selected) option, ArrowUp wraps to the tail (custom).
+    expect(optCustom.classList.contains("is-active")).toBe(true);
+    expect(optEmpty.classList.contains("is-active")).toBe(false);
+    docFire("keydown", { key: "Tab", target: btn });
+    expect(pop.hidden).toBe(true);
+  });
+
+  it("opens the popover from the button with Space and Down-arrow", () => {
+    const { btn, pop, docFire } = boot();
+    docFire("keydown", { key: " ", target: btn });
+    expect(pop.hidden).toBe(false);
+    docFire("keydown", { key: "Escape", target: btn });
+    docFire("keydown", { key: "ArrowDown", target: btn });
+    expect(pop.hidden).toBe(false);
   });
 
   it("the custom option reveals the text input for free entry", () => {
@@ -1885,6 +1912,7 @@ describe("model picker script", () => {
     expect(picker.classList.contains("is-custom")).toBe(true);
     expect(pop.hidden).toBe(true);
     expect(input.focus).toHaveBeenCalled();
+    expect(input.select).toHaveBeenCalled();
     // Picking a listed option afterwards hides the input again.
     docFire("click", { target: btn });
     docFire("click", { target: picker.querySelectorAll(".model-picker-option")[1] });

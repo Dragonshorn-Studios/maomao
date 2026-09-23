@@ -1043,8 +1043,9 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
     // Discovered models only widen the picker when MODEL_CATALOG is unset:
     // a configured catalog is the approved list — validateModelCatalog rejects
     // anything else on save, so offering unsavable options is misleading.
+    const approved = new Set(ctx.config.modelCatalog);
     const modelCatalog = mergedModelCatalog().filter(
-      (entry) => ctx.config.modelCatalog.length === 0 || entry.hint === "in MODEL_CATALOG",
+      (entry) => ctx.config.modelCatalog.length === 0 || approved.has(entry.id),
     );
     return {
       knownRoles: KNOWN_ROLE_OPTIONS,

@@ -32,10 +32,17 @@ export function modelPicker(options: {
   placeholder?: string;
   /** Offer a "Type a custom model…" tail option (default true). */
   allowCustom?: boolean;
-  /** Extra attributes on the control, already escaped (e.g. aria-invalid). */
+  /** Extra attributes on the value input, already escaped (e.g. aria-invalid + aria-describedby). */
   attrs?: string;
+  /**
+   * Extra attributes on the toggle button, already escaped — typically just
+   * `aria-invalid="true"` (styled in the theme). Field-level aria-describedby
+   * belongs on the input, not the decorative button.
+   */
+  buttonAttrs?: string;
 }): string {
   const attrs = options.attrs ? ` ${options.attrs}` : "";
+  const buttonAttrs = options.buttonAttrs ? ` ${options.buttonAttrs}` : "";
   const placeholder = options.placeholder ?? "provider/model";
   if (options.models.length === 0) {
     return `<input name="${escapeHtml(options.name)}" value="${escapeHtml(options.value)}" placeholder="${escapeHtml(placeholder)}"${attrs}/>`;
@@ -79,7 +86,7 @@ export function modelPicker(options: {
   const buttonLabel = options.value === "" ? (options.emptyLabel ?? options.value) : options.value;
   return `<span class="model-picker" data-model-picker>
     <input type="text" class="model-picker-input" name="${escapeHtml(options.name)}" value="${escapeHtml(options.value)}" placeholder="${escapeHtml(placeholder)}"${attrs}/>
-    <button type="button" class="model-picker-btn" aria-haspopup="listbox" aria-expanded="false"${attrs}>
+    <button type="button" class="model-picker-btn" aria-haspopup="listbox" aria-expanded="false"${buttonAttrs}>
       <span class="model-picker-label">${escapeHtml(buttonLabel)}</span><span class="model-picker-caret" aria-hidden="true">▾</span>
     </button>
     <span class="model-picker-pop" role="listbox" hidden>${emptyOption}${groupsHtml}${customOption}</span>
@@ -152,7 +159,10 @@ export const MODEL_PICKER_JS = String.raw`(function () {
       if (label) label.textContent = option.getAttribute("data-label") || "Custom model";
       options(picker).forEach(function (o) { o.setAttribute("aria-selected", "false"); });
       close(picker);
-      if (input) input.focus();
+      if (input) {
+        input.focus();
+        input.select();
+      }
       return;
     }
     picker.classList.remove("is-custom");
@@ -171,7 +181,7 @@ export const MODEL_PICKER_JS = String.raw`(function () {
     var index = list.indexOf(active);
     if (index === -1) {
       var selected = picker.querySelector('.model-picker-option[aria-selected="true"]');
-      index = Math.max(0, list.indexOf(selected) - (delta > 0 ? 1 : -1));
+      index = selected ? list.indexOf(selected) : delta > 0 ? -1 : 0;
     }
     index = (index + delta + list.length) % list.length;
     activate(picker, list[index]);
