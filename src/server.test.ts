@@ -1182,7 +1182,7 @@ describe("model discovery routes", () => {
     return { fn, calls };
   }
 
-  it("merges discovered models into the profile editor datalist with key hints", async () => {
+  it("merges discovered models into the profile editor model picker with key hints", async () => {
     const log = vi.spyOn(console, "log").mockImplementation(() => {});
     const dir = mkdtempSync(join(tmpdir(), "maomao-models-"));
     const providerCredentials = new ProviderCredentialStore(join(dir, "opencode", "auth.json"), {});
@@ -1200,9 +1200,16 @@ describe("model discovery routes", () => {
 
     const page = await app.request("/config/profiles/new", { headers: { cookie: session } });
     const html = await page.text();
-    expect(html).toContain('value="catalog/curated" label="in MODEL_CATALOG"');
-    expect(html).toContain('value="anthropic/claude-4.5-sonnet" label="key configured"');
-    expect(html).toContain('value="openai/gpt-4o" label="discovered via opencode models"');
+    expect(html).toContain('<optgroup label="catalog">');
+    expect(html).toContain('<option value="catalog/curated">catalog/curated (in MODEL_CATALOG)</option>');
+    expect(html).toContain('<optgroup label="anthropic">');
+    expect(html).toContain(
+      '<option value="anthropic/claude-4.5-sonnet">anthropic/claude-4.5-sonnet (key configured)</option>',
+    );
+    expect(html).toContain('<optgroup label="openai">');
+    expect(html).toContain(
+      '<option value="openai/gpt-4o">openai/gpt-4o (discovered via opencode models)</option>',
+    );
     expect(html).toContain("2 models discovered");
     log.mockRestore();
   });

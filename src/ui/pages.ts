@@ -1,5 +1,6 @@
 import type { JobRow, JobStore, ReviewerRunRow } from "../jobs/store.js";
 import { forgeBadgeTitle, forgeBadgeTitleHtml, forgeChipLabel, providerLabel } from "./forge-badge.js";
+import { modelPicker } from "./model-picker.js";
 import type { FindingRow } from "../findings/types.js";
 import { fingerprintFinding, stripHtmlComments } from "../findings/identity.js";
 import { POLICIES_WITH_EXTERNAL, POLICIES_WITH_INTERNAL } from "../routing/types.js";
@@ -1255,8 +1256,13 @@ export function renderProfileForm(
           <select name="${key("role")}" ${roleError ? `aria-invalid="true" aria-describedby="reviewer_row_${index}-error"` : ""}>${roleOptions(row.role)}</select>
         </label>
         <label>Model override (optional; provider/model)
-          <input list="profile-model-catalog" name="${key("model")}" value="${escapeHtml(row.model)}" placeholder="provider/model"
-            ${modelError ? `aria-invalid="true" aria-describedby="reviewer_row_${index}-error"` : ""}/>
+          ${modelPicker({
+            name: key("model"),
+            value: row.model,
+            models: options.modelCatalog,
+            emptyLabel: "— default —",
+            attrs: modelError ? `aria-invalid="true" aria-describedby="reviewer_row_${index}-error"` : "",
+          })}
         </label>
         <label>Timeout in seconds (optional, decimals allowed — caps this reviewer's run time; falls back to OPENCODE_TIMEOUT_MS)
           <input type="number" step="any" min="0" name="${key("timeout")}" value="${escapeHtml(row.timeoutSeconds)}"
@@ -1270,16 +1276,6 @@ export function renderProfileForm(
       </fieldset>`;
     })
     .join("");
-
-  const modelDatalist =
-    options.modelCatalog.length > 0
-      ? `<datalist id="profile-model-catalog">${options.modelCatalog
-          .map(
-            (model) =>
-              `<option value="${escapeHtml(model.id)}"${model.hint ? ` label="${escapeHtml(model.hint)}"` : ""}></option>`,
-          )
-          .join("")}</datalist>`
-      : "";
 
   const discoveryStatus = options.discovery
     ? (() => {
@@ -1329,7 +1325,6 @@ export function renderProfileForm(
         <legend>Reviewers (in order; roles not listed are disabled)</legend>
         ${reviewerRows}
         <button type="submit" name="action" value="add">Add reviewer</button>
-        ${modelDatalist}
       </fieldset>
       <fieldset>
         <legend>Publishing</legend>
@@ -1339,7 +1334,13 @@ export function renderProfileForm(
           </select>
         </label>
         <label>Router model override (optional; provider/model)
-          <input name="router_model" value="${escapeHtml(values.routerModel)}" list="profile-model-catalog" ${invalidAttr("router_model")} ${describedBy("router_model")}/>
+          ${modelPicker({
+            name: "router_model",
+            value: values.routerModel,
+            models: options.modelCatalog,
+            emptyLabel: "— default —",
+            attrs: `${invalidAttr("router_model")} ${describedBy("router_model")}`.trim(),
+          })}
         </label>
         ${err("router_model")}
         <label>Total cost ceiling in USD (optional — enforced per job across reviewer, aggregation, and verification spend)
@@ -1575,6 +1576,8 @@ export interface PromptConfigPageData {
   revisions: PromptRevisionView[];
   fixtures: PromptFixtureView[];
   evaluations: PromptEvaluationView[];
+  /** Model catalog + discovered models for the evaluation model picker. */
+  modelCatalog?: Array<{ id: string; hint?: string }>;
   canWrite: boolean;
   csrfToken?: string;
   notice?: string;
@@ -1724,7 +1727,12 @@ export function renderPromptConfigPage(data: PromptConfigPageData): string {
           ${csrf}
           <p><label>Prompt revision <input name="prompt_revision_id" required/></label></p>
           <p><label>Fixture <input name="fixture_id" required/></label></p>
-          <p><label>Model <input name="model"/></label></p>
+          <p><label>Model ${modelPicker({
+            name: "model",
+            value: "",
+            models: data.modelCatalog ?? [],
+            emptyLabel: "— default —",
+          })}</label></p>
           <p><label>Max cost (USD) <input name="max_cost_usd"/></label></p>
           <p><button type="submit" class="btn">Evaluate</button></p>
         </form>

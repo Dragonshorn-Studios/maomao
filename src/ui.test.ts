@@ -10,6 +10,7 @@ import { renderConnectionsPage } from "./ui/connections.js";
 import { renderHealthPage } from "./ui/health.js";
 import { renderChatPage } from "./ui/chat-page.js";
 import { jobStateLabel, settledFindingsCopy, findingOverrideNote } from "./ui/copy.js";
+import { modelPicker } from "./ui/model-picker.js";
 import { formatCost, formatTokens, jobMetrics } from "./ui/metrics.js";
 
 function seededStore() {
@@ -1635,3 +1636,39 @@ describe("Ask Maomao page contracts", () => {
   });
 });
 
+
+describe("model picker", () => {
+  const models = [
+    { id: "anthropic/claude-4.5-sonnet", hint: "key configured" },
+    { id: "anthropic/claude-4.5-haiku" },
+    { id: "openai/gpt-4o", hint: "discovered via opencode models" },
+  ];
+
+  it("groups options under a provider optgroup and selects the current value", () => {
+    const html = modelPicker({
+      name: "reviewer_model_0",
+      value: "anthropic/claude-4.5-haiku",
+      models,
+      emptyLabel: "— default —",
+    });
+    expect(html).toContain('<select name="reviewer_model_0">');
+    expect(html).toContain('<option value="">— default —</option>');
+    expect(html.indexOf('<optgroup label="anthropic">')).toBeLessThan(html.indexOf('<optgroup label="openai">'));
+    expect(html).toContain(
+      '<option value="anthropic/claude-4.5-haiku" selected>anthropic/claude-4.5-haiku</option>',
+    );
+    expect(html).toContain("(key configured)");
+    expect(html).not.toContain("datalist");
+  });
+
+  it("preserves a saved value that is not in the catalog as a custom option", () => {
+    const html = modelPicker({ name: "router_model", value: "local/llama", models, emptyLabel: "— default —" });
+    expect(html).toContain('<option value="local/llama" selected>local/llama (custom)</option>');
+  });
+
+  it("degrades to a text input when the model list is empty", () => {
+    const html = modelPicker({ name: "model", value: "x/y", models: [], emptyLabel: "— default —" });
+    expect(html).toContain('<input name="model" value="x/y"');
+    expect(html).not.toContain("<select");
+  });
+});
