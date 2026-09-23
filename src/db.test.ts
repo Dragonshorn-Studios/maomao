@@ -190,11 +190,22 @@ describe("usage schema migration", () => {
       legacy.close();
 
       const store = new JobStore(openDb(path));
-      const schema = new Database(path)
+      const check = new Database(path);
+      const schema = check
         .prepare(`SELECT sql FROM sqlite_master WHERE type='table' AND name='jobs'`)
         .get() as { sql: string };
       expect(schema.sql).toContain(
         "UNIQUE (provider, provider_instance, repo_full_name, pr_number, head_sha, job_type, dedup_key)",
+      );
+
+      // The rebuild renames and drops the legacy table — the jobs indexes must
+      // be re-issued afterwards, not before (regression: they died with the
+      // legacy table when created earlier in the same migrate pass).
+      const indexes = check
+        .prepare(`SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='jobs'`)
+        .all() as { name: string }[];
+      expect(indexes.map((row) => row.name)).toEqual(
+        expect.arrayContaining(["idx_jobs_created", "idx_jobs_state"]),
       );
 
       // The pre-existing scan row survived the rebuild with its type intact
