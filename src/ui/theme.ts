@@ -878,7 +878,9 @@ details.finding-diff > summary {
   max-height: 18rem;
   overflow-y: auto;
 }
-.model-picker.is-js .model-picker-pop { display: block; }
+/* :not([hidden]) keeps this reveal rule at equal specificity order under the
+   [hidden] guard below — otherwise pops paint open once is-js is stamped. */
+.model-picker.is-js .model-picker-pop:not([hidden]) { display: block; }
 .model-picker-pop[hidden] { display: none; }
 .model-picker-group {
   display: block;
