@@ -110,28 +110,29 @@ describe("effectiveConfigEntries", () => {
     expect(timeouts.notEnforced).toBeFalsy();
     const behavior = find(entries, "Profile budget behavior");
     expect(behavior).toMatchObject({ source: "profile", value: expect.stringContaining("degrade") });
-    // Profile reviewer selection applies only in fixed routing mode.
+    // The profile reviewer set is enforced in every routing mode now.
     const reviewerSet = find(entries, "Profile reviewer set (effective)");
-    expect(reviewerSet.notEnforced).toBe(true);
+    expect(reviewerSet.notEnforced).toBeFalsy();
   });
 
-  it("marks the profile reviewer set as enforced in fixed routing mode and drops roles missing from env", () => {
+  it("lists every profile role as the effective set — env roles no longer gate — and annotates the env rows", () => {
     const config = loadConfig({ REVIEWER_ROLES: "correctness,security" });
     const revision = fakeRevision({
       reviewers: [
         { role: "correctness" },
-        { role: "performance" as never },
+        { role: "api" as never },
         { role: "security" as never },
       ],
     });
     const entries = effectiveConfigEntries(config, { REVIEWER_ROLES: "correctness,security" }, revision);
-    // Intersection wins: performance is dropped, not silently run.
+    // The GUI-set profile wins: api runs even though env does not enable it.
     expect(find(entries, "Profile reviewer set (effective)")).toMatchObject({
-      value: "correctness, security",
-      // Default routing mode is hybrid, where the profile set does not apply.
-      notEnforced: true,
+      value: "correctness, api, security",
+      source: "profile",
     });
-    expect(find(entries, "Profile roles dropped (not in the env role list)").value).toBe("performance");
+    expect(find(entries, "Profile reviewer set (effective)").notEnforced).toBeFalsy();
+    expect(entries.some((entry) => entry.label.includes("dropped"))).toBe(false);
+    expect(find(entries, "Enabled roles").sourceDetail).toContain("overridden by profile #12");
   });
 
   it("marks the profile reviewer set as enforced in fixed routing mode", () => {
@@ -140,8 +141,8 @@ describe("effectiveConfigEntries", () => {
     const entries = effectiveConfigEntries(config, { REVIEWER_ROLES: "correctness,security" }, revision);
     expect(find(entries, "Profile reviewer set (effective)")).toMatchObject({
       value: "correctness",
-      notEnforced: false,
     });
+    expect(find(entries, "Profile reviewer set (effective)").notEnforced).toBeFalsy();
   });
 
   it("marks inherited model slots when only the reviewer model env var is set", () => {

@@ -85,6 +85,9 @@ export function effectiveConfigEntries(
     value: config.reviewers.map((role) => role.id).join(", "),
     source: src("REVIEWER_ROLES"),
     envKey: "REVIEWER_ROLES",
+    sourceDetail: activeRevision
+      ? `set overridden by profile #${activeRevision.id} — env models still apply as defaults`
+      : undefined,
   });
   const envRoleModels = config.reviewers.filter((role) => role.model);
   if (envRoleModels.length > 0) {
@@ -94,39 +97,24 @@ export function effectiveConfigEntries(
       value: envRoleModels.map((role) => `${role.id}: ${role.model}`).join(", "),
       source: "environment",
       envKey: "REVIEWER_MODEL_<ROLE>",
+      sourceDetail: activeRevision ? "default only — profile models win when set" : undefined,
     });
   }
   if (activeRevision) {
-    // applyProfileToSpecs runs the profile roles ∩ env roles, falling back to
-    // all profile roles only when the intersection is empty.
-    const envRoleIds = new Set(config.reviewers.map((role) => role.id));
+    // The GUI-set profile overrides the environment: its role list is the
+    // effective reviewer set in every routing mode (fixed runs it verbatim;
+    // the router chooses within it). Env REVIEWER_ROLES no longer gates.
     const profileRoles = activeRevision.definition.reviewers.map((reviewer) => reviewer.role);
-    const intersection = profileRoles.filter((role) => envRoleIds.has(role));
-    const effectiveSet =
-      intersection.length > 0 ? intersection : profileRoles;
-    const dropped = intersection.length > 0
-      ? profileRoles.filter((role) => !envRoleIds.has(role))
-      : [];
     const profileDetail = `#${activeRevision.id} (${activeRevision.name})`;
     add({
       group: "Reviewers",
       label: "Profile reviewer set (effective)",
       value:
-        effectiveSet.join(", ") ||
+        profileRoles.join(", ") ||
         "(none — falls back to env roles)",
       source: "profile",
       sourceDetail: profileDetail,
-      notEnforced: config.routing.mode !== "fixed",
     });
-    if (dropped.length > 0) {
-      add({
-        group: "Reviewers",
-        label: "Profile roles dropped (not in the env role list)",
-        value: dropped.join(", "),
-        source: "profile",
-        sourceDetail: profileDetail,
-      });
-    }
     const profileModels = activeRevision.definition.reviewers.filter((reviewer) => reviewer.model);
     if (profileModels.length > 0) {
       addProfile(
