@@ -1086,6 +1086,7 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
   ): ConfigPageData => ({
     identity: c.get("identity"),
     revisions: ctx.store.configs.listRevisions(),
+    profileRoutes: ctx.store.configs.listProfileRoutes(),
     audit: [],
     canWrite: opts.canWrite ?? gateOn,
     csrfToken: gateOn ? ensureCsrfToken(c, ctx.config.uiSessionSecret) : undefined,
@@ -1390,6 +1391,8 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
     "rolled-back": "Revision rolled back.",
     deactivated: "Revision deactivated.",
     "draft-discarded": "Draft discarded.",
+    "route-added": "Repo route added.",
+    "route-removed": "Repo route removed.",
     imported: "Configuration imported as drafts.",
     "models-refreshed": "Model list refreshed from opencode models.",
     "models-refresh-failed": "Model list refresh failed — see the note in the profile editor for details.",
@@ -1676,6 +1679,52 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
     const result = ctx.store.configs.discardDraft(Number(c.req.param("id")), actor.login);
     if ("error" in result) return renderProfilesWithError(c, result.error, 400);
     return c.redirect("/config/profiles?notice=draft-discarded", 302);
+  });
+
+  /**
+   * "Edit" on an active/retired revision forks it into a same-named draft —
+   * activating that draft supersedes it, keeping the versioned history.
+   * Drafts edit in place via the dedicated editor page instead.
+   */
+  app.post("/config/revisions/:id/edit", (c) => {
+    if (!gateOn) return c.redirect("/", 302);
+    const actor = configActor(c);
+    if (!actor) return configWriteDenied(c);
+    const existing = ctx.store.configs.getRevision(Number(c.req.param("id")));
+    if (!existing) return renderProfilesWithError(c, "Revision not found.", 404);
+    if (existing.status === "draft") {
+      return c.redirect(`/config/profiles/drafts/${existing.id}/edit`, 303);
+    }
+    const result = ctx.store.configs.createDraft({
+      definition: existing.definition,
+      note: `Edit of #${existing.id}.`,
+      createdBy: actor.login,
+    });
+    if ("error" in result) return renderProfilesWithError(c, result.issues.join("; "), 400);
+    return c.redirect(`/config/profiles/drafts/${result.revision.id}/edit`, 303);
+  });
+
+  app.post("/config/routes", async (c) => {
+    if (!gateOn) return c.redirect("/", 302);
+    const actor = configActor(c);
+    if (!actor) return configWriteDenied(c);
+    const body = await c.req.parseBody();
+    const result = ctx.store.configs.addProfileRoute({
+      pattern: typeof body.pattern === "string" ? body.pattern : "",
+      profileName: typeof body.profile_name === "string" ? body.profile_name : "",
+      createdBy: actor.login,
+    });
+    if ("error" in result) return renderProfilesWithError(c, result.error, 400);
+    return c.redirect("/config/profiles?notice=route-added", 302);
+  });
+
+  app.post("/config/routes/:id/delete", (c) => {
+    if (!gateOn) return c.redirect("/", 302);
+    const actor = configActor(c);
+    if (!actor) return configWriteDenied(c);
+    const result = ctx.store.configs.deleteProfileRoute(Number(c.req.param("id")), actor.login);
+    if ("error" in result) return renderProfilesWithError(c, result.error, 400);
+    return c.redirect("/config/profiles?notice=route-removed", 302);
   });
 
   app.get("/config/export", (c) => {
@@ -2052,7 +2101,7 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
       const confirmedSha = typeof body.sha === "string" ? body.sha.trim() : "";
       const confirmedBranch = typeof body.branch === "string" ? body.branch.trim() : "";
       const confirmedRevision = typeof body.revision_id === "string" ? body.revision_id.trim() : "";
-      const activeRevision = ctx.store.configs.getActiveRevision("default");
+      const activeRevision = ctx.store.configs.resolveProfileForRepo(`${parsed.owner}/${parsed.repo}`);
       const shaConfirmed = confirmedSha === head.headSha;
       const branchConfirmed = confirmedBranch === head.defaultBranch;
       const revisionConfirmed = confirmedRevision === (activeRevision ? String(activeRevision.id) : "");

@@ -6,7 +6,7 @@ import { fingerprintFinding, stripHtmlComments } from "../findings/identity.js";
 import { POLICIES_WITH_EXTERNAL, POLICIES_WITH_INTERNAL } from "../routing/types.js";
 import { LIVE_JOB_STATES } from "../config.js";
 import type { ProfileFieldErrors, ProfileFormValues } from "../config-form.js";
-import type { ProfileDefinition } from "../config-revisions.js";
+import type { ProfileDefinition, ProfileRouteRow } from "../config-revisions.js";
 import { initialProfileFormValues, profileFormValuesFromDefinition } from "../config-form.js";
 import type { EffectiveConfigEntry } from "../config-effective.js";
 import type { Severity } from "../schema.js";
@@ -1051,6 +1051,7 @@ export interface ConfigRevisionView {
 
 export interface ConfigPageData {
   revisions: ConfigRevisionView[];
+  profileRoutes?: ProfileRouteRow[];
   audit: Array<{ id: number; action: string; actor: string; revision_id: number | null; detail: string | null; created_at: string }>;
   csrfToken?: string;
   canWrite: boolean;
@@ -1172,6 +1173,12 @@ function revisionCard(revision: ConfigRevisionView, data: ConfigPageData): strin
       <button type="submit" class="btn-secondary">Discard</button>
     </form>`);
   }
+  if (data.canWrite && (revision.status === "active" || revision.status === "retired")) {
+    actions.push(`<form method="post" action="/config/revisions/${revision.id}/edit" class="inline-form">
+      ${csrf}
+      <button type="submit" class="btn-secondary">Edit</button>
+    </form>`);
+  }
   if (data.canWrite && revision.status === "active") {
     actions.push(`<form method="post" action="/config/revisions/${revision.id}/deactivate" class="inline-form">
       ${csrf}
@@ -1190,11 +1197,16 @@ function revisionCard(revision: ConfigRevisionView, data: ConfigPageData): strin
       <button type="submit" class="btn-secondary">Duplicate</button>
     </form>`);
   }
+  const routedPatterns = (data.profileRoutes ?? []).filter((route) => route.profile_name === revision.name);
   const effectNote =
     revision.status === "active"
       ? revision.name === "default"
-        ? `<p class="notice" role="status">In effect — every new review, scan, and brief runs with this profile.</p>`
-        : `<p class="error" role="alert">Active, but not driving jobs — the queue only reads the profile named <code>default</code>. Duplicate it, rename the draft to <code>default</code>, and activate to make these settings take effect.</p>`
+        ? `<p class="notice" role="status">In effect — drives every new job whose repo matches no route rule.</p>`
+        : routedPatterns.length > 0
+          ? `<p class="notice" role="status">In effect — drives new jobs for repos matching ${routedPatterns
+              .map((route) => `<code>${escapeHtml(route.pattern)}</code>`)
+              .join(", ")}.</p>`
+          : `<p class="error" role="alert">Active, but no repo route targets it — nothing uses this profile until a rule below points at <code>${escapeHtml(revision.name)}</code>.</p>`
       : "";
   const definitionJson = JSON.stringify(revision.definition, null, 2);
   return `<article class="card config-revision">
@@ -1355,7 +1367,7 @@ export function renderProfileForm(
           <input name="name" value="${escapeHtml(values.name)}" pattern="[a-z0-9][a-z0-9-]{0,48}" required
             ${invalidAttr("name")} ${describedBy("name")}/>
         </label>
-        <p class="muted">Only the profile named <code>default</code> drives jobs — any other name saves as an inert preset.</p>
+        <p class="muted">Jobs use the active profile whose name a repo route targets; <code>default</code> is the fallback when no route matches.</p>
         ${err("name")}
         <label>Revision note (optional)
           <input name="note" value="${escapeHtml(values.note)}"/>
@@ -1431,6 +1443,53 @@ export function renderConfigPage(data: ConfigPageData): string {
   });
 }
 
+/** Repo → profile routing rules: the longest matching pattern wins. */
+function repoRoutingSection(data: ConfigPageData): string {
+  const csrf = csrfInput(data.csrfToken);
+  const routes = data.profileRoutes ?? [];
+  const activeNames = new Set(data.revisions.filter((revision) => revision.status === "active").map((revision) => revision.name));
+  const allNames = [...new Set(data.revisions.map((revision) => revision.name))].sort();
+  const rows = routes
+    .map(
+      (route) => `<p class="muted"><code>${escapeHtml(route.pattern)}</code> &rarr; <strong>${escapeHtml(route.profile_name)}</strong>${
+        activeNames.has(route.profile_name) ? "" : ` <span class="muted">(no active revision — falls back to default)</span>`
+      }
+        ${
+          data.canWrite
+            ? `<form method="post" action="/config/routes/${route.id}/delete" class="inline-form">
+          ${csrf}
+          <button type="submit" class="btn-secondary">Remove</button>
+        </form>`
+            : ""
+        }</p>`,
+    )
+    .join("");
+  const addForm =
+    data.canWrite && allNames.length > 0
+      ? `<form method="post" action="/config/routes" class="operator-form">
+        ${csrf}
+        <label>Repo pattern
+          <input name="pattern" placeholder="acme/widgets or acme/*" maxlength="200" required/>
+        </label>
+        <label>Profile
+          <select name="profile_name">
+            ${allNames
+              .map(
+                (name) =>
+                  `<option value="${escapeHtml(name)}">${escapeHtml(name)}${activeNames.has(name) ? "" : " (no active)"}</option>`,
+              )
+              .join("")}
+          </select>
+        </label>
+        <p><button type="submit" class="btn">Add route</button></p>
+      </form>`
+      : "";
+  return `<h2>Repo routing</h2>
+    <p class="muted">Each new job runs with the active revision of the profile its repo routes to. A pattern ending in <code>*</code> matches by prefix (<code>acme/*</code>); the longest matching pattern wins; repos matching nothing use the active <code>default</code>.</p>
+    ${rows || `<p class="muted">No routes — every repo uses the active <code>default</code> profile.</p>`}
+    ${addForm}`;
+}
+
 /** /config/profiles: versioned review profiles — drafts are created here but
  * edited on their own page (/config/profiles/drafts/:id/edit) so list-page
  * re-renders cannot lose in-progress form state. */
@@ -1454,13 +1513,14 @@ export function renderProfilesPage(data: ConfigPageData): string {
     : "";
   const body = `
     <h1>Review profiles</h1>
-    <p class="lede">A profile bundles reviewer roles, models, publish floor, and budgets. New jobs run with the active revision named <code>default</code>; with nothing active the env configuration applies. Deactivate to go back to env. Credentials are never part of a profile.</p>
+    <p class="lede">A profile bundles reviewer roles, models, publish floor, and budgets. New jobs run with the active revision of the profile their repo routes to below; unmatched repos use the active <code>default</code>, and with nothing active the env configuration applies. Credentials are never part of a profile.</p>
     ${configSubNav("profiles")}
     ${data.notice ? `<p class="notice" role="status">${escapeHtml(data.notice)}</p>` : ""}
     ${data.error ? `<p class="error" role="alert">${escapeHtml(data.error)}</p>` : ""}
     ${createLink}
     <h2>Active</h2>
     ${active.map((revision) => revisionCard(revision, data)).join("") || `<p class="muted">No active revision — env configuration applies.</p>`}
+    ${repoRoutingSection(data)}
     <h2>Drafts</h2>
     ${drafts.map((revision) => revisionCard(revision, data)).join("") || `<p class="muted">No open drafts.</p>`}
     <h2>Retired</h2>

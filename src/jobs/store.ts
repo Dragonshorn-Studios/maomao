@@ -438,7 +438,7 @@ export class JobStore {
           input.headRef,
           input.webhookDeliveryId ?? null,
           input.webhookEvent ?? null,
-          input.profileRevisionId ?? this.configs.getActiveRevision("default")?.id ?? null,
+          input.profileRevisionId ?? this.configs.resolveProfileForRepo(input.repoFullName)?.id ?? null,
           jobType,
           input.scanBranch ?? null,
           dedupKey,

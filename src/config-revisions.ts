@@ -59,6 +59,17 @@ export interface ProfileRevisionRow {
 
 export const PROFILE_SCHEMA_VERSION = 1;
 
+/** A repo-pattern → profile-name routing rule; the longest matching pattern wins. */
+export interface ProfileRouteRow {
+  id: number;
+  pattern: string;
+  profile_name: string;
+  created_by: string;
+  created_at: string;
+}
+
+const ROUTE_PATTERN_MAX = 200;
+
 export class ConfigValidationError extends Error {
   constructor(public readonly issues: string[]) {
     super(`invalid profile configuration: ${issues.join("; ")}`);
@@ -75,6 +86,8 @@ export type ConfigAuditAction =
   | "rolled_back"
   | "deactivated"
   | "retired"
+  | "route_added"
+  | "route_removed"
   | "imported"
   | "exported";
 
@@ -226,6 +239,80 @@ export class ReviewConfigStore {
     return row ? rowToRevision(row) : undefined;
   }
 
+  /**
+   * Resolves which active revision a repo's jobs run with: the longest
+   * matching route pattern wins (a pattern ending in `*` is a prefix match,
+   * anything else is exact); a routed name with no active revision, and any
+   * repo with no matching rule, falls back to the active `default`.
+   */
+  resolveProfileForRepo(repoFullName: string): ProfileRevisionRow | undefined {
+    const routes = this.listProfileRoutes()
+      .filter((route) => matchesRoutePattern(route.pattern, repoFullName))
+      .sort((a, b) => b.pattern.length - a.pattern.length);
+    for (const route of routes) {
+      const revision = this.getActiveRevision(route.profile_name);
+      if (revision) return revision;
+      console.warn(
+        `config: route '${route.pattern}' points at profile '${route.profile_name}' with no active revision — falling back`,
+      );
+    }
+    return this.getActiveRevision("default");
+  }
+
+  /** Routes targeting a profile name — used to show where a profile is in effect. */
+  routesForProfile(name: string): ProfileRouteRow[] {
+    return this.listProfileRoutes().filter((route) => route.profile_name === name);
+  }
+
+  listProfileRoutes(): ProfileRouteRow[] {
+    const rows = this.db.prepare(`SELECT * FROM profile_routes ORDER BY LENGTH(pattern) DESC, id ASC`).all() as Record<
+      string,
+      unknown
+    >[];
+    return rows.map((row) => ({
+      id: Number(row.id),
+      pattern: String(row.pattern),
+      profile_name: String(row.profile_name),
+      created_by: String(row.created_by),
+      created_at: String(row.created_at),
+    }));
+  }
+
+  addProfileRoute(input: { pattern: string; profileName: string; createdBy: string }): { route: ProfileRouteRow } | { error: string } {
+    const pattern = input.pattern.trim();
+    const profileName = input.profileName.trim();
+    if (!pattern || pattern.length > ROUTE_PATTERN_MAX || /\s/.test(pattern)) {
+      return { error: "Repo pattern must be non-empty, without spaces (e.g. acme/widgets or acme/*)." };
+    }
+    if (!/^[a-z0-9][a-z0-9-]{0,48}$/.test(profileName)) {
+      return { error: "Route must target a valid profile name." };
+    }
+    if (this.db.prepare(`SELECT id FROM profile_routes WHERE pattern = ?`).get(pattern)) {
+      return { error: `A route for '${pattern}' already exists.` };
+    }
+    let result: unknown;
+    try {
+      result = this.db
+        .prepare(`INSERT INTO profile_routes (pattern, profile_name, created_by, created_at) VALUES (?, ?, ?, ?)`)
+        .run(pattern, profileName, input.createdBy, nowIso());
+    } catch {
+      return { error: `A route for '${pattern}' already exists.` };
+    }
+    const id = Number((result as { lastInsertRowid: unknown }).lastInsertRowid);
+    this.audit("route_added", input.createdBy, null, `${pattern} → ${profileName}`);
+    return { route: this.listProfileRoutes().find((route) => route.id === id)! };
+  }
+
+  deleteProfileRoute(id: number, actor: string): { ok: true } | { error: string } {
+    const existing = this.db.prepare(`SELECT * FROM profile_routes WHERE id = ?`).get(id) as
+      | Record<string, unknown>
+      | undefined;
+    if (!existing) return { error: "Route not found." };
+    this.db.prepare(`DELETE FROM profile_routes WHERE id = ?`).run(id);
+    this.audit("route_removed", actor, null, `${String(existing.pattern)} → ${String(existing.profile_name)} removed`);
+    return { ok: true };
+  }
+
   getActiveRevision(name: string): ProfileRevisionRow | undefined {
     const row = this.db.prepare(`SELECT * FROM profile_revisions WHERE name = ? AND status = 'active'`).get(name) as
       | Record<string, unknown>
@@ -361,6 +448,12 @@ export function validateProfileDefinition(definition: ProfileDefinition): string
     }
   }
   return issues;
+}
+
+/** `acme/*` is a prefix match; anything else must equal the repo name exactly. */
+export function matchesRoutePattern(pattern: string, repoFullName: string): boolean {
+  if (pattern.endsWith("*")) return repoFullName.startsWith(pattern.slice(0, -1));
+  return repoFullName === pattern;
 }
 
 function rowToRevision(row: Record<string, unknown>): ProfileRevisionRow {

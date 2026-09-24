@@ -205,6 +205,68 @@ describe("draft editing and conflicts", () => {
   });
 });
 
+describe("repo profile routing", () => {
+  function activateNamed(configs: ReviewConfigStore, name: string) {
+    const draft = configs.createDraft({
+      definition: { ...definition, name },
+      createdBy: "octocat",
+    });
+    if (!("revision" in draft)) throw new Error(`draft ${name} failed`);
+    const activated = configs.activateRevision(draft.revision.id, "octocat");
+    if (!("revision" in activated)) throw new Error(activated.error);
+    return activated.revision;
+  }
+
+  it("resolves a repo to the routed profile, longest pattern wins, default as fallback", () => {
+    const configs = store();
+    const fallback = activateNamed(configs, "default");
+    const ownerWide = activateNamed(configs, "acme-profile");
+    const exact = activateNamed(configs, "widgets-profile");
+
+    expect(configs.addProfileRoute({ pattern: "acme/*", profileName: "acme-profile", createdBy: "octocat" })).toHaveProperty("route");
+    expect(configs.addProfileRoute({ pattern: "acme/widgets", profileName: "widgets-profile", createdBy: "octocat" })).toHaveProperty("route");
+
+    expect(configs.resolveProfileForRepo("acme/widgets")?.id).toBe(exact.id);
+    expect(configs.resolveProfileForRepo("acme/gadgets")?.id).toBe(ownerWide.id);
+    expect(configs.resolveProfileForRepo("other/repo")?.id).toBe(fallback.id);
+    // "acme/widgets" is exact, so the longer-but-different repo falls to the prefix rule.
+    expect(configs.resolveProfileForRepo("acme/widgets-x")?.id).toBe(ownerWide.id);
+  });
+
+  it("falls back to default when the routed profile has no active revision", () => {
+    const configs = store();
+    const fallback = activateNamed(configs, "default");
+    // Route at a name with only a draft — never activated.
+    configs.createDraft({ definition: { ...definition, name: "sleeping" }, createdBy: "octocat" });
+    expect(configs.addProfileRoute({ pattern: "acme/*", profileName: "sleeping", createdBy: "octocat" })).toHaveProperty("route");
+    expect(configs.resolveProfileForRepo("acme/widgets")?.id).toBe(fallback.id);
+  });
+
+  it("resolves nothing with no routes and no active default", () => {
+    const configs = store();
+    expect(configs.resolveProfileForRepo("acme/widgets")).toBeUndefined();
+  });
+
+  it("validates and dedupes route patterns, and removal is audited", () => {
+    const configs = store();
+    expect(configs.addProfileRoute({ pattern: "", profileName: "default", createdBy: "octocat" })).toHaveProperty("error");
+    expect(configs.addProfileRoute({ pattern: "has space", profileName: "default", createdBy: "octocat" })).toHaveProperty("error");
+    expect(configs.addProfileRoute({ pattern: "acme/*", profileName: "Not-A-Name", createdBy: "octocat" })).toHaveProperty("error");
+
+    const added = configs.addProfileRoute({ pattern: "acme/*", profileName: "default", createdBy: "octocat" });
+    expect(added).toHaveProperty("route");
+    expect(configs.addProfileRoute({ pattern: "acme/*", profileName: "default", createdBy: "octocat" })).toHaveProperty("error");
+
+    if (!("route" in added)) throw new Error("route failed");
+    expect(configs.deleteProfileRoute(added.route.id, "octocat")).toEqual({ ok: true });
+    expect(configs.listProfileRoutes()).toEqual([]);
+    const actions = configs.listAudit().map((entry) => entry.action);
+    expect(actions).toContain("route_added");
+    expect(actions).toContain("route_removed");
+    expect(configs.deleteProfileRoute(9999, "octocat")).toEqual({ error: "Route not found." });
+  });
+});
+
 describe("profile validation and caps", () => {
   it("rejects unknown roles, oversized caps, and malformed models", () => {
     const configs = store();

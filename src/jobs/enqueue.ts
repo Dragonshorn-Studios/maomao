@@ -70,7 +70,7 @@ export function enqueuePullJob(
 ): EnqueueResult {
   const reviewers =
     config.routing.mode === "fixed"
-      ? applyProfileToSpecs(store, config, reviewerSpecs(config), input.profileRevisionId ?? store.configs.getActiveRevision("default")?.id ?? null, { wholeProfileSet: true })
+      ? applyProfileToSpecs(store, config, reviewerSpecs(config), input.profileRevisionId ?? store.configs.resolveProfileForRepo(input.repoFullName)?.id ?? null, { wholeProfileSet: true })
       : [];
   return store.enqueue({
     ...input,

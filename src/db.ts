@@ -292,6 +292,15 @@ function migrate(db: SqliteDb): void {
     CREATE INDEX IF NOT EXISTS idx_chat_conversations_job ON chat_conversations(job_id, id);
     CREATE INDEX IF NOT EXISTS idx_chat_messages_conversation ON chat_messages(conversation_id, id);
 
+    CREATE TABLE IF NOT EXISTS profile_routes (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      pattern TEXT NOT NULL,
+      profile_name TEXT NOT NULL,
+      created_by TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      UNIQUE (pattern)
+    );
+
     CREATE TABLE IF NOT EXISTS config_audit (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       action TEXT NOT NULL,
