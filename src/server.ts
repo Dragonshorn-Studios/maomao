@@ -1388,6 +1388,8 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
     "draft-saved": "Draft saved.",
     activated: "Revision activated.",
     "rolled-back": "Revision rolled back.",
+    deactivated: "Revision deactivated.",
+    "draft-discarded": "Draft discarded.",
     imported: "Configuration imported as drafts.",
     "models-refreshed": "Model list refreshed from opencode models.",
     "models-refresh-failed": "Model list refresh failed — see the note in the profile editor for details.",
@@ -1656,6 +1658,24 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
     const result = ctx.store.configs.rollbackRevision(Number(c.req.param("id")), actor.login);
     if ("error" in result) return renderProfilesWithError(c, result.error, 400);
     return c.redirect("/config/profiles?notice=rolled-back", 302);
+  });
+
+  app.post("/config/revisions/:id/deactivate", (c) => {
+    if (!gateOn) return c.redirect("/", 302);
+    const actor = configActor(c);
+    if (!actor) return configWriteDenied(c);
+    const result = ctx.store.configs.deactivateRevision(Number(c.req.param("id")), actor.login);
+    if ("error" in result) return renderProfilesWithError(c, result.error, 400);
+    return c.redirect("/config/profiles?notice=deactivated", 302);
+  });
+
+  app.post("/config/revisions/:id/discard", (c) => {
+    if (!gateOn) return c.redirect("/", 302);
+    const actor = configActor(c);
+    if (!actor) return configWriteDenied(c);
+    const result = ctx.store.configs.discardDraft(Number(c.req.param("id")), actor.login);
+    if ("error" in result) return renderProfilesWithError(c, result.error, 400);
+    return c.redirect("/config/profiles?notice=draft-discarded", 302);
   });
 
   app.get("/config/export", (c) => {

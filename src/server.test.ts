@@ -1839,6 +1839,70 @@ describe("config page IA", () => {
     expect(missing.status).toBe(404);
     log.mockRestore();
   });
+
+  it("deactivates the active revision and discards a draft via the profiles page forms", async () => {
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    const { app, store } = testApp(
+      {
+        UI_SESSION_SECRET: "session-secret-for-tests",
+        GITHUB_OAUTH_CLIENT_ID: "cid",
+        GITHUB_OAUTH_CLIENT_SECRET: "csecret",
+        MAOMAO_ADMIN_GITHUB_IDS: "1001",
+        MAOMAO_PUBLIC_URL: "https://maomao.example",
+      },
+      undefined,
+      mockOauthFetch({ id: 1001, login: "octocat" }),
+    );
+    const session = await operatorSession(app);
+    const created = store.configs.createDraft({
+      definition: { name: "default", reviewers: [{ role: "correctness" }], minPublishableSeverity: "info" },
+      createdBy: "system",
+    });
+    if ("error" in created) throw new Error(created.issues.join("; "));
+    const active = created.revision;
+    expect(store.configs.activateRevision(active.id, "system")).not.toHaveProperty("error");
+
+    const page = await app.request("/config/profiles", { headers: { cookie: session } });
+    const { html, csrfCookie, csrfToken } = await csrfArtifacts(page);
+    expect(html).toContain(`action="/config/revisions/${active.id}/deactivate"`);
+    expect(html).toContain("In effect");
+
+    const off = await app.request(`/config/revisions/${active.id}/deactivate`, {
+      method: "POST",
+      headers: { cookie: `${session}; ${csrfCookie}`, "content-type": "application/x-www-form-urlencoded" },
+      body: `csrf_token=${encodeURIComponent(csrfToken)}`,
+    });
+    expect(off.status).toBe(302);
+    expect(off.headers.get("location")).toBe("/config/profiles?notice=deactivated");
+    expect(store.configs.getActiveRevision("default")).toBeUndefined();
+    expect(store.configs.getRevision(active.id)?.status).toBe("retired");
+
+    const stray = store.configs.createDraft({
+      definition: { name: "stray", reviewers: [{ role: "correctness" }], minPublishableSeverity: "info" },
+      createdBy: "system",
+    });
+    if ("error" in stray) throw new Error(stray.issues.join("; "));
+    const page2 = await app.request("/config/profiles", { headers: { cookie: session } });
+    const artifacts2 = await csrfArtifacts(page2);
+    expect(artifacts2.html).toContain(`action="/config/revisions/${stray.revision.id}/discard"`);
+    const discard = await app.request(`/config/revisions/${stray.revision.id}/discard`, {
+      method: "POST",
+      headers: { cookie: `${session}; ${artifacts2.csrfCookie}`, "content-type": "application/x-www-form-urlencoded" },
+      body: `csrf_token=${encodeURIComponent(artifacts2.csrfToken)}`,
+    });
+    expect(discard.status).toBe(302);
+    expect(discard.headers.get("location")).toBe("/config/profiles?notice=draft-discarded");
+    expect(store.configs.getRevision(stray.revision.id)).toBeUndefined();
+
+    // Deactivating a non-active revision is rejected.
+    const again = await app.request(`/config/revisions/${active.id}/deactivate`, {
+      method: "POST",
+      headers: { cookie: `${session}; ${artifacts2.csrfCookie}`, "content-type": "application/x-www-form-urlencoded" },
+      body: `csrf_token=${encodeURIComponent(artifacts2.csrfToken)}`,
+    });
+    expect(again.status).toBe(400);
+    log.mockRestore();
+  });
 });
 
 describe("prompt configuration routes", () => {

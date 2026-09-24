@@ -6,6 +6,7 @@ import { fingerprintFinding, stripHtmlComments } from "../findings/identity.js";
 import { POLICIES_WITH_EXTERNAL, POLICIES_WITH_INTERNAL } from "../routing/types.js";
 import { LIVE_JOB_STATES } from "../config.js";
 import type { ProfileFieldErrors, ProfileFormValues } from "../config-form.js";
+import type { ProfileDefinition } from "../config-revisions.js";
 import { initialProfileFormValues, profileFormValuesFromDefinition } from "../config-form.js";
 import type { EffectiveConfigEntry } from "../config-effective.js";
 import type { Severity } from "../schema.js";
@@ -1143,6 +1144,20 @@ export function configSubNav(active: ConfigSection): string {
     .join(" · ")}</p>`;
 }
 
+/** One-line summary of what a profile definition configures. */
+function profileSummary(definition: ProfileDefinition): string {
+  const reviewers = definition.reviewers
+    .map((reviewer) => `${reviewer.role}${reviewer.model ? ` (${reviewer.model})` : ""}`)
+    .join(", ");
+  const parts: string[] = [];
+  parts.push(`${definition.reviewers.length} reviewer${definition.reviewers.length === 1 ? "" : "s"}: ${reviewers || "none"}`);
+  if (definition.routerModel) parts.push(`router ${definition.routerModel}`);
+  parts.push(`publish ≥ ${definition.minPublishableSeverity}`);
+  if (definition.maxTotalCostUsd) parts.push(`≤ $${definition.maxTotalCostUsd}`);
+  if (definition.maxTotalTokens) parts.push(`≤ ${definition.maxTotalTokens.toLocaleString("en-US")} tokens`);
+  return parts.join(" · ");
+}
+
 function revisionCard(revision: ConfigRevisionView, data: ConfigPageData): string {
   const csrf = csrfInput(data.csrfToken);
   const actions: string[] = [];
@@ -1151,6 +1166,16 @@ function revisionCard(revision: ConfigRevisionView, data: ConfigPageData): strin
     actions.push(`<form method="post" action="/config/revisions/${revision.id}/activate" class="inline-form">
       ${csrf}
       <button type="submit" class="btn">Activate</button>
+    </form>`);
+    actions.push(`<form method="post" action="/config/revisions/${revision.id}/discard" class="inline-form">
+      ${csrf}
+      <button type="submit" class="btn-secondary">Discard</button>
+    </form>`);
+  }
+  if (data.canWrite && revision.status === "active") {
+    actions.push(`<form method="post" action="/config/revisions/${revision.id}/deactivate" class="inline-form">
+      ${csrf}
+      <button type="submit" class="btn-secondary">Deactivate</button>
     </form>`);
   }
   if (data.canWrite && revision.status === "retired") {
@@ -1165,6 +1190,12 @@ function revisionCard(revision: ConfigRevisionView, data: ConfigPageData): strin
       <button type="submit" class="btn-secondary">Duplicate</button>
     </form>`);
   }
+  const effectNote =
+    revision.status === "active"
+      ? revision.name === "default"
+        ? `<p class="notice" role="status">In effect — every new review, scan, and brief runs with this profile.</p>`
+        : `<p class="error" role="alert">Active, but not driving jobs — the queue only reads the profile named <code>default</code>. Duplicate it, rename the draft to <code>default</code>, and activate to make these settings take effect.</p>`
+      : "";
   const definitionJson = JSON.stringify(revision.definition, null, 2);
   return `<article class="card config-revision">
     <header>
@@ -1172,6 +1203,8 @@ function revisionCard(revision: ConfigRevisionView, data: ConfigPageData): strin
       <span class="muted">by ${escapeHtml(revision.created_by)} · updated ${escapeHtml(revision.updated_at)}</span>
     </header>
     ${revision.note ? `<p class="muted">${escapeHtml(revision.note)}</p>` : ""}
+    <p class="muted">${escapeHtml(profileSummary(revision.definition as ProfileDefinition))}</p>
+    ${effectNote}
     <details>
       <summary>Definition</summary>
       <pre class="log-panel">${escapeHtml(definitionJson)}</pre>
@@ -1322,6 +1355,7 @@ export function renderProfileForm(
           <input name="name" value="${escapeHtml(values.name)}" pattern="[a-z0-9][a-z0-9-]{0,48}" required
             ${invalidAttr("name")} ${describedBy("name")}/>
         </label>
+        <p class="muted">Only the profile named <code>default</code> drives jobs — any other name saves as an inert preset.</p>
         ${err("name")}
         <label>Revision note (optional)
           <input name="note" value="${escapeHtml(values.note)}"/>
@@ -1420,7 +1454,7 @@ export function renderProfilesPage(data: ConfigPageData): string {
     : "";
   const body = `
     <h1>Review profiles</h1>
-    <p class="lede">Versioned review profiles and specialist selection. Activation is explicit and audited; credentials are never part of a profile.</p>
+    <p class="lede">A profile bundles reviewer roles, models, publish floor, and budgets. New jobs run with the active revision named <code>default</code>; with nothing active the env configuration applies. Deactivate to go back to env. Credentials are never part of a profile.</p>
     ${configSubNav("profiles")}
     ${data.notice ? `<p class="notice" role="status">${escapeHtml(data.notice)}</p>` : ""}
     ${data.error ? `<p class="error" role="alert">${escapeHtml(data.error)}</p>` : ""}

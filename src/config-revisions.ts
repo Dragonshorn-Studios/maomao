@@ -69,9 +69,11 @@ export class ConfigValidationError extends Error {
 export type ConfigAuditAction =
   | "draft_created"
   | "draft_updated"
+  | "draft_discarded"
   | "validated"
   | "activated"
   | "rolled_back"
+  | "deactivated"
   | "retired"
   | "imported"
   | "exported";
@@ -134,10 +136,10 @@ export class ReviewConfigStore {
     const now = nowIso();
     const result = this.db
       .prepare(
-        `UPDATE profile_revisions SET definition_json = ?, note = ?, updated_at = ?, edit_seq = edit_seq + 1
+        `UPDATE profile_revisions SET name = ?, definition_json = ?, note = ?, updated_at = ?, edit_seq = edit_seq + 1
          WHERE id = ? AND status = 'draft' AND edit_seq = ?`,
       )
-      .run(JSON.stringify(parsed.data), input.note ?? existing.note, now, input.id, input.expectedEditSeq);
+      .run(parsed.data.name, JSON.stringify(parsed.data), input.note ?? existing.note, now, input.id, input.expectedEditSeq);
     const changes = (result as { changes?: number }).changes ?? 0;
     if (changes === 0) return { error: "conflict" };
     this.audit("draft_updated", input.updatedBy, input.id, `draft updated`);
@@ -166,6 +168,32 @@ export class ReviewConfigStore {
     })();
     this.audit("activated", actor, id, `${revision.name} activated`);
     return { revision: this.getRevision(id)! };
+  }
+
+  /**
+   * Turns the active revision off without activating another: the profile
+   * stops driving jobs and its revision moves to retired (rollback can
+   * re-activate it). For the profile named 'default', env configuration
+   * applies while nothing is active.
+   */
+  deactivateRevision(id: number, actor: string): { revision: ProfileRevisionRow } | { error: string } {
+    const revision = this.getRevision(id);
+    if (!revision || revision.status !== "active") return { error: "only an active revision can be deactivated" };
+    const now = nowIso();
+    this.db
+      .prepare(`UPDATE profile_revisions SET status = 'retired', updated_at = ? WHERE id = ?`)
+      .run(now, id);
+    this.audit("deactivated", actor, id, `${revision.name} deactivated`);
+    return { revision: this.getRevision(id)! };
+  }
+
+  /** Deletes an unsaved-to-production draft; audited with the draft's name. */
+  discardDraft(id: number, actor: string): { ok: true } | { error: string } {
+    const revision = this.getRevision(id);
+    if (!revision || revision.status !== "draft") return { error: "only a draft can be discarded" };
+    this.db.prepare(`DELETE FROM profile_revisions WHERE id = ?`).run(id);
+    this.audit("draft_discarded", actor, id, `draft ${revision.name} discarded`);
+    return { ok: true };
   }
 
   /** Rollback re-activates a previous retired revision of the same name rather than editing history. */

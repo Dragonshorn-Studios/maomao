@@ -133,6 +133,76 @@ describe("draft editing and conflicts", () => {
     });
     expect(result).toEqual({ error: "not_found" });
   });
+
+  it("renaming a draft updates the row name so activation applies under it", () => {
+    const configs = store();
+    const draft = configs.createDraft({
+      definition: { ...definition, name: "my-preset" }, createdBy: "octocat" });
+    if (!("revision" in draft)) throw new Error("draft failed");
+    const updated = configs.updateDraft({
+      id: draft.revision.id,
+      definition,
+      expectedEditSeq: draft.revision.editSeq,
+      updatedBy: "octocat",
+    });
+    if (!("revision" in updated)) throw new Error("rename failed");
+    expect(updated.revision.name).toBe("default");
+    configs.activateRevision(draft.revision.id, "octocat");
+    expect(configs.getActiveRevision("default")?.id).toBe(draft.revision.id);
+    expect(configs.getActiveRevision("my-preset")).toBeUndefined();
+  });
+
+  it("deactivates an active revision back to env configuration, audited", () => {
+    const configs = store();
+    const draft = configs.createDraft({
+      definition, createdBy: "octocat" });
+    if (!("revision" in draft)) throw new Error("draft failed");
+    configs.activateRevision(draft.revision.id, "octocat");
+    expect(configs.getActiveRevision("default")).toBeDefined();
+
+    const deactivated = configs.deactivateRevision(draft.revision.id, "octocat");
+    expect(deactivated).toHaveProperty("revision");
+    expect(configs.getActiveRevision("default")).toBeUndefined();
+    expect(configs.getRevision(draft.revision.id)?.status).toBe("retired");
+    expect(configs.listAudit().some((entry) => entry.action === "deactivated")).toBe(true);
+
+    // Rollback can bring a deactivated revision back.
+    const restored = configs.rollbackRevision(draft.revision.id, "octocat");
+    expect(restored).toHaveProperty("revision");
+    expect(configs.getActiveRevision("default")?.id).toBe(draft.revision.id);
+  });
+
+  it("rejects deactivating anything but the active revision", () => {
+    const configs = store();
+    const draft = configs.createDraft({
+      definition, createdBy: "octocat" });
+    if (!("revision" in draft)) throw new Error("draft failed");
+    expect(configs.deactivateRevision(draft.revision.id, "octocat")).toEqual({
+      error: "only an active revision can be deactivated",
+    });
+    expect(configs.deactivateRevision(9999, "octocat")).toEqual({
+      error: "only an active revision can be deactivated",
+    });
+  });
+
+  it("discards a draft and audits it, refusing non-drafts", () => {
+    const configs = store();
+    const draft = configs.createDraft({
+      definition, createdBy: "octocat" });
+    if (!("revision" in draft)) throw new Error("draft failed");
+    const result = configs.discardDraft(draft.revision.id, "octocat");
+    expect(result).toEqual({ ok: true });
+    expect(configs.getRevision(draft.revision.id)).toBeUndefined();
+    expect(configs.listAudit().some((entry) => entry.action === "draft_discarded")).toBe(true);
+
+    const active = configs.createDraft({
+      definition, createdBy: "octocat" });
+    if (!("revision" in active)) throw new Error("second draft failed");
+    configs.activateRevision(active.revision.id, "octocat");
+    expect(configs.discardDraft(active.revision.id, "octocat")).toEqual({
+      error: "only a draft can be discarded",
+    });
+  });
 });
 
 describe("profile validation and caps", () => {
