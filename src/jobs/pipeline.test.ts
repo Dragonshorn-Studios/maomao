@@ -4786,6 +4786,55 @@ describe("profile budget ceilings and per-reviewer timeouts", () => {
     expect(store.getJob(created.job.id)?.state).toBe("completed");
   });
 
+  it("falls back to the custom role's own timeout when the profile entry sets none", async () => {
+    const config = profileConfig();
+    const store = new JobStore(openDb(":memory:"));
+    store.configs.upsertCustomRole({
+      slug: "goreviewer",
+      title: "Go reviewer",
+      prompt: "Check Go error handling and idioms.",
+      timeoutMs: 45_000,
+      actor: "octocat",
+    });
+    await activateProfile(store, {
+      name: "default",
+      reviewers: [{ role: "goreviewer" }, { role: "correctness", timeoutMs: 60_000 }],
+      minPublishableSeverity: "medium",
+    });
+    const timeouts: { marker: string; timeoutMs?: number }[] = [];
+    const opencode: OpenCodePort = {
+      async run(input) {
+        // "Role id: X" only appears inside built-in role bodies; the custom
+        // role's call is identified by its stored prompt body instead.
+        const marker = input.prompt.includes("Check Go error handling")
+          ? "goreviewer"
+          : (input.prompt.match(/Role id: (\w+)/)?.[1] ?? "other");
+        timeouts.push({ marker, timeoutMs: input.timeoutMs });
+        const text =
+          marker === "other"
+            ? JSON.stringify({ schema_version: 1, verdict: "clean", summary: "clean", findings: [] })
+            : reviewerJson(marker, "clean");
+        return { stdout: text, stderr: "", exitCode: 0, text, usage: {} };
+      },
+    };
+    const github = githubPort({
+      getPullDiff: async () => "diff --git a/example.ts b/example.ts\n",
+      listReviews: async () => [],
+      createCommentReview: async () => ({ id: "5", url: "u" }),
+    });
+    const created = store.enqueue({
+      ...jobInput("customtimeoutsha"),
+      reviewers: [
+        { role: "goreviewer", title: "Go reviewer" },
+        { role: "correctness", title: "Correctness" },
+      ],
+    });
+    await createPipeline({ config, store, github, checkout: await fixtureCheckout(), opencode }).run(created.job.id);
+
+    expect(timeouts.find((entry) => entry.marker === "goreviewer")?.timeoutMs).toBe(45_000);
+    expect(timeouts.find((entry) => entry.marker === "correctness")?.timeoutMs).toBe(60_000);
+  });
+
   it("degrades predictably when the cost ceiling is hit: skips remaining reviewers and aggregates deterministically", async () => {
     const config = profileConfig();
     const store = new JobStore(openDb(":memory:"));

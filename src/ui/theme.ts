@@ -1333,6 +1333,38 @@ body.operator main th {
   flex-wrap: wrap;
 }
 .connection-chips { display: flex; flex-wrap: wrap; gap: 0.35rem; }
+
+/* Alert-level role picks: chip checkboxes — the native input stays in the
+   tree (opacity 0, still focusable) so keyboard + no-JS both work. */
+.alert-level { display: flex; flex-wrap: wrap; align-items: baseline; gap: 0.4rem; margin-top: 0.5rem; }
+.alert-level-name { flex: 0 0 7rem; font-size: 0.82rem; color: var(--ink-muted); }
+.role-check {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.2rem 0.6rem;
+  border: 1px solid var(--line-strong);
+  border-radius: 999px;
+  background: var(--surface);
+  font-size: 0.82rem;
+  color: var(--ink-muted);
+  cursor: pointer;
+  user-select: none;
+}
+.role-check::before {
+  content: "";
+  width: 0.55rem;
+  height: 0.55rem;
+  flex: none;
+  border-radius: 50%;
+  border: 1px solid var(--line-strong);
+}
+.role-check:hover { border-color: var(--jade); color: var(--ink); }
+.role-check input { position: absolute; opacity: 0; width: 1px; height: 1px; margin: 0; }
+.role-check:has(input:checked) { background: var(--jade-soft); border-color: var(--jade); color: var(--ink); font-weight: 600; }
+.role-check:has(input:checked)::before { background: var(--jade); border-color: var(--jade); }
+.role-check:has(input:focus-visible) { outline: 2px solid var(--focus); outline-offset: 2px; }
+.alert-level[aria-invalid="true"] .role-check { border-color: var(--cinnabar); }
 .connection-flags { display: flex; flex-wrap: wrap; gap: 0.35rem; margin-top: 0.6rem; }
 .connection-actions {
   display: flex;

@@ -1,6 +1,8 @@
 import {
+  KNOWN_ROLE_IDS,
   PROFILE_MAX_REVIEWERS,
   PROFILE_MAX_TIMEOUT_MS,
+  ROLE_SLUG,
   profileDefinitionSchema,
 } from "./config-revisions.js";
 
@@ -49,6 +51,10 @@ export interface ProfileFormValues {
   maxCostUsd: string;
   maxTokens: string;
   budgetBehavior: string;
+  /** Comma-separated role lists per alert level; "" = router picks. */
+  alertObservation: string;
+  alertDiagnosis: string;
+  alertPoison: string;
 }
 
 export type ProfileFormAction =
@@ -69,7 +75,10 @@ export type ProfileFieldKey =
   | "min_severity"
   | "max_cost_usd"
   | "max_tokens"
-  | "budget_behavior";
+  | "budget_behavior"
+  | "alert_observation"
+  | "alert_diagnosis"
+  | "alert_poison";
 
 export type ProfileFieldErrors = { form?: string } & {
   [key: string]: string | undefined;
@@ -86,6 +95,9 @@ export function initialProfileFormValues(): ProfileFormValues {
     maxCostUsd: "",
     maxTokens: "",
     budgetBehavior: "degrade",
+    alertObservation: "",
+    alertDiagnosis: "",
+    alertPoison: "",
   };
 }
 
@@ -93,6 +105,15 @@ export function initialProfileFormValues(): ProfileFormValues {
 export const PROFILE_BUDGET_BEHAVIORS = ["degrade", "fail"] as const;
 
 const asString = (value: unknown): string => (typeof value === "string" ? value : "");
+/** Checkbox groups post `name[]` as a string array (or a single value); normalizes to a comma list. */
+const asRoleList = (value: unknown): string => {
+  const list = Array.isArray(value) ? value : value == null ? [] : [value];
+  return list
+    .filter((entry): entry is string => typeof entry === "string")
+    .map((entry) => entry.trim())
+    .filter((entry) => entry !== "")
+    .join(", ");
+};
 const asIndex = (value: unknown): number => {
   const raw = asString(value).trim();
   if (raw === "") return -1;
@@ -120,6 +141,9 @@ export function decodeProfileForm(body: Record<string, unknown>): ProfileFormVal
     maxCostUsd: asString(body.max_cost_usd).trim(),
     maxTokens: asString(body.max_tokens).trim(),
     budgetBehavior: normalizeBudgetBehavior(asString(body.budget_behavior)),
+    alertObservation: asRoleList(body["alert_observation[]"] ?? body.alert_observation),
+    alertDiagnosis: asRoleList(body["alert_diagnosis[]"] ?? body.alert_diagnosis),
+    alertPoison: asRoleList(body["alert_poison[]"] ?? body.alert_poison),
   };
 }
 
@@ -216,6 +240,7 @@ function optionalPositiveInteger(value: string): number | undefined | "invalid" 
  */
 export function profileFormToDefinition(
   values: ProfileFormValues,
+  extraRoles: readonly string[] = [],
 ): { ok: true; definition: unknown } | { ok: false; errors: ProfileFieldErrors } {
   const errors: ProfileFieldErrors = {};
   // Blank rows are dropped before validation; formIndices translates zod's
@@ -258,6 +283,19 @@ export function profileFormToDefinition(
   else if (tokens !== undefined) definition.maxTotalTokens = tokens;
   definition.onBudgetExceeded = normalizeBudgetBehavior(values.budgetBehavior);
 
+  const alertFields = [
+    ["observation", values.alertObservation, "alert_observation"],
+    ["diagnosis", values.alertDiagnosis, "alert_diagnosis"],
+    ["poisonAlert", values.alertPoison, "alert_poison"],
+  ] as const;
+  const alerts: Record<string, string[]> = {};
+  for (const [level, raw, field] of alertFields) {
+    const roles = raw.split(",").map((role) => role.trim()).filter((role) => role !== "");
+    if (roles.length > 0) alerts[level] = roles;
+    else if (raw !== "" && !errors[field]) errors[field] = "list reviewer roles, comma-separated";
+  }
+  if (Object.keys(alerts).length > 0) definition.alerts = alerts;
+
   const check = profileDefinitionSchema.safeParse(definition);
   if (!check.success) {
     for (const issue of check.error.issues) {
@@ -266,6 +304,16 @@ export function profileFormToDefinition(
       else if (!key && !errors.form) errors.form = issue.message;
     }
   }
+  // Role membership is validated here (not in the zod shape — custom roles
+  // live in the store) so each unknown role flags the row that holds it.
+  const knownRoles = new Set([...KNOWN_ROLE_IDS, ...extraRoles]);
+  reviewers.forEach((entry, index) => {
+    const role = (entry as { role: string }).role;
+    const key = `reviewer_role_${formIndices[index]}`;
+    if (ROLE_SLUG.test(role) && !knownRoles.has(role) && !errors[key]) {
+      errors[key] = "unknown specialist role";
+    }
+  });
   // Conversion errors (and any unmappable schema issue) must survive even
   // when the stripped definition would parse cleanly.
   if (Object.keys(errors).length > 0) {
@@ -289,6 +337,9 @@ function zodPathToFieldKey(path: PropertyKey[], formIndices: readonly number[]):
   if (head === "maxTotalCostUsd") return "max_cost_usd";
   if (head === "maxTotalTokens") return "max_tokens";
   if (head === "onBudgetExceeded") return "budget_behavior";
+  if (head === "alerts" && index === "observation") return "alert_observation";
+  if (head === "alerts" && index === "diagnosis") return "alert_diagnosis";
+  if (head === "alerts" && index === "poisonAlert") return "alert_poison";
   if (head === "reviewers" && typeof index === "number") {
     const formIndex = formIndices[index];
     if (formIndex == null) return null;
@@ -317,6 +368,7 @@ export function profileFormValuesFromDefinition(
     maxTotalCostUsd?: number;
     maxTotalTokens?: number;
     onBudgetExceeded?: string;
+    alerts?: { observation?: string[]; diagnosis?: string[]; poisonAlert?: string[] };
   };
   return {
     name: def.name ?? "",
@@ -332,5 +384,8 @@ export function profileFormValuesFromDefinition(
     maxCostUsd: def.maxTotalCostUsd != null ? String(def.maxTotalCostUsd) : "",
     maxTokens: def.maxTotalTokens != null ? String(def.maxTotalTokens) : "",
     budgetBehavior: normalizeBudgetBehavior(def.onBudgetExceeded ?? ""),
+    alertObservation: def.alerts?.observation?.join(", ") ?? "",
+    alertDiagnosis: def.alerts?.diagnosis?.join(", ") ?? "",
+    alertPoison: def.alerts?.poisonAlert?.join(", ") ?? "",
   };
 }

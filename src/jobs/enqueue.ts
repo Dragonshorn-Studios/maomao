@@ -1,5 +1,6 @@
 import type { Config } from "../config.js";
 import type { ProfileDefinition } from "../config-revisions.js";
+import type { ReviewProfile } from "../routing/types.js";
 import { KNOWN_REVIEWER_ROLES } from "../prompts.js";
 import type { EnqueueResult, JobStore, NewJobInput } from "./store.js";
 import type { JobQueue } from "./queue.js";
@@ -15,6 +16,13 @@ export function reviewerSpecs(config: Config, roleIds?: string[]): NewJobInput["
   }));
 }
 
+/** ReviewProfile ("poison-alert") → `alerts` object key ("poisonAlert"). */
+const ALERT_LEVEL_KEYS: Record<ReviewProfile, keyof NonNullable<ProfileDefinition["alerts"]>> = {
+  observation: "observation",
+  diagnosis: "diagnosis",
+  "poison-alert": "poisonAlert",
+};
+
 /**
  * Applies the job's profile revision to reviewer specs. The GUI-set profile
  * overrides the environment: an applied revision defines the reviewer set —
@@ -29,13 +37,17 @@ export function reviewerSpecs(config: Config, roleIds?: string[]): NewJobInput["
  * decides. The revision is resolved from the job's enqueue-time stamp, never
  * from the live active revision, so all stages of one job see the same
  * configuration.
+ *
+ * `level` is the alert level the router landed on. When the profile defines
+ * a reviewer list for that level it replaces the router's picks outright —
+ * the router decides the alert, the profile decides who answers it.
  */
 export function applyProfileToSpecs(
   store: JobStore,
   config: Config,
   specs: NewJobInput["reviewers"],
   revisionId: number | null | undefined,
-  options?: { wholeProfileSet?: boolean; requestedRoles?: string[] },
+  options?: { wholeProfileSet?: boolean; requestedRoles?: string[]; level?: ReviewProfile },
 ): NewJobInput["reviewers"] {
   const revision = revisionId ? store.configs.getRevision(revisionId) : undefined;
   if (!revision) return specs;
@@ -43,16 +55,20 @@ export function applyProfileToSpecs(
   const knownByRole = new Map(KNOWN_REVIEWER_ROLES.map((role) => [role.id, role]));
   const toSpec = (reviewer: ProfileDefinition["reviewers"][number]) => {
     const envRole = envByRole.get(reviewer.role);
+    const customRole = envRole || knownByRole.has(reviewer.role) ? undefined : store.configs.getCustomRole(reviewer.role);
     return {
       role: reviewer.role,
-      title: envRole?.title ?? knownByRole.get(reviewer.role)?.title ?? reviewer.role,
-      model: reviewer.model || envRole?.model || config.opencode.reviewerModel || undefined,
+      title: envRole?.title ?? knownByRole.get(reviewer.role)?.title ?? customRole?.title ?? reviewer.role,
+      model: reviewer.model || envRole?.model || customRole?.model || config.opencode.reviewerModel || undefined,
     };
   };
+  const alertRoles = options?.level ? revision.definition.alerts?.[ALERT_LEVEL_KEYS[options.level]] : undefined;
   const requested = new Set(options?.requestedRoles ?? specs.map((spec) => spec.role));
-  const selected = options?.wholeProfileSet
-    ? revision.definition.reviewers
-    : revision.definition.reviewers.filter((reviewer) => requested.has(reviewer.role));
+  const selected = alertRoles?.length
+    ? revision.definition.reviewers.filter((reviewer) => alertRoles.includes(reviewer.role))
+    : options?.wholeProfileSet
+      ? revision.definition.reviewers
+      : revision.definition.reviewers.filter((reviewer) => requested.has(reviewer.role));
   const constrained = (selected.length > 0 ? selected : revision.definition.reviewers).map(toSpec);
   if (constrained.length === 0) {
     console.warn(
@@ -70,7 +86,7 @@ export function enqueuePullJob(
 ): EnqueueResult {
   const reviewers =
     config.routing.mode === "fixed"
-      ? applyProfileToSpecs(store, config, reviewerSpecs(config), input.profileRevisionId ?? store.configs.getActiveRevision("default")?.id ?? null, { wholeProfileSet: true })
+      ? applyProfileToSpecs(store, config, reviewerSpecs(config), input.profileRevisionId ?? store.configs.resolveProfileForRepo(input.repoFullName)?.id ?? null, { wholeProfileSet: true })
       : [];
   return store.enqueue({
     ...input,

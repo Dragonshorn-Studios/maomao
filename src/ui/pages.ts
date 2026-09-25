@@ -6,6 +6,7 @@ import { fingerprintFinding, stripHtmlComments } from "../findings/identity.js";
 import { POLICIES_WITH_EXTERNAL, POLICIES_WITH_INTERNAL } from "../routing/types.js";
 import { LIVE_JOB_STATES } from "../config.js";
 import type { ProfileFieldErrors, ProfileFormValues } from "../config-form.js";
+import type { CustomRoleRow, ProfileDefinition, ProfileRouteRow } from "../config-revisions.js";
 import { initialProfileFormValues, profileFormValuesFromDefinition } from "../config-form.js";
 import type { EffectiveConfigEntry } from "../config-effective.js";
 import type { Severity } from "../schema.js";
@@ -1050,6 +1051,7 @@ export interface ConfigRevisionView {
 
 export interface ConfigPageData {
   revisions: ConfigRevisionView[];
+  profileRoutes?: ProfileRouteRow[];
   audit: Array<{ id: number; action: string; actor: string; revision_id: number | null; detail: string | null; created_at: string }>;
   csrfToken?: string;
   canWrite: boolean;
@@ -1143,6 +1145,30 @@ export function configSubNav(active: ConfigSection): string {
     .join(" · ")}</p>`;
 }
 
+/** One-line summary of what a profile definition configures. */
+function profileSummary(definition: ProfileDefinition): string {
+  const reviewers = definition.reviewers
+    .map((reviewer) => `${reviewer.role}${reviewer.model ? ` (${reviewer.model})` : ""}`)
+    .join(", ");
+  const parts: string[] = [];
+  parts.push(`${definition.reviewers.length} reviewer${definition.reviewers.length === 1 ? "" : "s"}: ${reviewers || "none"}`);
+  if (definition.routerModel) parts.push(`router ${definition.routerModel}`);
+  parts.push(`publish ≥ ${definition.minPublishableSeverity}`);
+  if (definition.maxTotalCostUsd) parts.push(`≤ $${definition.maxTotalCostUsd}`);
+  if (definition.maxTotalTokens) parts.push(`≤ ${definition.maxTotalTokens.toLocaleString("en-US")} tokens`);
+  const alertParts = (
+    [
+      ["observation", definition.alerts?.observation],
+      ["diagnosis", definition.alerts?.diagnosis],
+      ["poison-alert", definition.alerts?.poisonAlert],
+    ] as const
+  )
+    .filter((pair) => (pair[1]?.length ?? 0) > 0)
+    .map(([level, roles]) => `${level} → ${(roles ?? []).join(", ")}`);
+  if (alertParts.length > 0) parts.push(`alerts: ${alertParts.join(" · ")}`);
+  return parts.join(" · ");
+}
+
 function revisionCard(revision: ConfigRevisionView, data: ConfigPageData): string {
   const csrf = csrfInput(data.csrfToken);
   const actions: string[] = [];
@@ -1151,6 +1177,22 @@ function revisionCard(revision: ConfigRevisionView, data: ConfigPageData): strin
     actions.push(`<form method="post" action="/config/revisions/${revision.id}/activate" class="inline-form">
       ${csrf}
       <button type="submit" class="btn">Activate</button>
+    </form>`);
+    actions.push(`<form method="post" action="/config/revisions/${revision.id}/discard" class="inline-form">
+      ${csrf}
+      <button type="submit" class="btn-secondary">Discard</button>
+    </form>`);
+  }
+  if (data.canWrite && (revision.status === "active" || revision.status === "retired")) {
+    actions.push(`<form method="post" action="/config/revisions/${revision.id}/edit" class="inline-form">
+      ${csrf}
+      <button type="submit" class="btn-secondary">Edit</button>
+    </form>`);
+  }
+  if (data.canWrite && revision.status === "active") {
+    actions.push(`<form method="post" action="/config/revisions/${revision.id}/deactivate" class="inline-form">
+      ${csrf}
+      <button type="submit" class="btn-secondary">Deactivate</button>
     </form>`);
   }
   if (data.canWrite && revision.status === "retired") {
@@ -1165,6 +1207,17 @@ function revisionCard(revision: ConfigRevisionView, data: ConfigPageData): strin
       <button type="submit" class="btn-secondary">Duplicate</button>
     </form>`);
   }
+  const routedPatterns = (data.profileRoutes ?? []).filter((route) => route.profile_name === revision.name);
+  const effectNote =
+    revision.status === "active"
+      ? revision.name === "default"
+        ? `<p class="notice" role="status">In effect — drives every new job whose repo matches no route rule.</p>`
+        : routedPatterns.length > 0
+          ? `<p class="notice" role="status">In effect — drives new jobs for repos matching ${routedPatterns
+              .map((route) => `<code>${escapeHtml(route.pattern)}</code>`)
+              .join(", ")}.</p>`
+          : `<p class="error" role="alert">Active, but no repo route targets it — nothing uses this profile until a rule below points at <code>${escapeHtml(revision.name)}</code>.</p>`
+      : "";
   const definitionJson = JSON.stringify(revision.definition, null, 2);
   return `<article class="card config-revision">
     <header>
@@ -1172,6 +1225,8 @@ function revisionCard(revision: ConfigRevisionView, data: ConfigPageData): strin
       <span class="muted">by ${escapeHtml(revision.created_by)} · updated ${escapeHtml(revision.updated_at)}</span>
     </header>
     ${revision.note ? `<p class="muted">${escapeHtml(revision.note)}</p>` : ""}
+    <p class="muted">${escapeHtml(profileSummary(revision.definition as ProfileDefinition))}</p>
+    ${effectNote}
     <details>
       <summary>Definition</summary>
       <pre class="log-panel">${escapeHtml(definitionJson)}</pre>
@@ -1221,6 +1276,25 @@ export function renderProfileForm(
   const err = (key: string) => fieldError(errors, key);
   const invalidAttr = (key: string) => (errors?.[key] ? 'aria-invalid="true"' : "");
   const describedBy = (key: string) => (errors?.[key] ? `aria-describedby="${key}-error"` : "");
+
+  const reviewerRoles = [...new Set(values.reviewers.map((row) => row.role).filter((role) => role !== ""))];
+  const alertRoleGroup = (label: string, field: string, value: string) => {
+    const checked = new Set(value.split(",").map((role) => role.trim()).filter((role) => role !== ""));
+    const pills =
+      reviewerRoles.length === 0
+        ? `<span class="hint">Add reviewers above to pick alert sets.</span>`
+        : reviewerRoles
+            .map(
+              (role) =>
+                `<label class="role-check"><input type="checkbox" name="${field}[]" value="${escapeHtml(role)}"${checked.has(role) ? " checked" : ""}/><span>${escapeHtml(role)}</span></label>`,
+            )
+            .join("");
+    return `<div class="alert-level" role="group" aria-label="${escapeHtml(label)}"${errors?.[field] ? ` aria-invalid="true" aria-describedby="${field}-error"` : ""}>
+      <span class="alert-level-name">${escapeHtml(label)}</span>
+      ${pills}
+    </div>
+    ${err(field)}`;
+  };
 
   const roleOptions = (selected: string) =>
     [`<option value="">— pick a role —</option>`]
@@ -1322,6 +1396,7 @@ export function renderProfileForm(
           <input name="name" value="${escapeHtml(values.name)}" pattern="[a-z0-9][a-z0-9-]{0,48}" required
             ${invalidAttr("name")} ${describedBy("name")}/>
         </label>
+        <p class="muted">Jobs use the active profile whose name a repo route targets; <code>default</code> is the fallback when no route matches.</p>
         ${err("name")}
         <label>Revision note (optional)
           <input name="note" value="${escapeHtml(values.note)}"/>
@@ -1331,6 +1406,13 @@ export function renderProfileForm(
         <legend>Reviewers (in order; roles not listed are disabled)</legend>
         ${reviewerRows}
         <button type="submit" name="action" value="add">Add reviewer</button>
+      </fieldset>
+      <fieldset>
+        <legend>Alert overrides (optional)</legend>
+        <p class="hint">Pick roles from the reviewer list above. When the router lands on that alert level, the checked set runs instead of the router's picks — check nothing to keep routed reviewers.</p>
+        ${alertRoleGroup("Observation", "alert_observation", values.alertObservation)}
+        ${alertRoleGroup("Diagnosis", "alert_diagnosis", values.alertDiagnosis)}
+        ${alertRoleGroup("Poison alert", "alert_poison", values.alertPoison)}
       </fieldset>
       <fieldset>
         <legend>Publishing</legend>
@@ -1397,6 +1479,133 @@ export function renderConfigPage(data: ConfigPageData): string {
   });
 }
 
+/** Repo → profile routing rules: the longest matching pattern wins. */
+function repoRoutingSection(data: ConfigPageData): string {
+  const csrf = csrfInput(data.csrfToken);
+  const routes = data.profileRoutes ?? [];
+  const activeNames = new Set(data.revisions.filter((revision) => revision.status === "active").map((revision) => revision.name));
+  const allNames = [...new Set(data.revisions.map((revision) => revision.name))].sort();
+  const rows = routes
+    .map(
+      (route) => `<p class="muted"><code>${escapeHtml(route.pattern)}</code> &rarr; <strong>${escapeHtml(route.profile_name)}</strong>${
+        activeNames.has(route.profile_name) ? "" : ` <span class="muted">(no active revision — falls back to default)</span>`
+      }
+        ${
+          data.canWrite
+            ? `<form method="post" action="/config/routes/${route.id}/delete" class="inline-form">
+          ${csrf}
+          <button type="submit" class="btn-secondary">Remove</button>
+        </form>`
+            : ""
+        }</p>`,
+    )
+    .join("");
+  const addForm =
+    data.canWrite && allNames.length > 0
+      ? `<form method="post" action="/config/routes" class="operator-form">
+        ${csrf}
+        <label>Repo pattern
+          <input name="pattern" placeholder="acme/widgets or acme/*" maxlength="200" required/>
+        </label>
+        <label>Profile
+          <select name="profile_name">
+            ${allNames
+              .map(
+                (name) =>
+                  `<option value="${escapeHtml(name)}">${escapeHtml(name)}${activeNames.has(name) ? "" : " (no active)"}</option>`,
+              )
+              .join("")}
+          </select>
+        </label>
+        <p><button type="submit" class="btn">Add route</button></p>
+      </form>`
+      : "";
+  return `<h2>Repo routing</h2>
+    <p class="muted">Each new job runs with the active revision of the profile its repo routes to. A pattern ending in <code>*</code> matches by prefix (<code>acme/*</code>); the longest matching pattern wins; repos matching nothing use the active <code>default</code>.</p>
+    ${rows || `<p class="muted">No routes — every repo uses the active <code>default</code> profile.</p>`}
+    ${addForm}`;
+}
+
+/** The custom-role create/edit form's decoded values (seconds stay strings — exactness like reviewer timeouts). */
+export interface RoleFormValues {
+  slug: string;
+  title: string;
+  description: string;
+  prompt: string;
+  model: string;
+  timeoutSeconds: string;
+}
+
+export function roleFormValuesFromRole(role: CustomRoleRow): RoleFormValues {
+  return {
+    slug: role.slug,
+    title: role.title,
+    description: role.description,
+    prompt: role.prompt,
+    model: role.model ?? "",
+    timeoutSeconds: role.timeout_ms != null ? String(role.timeout_ms / 1000) : "",
+  };
+}
+
+function customRolesSection(data: PromptConfigPageData): string {
+  const roles = data.customRoles ?? [];
+  const csrf = csrfInput(data.csrfToken);
+  const rows = roles
+    .map(
+      (role) => `<p class="muted"><code>${escapeHtml(role.slug)}</code> — <strong>${escapeHtml(role.title)}</strong>${
+        role.model ? ` (${escapeHtml(role.model)})` : ""
+      }${role.description ? ` — ${escapeHtml(role.description)}` : ""}
+        ${
+          data.canWrite
+            ? `<a href="/config/prompts?edit_role=${encodeURIComponent(role.slug)}">Edit</a>
+        <a href="/config/prompts?duplicate_role=${encodeURIComponent(role.slug)}">Duplicate</a>
+        <form method="post" action="/config/roles/${encodeURIComponent(role.slug)}/delete" class="inline-form">
+          ${csrf}
+          <button type="submit" class="btn-secondary">Delete</button>
+        </form>`
+            : ""
+        }</p>`,
+    )
+    .join("");
+  const values = data.roleForm?.values;
+  const editing = data.roleForm?.editing === true;
+  const form = data.canWrite
+    ? `<form method="post" action="/config/roles" class="operator-form">
+        ${csrf}
+        ${data.roleForm?.errors ? `<p class="error" role="alert">${escapeHtml(data.roleForm.errors)}</p>` : ""}
+        <label>Role id (slug — used in profile reviewer lists)
+          <input name="role_slug" value="${escapeHtml(values?.slug ?? "")}" placeholder="go-reviewer" maxlength="49" ${editing ? "readonly" : ""} required/>
+        </label>
+        <label>Title
+          <input name="role_title" value="${escapeHtml(values?.title ?? "")}" placeholder="Go reviewer" required/>
+        </label>
+        <label>Description (optional — shown to the router when it picks reviewers)
+          <input name="role_description" value="${escapeHtml(values?.description ?? "")}" placeholder="Reviews Go diffs for idioms, error handling, race hazards"/>
+        </label>
+        <label>Prompt body (what this specialist checks; guardrails are added at run time)
+          <textarea name="role_prompt" rows="8" required>${escapeHtml(values?.prompt ?? "")}</textarea>
+        </label>
+        <label>Model override (optional; provider/model)
+          ${modelPicker({
+            name: "role_model",
+            value: values?.model ?? "",
+            models: data.roleModelCatalog ?? [],
+            emptyLabel: "— default —",
+            allowCustom: data.roleCatalogEnforced !== true,
+          })}
+        </label>
+        <label>Timeout in seconds (optional, decimals allowed)
+          <input type="number" step="any" min="0" name="role_timeout" value="${escapeHtml(values?.timeoutSeconds ?? "")}"/>
+        </label>
+        <p><button type="submit" class="btn">${editing ? "Save role" : "Create role"}</button>${editing || data.roleForm ? ` <a href="/config/prompts">Cancel</a>` : ""}</p>
+      </form>`
+    : "";
+  return `<h2>Custom roles</h2>
+    <p class="muted">Operator-defined specialists usable anywhere a built-in role works — profile reviewer lists, alert overrides, and router picks. Deleting a role still referenced by a profile is refused.</p>
+    ${rows || `<p class="muted">No custom roles yet.</p>`}
+    ${form}`;
+}
+
 /** /config/profiles: versioned review profiles — drafts are created here but
  * edited on their own page (/config/profiles/drafts/:id/edit) so list-page
  * re-renders cannot lose in-progress form state. */
@@ -1420,13 +1629,14 @@ export function renderProfilesPage(data: ConfigPageData): string {
     : "";
   const body = `
     <h1>Review profiles</h1>
-    <p class="lede">Versioned review profiles and specialist selection. Activation is explicit and audited; credentials are never part of a profile.</p>
+    <p class="lede">A profile bundles reviewer roles, models, publish floor, and budgets. New jobs run with the active revision of the profile their repo routes to below; unmatched repos use the active <code>default</code>, and with nothing active the env configuration applies. Credentials are never part of a profile.</p>
     ${configSubNav("profiles")}
     ${data.notice ? `<p class="notice" role="status">${escapeHtml(data.notice)}</p>` : ""}
     ${data.error ? `<p class="error" role="alert">${escapeHtml(data.error)}</p>` : ""}
     ${createLink}
     <h2>Active</h2>
     ${active.map((revision) => revisionCard(revision, data)).join("") || `<p class="muted">No active revision — env configuration applies.</p>`}
+    ${repoRoutingSection(data)}
     <h2>Drafts</h2>
     ${drafts.map((revision) => revisionCard(revision, data)).join("") || `<p class="muted">No open drafts.</p>`}
     <h2>Retired</h2>
@@ -1589,6 +1799,12 @@ export interface PromptConfigPageData {
   revisions: PromptRevisionView[];
   fixtures: PromptFixtureView[];
   evaluations: PromptEvaluationView[];
+  customRoles?: CustomRoleRow[];
+  /** Prefilled custom-role form (?edit_role= / ?duplicate_role= or a failed save re-render). */
+  roleForm?: { values: RoleFormValues; errors?: string; editing?: boolean };
+  /** Catalog-filtered models for the role model picker (MODEL_CATALOG applies to role specs). */
+  roleModelCatalog?: Array<{ id: string; hint?: string }>;
+  roleCatalogEnforced?: boolean;
   /**
    * Model catalog + discovered models for the evaluation model picker —
    * intentionally unfiltered (evaluatePrompt accepts any model and the eval
@@ -1702,6 +1918,11 @@ function promptRoleCard(
       <pre class="log-panel">${escapeHtml(currentBody)}</pre>
     </details>
     ${overrideForm}
+    ${
+      data.canWrite
+        ? `<p class="muted"><a href="/config/prompts?duplicate_role=${encodeURIComponent(role.id)}">Duplicate into a custom role</a></p>`
+        : ""
+    }
     ${drafts.map((revision) => promptRevisionCard(revision, data)).join("")}
     ${history}
   </article>`;
@@ -1781,6 +2002,7 @@ export function renderPromptConfigPage(data: PromptConfigPageData): string {
     ${writeGate}
     <h2>Roles</h2>
     <ul class="prompt-role-list">${roleCards}${unknown}</ul>
+    ${customRolesSection(data)}
     <h2>Evaluation fixtures</h2>
     ${fixtureForm}
     ${data.fixtures.length > 0 ? `<table class="config-audit"><thead><tr><th>ID</th><th>Name</th><th>Diff chars</th><th>Expectations</th><th>Saved by</th></tr></thead><tbody>${fixtureRows}</tbody></table>` : `<p class="muted">No fixtures saved.</p>`}

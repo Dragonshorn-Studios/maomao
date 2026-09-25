@@ -1592,15 +1592,20 @@ async function routeSpecialists(
     decision.profile === "poison-alert" ? config.poisonAlert.policy : null,
     { routing_mode: config.routing.mode },
   );
-  store.ensureReviewerRuns(
-    job.id,
-    // Pass the router's raw picks: reviewerSpecs filters by env membership,
-    // which would silently drop a profile-only role the router chose.
-    applyProfileToSpecs(store, config, reviewerSpecs(config, decision.reviewers), job.profile_revision_id, { requestedRoles: decision.reviewers }),
-  );
+  // Pass the router's raw picks: reviewerSpecs filters by env membership,
+  // which would silently drop a profile-only role the router chose. When the
+  // profile defines an alert-level reviewer list it replaces the picks here.
+  const runSpecs = applyProfileToSpecs(store, config, reviewerSpecs(config, decision.reviewers), job.profile_revision_id, {
+    requestedRoles: decision.reviewers,
+    level: decision.profile,
+  });
+  store.ensureReviewerRuns(job.id, runSpecs);
+  const runRoles = runSpecs.map((spec) => spec.role).join(", ");
   store.log(
     job.id,
-    `Routed profile=${decision.profile} source=${decision.source} reviewers=${decision.reviewers.join(", ")} reason=${decision.reason}`,
+    `Routed profile=${decision.profile} source=${decision.source} reviewers=${decision.reviewers.join(", ")}` +
+      (runRoles !== decision.reviewers.join(", ") ? ` → profile ${decision.profile} list runs ${runRoles}` : "") +
+      ` reason=${decision.reason}`,
   );
 }
 
@@ -1670,10 +1675,16 @@ async function runReviewer(
   humanOverrides?: HumanOverrideContext,
 ): Promise<void> {
   // Profile-added roles may not appear in env REVIEWER_ROLES; fall back to the
-  // built-in catalog so they still get their authored prompt body.
+  // built-in catalog, then operator-defined custom roles, so they still get
+  // their authored prompt body. A custom role's stored body flows through the
+  // same path as role.prompt (guardrails composed in buildReviewerPrompt).
+  const customRole = deps.store.configs.getCustomRole(run.role);
   const role =
     deps.config.reviewers.find((item) => item.id === run.role) ??
-    KNOWN_REVIEWER_ROLES.find((item) => item.id === run.role);
+    KNOWN_REVIEWER_ROLES.find((item) => item.id === run.role) ??
+    (customRole
+      ? { id: customRole.slug, title: customRole.title, prompt: customRole.prompt, model: customRole.model ?? undefined }
+      : undefined);
   // The run's stored model (profile revision / enqueue spec) wins over config defaults.
   const model = run.model || role?.model || deps.config.opencode.reviewerModel;
   // An active prompt revision overrides the role's authored body; guardrails stay composed here.
@@ -1715,7 +1726,9 @@ async function runReviewer(
         model,
         prompt,
         files,
-        timeoutMs: profileTimeoutMs ?? deps.config.opencode.timeoutMs,
+        // A custom role's own timeout is the fallback between the profile
+        // entry's override and the global default.
+        timeoutMs: profileTimeoutMs ?? customRole?.timeout_ms ?? deps.config.opencode.timeoutMs,
         extraArgs: deps.config.opencode.extraArgs,
         bin: deps.config.opencode.bin,
         title: `maomao-${run.role}-${job.id}`,
