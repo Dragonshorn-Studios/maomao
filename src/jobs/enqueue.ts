@@ -55,10 +55,11 @@ export function applyProfileToSpecs(
   const knownByRole = new Map(KNOWN_REVIEWER_ROLES.map((role) => [role.id, role]));
   const toSpec = (reviewer: ProfileDefinition["reviewers"][number]) => {
     const envRole = envByRole.get(reviewer.role);
+    const customRole = envRole || knownByRole.has(reviewer.role) ? undefined : store.configs.getCustomRole(reviewer.role);
     return {
       role: reviewer.role,
-      title: envRole?.title ?? knownByRole.get(reviewer.role)?.title ?? reviewer.role,
-      model: reviewer.model || envRole?.model || config.opencode.reviewerModel || undefined,
+      title: envRole?.title ?? knownByRole.get(reviewer.role)?.title ?? customRole?.title ?? reviewer.role,
+      model: reviewer.model || envRole?.model || customRole?.model || config.opencode.reviewerModel || undefined,
     };
   };
   const alertRoles = options?.level ? revision.definition.alerts?.[ALERT_LEVEL_KEYS[options.level]] : undefined;

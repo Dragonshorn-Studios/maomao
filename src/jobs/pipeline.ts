@@ -1675,10 +1675,16 @@ async function runReviewer(
   humanOverrides?: HumanOverrideContext,
 ): Promise<void> {
   // Profile-added roles may not appear in env REVIEWER_ROLES; fall back to the
-  // built-in catalog so they still get their authored prompt body.
+  // built-in catalog, then operator-defined custom roles, so they still get
+  // their authored prompt body. A custom role's stored body flows through the
+  // same path as role.prompt (guardrails composed in buildReviewerPrompt).
+  const customRole = deps.store.configs.getCustomRole(run.role);
   const role =
     deps.config.reviewers.find((item) => item.id === run.role) ??
-    KNOWN_REVIEWER_ROLES.find((item) => item.id === run.role);
+    KNOWN_REVIEWER_ROLES.find((item) => item.id === run.role) ??
+    (customRole
+      ? { id: customRole.slug, title: customRole.title, prompt: customRole.prompt, model: customRole.model ?? undefined }
+      : undefined);
   // The run's stored model (profile revision / enqueue spec) wins over config defaults.
   const model = run.model || role?.model || deps.config.opencode.reviewerModel;
   // An active prompt revision overrides the role's authored body; guardrails stay composed here.

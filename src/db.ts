@@ -301,6 +301,19 @@ function migrate(db: SqliteDb): void {
       UNIQUE (pattern)
     );
 
+    CREATE TABLE IF NOT EXISTS custom_roles (
+      slug TEXT PRIMARY KEY,
+      title TEXT NOT NULL,
+      description TEXT NOT NULL DEFAULT '',
+      prompt TEXT NOT NULL,
+      model TEXT,
+      timeout_ms INTEGER,
+      created_by TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      updated_by TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+
     CREATE TABLE IF NOT EXISTS config_audit (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       action TEXT NOT NULL,

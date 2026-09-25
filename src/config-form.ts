@@ -1,6 +1,8 @@
 import {
+  KNOWN_ROLE_IDS,
   PROFILE_MAX_REVIEWERS,
   PROFILE_MAX_TIMEOUT_MS,
+  ROLE_SLUG,
   profileDefinitionSchema,
 } from "./config-revisions.js";
 
@@ -238,6 +240,7 @@ function optionalPositiveInteger(value: string): number | undefined | "invalid" 
  */
 export function profileFormToDefinition(
   values: ProfileFormValues,
+  extraRoles: readonly string[] = [],
 ): { ok: true; definition: unknown } | { ok: false; errors: ProfileFieldErrors } {
   const errors: ProfileFieldErrors = {};
   // Blank rows are dropped before validation; formIndices translates zod's
@@ -301,6 +304,16 @@ export function profileFormToDefinition(
       else if (!key && !errors.form) errors.form = issue.message;
     }
   }
+  // Role membership is validated here (not in the zod shape — custom roles
+  // live in the store) so each unknown role flags the row that holds it.
+  const knownRoles = new Set([...KNOWN_ROLE_IDS, ...extraRoles]);
+  reviewers.forEach((entry, index) => {
+    const role = (entry as { role: string }).role;
+    const key = `reviewer_role_${formIndices[index]}`;
+    if (ROLE_SLUG.test(role) && !knownRoles.has(role) && !errors[key]) {
+      errors[key] = "unknown specialist role";
+    }
+  });
   // Conversion errors (and any unmappable schema issue) must survive even
   // when the stripped definition would parse cleanly.
   if (Object.keys(errors).length > 0) {

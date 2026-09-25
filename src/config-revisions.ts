@@ -12,7 +12,9 @@ export const PROFILE_MAX_TIMEOUT_MS = 30 * 60 * 1000;
 export const PROFILE_MAX_TOTAL_COST_USD = 5;
 export const PROFILE_MAX_TOTAL_TOKENS = 2_000_000;
 
-const KNOWN_ROLE_IDS = KNOWN_REVIEWER_ROLES.map((role) => role.id);
+export const KNOWN_ROLE_IDS = KNOWN_REVIEWER_ROLES.map((role) => role.id);
+/** Role ids are slug-shaped; membership (built-in or custom role) is checked at the store level. */
+export const ROLE_SLUG = /^[a-z0-9][a-z0-9-]{0,48}$/;
 
 export const profileDefinitionSchema = z
   .object({
@@ -22,7 +24,7 @@ export const profileDefinitionSchema = z
     reviewers: z
       .array(
         z.object({
-          role: z.string().refine((role) => KNOWN_ROLE_IDS.includes(role), `unknown specialist role`),
+          role: z.string().regex(ROLE_SLUG, "role id is lowercase letters, digits, and dashes"),
           model: z.string().regex(/^[\w./:-]+$/, "model must be provider/model").max(120).optional(),
           timeoutMs: z.number().int().positive().max(PROFILE_MAX_TIMEOUT_MS).optional(),
         }),
@@ -54,8 +56,8 @@ export const profileDefinitionSchema = z
     const allowed = new Set(definition.reviewers.map((reviewer) => reviewer.role));
     for (const [level, roles] of Object.entries(definition.alerts ?? {})) {
       roles?.forEach((role, index) => {
-        if (!KNOWN_ROLE_IDS.includes(role)) {
-          ctx.addIssue({ code: "custom", path: ["alerts", level, index], message: `unknown specialist role` });
+        if (!ROLE_SLUG.test(role)) {
+          ctx.addIssue({ code: "custom", path: ["alerts", level, index], message: `role id is lowercase letters, digits, and dashes` });
         } else if (!allowed.has(role)) {
           ctx.addIssue({ code: "custom", path: ["alerts", level, index], message: `${role} is not in this profile's reviewer list` });
         }
@@ -93,6 +95,21 @@ export interface ProfileRouteRow {
   created_at: string;
 }
 
+/** An operator-defined specialist beyond the built-in role set (e.g. a "Go reviewer"). */
+export interface CustomRoleRow {
+  slug: string;
+  title: string;
+  description: string;
+  /** Editable prompt body — guardrails are composed at run time, never stored. */
+  prompt: string;
+  model: string | null;
+  timeout_ms: number | null;
+  created_by: string;
+  created_at: string;
+  updated_by: string;
+  updated_at: string;
+}
+
 const ROUTE_PATTERN_MAX = 200;
 
 export class ConfigValidationError extends Error {
@@ -113,6 +130,9 @@ export type ConfigAuditAction =
   | "retired"
   | "route_added"
   | "route_removed"
+  | "role_created"
+  | "role_updated"
+  | "role_deleted"
   | "imported"
   | "exported";
 
@@ -127,6 +147,29 @@ export class ReviewConfigStore {
     private readonly modelCatalog: string[] = [],
   ) {}
 
+  /** Roles in the definition that are neither built-in nor custom — the store-level
+   * membership check the zod shape can't do (custom roles live in this db). */
+  private unknownRoleIssues(definition: ProfileDefinition): string[] {
+    const known = new Set<string>([...KNOWN_ROLE_IDS, ...this.customRoleIds()]);
+    return definition.reviewers
+      .filter((reviewer) => !known.has(reviewer.role))
+      .map((reviewer) => `reviewers: unknown specialist role: ${reviewer.role}`);
+  }
+
+  /** Same membership check on a pre-parse definition, so unknown roles still surface
+   * alongside shape errors instead of disappearing when the zod parse fails. Slug-invalid
+   * roles are skipped — the schema already reports those. */
+  private unknownRoleIssuesRaw(definition: unknown): string[] {
+    if (!definition || typeof definition !== "object") return [];
+    const reviewers = (definition as { reviewers?: unknown }).reviewers;
+    if (!Array.isArray(reviewers)) return [];
+    const known = new Set<string>([...KNOWN_ROLE_IDS, ...this.customRoleIds()]);
+    return reviewers
+      .map((reviewer) => (reviewer && typeof reviewer === "object" ? (reviewer as { role?: unknown }).role : undefined))
+      .filter((role): role is string => typeof role === "string" && ROLE_SLUG.test(role) && !known.has(role))
+      .map((role) => `reviewers: unknown specialist role: ${role}`);
+  }
+
   createDraft(input: {
     definition: unknown;
     note?: string;
@@ -134,10 +177,16 @@ export class ReviewConfigStore {
   }): { revision: ProfileRevisionRow } | { error: "invalid"; issues: string[] } {
     const parsed = profileDefinitionSchema.safeParse(input.definition);
     if (!parsed.success) {
-      return { error: "invalid", issues: parsed.error.issues.map((issue) => `${issue.path.join(".")}: ${issue.message}`) };
+      return {
+        error: "invalid",
+        issues: [
+          ...parsed.error.issues.map((issue) => `${issue.path.join(".")}: ${issue.message}`),
+          ...this.unknownRoleIssuesRaw(input.definition),
+        ],
+      };
     }
-    const catalogIssues = validateModelCatalog(parsed.data, this.modelCatalog);
-    if (catalogIssues.length > 0) return { error: "invalid", issues: catalogIssues };
+    const issues = [...this.unknownRoleIssues(parsed.data), ...validateModelCatalog(parsed.data, this.modelCatalog)];
+    if (issues.length > 0) return { error: "invalid", issues };
     const now = nowIso();
     // The row name comes from the definition itself, so consumers keying on "default"
     // can never diverge from what the operator configured.
@@ -167,10 +216,16 @@ export class ReviewConfigStore {
     if (!existing || existing.status !== "draft") return { error: "not_found" };
     const parsed = profileDefinitionSchema.safeParse(input.definition);
     if (!parsed.success) {
-      return { error: "invalid", issues: parsed.error.issues.map((issue) => `${issue.path.join(".")}: ${issue.message}`) };
+      return {
+        error: "invalid",
+        issues: [
+          ...parsed.error.issues.map((issue) => `${issue.path.join(".")}: ${issue.message}`),
+          ...this.unknownRoleIssuesRaw(input.definition),
+        ],
+      };
     }
-    const catalogIssues = validateModelCatalog(parsed.data, this.modelCatalog);
-    if (catalogIssues.length > 0) return { error: "invalid", issues: catalogIssues };
+    const issues = [...this.unknownRoleIssues(parsed.data), ...validateModelCatalog(parsed.data, this.modelCatalog)];
+    if (issues.length > 0) return { error: "invalid", issues };
     const now = nowIso();
     const result = this.db
       .prepare(
@@ -189,7 +244,7 @@ export class ReviewConfigStore {
     const revision = this.getRevision(id);
     if (!revision || revision.status === "active") return { error: "revision not found or already active" };
     if (revision.status === "retired") return { error: "cannot activate a retired revision directly; roll back instead" };
-    const issues = [...validateProfileDefinition(revision.definition), ...validateModelCatalog(revision.definition, this.modelCatalog)];
+    const issues = [...validateProfileDefinition(revision.definition, this.customRoleIds()), ...validateModelCatalog(revision.definition, this.modelCatalog)];
     if (issues.length > 0) return { error: `cannot activate invalid revision: ${issues.join("; ")}` };
     const now = nowIso();
     const superseded = this.getActiveRevision(revision.name);
@@ -238,7 +293,7 @@ export class ReviewConfigStore {
   rollbackRevision(id: number, actor: string): { revision: ProfileRevisionRow } | { error: string } {
     const revision = this.getRevision(id);
     if (!revision || revision.status !== "retired") return { error: "only a retired revision can be re-activated" };
-    const issues = [...validateProfileDefinition(revision.definition), ...validateModelCatalog(revision.definition, this.modelCatalog)];
+    const issues = [...validateProfileDefinition(revision.definition, this.customRoleIds()), ...validateModelCatalog(revision.definition, this.modelCatalog)];
     if (issues.length > 0) return { error: `cannot activate invalid revision: ${issues.join("; ")}` };
     const now = nowIso();
     const superseded = this.getActiveRevision(revision.name);
@@ -338,6 +393,101 @@ export class ReviewConfigStore {
     return { ok: true };
   }
 
+  // ---- Custom reviewer roles ----
+
+  private rowToCustomRole(row: Record<string, unknown>): CustomRoleRow {
+    return {
+      slug: String(row.slug),
+      title: String(row.title),
+      description: String(row.description ?? ""),
+      prompt: String(row.prompt),
+      model: (row.model as string | null) ?? null,
+      timeout_ms: (row.timeout_ms as number | null) ?? null,
+      created_by: String(row.created_by),
+      created_at: String(row.created_at),
+      updated_by: String(row.updated_by),
+      updated_at: String(row.updated_at),
+    };
+  }
+
+  listCustomRoles(): CustomRoleRow[] {
+    const rows = this.db.prepare(`SELECT * FROM custom_roles ORDER BY slug`).all() as Record<string, unknown>[];
+    return rows.map((row) => this.rowToCustomRole(row));
+  }
+
+  getCustomRole(slug: string): CustomRoleRow | undefined {
+    const row = this.db.prepare(`SELECT * FROM custom_roles WHERE slug = ?`).get(slug) as Record<string, unknown> | undefined;
+    return row ? this.rowToCustomRole(row) : undefined;
+  }
+
+  private customRoleIds(): string[] {
+    return (this.db.prepare(`SELECT slug FROM custom_roles`).all() as Record<string, unknown>[]).map((row) => String(row.slug));
+  }
+
+  /** Roles referenced by any non-retired revision's definition (for delete warnings). */
+  private profilesReferencingRole(slug: string): string[] {
+    return this.listRevisions()
+      .filter(
+        (revision) =>
+          revision.status !== "retired" && revision.definition.reviewers.some((reviewer) => reviewer.role === slug),
+      )
+      .map((revision) => `${revision.name} (#${revision.id})`);
+  }
+
+  upsertCustomRole(input: {
+    slug: string;
+    title: string;
+    description?: string;
+    prompt: string;
+    model?: string;
+    timeoutMs?: number;
+    actor: string;
+  }): { role: CustomRoleRow } | { error: string } {
+    const slug = input.slug.trim();
+    if (!ROLE_SLUG.test(slug)) return { error: "Role id is lowercase letters, digits, and dashes." };
+    if (KNOWN_ROLE_IDS.includes(slug)) return { error: `'${slug}' is a built-in role — edit its prompt on the Prompts page instead.` };
+    const title = input.title.trim();
+    if (!title) return { error: "Title is required." };
+    const prompt = input.prompt.trim();
+    if (!prompt) return { error: "Prompt body is required." };
+    if (input.model && !/^[\w./:-]+$/.test(input.model)) return { error: "Model must be provider/model." };
+    // Same catalog policy profile reviewer entries get — a custom role's model
+    // becomes a reviewer spec at run time, so it must obey MODEL_CATALOG too.
+    if (input.model && this.modelCatalog.length > 0 && !this.modelCatalog.includes(input.model)) {
+      return { error: `Model '${input.model}' is not in MODEL_CATALOG.` };
+    }
+    if (input.timeoutMs != null && (!Number.isInteger(input.timeoutMs) || input.timeoutMs <= 0 || input.timeoutMs > PROFILE_MAX_TIMEOUT_MS)) {
+      return { error: "Timeout must be a positive whole number of ms (max 30 minutes)." };
+    }
+    const existing = this.getCustomRole(slug);
+    const now = nowIso();
+    if (existing) {
+      this.db
+        .prepare(`UPDATE custom_roles SET title = ?, description = ?, prompt = ?, model = ?, timeout_ms = ?, updated_by = ?, updated_at = ? WHERE slug = ?`)
+        .run(title, input.description ?? "", prompt, input.model ?? null, input.timeoutMs ?? null, input.actor, now, slug);
+      this.audit("role_updated", input.actor, null, `${slug} updated`);
+    } else {
+      this.db
+        .prepare(`INSERT INTO custom_roles (slug, title, description, prompt, model, timeout_ms, created_by, created_at, updated_by, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+        .run(slug, title, input.description ?? "", prompt, input.model ?? null, input.timeoutMs ?? null, input.actor, now, input.actor, now);
+      this.audit("role_created", input.actor, null, `${slug} created`);
+    }
+    return { role: this.getCustomRole(slug)! };
+  }
+
+  /** Refuses to delete a role still referenced by a non-retired revision. */
+  deleteCustomRole(slug: string, actor: string): { ok: true } | { error: string } {
+    const existing = this.getCustomRole(slug);
+    if (!existing) return { error: "Role not found." };
+    const references = this.profilesReferencingRole(slug);
+    if (references.length > 0) {
+      return { error: `'${slug}' is used by ${references.join(", ")} — remove it there first.` };
+    }
+    this.db.prepare(`DELETE FROM custom_roles WHERE slug = ?`).run(slug);
+    this.audit("role_deleted", actor, null, `${slug} deleted`);
+    return { ok: true };
+  }
+
   getActiveRevision(name: string): ProfileRevisionRow | undefined {
     const row = this.db.prepare(`SELECT * FROM profile_revisions WHERE name = ? AND status = 'active'`).get(name) as
       | Record<string, unknown>
@@ -363,7 +513,12 @@ export class ReviewConfigStore {
   }
 
   /** Credential-free export: definitions only, with a schema version for forward compatibility. */
-  exportConfig(): { schema_version: number; exported_at: string; revisions: Array<{ name: string; status: string; definition: ProfileDefinition; note: string | null }> } {
+  exportConfig(): {
+    schema_version: number;
+    exported_at: string;
+    revisions: Array<{ name: string; status: string; definition: ProfileDefinition; note: string | null }>;
+    roles: Array<Pick<CustomRoleRow, "slug" | "title" | "description" | "prompt" | "model" | "timeout_ms">>;
+  } {
     this.audit("exported", "system", null, "config exported");
     return {
       schema_version: PROFILE_SCHEMA_VERSION,
@@ -374,14 +529,36 @@ export class ReviewConfigStore {
         definition: revision.definition,
         note: revision.note,
       })),
+      roles: this.listCustomRoles().map(({ slug, title, description, prompt, model, timeout_ms }) => ({
+        slug,
+        title,
+        description,
+        prompt,
+        model,
+        timeout_ms,
+      })),
     };
   }
 
-  /** Imports revisions as drafts regardless of the source status; activation stays explicit. */
-  importConfig(input: { payload: unknown; actor: string }): { imported: number; skipped: number } | { error: string } {
-    const payload = input.payload as { schema_version?: unknown; revisions?: unknown };
+  /** Imports roles then revisions as drafts regardless of the source status; activation stays explicit. */
+  importConfig(input: { payload: unknown; actor: string }): { imported: number; skipped: number; rolesImported: number } | { error: string } {
+    const payload = input.payload as { schema_version?: unknown; revisions?: unknown; roles?: unknown };
     if (payload?.schema_version !== PROFILE_SCHEMA_VERSION || !Array.isArray(payload.revisions)) {
       return { error: `unsupported config export (schema_version must be ${PROFILE_SCHEMA_VERSION})` };
+    }
+    // Roles first so imported revisions referencing them pass membership validation.
+    let rolesImported = 0;
+    for (const entry of (Array.isArray(payload.roles) ? payload.roles : []) as Array<Record<string, unknown>>) {
+      const result = this.upsertCustomRole({
+        slug: String(entry.slug ?? ""),
+        title: String(entry.title ?? ""),
+        description: typeof entry.description === "string" ? entry.description : "",
+        prompt: String(entry.prompt ?? ""),
+        model: typeof entry.model === "string" ? entry.model : undefined,
+        timeoutMs: typeof entry.timeout_ms === "number" ? entry.timeout_ms : undefined,
+        actor: input.actor,
+      });
+      if ("role" in result) rolesImported += 1;
     }
     let imported = 0;
     let skipped = 0;
@@ -394,8 +571,8 @@ export class ReviewConfigStore {
       if ("revision" in result) imported += 1;
       else skipped += 1;
     }
-    this.audit("imported", input.actor, null, `${imported} imported as drafts, ${skipped} skipped`);
-    return { imported, skipped };
+    this.audit("imported", input.actor, null, `${imported} imported as drafts, ${skipped} skipped, ${rolesImported} roles`);
+    return { imported, skipped, rolesImported };
   }
 }
 
@@ -456,10 +633,12 @@ export function validateModelCatalog(definition: ProfileDefinition, catalog: str
 }
 
 /** Extra semantic validation beyond the zod shape (e.g. duplicate roles, unknown models). */
-export function validateProfileDefinition(definition: ProfileDefinition): string[] {
+export function validateProfileDefinition(definition: ProfileDefinition, customRoleIds: readonly string[] = []): string[] {
   const issues: string[] = [];
+  const known = new Set<string>([...KNOWN_ROLE_IDS, ...customRoleIds]);
   const seen = new Set<string>();
   for (const reviewer of definition.reviewers) {
+    if (!known.has(reviewer.role)) issues.push(`unknown specialist role: ${reviewer.role}`);
     if (seen.has(reviewer.role)) issues.push(`duplicate specialist role: ${reviewer.role}`);
     seen.add(reviewer.role);
   }

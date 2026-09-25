@@ -1970,6 +1970,123 @@ describe("config page IA", () => {
     expect(edit.headers.get("location")).toBe(`/config/profiles/drafts/${fork?.id}/edit`);
     log.mockRestore();
   });
+
+  it("creates, edits, and deletes custom roles and lets profiles reference them", async () => {
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    const { app, store } = testApp(
+      {
+        UI_SESSION_SECRET: "session-secret-for-tests",
+        GITHUB_OAUTH_CLIENT_ID: "cid",
+        GITHUB_OAUTH_CLIENT_SECRET: "csecret",
+        MAOMAO_ADMIN_GITHUB_IDS: "1001",
+        MAOMAO_PUBLIC_URL: "https://maomao.example",
+      },
+      undefined,
+      mockOauthFetch({ id: 1001, login: "octocat" }),
+    );
+    const session = await operatorSession(app);
+    const page = await app.request("/config/profiles", { headers: { cookie: session } });
+    const { csrfCookie, csrfToken } = await csrfArtifacts(page);
+    const cookie = `${session}; ${csrfCookie}`;
+
+    // Create via POST /config/roles.
+    const create = await app.request("/config/roles", {
+      method: "POST",
+      headers: { cookie, "content-type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({
+        csrf_token: csrfToken,
+        role_slug: "go-reviewer",
+        role_title: "Go reviewer",
+        role_description: "Reviews Go diffs",
+        role_prompt: "Check Go error handling and idioms.",
+        role_model: "acme/go-model",
+        role_timeout: "90",
+      }).toString(),
+    });
+    expect(create.status).toBe(302);
+    expect(create.headers.get("location")).toContain("notice=role-saved");
+    expect(store.configs.getCustomRole("go-reviewer")?.timeout_ms).toBe(90000);
+
+    // The role appears in the Custom roles section and in the reviewer select options.
+    const listed = await app.request("/config/profiles", { headers: { cookie: session } });
+    const listedHtml = await listed.text();
+    expect(listedHtml).toContain("go-reviewer");
+    expect(listedHtml).toContain("edit_role=go-reviewer");
+    const newDraft = await app.request("/config/profiles/new", { headers: { cookie: session } });
+    expect(await newDraft.text()).toContain("Go reviewer (custom)");
+
+    // ?edit_role prefills the form in edit mode.
+    const editPage = await app.request("/config/profiles?edit_role=go-reviewer", { headers: { cookie: session } });
+    const editHtml = await editPage.text();
+    expect(editHtml).toMatch(/name="role_slug"[^>]*value="go-reviewer"[^>]*readonly/);
+    expect(editHtml).toContain('value="Go reviewer"');
+    expect(editHtml).toContain("Save role");
+
+    // Rejections: a built-in slug and a bad slug re-render with an error.
+    const artifacts2 = await csrfArtifacts(await app.request("/config/profiles", { headers: { cookie: session } }));
+    const collision = await app.request("/config/roles", {
+      method: "POST",
+      headers: { cookie: `${session}; ${artifacts2.csrfCookie}`, "content-type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({
+        csrf_token: artifacts2.csrfToken,
+        role_slug: "correctness",
+        role_title: "Nope",
+        role_prompt: "body",
+      }).toString(),
+    });
+    expect(collision.status).toBe(400);
+    expect(await collision.text()).toContain("built-in role");
+
+    // A profile draft can reference the custom role; deleting is refused while it does.
+    const draft = store.configs.createDraft({
+      definition: { name: "go-profile", reviewers: [{ role: "go-reviewer" }], minPublishableSeverity: "info" },
+      createdBy: "octocat",
+    });
+    expect("revision" in draft).toBe(true);
+    const artifacts3 = await csrfArtifacts(await app.request("/config/profiles", { headers: { cookie: session } }));
+    const refused = await app.request("/config/roles/go-reviewer/delete", {
+      method: "POST",
+      headers: { cookie: `${session}; ${artifacts3.csrfCookie}`, "content-type": "application/x-www-form-urlencoded" },
+      body: `csrf_token=${encodeURIComponent(artifacts3.csrfToken)}`,
+    });
+    expect(refused.status).toBe(400);
+    expect(await refused.text()).toContain("used by");
+    if (!("revision" in draft)) return;
+    store.configs.discardDraft(draft.revision.id, "octocat");
+
+    // The structured profile form accepts the custom role (membership check).
+    const artifacts4 = await csrfArtifacts(await app.request("/config/profiles", { headers: { cookie: session } }));
+    const saveProfile = await app.request("/config/drafts", {
+      method: "POST",
+      headers: { cookie: `${session}; ${artifacts4.csrfCookie}`, "content-type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({
+        editor: "structured",
+        action: "save",
+        csrf_token: artifacts4.csrfToken,
+        name: "go-checks",
+        reviewer_count: "1",
+        reviewer_role_0: "go-reviewer",
+        min_severity: "info",
+      }).toString(),
+    });
+    expect(saveProfile.status).toBe(302);
+    expect(store.configs.listRevisions().find((row) => row.name === "go-checks")?.definition.reviewers).toEqual([
+      { role: "go-reviewer" },
+    ]);
+    store.configs.discardDraft(store.configs.listRevisions().find((row) => row.name === "go-checks")!.id, "octocat");
+
+    // With nothing referencing it, delete succeeds.
+    const artifacts5 = await csrfArtifacts(await app.request("/config/profiles", { headers: { cookie: session } }));
+    const remove = await app.request("/config/roles/go-reviewer/delete", {
+      method: "POST",
+      headers: { cookie: `${session}; ${artifacts5.csrfCookie}`, "content-type": "application/x-www-form-urlencoded" },
+      body: `csrf_token=${encodeURIComponent(artifacts5.csrfToken)}`,
+    });
+    expect(remove.status).toBe(302);
+    expect(remove.headers.get("location")).toContain("notice=role-deleted");
+    expect(store.configs.getCustomRole("go-reviewer")).toBeUndefined();
+    log.mockRestore();
+  });
 });
 
 describe("prompt configuration routes", () => {

@@ -72,6 +72,8 @@ import {
   type BriefConfirmNotice,
   type BriefPageData,
   type PausePageData,
+  type RoleFormValues,
+  roleFormValuesFromRole,
 } from "./ui/index.js";
 import { renderProvidersPage } from "./ui/providers.js";
 import { ProviderCredentialStore, opencodeAuthPath, providerAuthSecrets } from "./opencode/credentials.js";
@@ -1066,7 +1068,7 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
       (entry) => ctx.config.modelCatalog.length === 0 || approved.has(entry.id),
     );
     return {
-      knownRoles: KNOWN_ROLE_OPTIONS,
+      knownRoles: allRoleOptions(),
       modelCatalog,
       catalogEnforced: ctx.config.modelCatalog.length > 0,
       discovery: ctx.modelDiscovery
@@ -1075,6 +1077,11 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
     };
   };
 
+  const allRoleOptions = () => [
+    ...KNOWN_ROLE_OPTIONS,
+    ...ctx.store.configs.listCustomRoles().map((role) => ({ id: role.slug, title: `${role.title} (custom)` })),
+  ];
+
   const profilesPageData = (
     c: Context<AppEnv>,
     opts: {
@@ -1082,16 +1089,19 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
       error?: string;
       canWrite?: boolean;
       form?: { values: ProfileFormValues; errors?: ProfileFieldErrors };
+      roleForm?: { values: RoleFormValues; errors?: string };
     } = {},
   ): ConfigPageData => ({
     identity: c.get("identity"),
     revisions: ctx.store.configs.listRevisions(),
     profileRoutes: ctx.store.configs.listProfileRoutes(),
+    customRoles: ctx.store.configs.listCustomRoles(),
     audit: [],
     canWrite: opts.canWrite ?? gateOn,
     csrfToken: gateOn ? ensureCsrfToken(c, ctx.config.uiSessionSecret) : undefined,
     notice: opts.notice,
     error: opts.error,
+    roleForm: opts.roleForm,
     profileEditor: { ...profileEditorBase(), ...(opts.form ? { form: opts.form } : {}) },
   });
 
@@ -1393,6 +1403,8 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
     "draft-discarded": "Draft discarded.",
     "route-added": "Repo route added.",
     "route-removed": "Repo route removed.",
+    "role-saved": "Custom role saved.",
+    "role-deleted": "Custom role deleted.",
     imported: "Configuration imported as drafts.",
     "models-refreshed": "Model list refreshed from opencode models.",
     "models-refresh-failed": "Model list refresh failed — see the note in the profile editor for details.",
@@ -1400,7 +1412,16 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
 
   app.get("/config/profiles", (c) => {
     if (!gateOn) return c.redirect("/", 302);
-    return c.html(renderProfilesPage(profilesPageData(c, { notice: profileNotices[c.req.query("notice") ?? ""] })));
+    const editSlug = c.req.query("edit_role");
+    const editRole = editSlug ? ctx.store.configs.getCustomRole(editSlug) : undefined;
+    return c.html(
+      renderProfilesPage(
+        profilesPageData(c, {
+          notice: profileNotices[c.req.query("notice") ?? ""],
+          ...(editRole ? { roleForm: { values: roleFormValuesFromRole(editRole) } } : {}),
+        }),
+      ),
+    );
   });
 
   app.get("/config/profiles/new", (c) => {
@@ -1471,9 +1492,9 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
     if (action.kind === "noop") {
       errors.form = "That row action does not apply — nothing changed.";
     } else if (action.kind !== "save") {
-      values = applyProfileAction(values, action, KNOWN_ROLE_OPTIONS.map((role) => role.id));
+      values = applyProfileAction(values, action, allRoleOptions().map((role) => role.id));
     } else {
-      const built = profileFormToDefinition(values);
+      const built = profileFormToDefinition(values, ctx.store.configs.listCustomRoles().map((role) => role.slug));
       if (!built.ok) {
         for (const [key, message] of Object.entries(built.errors)) {
           if (key !== "form" && !errors[key]) errors[key] = message;
@@ -1702,6 +1723,53 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
     });
     if ("error" in result) return renderProfilesWithError(c, result.issues.join("; "), 400);
     return c.redirect(`/config/profiles/drafts/${result.revision.id}/edit`, 303);
+  });
+
+  app.post("/config/roles", async (c) => {
+    if (!gateOn) return c.redirect("/", 302);
+    const actor = configActor(c);
+    if (!actor) return configWriteDenied(c);
+    const body = await c.req.parseBody();
+    const asStr = (value: unknown) => (typeof value === "string" ? value : "");
+    const timeoutSeconds = asStr(body.role_timeout).trim();
+    const parsedTimeout = timeoutSeconds === "" ? undefined : Number(timeoutSeconds);
+    const values: RoleFormValues = {
+      slug: asStr(body.role_slug).trim(),
+      title: asStr(body.role_title).trim(),
+      description: asStr(body.role_description).trim(),
+      prompt: asStr(body.role_prompt),
+      model: asStr(body.role_model).trim(),
+      timeoutSeconds,
+    };
+    const timeoutMs =
+      parsedTimeout === undefined ? undefined : Number.isFinite(parsedTimeout) ? Math.round(parsedTimeout * 1000) : -1;
+    const result = ctx.store.configs.upsertCustomRole({
+      slug: values.slug,
+      title: values.title,
+      description: values.description,
+      prompt: values.prompt,
+      model: values.model || undefined,
+      timeoutMs,
+      actor: actor.login,
+    });
+    if ("error" in result) {
+      return c.html(
+        renderProfilesPage(
+          profilesPageData(c, { roleForm: { values, errors: result.error }, error: result.error }),
+        ),
+        400,
+      );
+    }
+    return c.redirect("/config/profiles?notice=role-saved", 302);
+  });
+
+  app.post("/config/roles/:slug/delete", (c) => {
+    if (!gateOn) return c.redirect("/", 302);
+    const actor = configActor(c);
+    if (!actor) return configWriteDenied(c);
+    const result = ctx.store.configs.deleteCustomRole(c.req.param("slug"), actor.login);
+    if ("error" in result) return renderProfilesWithError(c, result.error, 400);
+    return c.redirect("/config/profiles?notice=role-deleted", 302);
   });
 
   app.post("/config/routes", async (c) => {

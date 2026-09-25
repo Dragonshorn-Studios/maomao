@@ -24,6 +24,8 @@ export {
   type ConfigPageData,
   type ConfigRevisionView,
   type DraftEditPageData,
+  type RoleFormValues,
+  roleFormValuesFromRole,
 } from "./pages.js";
 export { renderPromptConfigPage, type PromptConfigPageData } from "./pages.js";
 export { renderConnectionsPage, type ConnectionsPageData } from "./connections.js";

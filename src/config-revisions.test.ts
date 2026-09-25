@@ -89,7 +89,7 @@ describe("profile revision lifecycle", () => {
 
     const other = store();
     const result = other.importConfig({ payload: exported, actor: "octocat" });
-    expect(result).toEqual({ imported: 1, skipped: 0 });
+    expect(result).toEqual({ imported: 1, skipped: 0, rolesImported: 0 });
     // Imported revisions are drafts: activation stays explicit.
     expect(other.getActiveRevision("default")).toBeUndefined();
     expect(other.listRevisions()[0]?.status).toBe("draft");
@@ -432,5 +432,124 @@ describe("profile alert overrides", () => {
     const specs = applyProfileToSpecs(jobs, config, reviewerSpecs(config), id, { level: "observation" });
     expect(specs.map((spec) => spec.role)).toEqual(["correctness"]);
     expect(specs[0]?.model).toBe("acme/fast");
+  });
+});
+
+describe("custom roles", () => {
+  const goRole = {
+    slug: "go-reviewer",
+    title: "Go reviewer",
+    description: "Reviews Go diffs for idioms",
+    prompt: "Check Go error handling, race hazards, and idiom fit.",
+    model: "acme/go-model",
+    actor: "octocat",
+  };
+
+  it("creates, updates, lists, and deletes custom roles with audit entries", () => {
+    const configs = store();
+    const created = configs.upsertCustomRole(goRole);
+    expect("role" in created).toBe(true);
+    expect(configs.getCustomRole("go-reviewer")?.title).toBe("Go reviewer");
+    expect(configs.listCustomRoles().map((role) => role.slug)).toEqual(["go-reviewer"]);
+
+    const updated = configs.upsertCustomRole({ ...goRole, title: "Go reviewer v2", timeoutMs: 90000 });
+    expect("role" in updated).toBe(true);
+    const row = configs.getCustomRole("go-reviewer");
+    expect(row?.title).toBe("Go reviewer v2");
+    expect(row?.timeout_ms).toBe(90000);
+
+    const removed = configs.deleteCustomRole("go-reviewer", "octocat");
+    expect(removed).toEqual({ ok: true });
+    expect(configs.getCustomRole("go-reviewer")).toBeUndefined();
+    expect(configs.listAudit().map((entry) => entry.action)).toEqual(
+      expect.arrayContaining(["role_created", "role_updated", "role_deleted"]),
+    );
+  });
+
+  it("rejects built-in slugs and malformed input", () => {
+    const configs = store();
+    expect(configs.upsertCustomRole({ ...goRole, slug: "correctness" })).toHaveProperty("error");
+    expect(configs.upsertCustomRole({ ...goRole, slug: "Not A Slug" })).toHaveProperty("error");
+    expect(configs.upsertCustomRole({ ...goRole, title: " " })).toHaveProperty("error");
+    expect(configs.upsertCustomRole({ ...goRole, prompt: " " })).toHaveProperty("error");
+    expect(configs.deleteCustomRole("missing", "octocat")).toHaveProperty("error");
+  });
+
+  it("lets drafts reference custom roles and blocks activation once the role is gone", () => {
+    const configs = store();
+    configs.upsertCustomRole(goRole);
+    const draft = configs.createDraft({
+      definition: { ...definition, reviewers: [{ role: "go-reviewer" }] },
+      createdBy: "octocat",
+    });
+    expect("revision" in draft).toBe(true);
+    if (!("revision" in draft)) return;
+
+    // Deleting is refused while the draft references it — force-remove to
+    // prove activation re-validates membership at that point too.
+    expect(configs.deleteCustomRole("go-reviewer", "octocat")).toHaveProperty("error");
+    configs.discardDraft(draft.revision.id, "octocat");
+    expect(configs.deleteCustomRole("go-reviewer", "octocat")).toEqual({ ok: true });
+
+    const orphan = configs.createDraft({
+      definition: { ...definition, reviewers: [{ role: "go-reviewer" }] },
+      createdBy: "octocat",
+    });
+    expect(orphan).toHaveProperty("error");
+    if (!("error" in orphan)) return;
+    expect(orphan.issues.join(" ")).toContain("unknown specialist role");
+  });
+
+  it("refuses deletion while a non-retired revision references the role", () => {
+    const configs = store();
+    configs.upsertCustomRole(goRole);
+    const draft = configs.createDraft({
+      definition: { ...definition, reviewers: [{ role: "go-reviewer" }] },
+      createdBy: "octocat",
+    });
+    if (!("revision" in draft)) throw new Error("draft failed");
+    const activated = configs.activateRevision(draft.revision.id, "octocat");
+    if (!("revision" in activated)) throw new Error("activate failed");
+
+    expect(configs.deleteCustomRole("go-reviewer", "octocat")).toHaveProperty("error");
+    configs.deactivateRevision(activated.revision.id, "octocat");
+    expect(configs.deleteCustomRole("go-reviewer", "octocat")).toEqual({ ok: true });
+  });
+
+  it("exports and imports custom roles so imported revisions validate", () => {
+    const configs = store();
+    configs.upsertCustomRole(goRole);
+    const draft = configs.createDraft({
+      definition: { ...definition, reviewers: [{ role: "go-reviewer" }] },
+      createdBy: "octocat",
+    });
+    if (!("revision" in draft)) throw new Error("draft failed");
+    configs.activateRevision(draft.revision.id, "octocat");
+    const exported = configs.exportConfig();
+    expect(exported.roles.map((role) => role.slug)).toEqual(["go-reviewer"]);
+
+    const other = store();
+    const result = other.importConfig({ payload: exported, actor: "octocat" });
+    expect(result).toEqual({ imported: 1, skipped: 0, rolesImported: 1 });
+    // The imported revision passes membership validation on activation.
+    const imported = other.listRevisions()[0];
+    expect(other.activateRevision(imported!.id, "octocat")).toHaveProperty("revision");
+  });
+
+  it("resolves a custom role's title and model into reviewer specs", () => {
+    const jobs = new JobStore(openDb(":memory:"));
+    jobs.configs.upsertCustomRole(goRole);
+    const draft = jobs.configs.createDraft({
+      definition: { ...definition, reviewers: [{ role: "go-reviewer" }, { role: "correctness" }] },
+      createdBy: "octocat",
+    });
+    if (!("revision" in draft)) throw new Error("draft failed");
+    const config = loadConfig({ OPENCODE_REVIEWER_MODEL: "env/model" });
+    const specs = applyProfileToSpecs(jobs, config, reviewerSpecs(config), draft.revision.id, {
+      wholeProfileSet: true,
+    });
+    const go = specs.find((spec) => spec.role === "go-reviewer");
+    expect(go?.title).toBe("Go reviewer");
+    expect(go?.model).toBe("acme/go-model");
   });
 });

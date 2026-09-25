@@ -6,7 +6,7 @@ import { fingerprintFinding, stripHtmlComments } from "../findings/identity.js";
 import { POLICIES_WITH_EXTERNAL, POLICIES_WITH_INTERNAL } from "../routing/types.js";
 import { LIVE_JOB_STATES } from "../config.js";
 import type { ProfileFieldErrors, ProfileFormValues } from "../config-form.js";
-import type { ProfileDefinition, ProfileRouteRow } from "../config-revisions.js";
+import type { CustomRoleRow, ProfileDefinition, ProfileRouteRow } from "../config-revisions.js";
 import { initialProfileFormValues, profileFormValuesFromDefinition } from "../config-form.js";
 import type { EffectiveConfigEntry } from "../config-effective.js";
 import type { Severity } from "../schema.js";
@@ -1052,6 +1052,9 @@ export interface ConfigRevisionView {
 export interface ConfigPageData {
   revisions: ConfigRevisionView[];
   profileRoutes?: ProfileRouteRow[];
+  customRoles?: CustomRoleRow[];
+  /** Prefilled custom-role form (?edit_role=slug or a failed save re-render). */
+  roleForm?: { values: RoleFormValues; errors?: string };
   audit: Array<{ id: number; action: string; actor: string; revision_id: number | null; detail: string | null; created_at: string }>;
   csrfToken?: string;
   canWrite: boolean;
@@ -1526,6 +1529,85 @@ function repoRoutingSection(data: ConfigPageData): string {
     ${addForm}`;
 }
 
+/** The custom-role create/edit form's decoded values (seconds stay strings — exactness like reviewer timeouts). */
+export interface RoleFormValues {
+  slug: string;
+  title: string;
+  description: string;
+  prompt: string;
+  model: string;
+  timeoutSeconds: string;
+}
+
+export function roleFormValuesFromRole(role: CustomRoleRow): RoleFormValues {
+  return {
+    slug: role.slug,
+    title: role.title,
+    description: role.description,
+    prompt: role.prompt,
+    model: role.model ?? "",
+    timeoutSeconds: role.timeout_ms != null ? String(role.timeout_ms / 1000) : "",
+  };
+}
+
+function customRolesSection(data: ConfigPageData): string {
+  const roles = data.customRoles ?? [];
+  const csrf = csrfInput(data.csrfToken);
+  const rows = roles
+    .map(
+      (role) => `<p class="muted"><code>${escapeHtml(role.slug)}</code> — <strong>${escapeHtml(role.title)}</strong>${
+        role.model ? ` (${escapeHtml(role.model)})` : ""
+      }${role.description ? ` — ${escapeHtml(role.description)}` : ""}
+        ${
+          data.canWrite
+            ? `<a href="/config/profiles?edit_role=${encodeURIComponent(role.slug)}">Edit</a>
+        <form method="post" action="/config/roles/${encodeURIComponent(role.slug)}/delete" class="inline-form">
+          ${csrf}
+          <button type="submit" class="btn-secondary">Delete</button>
+        </form>`
+            : ""
+        }</p>`,
+    )
+    .join("");
+  const values = data.roleForm?.values;
+  const editing = Boolean(values?.slug && roles.some((role) => role.slug === values.slug));
+  const form = data.canWrite
+    ? `<form method="post" action="/config/roles" class="operator-form">
+        ${csrf}
+        ${data.roleForm?.errors ? `<p class="error" role="alert">${escapeHtml(data.roleForm.errors)}</p>` : ""}
+        <label>Role id (slug — used in profile reviewer lists)
+          <input name="role_slug" value="${escapeHtml(values?.slug ?? "")}" placeholder="go-reviewer" maxlength="49" ${editing ? "readonly" : ""} required/>
+        </label>
+        <label>Title
+          <input name="role_title" value="${escapeHtml(values?.title ?? "")}" placeholder="Go reviewer" required/>
+        </label>
+        <label>Description (optional — shown to the router when it picks reviewers)
+          <input name="role_description" value="${escapeHtml(values?.description ?? "")}" placeholder="Reviews Go diffs for idioms, error handling, race hazards"/>
+        </label>
+        <label>Prompt body (what this specialist checks; guardrails are added at run time)
+          <textarea name="role_prompt" rows="8" required>${escapeHtml(values?.prompt ?? "")}</textarea>
+        </label>
+        <label>Model override (optional; provider/model)
+          ${modelPicker({
+            name: "role_model",
+            value: values?.model ?? "",
+            models: data.profileEditor?.modelCatalog ?? [],
+            emptyLabel: "— default —",
+            allowCustom: !data.profileEditor?.catalogEnforced,
+          })}
+        </label>
+        <label>Timeout in seconds (optional, decimals allowed)
+          <input type="number" step="any" min="0" name="role_timeout" value="${escapeHtml(values?.timeoutSeconds ?? "")}"/>
+        </label>
+        <p><button type="submit" class="btn">${editing ? "Save role" : "Create role"}</button>${editing ? ` <a href="/config/profiles">Cancel edit</a>` : ""}</p>
+      </form>`
+    : "";
+  return `<h2>Custom roles</h2>
+    <p class="muted">Operator-defined specialists usable anywhere a built-in role works — profile reviewer lists, alert overrides, and router picks. Deleting a role still referenced by a profile is refused.</p>
+    ${rows || `<p class="muted">No custom roles yet.</p>`}
+    ${form}`;
+}
+
 /** /config/profiles: versioned review profiles — drafts are created here but
  * edited on their own page (/config/profiles/drafts/:id/edit) so list-page
  * re-renders cannot lose in-progress form state. */
@@ -1557,6 +1639,7 @@ export function renderProfilesPage(data: ConfigPageData): string {
     <h2>Active</h2>
     ${active.map((revision) => revisionCard(revision, data)).join("") || `<p class="muted">No active revision — env configuration applies.</p>`}
     ${repoRoutingSection(data)}
+    ${customRolesSection(data)}
     <h2>Drafts</h2>
     ${drafts.map((revision) => revisionCard(revision, data)).join("") || `<p class="muted">No open drafts.</p>`}
     <h2>Retired</h2>
