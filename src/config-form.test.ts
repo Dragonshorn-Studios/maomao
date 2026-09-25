@@ -136,6 +136,40 @@ describe("profileFormToDefinition", () => {
     });
   });
 
+  it("encodes alert overrides and reports violations on the alert fields", () => {
+    const ok = profileFormToDefinition(
+      decodeProfileForm(
+        formBody({
+          name: "alerts",
+          reviewer_count: "2",
+          reviewer_role_0: "correctness",
+          reviewer_role_1: "security",
+          alert_poison: "security, correctness",
+        }),
+      ),
+    );
+    expect(ok).toMatchObject({ ok: true });
+    if (!ok.ok) return;
+    expect(ok.definition).toMatchObject({ alerts: { poisonAlert: ["security", "correctness"] } });
+
+    const outside = profileFormToDefinition(
+      decodeProfileForm(
+        formBody({
+          name: "alerts",
+          reviewer_count: "1",
+          reviewer_role_0: "correctness",
+          alert_diagnosis: "correctness, tests",
+        }),
+      ),
+    );
+    expect(outside.ok).toBe(false);
+    if (outside.ok) return;
+    expect(outside.errors.alert_diagnosis).toContain("not in this profile's reviewer list");
+
+    const roundTrip = profileFormValuesFromDefinition(ok.definition, null);
+    expect(roundTrip.alertPoison).toBe("security, correctness");
+  });
+
   it("drops fully empty reviewer rows and omits blank optionals", () => {
     const result = profileFormToDefinition(
       decodeProfileForm(

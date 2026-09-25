@@ -49,6 +49,10 @@ export interface ProfileFormValues {
   maxCostUsd: string;
   maxTokens: string;
   budgetBehavior: string;
+  /** Comma-separated role lists per alert level; "" = router picks. */
+  alertObservation: string;
+  alertDiagnosis: string;
+  alertPoison: string;
 }
 
 export type ProfileFormAction =
@@ -69,7 +73,10 @@ export type ProfileFieldKey =
   | "min_severity"
   | "max_cost_usd"
   | "max_tokens"
-  | "budget_behavior";
+  | "budget_behavior"
+  | "alert_observation"
+  | "alert_diagnosis"
+  | "alert_poison";
 
 export type ProfileFieldErrors = { form?: string } & {
   [key: string]: string | undefined;
@@ -86,6 +93,9 @@ export function initialProfileFormValues(): ProfileFormValues {
     maxCostUsd: "",
     maxTokens: "",
     budgetBehavior: "degrade",
+    alertObservation: "",
+    alertDiagnosis: "",
+    alertPoison: "",
   };
 }
 
@@ -120,6 +130,9 @@ export function decodeProfileForm(body: Record<string, unknown>): ProfileFormVal
     maxCostUsd: asString(body.max_cost_usd).trim(),
     maxTokens: asString(body.max_tokens).trim(),
     budgetBehavior: normalizeBudgetBehavior(asString(body.budget_behavior)),
+    alertObservation: asString(body.alert_observation).trim(),
+    alertDiagnosis: asString(body.alert_diagnosis).trim(),
+    alertPoison: asString(body.alert_poison).trim(),
   };
 }
 
@@ -258,6 +271,19 @@ export function profileFormToDefinition(
   else if (tokens !== undefined) definition.maxTotalTokens = tokens;
   definition.onBudgetExceeded = normalizeBudgetBehavior(values.budgetBehavior);
 
+  const alertFields = [
+    ["observation", values.alertObservation, "alert_observation"],
+    ["diagnosis", values.alertDiagnosis, "alert_diagnosis"],
+    ["poisonAlert", values.alertPoison, "alert_poison"],
+  ] as const;
+  const alerts: Record<string, string[]> = {};
+  for (const [level, raw, field] of alertFields) {
+    const roles = raw.split(",").map((role) => role.trim()).filter((role) => role !== "");
+    if (roles.length > 0) alerts[level] = roles;
+    else if (raw !== "" && !errors[field]) errors[field] = "list reviewer roles, comma-separated";
+  }
+  if (Object.keys(alerts).length > 0) definition.alerts = alerts;
+
   const check = profileDefinitionSchema.safeParse(definition);
   if (!check.success) {
     for (const issue of check.error.issues) {
@@ -289,6 +315,9 @@ function zodPathToFieldKey(path: PropertyKey[], formIndices: readonly number[]):
   if (head === "maxTotalCostUsd") return "max_cost_usd";
   if (head === "maxTotalTokens") return "max_tokens";
   if (head === "onBudgetExceeded") return "budget_behavior";
+  if (head === "alerts" && index === "observation") return "alert_observation";
+  if (head === "alerts" && index === "diagnosis") return "alert_diagnosis";
+  if (head === "alerts" && index === "poisonAlert") return "alert_poison";
   if (head === "reviewers" && typeof index === "number") {
     const formIndex = formIndices[index];
     if (formIndex == null) return null;
@@ -317,6 +346,7 @@ export function profileFormValuesFromDefinition(
     maxTotalCostUsd?: number;
     maxTotalTokens?: number;
     onBudgetExceeded?: string;
+    alerts?: { observation?: string[]; diagnosis?: string[]; poisonAlert?: string[] };
   };
   return {
     name: def.name ?? "",
@@ -332,5 +362,8 @@ export function profileFormValuesFromDefinition(
     maxCostUsd: def.maxTotalCostUsd != null ? String(def.maxTotalCostUsd) : "",
     maxTokens: def.maxTotalTokens != null ? String(def.maxTotalTokens) : "",
     budgetBehavior: normalizeBudgetBehavior(def.onBudgetExceeded ?? ""),
+    alertObservation: def.alerts?.observation?.join(", ") ?? "",
+    alertDiagnosis: def.alerts?.diagnosis?.join(", ") ?? "",
+    alertPoison: def.alerts?.poisonAlert?.join(", ") ?? "",
   };
 }

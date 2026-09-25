@@ -1156,6 +1156,16 @@ function profileSummary(definition: ProfileDefinition): string {
   parts.push(`publish ≥ ${definition.minPublishableSeverity}`);
   if (definition.maxTotalCostUsd) parts.push(`≤ $${definition.maxTotalCostUsd}`);
   if (definition.maxTotalTokens) parts.push(`≤ ${definition.maxTotalTokens.toLocaleString("en-US")} tokens`);
+  const alertParts = (
+    [
+      ["observation", definition.alerts?.observation],
+      ["diagnosis", definition.alerts?.diagnosis],
+      ["poison-alert", definition.alerts?.poisonAlert],
+    ] as const
+  )
+    .filter((pair) => (pair[1]?.length ?? 0) > 0)
+    .map(([level, roles]) => `${level} → ${(roles ?? []).join(", ")}`);
+  if (alertParts.length > 0) parts.push(`alerts: ${alertParts.join(" · ")}`);
   return parts.join(" · ");
 }
 
@@ -1377,6 +1387,22 @@ export function renderProfileForm(
         <legend>Reviewers (in order; roles not listed are disabled)</legend>
         ${reviewerRows}
         <button type="submit" name="action" value="add">Add reviewer</button>
+      </fieldset>
+      <fieldset>
+        <legend>Alert overrides (optional)</legend>
+        <p class="hint">Roles from the reviewer list above, comma-separated. When the router lands on that alert level, this list runs instead of the router's picks — leave blank to keep routed reviewers.</p>
+        <label>Observation
+          <input name="alert_observation" value="${escapeHtml(values.alertObservation)}" placeholder="e.g. correctness" ${invalidAttr("alert_observation")} ${describedBy("alert_observation")}/>
+        </label>
+        ${err("alert_observation")}
+        <label>Diagnosis
+          <input name="alert_diagnosis" value="${escapeHtml(values.alertDiagnosis)}" placeholder="e.g. correctness, security" ${invalidAttr("alert_diagnosis")} ${describedBy("alert_diagnosis")}/>
+        </label>
+        ${err("alert_diagnosis")}
+        <label>Poison alert
+          <input name="alert_poison" value="${escapeHtml(values.alertPoison)}" placeholder="e.g. security, maintainer" ${invalidAttr("alert_poison")} ${describedBy("alert_poison")}/>
+        </label>
+        ${err("alert_poison")}
       </fieldset>
       <fieldset>
         <legend>Publishing</legend>

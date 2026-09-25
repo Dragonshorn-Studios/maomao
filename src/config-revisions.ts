@@ -35,8 +35,33 @@ export const profileDefinitionSchema = z
     maxTotalTokens: z.number().int().positive().max(PROFILE_MAX_TOTAL_TOKENS).optional(),
     /** What happens when a cost/token ceiling is hit mid-pipeline. */
     onBudgetExceeded: z.enum(["degrade", "fail"]).default("degrade"),
+    /**
+     * Per alert level, the roles that run instead of the router's picks —
+     * subsets of `reviewers` (models/timeouts inherit the base entry). The
+     * router still decides the level; the profile decides who shows up.
+     */
+    alerts: z
+      .object({
+        observation: z.array(z.string()).min(1).optional(),
+        diagnosis: z.array(z.string()).min(1).optional(),
+        poisonAlert: z.array(z.string()).min(1).optional(),
+      })
+      .strict()
+      .optional(),
   })
-  .strict();
+  .strict()
+  .superRefine((definition, ctx) => {
+    const allowed = new Set(definition.reviewers.map((reviewer) => reviewer.role));
+    for (const [level, roles] of Object.entries(definition.alerts ?? {})) {
+      roles?.forEach((role, index) => {
+        if (!KNOWN_ROLE_IDS.includes(role)) {
+          ctx.addIssue({ code: "custom", path: ["alerts", level, index], message: `unknown specialist role` });
+        } else if (!allowed.has(role)) {
+          ctx.addIssue({ code: "custom", path: ["alerts", level, index], message: `${role} is not in this profile's reviewer list` });
+        }
+      });
+    }
+  });
 
 export type ProfileDefinition = z.infer<typeof profileDefinitionSchema>;
 

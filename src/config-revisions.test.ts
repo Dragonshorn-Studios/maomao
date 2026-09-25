@@ -366,3 +366,71 @@ describe("default profile seed", () => {
     expect(applyProfileToSpecs(jobs, config, envSpecs, draft.id)).toEqual(envSpecs);
   });
 });
+
+describe("profile alert overrides", () => {
+  const alerted = {
+    name: "default",
+    reviewers: [
+      { role: "correctness", model: "acme/fast" },
+      { role: "security" },
+      { role: "maintainer" },
+    ],
+    minPublishableSeverity: "info",
+    alerts: { poisonAlert: ["security", "maintainer"], observation: ["correctness"] },
+  };
+
+  const alertedStore = () => {
+    const jobs = new JobStore(openDb(":memory:"));
+    const draft = jobs.configs.createDraft({ definition: alerted, createdBy: "octocat" });
+    if (!("revision" in draft)) throw new Error(draft.error);
+    jobs.configs.activateRevision(draft.revision.id, "octocat");
+    return { jobs, id: draft.revision.id };
+  };
+
+  it("stores alert lists on the revision", () => {
+    const { jobs, id } = alertedStore();
+    expect(jobs.configs.getRevision(id)?.definition.alerts).toEqual(alerted.alerts);
+  });
+
+  it("rejects alert roles outside the reviewer list or unknown", () => {
+    const configs = store();
+    const notListed = configs.createDraft({
+      definition: { ...alerted, alerts: { poisonAlert: ["security", "tests"] } },
+      createdBy: "octocat",
+    });
+    expect(notListed).toHaveProperty("error");
+    const unknown = configs.createDraft({
+      definition: { ...alerted, alerts: { diagnosis: ["no-such-role"] } },
+      createdBy: "octocat",
+    });
+    expect(unknown).toHaveProperty("error");
+  });
+
+  it("runs the alert list in profile order instead of the router's picks at that level", () => {
+    const { jobs, id } = alertedStore();
+    const config = loadConfig({ OPENCODE_REVIEWER_MODEL: "env/model" });
+    const specs = applyProfileToSpecs(jobs, config, reviewerSpecs(config, ["correctness"]), id, {
+      requestedRoles: ["correctness"],
+      level: "poison-alert",
+    });
+    expect(specs.map((spec) => spec.role)).toEqual(["security", "maintainer"]);
+  });
+
+  it("keeps routed reviewers for levels without an override", () => {
+    const { jobs, id } = alertedStore();
+    const config = loadConfig();
+    const specs = applyProfileToSpecs(jobs, config, reviewerSpecs(config, ["security", "maintainer"]), id, {
+      requestedRoles: ["security", "maintainer"],
+      level: "diagnosis",
+    });
+    expect(specs.map((spec) => spec.role)).toEqual(["security", "maintainer"]);
+  });
+
+  it("observation override inherits the base entry's model", () => {
+    const { jobs, id } = alertedStore();
+    const config = loadConfig();
+    const specs = applyProfileToSpecs(jobs, config, reviewerSpecs(config), id, { level: "observation" });
+    expect(specs.map((spec) => spec.role)).toEqual(["correctness"]);
+    expect(specs[0]?.model).toBe("acme/fast");
+  });
+});

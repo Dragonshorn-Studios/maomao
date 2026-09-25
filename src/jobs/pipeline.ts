@@ -1592,15 +1592,20 @@ async function routeSpecialists(
     decision.profile === "poison-alert" ? config.poisonAlert.policy : null,
     { routing_mode: config.routing.mode },
   );
-  store.ensureReviewerRuns(
-    job.id,
-    // Pass the router's raw picks: reviewerSpecs filters by env membership,
-    // which would silently drop a profile-only role the router chose.
-    applyProfileToSpecs(store, config, reviewerSpecs(config, decision.reviewers), job.profile_revision_id, { requestedRoles: decision.reviewers }),
-  );
+  // Pass the router's raw picks: reviewerSpecs filters by env membership,
+  // which would silently drop a profile-only role the router chose. When the
+  // profile defines an alert-level reviewer list it replaces the picks here.
+  const runSpecs = applyProfileToSpecs(store, config, reviewerSpecs(config, decision.reviewers), job.profile_revision_id, {
+    requestedRoles: decision.reviewers,
+    level: decision.profile,
+  });
+  store.ensureReviewerRuns(job.id, runSpecs);
+  const runRoles = runSpecs.map((spec) => spec.role).join(", ");
   store.log(
     job.id,
-    `Routed profile=${decision.profile} source=${decision.source} reviewers=${decision.reviewers.join(", ")} reason=${decision.reason}`,
+    `Routed profile=${decision.profile} source=${decision.source} reviewers=${decision.reviewers.join(", ")}` +
+      (runRoles !== decision.reviewers.join(", ") ? ` → profile ${decision.profile} list runs ${runRoles}` : "") +
+      ` reason=${decision.reason}`,
   );
 }
 
