@@ -1277,6 +1277,25 @@ export function renderProfileForm(
   const invalidAttr = (key: string) => (errors?.[key] ? 'aria-invalid="true"' : "");
   const describedBy = (key: string) => (errors?.[key] ? `aria-describedby="${key}-error"` : "");
 
+  const reviewerRoles = [...new Set(values.reviewers.map((row) => row.role).filter((role) => role !== ""))];
+  const alertRoleGroup = (label: string, field: string, value: string) => {
+    const checked = new Set(value.split(",").map((role) => role.trim()).filter((role) => role !== ""));
+    const pills =
+      reviewerRoles.length === 0
+        ? `<span class="hint">Add reviewers above to pick alert sets.</span>`
+        : reviewerRoles
+            .map(
+              (role) =>
+                `<label class="role-check"><input type="checkbox" name="${field}[]" value="${escapeHtml(role)}"${checked.has(role) ? " checked" : ""}/><span>${escapeHtml(role)}</span></label>`,
+            )
+            .join("");
+    return `<div class="alert-level" role="group" aria-label="${escapeHtml(label)}"${errors?.[field] ? ` aria-invalid="true" aria-describedby="${field}-error"` : ""}>
+      <span class="alert-level-name">${escapeHtml(label)}</span>
+      ${pills}
+    </div>
+    ${err(field)}`;
+  };
+
   const roleOptions = (selected: string) =>
     [`<option value="">— pick a role —</option>`]
       .concat(
@@ -1390,19 +1409,10 @@ export function renderProfileForm(
       </fieldset>
       <fieldset>
         <legend>Alert overrides (optional)</legend>
-        <p class="hint">Roles from the reviewer list above, comma-separated. When the router lands on that alert level, this list runs instead of the router's picks — leave blank to keep routed reviewers.</p>
-        <label>Observation
-          <input name="alert_observation" value="${escapeHtml(values.alertObservation)}" placeholder="e.g. correctness" ${invalidAttr("alert_observation")} ${describedBy("alert_observation")}/>
-        </label>
-        ${err("alert_observation")}
-        <label>Diagnosis
-          <input name="alert_diagnosis" value="${escapeHtml(values.alertDiagnosis)}" placeholder="e.g. correctness, security" ${invalidAttr("alert_diagnosis")} ${describedBy("alert_diagnosis")}/>
-        </label>
-        ${err("alert_diagnosis")}
-        <label>Poison alert
-          <input name="alert_poison" value="${escapeHtml(values.alertPoison)}" placeholder="e.g. security, maintainer" ${invalidAttr("alert_poison")} ${describedBy("alert_poison")}/>
-        </label>
-        ${err("alert_poison")}
+        <p class="hint">Pick roles from the reviewer list above. When the router lands on that alert level, the checked set runs instead of the router's picks — check nothing to keep routed reviewers.</p>
+        ${alertRoleGroup("Observation", "alert_observation", values.alertObservation)}
+        ${alertRoleGroup("Diagnosis", "alert_diagnosis", values.alertDiagnosis)}
+        ${alertRoleGroup("Poison alert", "alert_poison", values.alertPoison)}
       </fieldset>
       <fieldset>
         <legend>Publishing</legend>

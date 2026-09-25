@@ -103,6 +103,15 @@ export function initialProfileFormValues(): ProfileFormValues {
 export const PROFILE_BUDGET_BEHAVIORS = ["degrade", "fail"] as const;
 
 const asString = (value: unknown): string => (typeof value === "string" ? value : "");
+/** Checkbox groups post `name[]` as a string array (or a single value); normalizes to a comma list. */
+const asRoleList = (value: unknown): string => {
+  const list = Array.isArray(value) ? value : value == null ? [] : [value];
+  return list
+    .filter((entry): entry is string => typeof entry === "string")
+    .map((entry) => entry.trim())
+    .filter((entry) => entry !== "")
+    .join(", ");
+};
 const asIndex = (value: unknown): number => {
   const raw = asString(value).trim();
   if (raw === "") return -1;
@@ -130,9 +139,9 @@ export function decodeProfileForm(body: Record<string, unknown>): ProfileFormVal
     maxCostUsd: asString(body.max_cost_usd).trim(),
     maxTokens: asString(body.max_tokens).trim(),
     budgetBehavior: normalizeBudgetBehavior(asString(body.budget_behavior)),
-    alertObservation: asString(body.alert_observation).trim(),
-    alertDiagnosis: asString(body.alert_diagnosis).trim(),
-    alertPoison: asString(body.alert_poison).trim(),
+    alertObservation: asRoleList(body["alert_observation[]"] ?? body.alert_observation),
+    alertDiagnosis: asRoleList(body["alert_diagnosis[]"] ?? body.alert_diagnosis),
+    alertPoison: asRoleList(body["alert_poison[]"] ?? body.alert_poison),
   };
 }
 
