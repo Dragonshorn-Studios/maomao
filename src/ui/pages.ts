@@ -1052,9 +1052,6 @@ export interface ConfigRevisionView {
 export interface ConfigPageData {
   revisions: ConfigRevisionView[];
   profileRoutes?: ProfileRouteRow[];
-  customRoles?: CustomRoleRow[];
-  /** Prefilled custom-role form (?edit_role=slug or a failed save re-render). */
-  roleForm?: { values: RoleFormValues; errors?: string };
   audit: Array<{ id: number; action: string; actor: string; revision_id: number | null; detail: string | null; created_at: string }>;
   csrfToken?: string;
   canWrite: boolean;
@@ -1550,7 +1547,7 @@ export function roleFormValuesFromRole(role: CustomRoleRow): RoleFormValues {
   };
 }
 
-function customRolesSection(data: ConfigPageData): string {
+function customRolesSection(data: PromptConfigPageData): string {
   const roles = data.customRoles ?? [];
   const csrf = csrfInput(data.csrfToken);
   const rows = roles
@@ -1560,7 +1557,8 @@ function customRolesSection(data: ConfigPageData): string {
       }${role.description ? ` — ${escapeHtml(role.description)}` : ""}
         ${
           data.canWrite
-            ? `<a href="/config/profiles?edit_role=${encodeURIComponent(role.slug)}">Edit</a>
+            ? `<a href="/config/prompts?edit_role=${encodeURIComponent(role.slug)}">Edit</a>
+        <a href="/config/prompts?duplicate_role=${encodeURIComponent(role.slug)}">Duplicate</a>
         <form method="post" action="/config/roles/${encodeURIComponent(role.slug)}/delete" class="inline-form">
           ${csrf}
           <button type="submit" class="btn-secondary">Delete</button>
@@ -1570,7 +1568,7 @@ function customRolesSection(data: ConfigPageData): string {
     )
     .join("");
   const values = data.roleForm?.values;
-  const editing = Boolean(values?.slug && roles.some((role) => role.slug === values.slug));
+  const editing = data.roleForm?.editing === true;
   const form = data.canWrite
     ? `<form method="post" action="/config/roles" class="operator-form">
         ${csrf}
@@ -1591,15 +1589,15 @@ function customRolesSection(data: ConfigPageData): string {
           ${modelPicker({
             name: "role_model",
             value: values?.model ?? "",
-            models: data.profileEditor?.modelCatalog ?? [],
+            models: data.roleModelCatalog ?? [],
             emptyLabel: "— default —",
-            allowCustom: !data.profileEditor?.catalogEnforced,
+            allowCustom: data.roleCatalogEnforced !== true,
           })}
         </label>
         <label>Timeout in seconds (optional, decimals allowed)
           <input type="number" step="any" min="0" name="role_timeout" value="${escapeHtml(values?.timeoutSeconds ?? "")}"/>
         </label>
-        <p><button type="submit" class="btn">${editing ? "Save role" : "Create role"}</button>${editing ? ` <a href="/config/profiles">Cancel edit</a>` : ""}</p>
+        <p><button type="submit" class="btn">${editing ? "Save role" : "Create role"}</button>${editing || data.roleForm ? ` <a href="/config/prompts">Cancel</a>` : ""}</p>
       </form>`
     : "";
   return `<h2>Custom roles</h2>
@@ -1639,7 +1637,6 @@ export function renderProfilesPage(data: ConfigPageData): string {
     <h2>Active</h2>
     ${active.map((revision) => revisionCard(revision, data)).join("") || `<p class="muted">No active revision — env configuration applies.</p>`}
     ${repoRoutingSection(data)}
-    ${customRolesSection(data)}
     <h2>Drafts</h2>
     ${drafts.map((revision) => revisionCard(revision, data)).join("") || `<p class="muted">No open drafts.</p>`}
     <h2>Retired</h2>
@@ -1802,6 +1799,12 @@ export interface PromptConfigPageData {
   revisions: PromptRevisionView[];
   fixtures: PromptFixtureView[];
   evaluations: PromptEvaluationView[];
+  customRoles?: CustomRoleRow[];
+  /** Prefilled custom-role form (?edit_role= / ?duplicate_role= or a failed save re-render). */
+  roleForm?: { values: RoleFormValues; errors?: string; editing?: boolean };
+  /** Catalog-filtered models for the role model picker (MODEL_CATALOG applies to role specs). */
+  roleModelCatalog?: Array<{ id: string; hint?: string }>;
+  roleCatalogEnforced?: boolean;
   /**
    * Model catalog + discovered models for the evaluation model picker —
    * intentionally unfiltered (evaluatePrompt accepts any model and the eval
@@ -1915,6 +1918,11 @@ function promptRoleCard(
       <pre class="log-panel">${escapeHtml(currentBody)}</pre>
     </details>
     ${overrideForm}
+    ${
+      data.canWrite
+        ? `<p class="muted"><a href="/config/prompts?duplicate_role=${encodeURIComponent(role.id)}">Duplicate into a custom role</a></p>`
+        : ""
+    }
     ${drafts.map((revision) => promptRevisionCard(revision, data)).join("")}
     ${history}
   </article>`;
@@ -1994,6 +2002,7 @@ export function renderPromptConfigPage(data: PromptConfigPageData): string {
     ${writeGate}
     <h2>Roles</h2>
     <ul class="prompt-role-list">${roleCards}${unknown}</ul>
+    ${customRolesSection(data)}
     <h2>Evaluation fixtures</h2>
     ${fixtureForm}
     ${data.fixtures.length > 0 ? `<table class="config-audit"><thead><tr><th>ID</th><th>Name</th><th>Diff chars</th><th>Expectations</th><th>Saved by</th></tr></thead><tbody>${fixtureRows}</tbody></table>` : `<p class="muted">No fixtures saved.</p>`}

@@ -23,7 +23,7 @@ import { LIVE_JOB_STATES } from "./config.js";
 import { effectiveConfigEntries } from "./config-effective.js";
 import type { ProfileFieldErrors, ProfileFormValues } from "./config-form.js";
 import { decodeProfileAction, decodeProfileForm, applyProfileAction, profileFormToDefinition } from "./config-form.js";
-import { KNOWN_REVIEWER_ROLES } from "./prompts.js";
+import { KNOWN_REVIEWER_ROLES, promptBodyFromRolePrompt } from "./prompts.js";
 import { subscribe } from "./events.js";
 import { redactSecrets, truncate } from "./util.js";
 import { readFileSync } from "node:fs";
@@ -1089,19 +1089,16 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
       error?: string;
       canWrite?: boolean;
       form?: { values: ProfileFormValues; errors?: ProfileFieldErrors };
-      roleForm?: { values: RoleFormValues; errors?: string };
     } = {},
   ): ConfigPageData => ({
     identity: c.get("identity"),
     revisions: ctx.store.configs.listRevisions(),
     profileRoutes: ctx.store.configs.listProfileRoutes(),
-    customRoles: ctx.store.configs.listCustomRoles(),
     audit: [],
     canWrite: opts.canWrite ?? gateOn,
     csrfToken: gateOn ? ensureCsrfToken(c, ctx.config.uiSessionSecret) : undefined,
     notice: opts.notice,
     error: opts.error,
-    roleForm: opts.roleForm,
     profileEditor: { ...profileEditorBase(), ...(opts.form ? { form: opts.form } : {}) },
   });
 
@@ -1403,8 +1400,6 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
     "draft-discarded": "Draft discarded.",
     "route-added": "Repo route added.",
     "route-removed": "Repo route removed.",
-    "role-saved": "Custom role saved.",
-    "role-deleted": "Custom role deleted.",
     imported: "Configuration imported as drafts.",
     "models-refreshed": "Model list refreshed from opencode models.",
     "models-refresh-failed": "Model list refresh failed — see the note in the profile editor for details.",
@@ -1412,16 +1407,7 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
 
   app.get("/config/profiles", (c) => {
     if (!gateOn) return c.redirect("/", 302);
-    const editSlug = c.req.query("edit_role");
-    const editRole = editSlug ? ctx.store.configs.getCustomRole(editSlug) : undefined;
-    return c.html(
-      renderProfilesPage(
-        profilesPageData(c, {
-          notice: profileNotices[c.req.query("notice") ?? ""],
-          ...(editRole ? { roleForm: { values: roleFormValuesFromRole(editRole) } } : {}),
-        }),
-      ),
-    );
+    return c.html(renderProfilesPage(profilesPageData(c, { notice: profileNotices[c.req.query("notice") ?? ""] })));
   });
 
   app.get("/config/profiles/new", (c) => {
@@ -1754,13 +1740,16 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
     });
     if ("error" in result) {
       return c.html(
-        renderProfilesPage(
-          profilesPageData(c, { roleForm: { values, errors: result.error }, error: result.error }),
+        renderPromptConfigPage(
+          promptsPageData(c, {
+            roleForm: { values, errors: result.error, editing: Boolean(ctx.store.configs.getCustomRole(values.slug)) },
+            error: result.error,
+          }),
         ),
         400,
       );
     }
-    return c.redirect("/config/profiles?notice=role-saved", 302);
+    return c.redirect("/config/prompts?notice=role-saved", 302);
   });
 
   app.post("/config/roles/:slug/delete", (c) => {
@@ -1768,8 +1757,8 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
     const actor = configActor(c);
     if (!actor) return configWriteDenied(c);
     const result = ctx.store.configs.deleteCustomRole(c.req.param("slug"), actor.login);
-    if ("error" in result) return renderProfilesWithError(c, result.error, 400);
-    return c.redirect("/config/profiles?notice=role-deleted", 302);
+    if ("error" in result) return renderPromptError(c, result.error, 400);
+    return c.redirect("/config/prompts?notice=role-deleted", 302);
   });
 
   app.post("/config/routes", async (c) => {
@@ -1864,34 +1853,43 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
       created_at: evaluation.created_at,
     }));
 
+  const promptsPageData = (
+    c: Context<AppEnv>,
+    opts: {
+      notice?: string;
+      error?: string;
+      canWrite?: boolean;
+      roleForm?: { values: RoleFormValues; errors?: string; editing?: boolean };
+    } = {},
+  ) => ({
+    identity: c.get("identity"),
+    revisions: promptViews(),
+    fixtures: fixtureViews(),
+    evaluations: evaluationViews(),
+    modelCatalog: mergedModelCatalog(),
+    customRoles: ctx.store.configs.listCustomRoles(),
+    roleModelCatalog: profileEditorBase().modelCatalog,
+    roleCatalogEnforced: ctx.config.modelCatalog.length > 0,
+    canWrite: opts.canWrite ?? gateOn,
+    csrfToken: gateOn ? ensureCsrfToken(c, ctx.config.uiSessionSecret) : undefined,
+    notice: opts.notice,
+    error: opts.error,
+    roleForm: opts.roleForm,
+  });
+
   const promptWriteDenied = (c: Context<AppEnv>) =>
     c.html(
-      renderPromptConfigPage({
-        identity: c.get("identity"),
-        revisions: promptViews(),
-        fixtures: fixtureViews(),
-        evaluations: evaluationViews(),
-        modelCatalog: mergedModelCatalog(),
-        canWrite: false,
-        error: "Writing prompt configuration requires an operator GitHub OAuth identity.",
-      }),
+      renderPromptConfigPage(
+        promptsPageData(c, {
+          canWrite: false,
+          error: "Writing prompt configuration requires an operator GitHub OAuth identity.",
+        }),
+      ),
       403,
     );
 
   const renderPromptError = (c: Context<AppEnv>, message: string, status: 400 | 403 | 409 | 503 = 400) =>
-    c.html(
-      renderPromptConfigPage({
-        identity: c.get("identity"),
-        revisions: promptViews(),
-        fixtures: fixtureViews(),
-        evaluations: evaluationViews(),
-        modelCatalog: mergedModelCatalog(),
-        canWrite: gateOn,
-        error: message,
-        csrfToken: gateOn ? ensureCsrfToken(c, ctx.config.uiSessionSecret) : undefined,
-      }),
-      status,
-    );
+    c.html(renderPromptConfigPage(promptsPageData(c, { error: message })), status);
 
   app.get("/config/prompts", (c) => {
     if (!gateOn) return c.redirect("/", 302);
@@ -1902,18 +1900,42 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
       "rolled-back": "Prompt revision rolled back.",
       "fixture-saved": "Fixture saved.",
       evaluated: "Evaluation recorded.",
+      "role-saved": "Custom role saved.",
+      "role-deleted": "Custom role deleted.",
     };
+    const editSlug = c.req.query("edit_role");
+    const dupSlug = c.req.query("duplicate_role");
+    let roleForm: { values: RoleFormValues; editing?: boolean } | undefined;
+    if (editSlug) {
+      const row = ctx.store.configs.getCustomRole(editSlug);
+      if (row) roleForm = { values: roleFormValuesFromRole(row), editing: true };
+    } else if (dupSlug) {
+      const custom = ctx.store.configs.getCustomRole(dupSlug);
+      if (custom) {
+        roleForm = {
+          values: { ...roleFormValuesFromRole(custom), slug: `${custom.slug}-copy`, title: `Copy of ${custom.title}` },
+        };
+      } else {
+        const builtin = KNOWN_REVIEWER_ROLES.find((role) => role.id === dupSlug);
+        if (builtin) {
+          const body = ctx.store.prompts.getActivePrompt(dupSlug)?.body ?? promptBodyFromRolePrompt(builtin.prompt);
+          roleForm = {
+            values: {
+              slug: `${builtin.id}-copy`,
+              title: `Copy of ${builtin.title}`,
+              description: "",
+              prompt: body,
+              model: "",
+              timeoutSeconds: "",
+            },
+          };
+        }
+      }
+    }
     return c.html(
-      renderPromptConfigPage({
-        identity: c.get("identity"),
-        revisions: promptViews(),
-        fixtures: fixtureViews(),
-        evaluations: evaluationViews(),
-        modelCatalog: mergedModelCatalog(),
-        canWrite: gateOn,
-        csrfToken: gateOn ? ensureCsrfToken(c, ctx.config.uiSessionSecret) : undefined,
-        notice: notices[c.req.query("notice") ?? ""],
-      }),
+      renderPromptConfigPage(
+        promptsPageData(c, { notice: notices[c.req.query("notice") ?? ""], roleForm }),
+      ),
     );
   });
 
