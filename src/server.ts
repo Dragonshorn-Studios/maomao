@@ -1911,9 +1911,10 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
       if (row) roleForm = { values: roleFormValuesFromRole(row), editing: true };
     } else if (dupSlug) {
       const custom = ctx.store.configs.getCustomRole(dupSlug);
+      const copySlug = (base: string) => `${base.slice(0, 44)}-copy`;
       if (custom) {
         roleForm = {
-          values: { ...roleFormValuesFromRole(custom), slug: `${custom.slug}-copy`, title: `Copy of ${custom.title}` },
+          values: { ...roleFormValuesFromRole(custom), slug: copySlug(custom.slug), title: `Copy of ${custom.title}` },
         };
       } else {
         const builtin = KNOWN_REVIEWER_ROLES.find((role) => role.id === dupSlug);
@@ -1921,7 +1922,7 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
           const body = ctx.store.prompts.getActivePrompt(dupSlug)?.body ?? promptBodyFromRolePrompt(builtin.prompt);
           roleForm = {
             values: {
-              slug: `${builtin.id}-copy`,
+              slug: copySlug(builtin.id),
               title: `Copy of ${builtin.title}`,
               description: "",
               prompt: body,
