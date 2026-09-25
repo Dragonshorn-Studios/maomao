@@ -1726,7 +1726,9 @@ async function runReviewer(
         model,
         prompt,
         files,
-        timeoutMs: profileTimeoutMs ?? deps.config.opencode.timeoutMs,
+        // A custom role's own timeout is the fallback between the profile
+        // entry's override and the global default.
+        timeoutMs: profileTimeoutMs ?? customRole?.timeout_ms ?? deps.config.opencode.timeoutMs,
         extraArgs: deps.config.opencode.extraArgs,
         bin: deps.config.opencode.bin,
         title: `maomao-${run.role}-${job.id}`,
