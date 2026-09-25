@@ -1714,7 +1714,7 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
   app.post("/config/roles", async (c) => {
     if (!gateOn) return c.redirect("/", 302);
     const actor = configActor(c);
-    if (!actor) return configWriteDenied(c);
+    if (!actor) return promptWriteDenied(c);
     const body = await c.req.parseBody();
     const asStr = (value: unknown) => (typeof value === "string" ? value : "");
     const timeoutSeconds = asStr(body.role_timeout).trim();
@@ -1755,7 +1755,7 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
   app.post("/config/roles/:slug/delete", (c) => {
     if (!gateOn) return c.redirect("/", 302);
     const actor = configActor(c);
-    if (!actor) return configWriteDenied(c);
+    if (!actor) return promptWriteDenied(c);
     const result = ctx.store.configs.deleteCustomRole(c.req.param("slug"), actor.login);
     if ("error" in result) return renderPromptError(c, result.error, 400);
     return c.redirect("/config/prompts?notice=role-deleted", 302);
