@@ -640,6 +640,7 @@ describe("GitLab note events", () => {
     expect(result.dispatchJobId).toBe(opened.enqueue?.job.id);
     const job = input.store.getJob(result.dispatchJobId!);
     expect(job?.manual_escalate_requested).toBe(1);
+    expect(input.store.listWebhookDeliveries({}).find((d) => d.result === "escalate")).toBeDefined();
   });
 });
 
@@ -721,5 +722,138 @@ describe("accessLevelToPermission / decodeSigningSecret / toForgeDiscussions", (
       { id: "d2", notes: [{ id: 1, body: "x", author: {}, resolvable: true, resolved: true }] },
     ]);
     expect(resolved[0]?.isResolved).toBe(true);
+  });
+});
+
+describe("GitLab delivery log", () => {
+  it("records ignored note actions with reason and payload context", async () => {
+    const connections = newConnections();
+    const { id, secret } = createConnection(connections);
+    const input = baseInput(
+      connections,
+      id,
+      signedRequest(
+        secret,
+        "note",
+        JSON.stringify(
+          notePayload({
+            object_attributes: { id: 9001, note: "@maomao bury", noteable_type: "MergeRequest", action: "edited" },
+          }),
+        ),
+      ),
+    );
+    const result = await handleGitLabWebhook(input);
+    expect(result.body.ignored).toBe(true);
+
+    const row = input.store
+      .listWebhookDeliveries({ limit: 10 })
+      .find((entry) => entry.delivery_id === input.request.webhookId);
+    expect(row?.provider).toBe("gitlab");
+    expect(row?.provider_instance).toBe("gitlab.com");
+    expect(row?.result).toBe("ignored: ignored note action edited");
+    expect(row?.repo_full_name).toBe("acme/widgets");
+    expect(row?.action).toBe("edited");
+    expect(row?.actor).toBe("maintainer");
+  });
+
+  it("records deliveries ignored before dispatch (unsupported object kinds)", async () => {
+    const connections = newConnections();
+    const { id, secret } = createConnection(connections);
+    const input = baseInput(
+      connections,
+      id,
+      signedRequest(
+        secret,
+        "issue",
+        JSON.stringify({ object_kind: "issue", project: { path_with_namespace: "acme/widgets" }, user: { username: "maintainer" } }),
+      ),
+    );
+    const result = await handleGitLabWebhook(input);
+    expect(result.body.ignored).toBe(true);
+
+    const row = input.store
+      .listWebhookDeliveries({ limit: 10 })
+      .find((entry) => entry.delivery_id === input.request.webhookId);
+    expect(row?.result).toBe("ignored: event issue");
+    expect(row?.repo_full_name).toBe("acme/widgets");
+    expect(row?.actor).toBe("maintainer");
+  });
+
+  it("does not record failed verifications", async () => {
+    const connections = newConnections();
+    const { id } = createConnection(connections);
+    const input = baseInput(connections, id, {
+      event: "merge_request",
+      rawBody: JSON.stringify(mrPayload()),
+      webhookId: "whid-bad",
+      webhookTimestamp: String(Math.floor(Date.now() / 1000)),
+      webhookSignature: "v1,garbage",
+    });
+    const result = await handleGitLabWebhook(input);
+    expect(result.status).toBe(401);
+    expect(input.store.listWebhookDeliveries({})).toHaveLength(0);
+  });
+
+  it("records rate-limited deliveries as ignored without consuming the redelivery retry", async () => {
+    const connections = newConnections();
+    const { id, secret } = createConnection(connections);
+    const input = baseInput(connections, id, signedRequest(secret, "merge_request", JSON.stringify(mrPayload())));
+    // Trip the repo limiter so the enqueue path returns "rate limited".
+    const limit = input.config.repoRateLimitPerWindow;
+    const windowMs = input.config.repoRateWindowMs;
+    for (let index = 0; index < limit; index += 1) {
+      input.rateLimiter!.recordKey("gitlab:gitlab.com:42", limit, windowMs);
+    }
+    const result = await handleGitLabWebhook(input);
+    expect(result.body.ignored).toBe(true);
+    expect(result.body.reason).toBe("rate limited");
+
+    const scope = { provider: "gitlab", instance: "gitlab.com" } as const;
+    const row = input.store
+      .listWebhookDeliveries({})
+      .find((entry) => entry.delivery_id === input.request.webhookId);
+    expect(row?.result).toBe("ignored: rate limited");
+    // Observational only — a redelivery after the window must still reprocess,
+    // not be answered as a duplicate.
+    expect(input.store.hasWebhookDelivery(input.request.webhookId!, scope)).toBe(false);
+
+    // And when the redelivery is then handled, the same row upgrades its result.
+    input.store.claimWebhookDelivery(input.request.webhookId!, "merge_request", "enqueued", scope);
+    expect(
+      input.store.listWebhookDeliveries({}).find((entry) => entry.delivery_id === input.request.webhookId)?.result,
+    ).toBe("enqueued");
+  });
+
+  it("verifies before the disabled-connection check so forged requests leave no log row", async () => {
+    const connections = newConnections();
+    const { id, secret } = createConnection(connections);
+    connections.update(id, { enabled: false });
+    const input = baseInput(connections, id, signedRequest(secret, "merge_request", JSON.stringify(mrPayload())));
+
+    // A verified delivery to a disabled connection is recorded as ignored…
+    const ignored = await handleGitLabWebhook(input);
+    expect(ignored.body.ignored).toBe(true);
+    const row = input.store
+      .listWebhookDeliveries({})
+      .find((entry) => entry.delivery_id === input.request.webhookId);
+    expect(row?.result).toBe("ignored: connection is disabled");
+    expect(row?.repo_full_name).toBe("acme/widgets");
+
+    // …but a forged body (bad signature) to the same connection is a 401 and
+    // records nothing — it never reached the verified-recording boundary.
+    const forged = await handleGitLabWebhook({
+      ...input,
+      request: {
+        event: "merge_request",
+        rawBody: JSON.stringify(mrPayload({ project: { id: 42, path_with_namespace: "attacker/repo" }, user: { username: "attacker" } })),
+        webhookId: "whid-forged",
+        webhookTimestamp: String(Math.floor(Date.now() / 1000)),
+        webhookSignature: "v1,garbage",
+      },
+    });
+    expect(forged.status).toBe(401);
+    expect(
+      input.store.listWebhookDeliveries({}).find((entry) => entry.delivery_id === "whid-forged"),
+    ).toBeUndefined();
   });
 });

@@ -19,6 +19,7 @@ export {
   renderNewProfilePage,
   renderDraftEditPage,
   renderConfigAuditPage,
+  renderConfigDeliveriesPage,
   renderProfileForm,
   configSubNav,
   type ConfigPageData,

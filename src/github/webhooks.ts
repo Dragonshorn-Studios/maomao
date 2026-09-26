@@ -25,6 +25,7 @@ import {
   isBotActor,
   mentionsEscalateCommand,
 } from "../routing/escalation.js";
+import { enqueueClaimResult, recordWebhookDelivery } from "../forge/deliveries.js";
 
 export interface WebhookRequest {
   event: string;
@@ -259,7 +260,7 @@ function handlePullClosed(
   };
 }
 
-export async function handleGithubWebhook(input: {
+export interface GithubWebhookInput {
   config: Config;
   store: JobStore;
   request: WebhookRequest;
@@ -267,7 +268,25 @@ export async function handleGithubWebhook(input: {
   github?: GithubPort & Partial<ManualTriggerPort>;
   /** Queue hook so cancelled jobs are dropped from memory before the claim/audit steps. */
   abortJobs?: (jobIds: number[]) => void;
-}): Promise<WebhookHandleResult> {
+}
+
+export async function handleGithubWebhook(input: GithubWebhookInput): Promise<WebhookHandleResult> {
+  const result = await handleGithubWebhookRequest(input);
+  // Boundary bookkeeping: record verified deliveries the inner handlers left
+  // unclaimed — every `ignored` answer (unsupported events, non-command
+  // comments, out-of-scope actions) plus clean `ok` results. Failures stay
+  // unclaimed so redeliveries can retry.
+  recordWebhookDelivery({
+    store: input.store,
+    deliveryId: input.request.deliveryId,
+    event: input.request.event,
+    rawBody: input.request.rawBody,
+    result,
+  });
+  return result;
+}
+
+async function handleGithubWebhookRequest(input: GithubWebhookInput): Promise<WebhookHandleResult> {
   const valid = await verifyGithubSignature(
     input.config.github.webhookSecret,
     input.request.rawBody,
@@ -410,6 +429,11 @@ export async function handleGithubWebhook(input: {
         input.config.repoRateWindowMs,
       );
     }
+    input.store.claimWebhookDelivery(
+      input.request.deliveryId,
+      input.request.event,
+      enqueueClaimResult(enqueue),
+    );
     return {
       status: enqueue.created ? 202 : 200,
       body: {
@@ -497,6 +521,9 @@ async function handleIssueComment(input: {
   }
   input.store.patchJob(job.id, { manual_escalate_requested: 1 });
   input.store.log(job.id, `Authorized escalate command from ${actorLogin}`);
+  // Claim with the command name like the GitLab escalate path so the
+  // deliveries log shows "escalate", not a bare boundary-recorded "ok".
+  input.store.claimWebhookDelivery(input.request.deliveryId, input.request.event, "escalate");
   return {
     status: 202,
     body: { ok: true, dispatchJobId: job.id, jobId: job.id, headSha: job.head_sha },

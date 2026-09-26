@@ -22,6 +22,7 @@ import { cancelJobsForPull } from "../jobs/cancel.js";
 import type { ForgeConnectionStore, OpenedConnection } from "../forge/connections.js";
 import { commentLooksLikeMaomaoEscalation, mentionsEscalateCommand } from "../routing/escalation.js";
 import type { RepoRateLimiter } from "../github/rate-limit.js";
+import { enqueueClaimResult, recordWebhookDelivery } from "../forge/deliveries.js";
 
 export interface GitLabWebhookRequest {
   event: string;
@@ -227,10 +228,12 @@ function enqueueMergeRequestJob(input: {
   }
   // Claim the delivery only after handling: a crash before here lets the
   // redelivery retry instead of reporting duplicate.
-  store.claimWebhookDelivery(input.deliveryId, input.event, enqueue.created ? "enqueued" : "skipped", {
-    provider: "gitlab",
-    instance: connection.instance.hostname,
-  });
+  store.claimWebhookDelivery(
+    input.deliveryId,
+    input.event,
+    enqueueClaimResult(enqueue),
+    { provider: "gitlab", instance: connection.instance.hostname },
+  );
   return {
     status: enqueue.created ? 202 : 200,
     body: {
@@ -495,7 +498,7 @@ async function handleNoteEvent(input: {
   };
 }
 
-export async function handleGitLabWebhook(input: {
+export interface GitLabWebhookInput {
   config: Config;
   store: JobStore;
   connections: ForgeConnectionStore;
@@ -505,18 +508,55 @@ export async function handleGitLabWebhook(input: {
   /** Queued aborts for cancelled jobs; wired from the server like the GitHub path. */
   abortJobs?: (jobIds: number[]) => void;
   gitlabFactory?: (connection: OpenedConnection) => GitLabCommandApi;
-}): Promise<GitLabWebhookHandleResult> {
-  const { store, request } = input;
+}
+
+export async function handleGitLabWebhook(input: GitLabWebhookInput): Promise<GitLabWebhookHandleResult> {
   let connection: OpenedConnection;
   try {
     connection = input.connections.open(input.connectionId);
   } catch {
     return { status: 404, body: { error: "unknown connection" } };
   }
-  if (connection.row.enabled !== 1) {
-    return ignored("connection is disabled");
-  }
+  const { request } = input;
+  // The delivery id is derived once here so the inner handler and the
+  // boundary recorder share a single derivation — diverging sites would split
+  // one delivery across two rows.
+  const deliveryId = deliveryIdFrom(
+    {
+      "webhook-id": request.webhookId,
+      "x-gitlab-event-uuid": request.eventUuid,
+      "x-gitlab-webhook-uuid": request.webhookUuid,
+    },
+    request.event,
+    `${connection.row.id}:${request.rawBody}`,
+  );
+  const result = await handleGitLabWebhookRequest(input, connection, deliveryId);
+  // Boundary bookkeeping mirroring the GitHub path: records verified
+  // deliveries the inner handler left unclaimed (ignored events, non-command
+  // notes, out-of-scope actions) with reason and payload context. Every
+  // recordable status comes after signature verification, so nothing
+  // unverified can be logged; failures stay unclaimed so redeliveries retry.
+  recordWebhookDelivery({
+    store: input.store,
+    deliveryId,
+    event: request.event,
+    rawBody: request.rawBody,
+    result,
+    scope: { provider: "gitlab", instance: connection.instance.hostname },
+  });
+  return result;
+}
 
+async function handleGitLabWebhookRequest(
+  input: GitLabWebhookInput,
+  connection: OpenedConnection,
+  deliveryId: string,
+): Promise<GitLabWebhookHandleResult> {
+  const { store, request } = input;
+
+  // Verify before anything else — including the enabled check — so a forged
+  // request to a disabled connection gets a 401 instead of an ignored 202
+  // that the deliveries log would record with attacker-controlled context.
   const verification = verifyGitLabWebhook({
     body: request.rawBody,
     secret: connection.webhookSecret,
@@ -527,6 +567,10 @@ export async function handleGitLabWebhook(input: {
   });
   if (!verification.ok) {
     return { status: 401, body: { error: verification.reason } };
+  }
+
+  if (connection.row.enabled !== 1) {
+    return ignored("connection is disabled");
   }
 
   if (request.event.toLowerCase() === "ping" || request.event.toLowerCase() === "ping hook") {
@@ -550,15 +594,6 @@ export async function handleGitLabWebhook(input: {
     return ignored("ignored bot-authored event");
   }
 
-  const deliveryId = deliveryIdFrom(
-    {
-      "webhook-id": request.webhookId,
-      "x-gitlab-event-uuid": request.eventUuid,
-      "x-gitlab-webhook-uuid": request.webhookUuid,
-    },
-    request.event,
-    `${connection.row.id}:${request.rawBody}`,
-  );
   const scope = { provider: "gitlab", instance: connection.instance.hostname };
   try {
     if (deliveryId && store.hasWebhookDelivery(deliveryId, scope)) {

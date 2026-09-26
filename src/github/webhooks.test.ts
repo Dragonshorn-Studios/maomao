@@ -484,6 +484,9 @@ describe("webhook handling", () => {
     });
     expect(ok.dispatchJobId).toBe(jobId);
     expect(store.getJob(jobId!)?.manual_escalate_requested).toBe(1);
+    // The escalate path claims its own result — the deliveries log shows
+    // "escalate", not a boundary-recorded bare "ok".
+    expect(store.listWebhookDeliveries({}).find((d) => d.delivery_id === "c3")?.result).toBe("escalate");
 
     store.patchJob(jobId!, { manual_escalate_requested: 0 });
     const memberBody = JSON.stringify({
@@ -1611,5 +1614,163 @@ describe("stack commands (issue #99)", () => {
     expect(markers.map((c) => c.pullNumber).sort()).toEqual([41, 42]);
     expect(markers.find((c) => c.pullNumber === 41)?.body).toContain("h41");
     expect(markers.find((c) => c.pullNumber === 42)?.body).toContain("h42");
+  });
+});
+
+describe("webhook delivery log", () => {
+  function loggedDelivery(store: JobStore, deliveryId: string) {
+    return store.listWebhookDeliveries({ limit: 20 }).find((row) => row.delivery_id === deliveryId);
+  }
+
+  it("records ignored pull_request actions with their reason and context", async () => {
+    const secret = "s3cret";
+    const config = loadConfig({ GITHUB_WEBHOOK_SECRET: secret, GITHUB_APP_ID: "1", GITHUB_APP_PRIVATE_KEY: "k" });
+    const store = new JobStore(openDb(":memory:"));
+    const rawBody = JSON.stringify(
+      prPayload({ action: "edited", sender: { login: "octocat" } }),
+    );
+    const result = await handleGithubWebhook({
+      config,
+      store,
+      request: { event: "pull_request", deliveryId: "ignored-1", signature: sign(secret, rawBody), rawBody },
+    });
+    expect(result.body.ignored).toBe(true);
+
+    const row = loggedDelivery(store, "ignored-1");
+    expect(row).toBeDefined();
+    expect(row!.event).toBe("pull_request");
+    expect(row!.action).toBe("edited");
+    expect(row!.repo_full_name).toBe("acme/widgets");
+    expect(row!.actor).toBe("octocat");
+    expect(row!.result).toBe("ignored: ignored action edited");
+  });
+
+  it("records unsupported events as ignored deliveries", async () => {
+    const secret = "s3cret";
+    const config = loadConfig({ GITHUB_WEBHOOK_SECRET: secret });
+    const store = new JobStore(openDb(":memory:"));
+    const rawBody = JSON.stringify(prPayload({ sender: { login: "octocat" } }));
+    const result = await handleGithubWebhook({
+      config,
+      store,
+      request: { event: "check_run", deliveryId: "ev-1", signature: sign(secret, rawBody), rawBody },
+    });
+    expect(result.body.ignored).toBe(true);
+    const row = loggedDelivery(store, "ev-1");
+    expect(row?.result).toBe("ignored: event check_run");
+  });
+
+  it("records pings and keeps the specific result on already-claimed deliveries", async () => {
+    const secret = "s3cret";
+    const config = loadConfig({ GITHUB_WEBHOOK_SECRET: secret, GITHUB_APP_ID: "1", GITHUB_APP_PRIVATE_KEY: "k" });
+    const store = new JobStore(openDb(":memory:"));
+    const ping = await handleGithubWebhook({
+      config,
+      store,
+      request: { event: "ping", deliveryId: "ping-1", signature: sign(secret, "{}"), rawBody: "{}" },
+    });
+    expect(ping.status).toBe(200);
+    expect(loggedDelivery(store, "ping-1")?.result).toBe("ok: ping");
+
+    // A merged close claims with its own result before the boundary wrapper
+    // runs; the wrapper only backfills context, never rewrites the result.
+    const rawBody = JSON.stringify(
+      prPayload({ action: "closed", pull_request: { ...prPayload().pull_request, merged: true }, sender: { login: "octocat" } }),
+    );
+    await handleGithubWebhook({
+      config,
+      store,
+      request: { event: "pull_request", deliveryId: "close-1", signature: sign(secret, rawBody), rawBody },
+    });
+    const row = loggedDelivery(store, "close-1");
+    expect(row?.result).toBe("pr_merged_cancel");
+    expect(row?.ignored).toBe(0);
+    expect(row?.repo_full_name).toBe("acme/widgets");
+    expect(row?.actor).toBe("octocat");
+  });
+
+  it("records non-command issue comments and falls back to the comment author", async () => {
+    const secret = "s3cret";
+    const config = loadConfig({ GITHUB_WEBHOOK_SECRET: secret });
+    const store = new JobStore(openDb(":memory:"));
+    // No sender: the comment's author is the actor-context fallback.
+    const rawBody = JSON.stringify(
+      commentPayload({
+        comment: {
+          id: 9100,
+          body: "lgtm",
+          user: { login: "alice", type: "User" },
+          author_association: "OWNER",
+        },
+      }),
+    );
+    const result = await handleGithubWebhook({
+      config,
+      store,
+      request: { event: "issue_comment", deliveryId: "ic-1", signature: sign(secret, rawBody), rawBody },
+    });
+    expect(result.body.ignored).toBe(true);
+    const row = loggedDelivery(store, "ic-1");
+    expect(row?.result).toBe("ignored: not an escalate command");
+    expect(row?.ignored).toBe(1);
+    expect(row?.actor).toBe("alice");
+    expect(row?.repo_full_name).toBe("acme/widgets");
+  });
+
+  it("records a contextless row when the payload carries no repo or actor", async () => {
+    const secret = "s3cret";
+    const config = loadConfig({ GITHUB_WEBHOOK_SECRET: secret });
+    const store = new JobStore(openDb(":memory:"));
+    const rawBody = JSON.stringify({ action: "edited" });
+    await handleGithubWebhook({
+      config,
+      store,
+      request: { event: "pull_request", deliveryId: "ctx-0", signature: sign(secret, rawBody), rawBody },
+    });
+    const row = loggedDelivery(store, "ctx-0");
+    expect(row?.result).toBe("ignored: ignored action edited");
+    expect(row?.repo_full_name).toBeNull();
+    expect(row?.actor).toBeNull();
+  });
+
+  it("does not record unverified deliveries", async () => {
+    const config = loadConfig({ GITHUB_WEBHOOK_SECRET: "s3cret" });
+    const store = new JobStore(openDb(":memory:"));
+    const result = await handleGithubWebhook({
+      config,
+      store,
+      request: { event: "pull_request", deliveryId: "bad-1", signature: "sha256=deadbeef", rawBody: "{}" },
+    });
+    expect(result.status).toBe(401);
+    expect(store.listWebhookDeliveries({})).toHaveLength(0);
+  });
+
+  it("claims enqueued and skipped results for pull_request deliveries", async () => {
+    const secret = "s3cret";
+    const config = loadConfig({
+      GITHUB_WEBHOOK_SECRET: secret,
+      GITHUB_APP_ID: "1",
+      GITHUB_APP_PRIVATE_KEY: "k",
+      REVIEWER_ROLES: "correctness",
+    });
+    const store = new JobStore(openDb(":memory:"));
+    const rawBody = JSON.stringify(prPayload({ sender: { login: "octocat" } }));
+    const first = await handleGithubWebhook({
+      config,
+      store,
+      request: { event: "pull_request", deliveryId: "enq-1", signature: sign(secret, rawBody), rawBody },
+    });
+    expect(first.body.created).toBe(true);
+    expect(loggedDelivery(store, "enq-1")?.result).toBe("enqueued");
+
+    // Same head SHA on a new delivery id: the enqueue dedups and the second
+    // delivery row records the skip reason.
+    const dup = await handleGithubWebhook({
+      config,
+      store,
+      request: { event: "pull_request", deliveryId: "enq-2", signature: sign(secret, rawBody), rawBody },
+    });
+    expect(dup.body.created).toBe(false);
+    expect(loggedDelivery(store, "enq-2")?.result).toMatch(/^skipped: /);
   });
 });

@@ -187,3 +187,80 @@ function seededStoreAppend(store: JobStore, count: number, firstPrNumber: number
     expect(page.jobs).toHaveLength(25);
     expect(page.hasOlder).toBe(false);
   });
+
+describe("listWebhookDeliveries", () => {
+  function seededDeliveries(count: number): JobStore {
+    const store = new JobStore(openDb(":memory:"));
+    for (let index = 0; index < count; index += 1) {
+      store.claimWebhookDelivery(`delivery-${index + 1}`, "pull_request", `result-${index + 1}`);
+    }
+    return store;
+  }
+
+  it("serves the newest deliveries first and pages with a (created_at, delivery_id) cursor", () => {
+    const store = seededDeliveries(7);
+    const first = store.listWebhookDeliveries({ limit: 3 });
+    expect(first.map((row) => row.delivery_id)).toEqual(["delivery-7", "delivery-6", "delivery-5"]);
+
+    const older = store.listWebhookDeliveries({
+      limit: 3,
+      before: { createdAt: first[2]!.created_at, deliveryId: first[2]!.delivery_id },
+    });
+    expect(older.map((row) => row.delivery_id)).toEqual(["delivery-4", "delivery-3", "delivery-2"]);
+
+    const last = store.listWebhookDeliveries({
+      limit: 3,
+      before: { createdAt: older[2]!.created_at, deliveryId: older[2]!.delivery_id },
+    });
+    expect(last.map((row) => row.delivery_id)).toEqual(["delivery-1"]);
+  });
+
+  it("clamps the limit and returns nothing for an empty log", () => {
+    const store = seededDeliveries(3);
+    expect(store.listWebhookDeliveries({ limit: 1 })).toHaveLength(1);
+    expect(store.listWebhookDeliveries({ limit: 9999 })).toHaveLength(3);
+    expect(new JobStore(openDb(":memory:")).listWebhookDeliveries({})).toEqual([]);
+  });
+
+  it("backfills context on already-claimed deliveries without touching the result", () => {
+    const store = new JobStore(openDb(":memory:"));
+    expect(store.claimWebhookDelivery("d-1", "pull_request", "enqueued")).toBe(true);
+    // Second claim loses: result stays, context fills in.
+    expect(
+      store.claimWebhookDelivery("d-1", "pull_request", "ignored: late", undefined, {
+        repoFullName: "acme/widgets",
+        action: "opened",
+        actor: "octocat",
+      }),
+    ).toBe(false);
+    const row = store.listWebhookDeliveries({})[0]!;
+    expect(row.result).toBe("enqueued");
+    expect(row.repo_full_name).toBe("acme/widgets");
+    expect(row.action).toBe("opened");
+    expect(row.actor).toBe("octocat");
+  });
+
+  it("treats ignored rows as observational: no dedup, and a handled redelivery overwrites the result", () => {
+    const store = new JobStore(openDb(":memory:"));
+    // A transiently ignored delivery is recorded for the log but must not
+    // claim the dedup slot — a redelivery after the window/job change retries.
+    store.claimWebhookDelivery("d-rl", "merge_request", "ignored: rate limited");
+    expect(store.hasWebhookDelivery("d-rl")).toBe(false);
+    expect(store.listWebhookDeliveries({})[0]!.ignored).toBe(1);
+
+    // The redelivery is then handled for real: the row upgrades to the real
+    // outcome rather than keeping a stale ignored reason.
+    store.claimWebhookDelivery("d-rl", "merge_request", "enqueued");
+    expect(store.hasWebhookDelivery("d-rl")).toBe(true);
+    const upgraded = store.listWebhookDeliveries({})[0]!;
+    expect(upgraded.result).toBe("enqueued");
+    expect(upgraded.ignored).toBe(0);
+
+    // A redelivery that is still ignored keeps the first recorded reason.
+    store.claimWebhookDelivery("d-2", "note", "ignored: rate limited");
+    store.claimWebhookDelivery("d-2", "note", "ignored: something else");
+    expect(store.listWebhookDeliveries({}).find((row) => row.delivery_id === "d-2")!.result).toBe(
+      "ignored: rate limited",
+    );
+  });
+});
