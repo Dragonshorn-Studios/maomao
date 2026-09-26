@@ -1696,4 +1696,33 @@ describe("webhook delivery log", () => {
     expect(result.status).toBe(401);
     expect(store.listWebhookDeliveries({})).toHaveLength(0);
   });
+
+  it("claims enqueued and skipped results for pull_request deliveries", async () => {
+    const secret = "s3cret";
+    const config = loadConfig({
+      GITHUB_WEBHOOK_SECRET: secret,
+      GITHUB_APP_ID: "1",
+      GITHUB_APP_PRIVATE_KEY: "k",
+      REVIEWER_ROLES: "correctness",
+    });
+    const store = new JobStore(openDb(":memory:"));
+    const rawBody = JSON.stringify(prPayload({ sender: { login: "octocat" } }));
+    const first = await handleGithubWebhook({
+      config,
+      store,
+      request: { event: "pull_request", deliveryId: "enq-1", signature: sign(secret, rawBody), rawBody },
+    });
+    expect(first.body.created).toBe(true);
+    expect(loggedDelivery(store, "enq-1")?.result).toBe("enqueued");
+
+    // Same head SHA on a new delivery id: the enqueue dedups and the second
+    // delivery row records the skip reason.
+    const dup = await handleGithubWebhook({
+      config,
+      store,
+      request: { event: "pull_request", deliveryId: "enq-2", signature: sign(secret, rawBody), rawBody },
+    });
+    expect(dup.body.created).toBe(false);
+    expect(loggedDelivery(store, "enq-2")?.result).toMatch(/^skipped: /);
+  });
 });

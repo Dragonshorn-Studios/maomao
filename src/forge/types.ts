@@ -47,6 +47,15 @@ export function normalizeScope(scope?: Partial<ForgeScope>): ForgeScope {
   return { provider, instance };
 }
 
+/** Payload context recorded alongside a webhook delivery claim: which repo it
+ * touched, the event action, and who sent it. Extracted from the raw body at
+ * the handler boundary; all fields optional because payloads are untrusted. */
+export interface WebhookDeliveryContext {
+  repoFullName?: string | null;
+  action?: string | null;
+  actor?: string | null;
+}
+
 /** Structural read of a row's persisted scope; both columns are NOT NULL. */
 export function scopeOf(row: { provider: string; provider_instance: string }): ForgeScope {
   return { provider: row.provider, instance: row.provider_instance };

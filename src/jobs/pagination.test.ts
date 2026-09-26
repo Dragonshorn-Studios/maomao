@@ -233,4 +233,25 @@ describe("listWebhookDeliveries", () => {
     expect(row.action).toBe("opened");
     expect(row.actor).toBe("octocat");
   });
+
+  it("treats ignored rows as observational: no dedup, and a handled redelivery overwrites the result", () => {
+    const store = new JobStore(openDb(":memory:"));
+    // A transiently ignored delivery is recorded for the log but must not
+    // claim the dedup slot — a redelivery after the window/job change retries.
+    store.claimWebhookDelivery("d-rl", "merge_request", "ignored: rate limited");
+    expect(store.hasWebhookDelivery("d-rl")).toBe(false);
+
+    // The redelivery is then handled for real: the row upgrades to the real
+    // outcome rather than keeping a stale ignored reason.
+    store.claimWebhookDelivery("d-rl", "merge_request", "enqueued");
+    expect(store.hasWebhookDelivery("d-rl")).toBe(true);
+    expect(store.listWebhookDeliveries({})[0]!.result).toBe("enqueued");
+
+    // A redelivery that is still ignored keeps the first recorded reason.
+    store.claimWebhookDelivery("d-2", "note", "ignored: rate limited");
+    store.claimWebhookDelivery("d-2", "note", "ignored: something else");
+    expect(store.listWebhookDeliveries({}).find((row) => row.delivery_id === "d-2")!.result).toBe(
+      "ignored: rate limited",
+    );
+  });
 });

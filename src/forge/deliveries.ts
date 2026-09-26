@@ -1,5 +1,5 @@
-import type { ForgeScope } from "./types.js";
-import type { JobStore, WebhookDeliveryContext } from "../jobs/store.js";
+import type { ForgeScope, WebhookDeliveryContext } from "./types.js";
+import type { JobStore } from "../jobs/store.js";
 
 /**
  * Delivery log bookkeeping shared by the GitHub and GitLab webhook handlers.
@@ -19,6 +19,12 @@ import type { JobStore, WebhookDeliveryContext } from "../jobs/store.js";
  * - `ok` results carrying `warning` — those paths leave the delivery
  *   unclaimed on purpose so a redelivery can retry (e.g. truncated GitLab
  *   discussion listings).
+ *
+ * `ignored:` rows are observational, not dedup claims: `hasWebhookDelivery`
+ * excludes them so a redelivery of a transiently ignored event (rate limit
+ * window passed, a job landed since, the connection was re-enabled) still
+ * reprocesses — matching the pre-logging behavior — and a successful retry's
+ * claim overwrites the stale `ignored:` result via `claimWebhookDelivery`.
  * Duplicate answers still write context: the INSERT is a no-op for the
  * result, but the claim call backfills repo/action/actor on the existing row.
  */

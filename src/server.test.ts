@@ -1794,6 +1794,9 @@ describe("config page IA", () => {
     });
     store.claimWebhookDelivery("del-ping", "ping", "ok: ping", { provider: "gitlab", instance: "gitlab.example" });
 
+    // A malformed cursor falls back to the first page rather than 500ing.
+    expect((await app.request("/config/deliveries?before=abc", { headers: { cookie: session } })).status).toBe(200);
+
     const html = await (await app.request("/config/deliveries", { headers: { cookie: session } })).text();
     expect(html).toContain("Webhook deliveries");
     expect(html).toContain("ignored: ignored action edited");

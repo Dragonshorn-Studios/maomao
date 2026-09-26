@@ -792,4 +792,67 @@ describe("GitLab delivery log", () => {
     expect(result.status).toBe(401);
     expect(input.store.listWebhookDeliveries({})).toHaveLength(0);
   });
+
+  it("records rate-limited deliveries as ignored without consuming the redelivery retry", async () => {
+    const connections = newConnections();
+    const { id, secret } = createConnection(connections);
+    const input = baseInput(connections, id, signedRequest(secret, "merge_request", JSON.stringify(mrPayload())));
+    // Trip the repo limiter so the enqueue path returns "rate limited".
+    const limit = input.config.repoRateLimitPerWindow;
+    const windowMs = input.config.repoRateWindowMs;
+    for (let index = 0; index < limit; index += 1) {
+      input.rateLimiter!.recordKey("gitlab:gitlab.com:42", limit, windowMs);
+    }
+    const result = await handleGitLabWebhook(input);
+    expect(result.body.ignored).toBe(true);
+    expect(result.body.reason).toBe("rate limited");
+
+    const scope = { provider: "gitlab", instance: "gitlab.com" } as const;
+    const row = input.store
+      .listWebhookDeliveries({})
+      .find((entry) => entry.delivery_id === input.request.webhookId);
+    expect(row?.result).toBe("ignored: rate limited");
+    // Observational only — a redelivery after the window must still reprocess,
+    // not be answered as a duplicate.
+    expect(input.store.hasWebhookDelivery(input.request.webhookId!, scope)).toBe(false);
+
+    // And when the redelivery is then handled, the same row upgrades its result.
+    input.store.claimWebhookDelivery(input.request.webhookId!, "merge_request", "enqueued", scope);
+    expect(
+      input.store.listWebhookDeliveries({}).find((entry) => entry.delivery_id === input.request.webhookId)?.result,
+    ).toBe("enqueued");
+  });
+
+  it("verifies before the disabled-connection check so forged requests leave no log row", async () => {
+    const connections = newConnections();
+    const { id, secret } = createConnection(connections);
+    connections.update(id, { enabled: false });
+    const input = baseInput(connections, id, signedRequest(secret, "merge_request", JSON.stringify(mrPayload())));
+
+    // A verified delivery to a disabled connection is recorded as ignored…
+    const ignored = await handleGitLabWebhook(input);
+    expect(ignored.body.ignored).toBe(true);
+    const row = input.store
+      .listWebhookDeliveries({})
+      .find((entry) => entry.delivery_id === input.request.webhookId);
+    expect(row?.result).toBe("ignored: connection is disabled");
+    expect(row?.repo_full_name).toBe("acme/widgets");
+
+    // …but a forged body (bad signature) to the same connection is a 401 and
+    // records nothing — it never reached the verified-recording boundary.
+    const forged = await handleGitLabWebhook({
+      ...input,
+      request: {
+        event: "merge_request",
+        rawBody: JSON.stringify(mrPayload({ project: { id: 42, path_with_namespace: "attacker/repo" }, user: { username: "attacker" } })),
+        webhookId: "whid-forged",
+        webhookTimestamp: String(Math.floor(Date.now() / 1000)),
+        webhookSignature: "v1,garbage",
+      },
+    });
+    expect(forged.status).toBe(401);
+    expect(
+      input.store.listWebhookDeliveries({}).find((entry) => entry.delivery_id === "whid-forged"),
+    ).toBeUndefined();
+  });
 });

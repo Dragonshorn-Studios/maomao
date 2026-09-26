@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import type { SqliteDb } from "../db.js";
 import type { CancelReason, JobState, ReviewerState } from "../config.js";
 import { JOBS_PAGE_SIZE_DEFAULT, JOBS_PAGE_SIZE_MAX, LIVE_JOB_STATES } from "../config.js";
-import type { ForgeScope } from "../forge/types.js";
+import type { ForgeScope, WebhookDeliveryContext } from "../forge/types.js";
 import { normalizeScope } from "../forge/types.js";
 import type { FindingRow, FindingStatus } from "../findings/types.js";
 import { nowIso } from "../util.js";
@@ -241,15 +241,6 @@ export interface EnqueueResult {
   created: boolean;
   skippedReason?: string;
   staleJobIds: number[];
-}
-
-/** Payload context recorded alongside a webhook delivery claim: which repo it
- * touched, the event action, and who sent it. Extracted from the raw body at
- * the handler boundary; all fields optional because payloads are untrusted. */
-export interface WebhookDeliveryContext {
-  repoFullName?: string | null;
-  action?: string | null;
-  actor?: string | null;
 }
 
 export interface WebhookDeliveryRow {
@@ -1541,21 +1532,27 @@ export class JobStore {
         context?.action ?? null,
         context?.actor ?? null,
       );
-    if (insert.changes === 0 && context) {
-      // The row exists (claimed earlier by the handler with a specific result):
-      // backfill context without overwriting it or the recorded result.
+    if (insert.changes === 0) {
+      // The row exists: a previously ignored delivery that a redelivery now
+      // handled (rate-limit window passed, job landed, …) takes the real
+      // outcome; a redelivery still ignored keeps the first reason. Context
+      // columns only backfill — never overwrite a claim's own result or
+      // context.
       this.db
         .prepare(
           `UPDATE webhook_deliveries SET
+            result = CASE WHEN result LIKE 'ignored:%' AND ? NOT LIKE 'ignored:%' THEN ? ELSE result END,
             repo_full_name = COALESCE(repo_full_name, ?),
             action = COALESCE(action, ?),
             actor = COALESCE(actor, ?)
           WHERE provider = ? AND provider_instance = ? AND delivery_id = ?`,
         )
         .run(
-          context.repoFullName ?? null,
-          context.action ?? null,
-          context.actor ?? null,
+          result,
+          result,
+          context?.repoFullName ?? null,
+          context?.action ?? null,
+          context?.actor ?? null,
           resolved.provider,
           resolved.instance,
           deliveryId,
@@ -1584,12 +1581,17 @@ export class JobStore {
       .all(limit) as WebhookDeliveryRow[];
   }
 
+  /** Delivery dedup gate. `ignored:` rows are observational only — they do
+   * NOT dedup, so a redelivery of a transiently ignored event (rate limited,
+   * escalated before any job existed) still reprocesses, restoring the
+   * pre-logging retry behavior. Handled results (enqueued, commands, …) gate
+   * redeliveries to `duplicate` as before. */
   hasWebhookDelivery(deliveryId: string, scope?: Partial<ForgeScope>): boolean {
     if (!deliveryId) return false;
     const resolved = normalizeScope(scope);
     const row = this.db
       .prepare(
-        `SELECT delivery_id FROM webhook_deliveries WHERE provider = ? AND provider_instance = ? AND delivery_id = ?`,
+        `SELECT delivery_id FROM webhook_deliveries WHERE provider = ? AND provider_instance = ? AND delivery_id = ? AND result NOT LIKE 'ignored:%'`,
       )
       .get(resolved.provider, resolved.instance, deliveryId) as { delivery_id: string } | undefined;
     return Boolean(row);
