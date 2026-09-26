@@ -2058,6 +2058,7 @@ async function publishReview(
     allowApprove: deps.config.reviewAllowApprove,
     allowRequestChanges: deps.config.reviewAllowRequestChanges,
     minSeverity: deps.config.reviewRequestChangesMinSeverity,
+    approveMaxSeverity: deps.config.reviewApproveMaxSeverity,
     clean,
     findings: publishable,
     allReviewersDone,

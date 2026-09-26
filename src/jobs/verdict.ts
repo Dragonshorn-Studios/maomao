@@ -9,6 +9,12 @@ export interface ReviewEventInput {
   allowApprove: boolean;
   allowRequestChanges: boolean;
   minSeverity: Severity;
+  /**
+   * Highest severity that still permits APPROVE (e.g. "low" approves reviews whose
+   * worst findings are low/info). Undefined keeps the strict rule: APPROVE only
+   * when the review is clean.
+   */
+  approveMaxSeverity?: Severity | null;
   /** True when the aggregated review produced no publishable findings and verdict "clean". */
   clean: boolean;
   findings: Array<{ severity?: string | null }>;
@@ -51,9 +57,21 @@ export function resolveReviewEvent(input: ReviewEventInput): ReviewEventDecision
     }
     return { event: "COMMENT", reason: `request-changes disabled; ${blockerCount} finding(s) at or above ${input.minSeverity}` };
   }
-  if (input.clean) {
+  // "At or below" the approve ceiling means rank >= its rank (rank is inverted).
+  const belowApproveCeiling =
+    input.approveMaxSeverity != null &&
+    input.findings.every(
+      (finding) =>
+        severityRank((finding.severity ?? "info") as Severity) >= severityRank(input.approveMaxSeverity as Severity),
+    );
+  if (input.clean || belowApproveCeiling) {
     if (input.allowApprove) {
-      return { event: "APPROVE", reason: "clean review, all reviewers finished" };
+      return {
+        event: "APPROVE",
+        reason: input.clean
+          ? "clean review, all reviewers finished"
+          : `no findings above ${input.approveMaxSeverity} severity`,
+      };
     }
     return { event: "COMMENT", reason: "approve disabled; comment-only" };
   }

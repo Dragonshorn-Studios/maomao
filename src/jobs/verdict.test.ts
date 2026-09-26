@@ -65,4 +65,44 @@ describe("review event resolution", () => {
     const result = resolveReviewEvent(input({ clean: false, findings: [{ severity: "low" }] }));
     expect(result).toEqual({ event: "COMMENT", reason: "findings below the request-changes threshold" });
   });
+
+  it("approves findings at or below the approve ceiling", () => {
+    const result = resolveReviewEvent(
+      input({ clean: false, approveMaxSeverity: "low", findings: [{ severity: "low" }, { severity: "info" }] }),
+    );
+    expect(result).toEqual({ event: "APPROVE", reason: "no findings above low severity" });
+  });
+
+  it("still comments when a finding exceeds the approve ceiling", () => {
+    const result = resolveReviewEvent(
+      input({ clean: false, approveMaxSeverity: "low", findings: [{ severity: "medium" }] }),
+    );
+    expect(result.event).toBe("COMMENT");
+    expect(result.reason).toContain("below the request-changes threshold");
+  });
+
+  it("never approves over the ceiling when approve is disabled or the run is degraded", () => {
+    const findings = [{ severity: "low" }];
+    expect(
+      resolveReviewEvent(input({ clean: false, approveMaxSeverity: "low", allowApprove: false, findings })).event,
+    ).toBe("COMMENT");
+    expect(
+      resolveReviewEvent(input({ clean: false, approveMaxSeverity: "low", allReviewersDone: false, findings })).event,
+    ).toBe("COMMENT");
+    expect(
+      resolveReviewEvent(input({ clean: false, approveMaxSeverity: "low", aggregatorFallback: true, findings })).event,
+    ).toBe("COMMENT");
+  });
+
+  it("keeps request-changes precedence over the approve ceiling", () => {
+    const result = resolveReviewEvent(
+      input({
+        clean: false,
+        approveMaxSeverity: "high",
+        minSeverity: "blocker",
+        findings: [{ severity: "blocker" }, { severity: "low" }],
+      }),
+    );
+    expect(result.event).toBe("REQUEST_CHANGES");
+  });
 });

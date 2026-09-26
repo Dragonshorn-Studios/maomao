@@ -297,6 +297,12 @@ export function effectiveConfigEntries(
   row("Publishing", "Allow APPROVE verdicts", "GITHUB_REVIEW_ALLOW_APPROVE", boolLabel(config.reviewAllowApprove));
   row(
     "Publishing",
+    "Approve maximum severity",
+    "GITHUB_REVIEW_APPROVE_MAX_SEVERITY",
+    config.reviewApproveMaxSeverity ?? "clean reviews only",
+  );
+  row(
+    "Publishing",
     "Allow REQUEST_CHANGES verdicts",
     "GITHUB_REVIEW_ALLOW_REQUEST_CHANGES",
     boolLabel(config.reviewAllowRequestChanges),

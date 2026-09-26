@@ -105,6 +105,8 @@ export interface Config {
   reviewAllowApprove: boolean;
   reviewAllowRequestChanges: boolean;
   reviewRequestChangesMinSeverity: Severity;
+  /** Highest finding severity that still permits APPROVE. Null = only fully clean reviews approve. */
+  reviewApproveMaxSeverity: Severity | null;
   /** GitHub OAuth (operator login). Empty strings = OAuth disabled. */
   oauthClientId: string;
   oauthClientSecret: string;
@@ -325,6 +327,9 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
       "blocker",
       "GITHUB_REVIEW_REQUEST_CHANGES_MIN_SEVERITY",
     ),
+    reviewApproveMaxSeverity: env.GITHUB_REVIEW_APPROVE_MAX_SEVERITY?.trim()
+      ? parseSeverity(env.GITHUB_REVIEW_APPROVE_MAX_SEVERITY, "low", "GITHUB_REVIEW_APPROVE_MAX_SEVERITY")
+      : null,
     allowedGithubAccountIds: parseIdList(env.ALLOWED_GITHUB_ACCOUNT_IDS, "ALLOWED_GITHUB_ACCOUNT_IDS"),
     allowedGithubRepositoryIds: parseIdList(env.ALLOWED_GITHUB_REPOSITORY_IDS, "ALLOWED_GITHUB_REPOSITORY_IDS"),
     overrideAuthors: parseCsv(env.MAOMAO_OVERRIDE_AUTHORS).map((login) => login.toLowerCase()),
