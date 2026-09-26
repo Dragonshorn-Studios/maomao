@@ -14,8 +14,8 @@ import {
 import { createHash, randomUUID } from "node:crypto";
 import type { EnqueueResult, JobStore } from "../jobs/store.js";
 import { enqueuePullJob } from "../jobs/enqueue.js";
-import { extractStackBodyMarker, looksLikeStackCommand, parseStackCommand, resolveStackChain, validateStackMembers, type StackBodyMarker, type StackCommand } from "../stacks/commands.js";
-import { upsertStackComment } from "../stacks/comments.js";
+import { extractStackBodyMarker, looksLikeStackCommand, parseStackCommand, resolveStackChain, stackDedupPrefix, validateStackMembers, type StackBodyMarker, type StackCommand } from "../stacks/commands.js";
+import { upsertStackComment, upsertStackSuppressionNote } from "../stacks/comments.js";
 import type { ResolvedPull } from "./client.js";
 import { cancelJobsForPull } from "../jobs/cancel.js";
 import { logAuthorizationRejection, logRateLimited, positiveGithubId, rejectUnauthorized } from "./authorize.js";
@@ -154,7 +154,8 @@ export function parsePullRequestPayload(payload: PullRequestWebhookPayload): {
   headSha: string;
   baseRef: string;
   headRef: string;
-  headRepoFullName?: string;
+  /** Null = deleted-fork head; undefined = field absent from the payload. */
+  headRepoFullName?: string | null;
 } {
   const installationId = numericId(payload.installation?.id);
   const githubAccountId =
@@ -185,7 +186,7 @@ export function parsePullRequestPayload(payload: PullRequestWebhookPayload): {
     headSha: pr.head.sha,
     baseRef: pr.base.ref ?? "",
     headRef: pr.head.ref ?? "",
-    headRepoFullName: pr.head.repo?.full_name ?? undefined,
+    headRepoFullName: pr.head.repo === null ? null : (pr.head.repo?.full_name ?? undefined),
   };
 }
 
@@ -701,7 +702,7 @@ async function refreshStackComments(
 // supersedes the queued run and can never dedup onto a finished job.
 function stackDedupKey(stackId: string, members: { prNumber: number; headSha: string }[]): string {
   const vector = members.map((m) => `${m.prNumber}:${m.headSha}`).join("/");
-  return `stack:${stackId}@${createHash("sha1").update(vector).digest("hex").slice(0, 12)}`;
+  return `${stackDedupPrefix(stackId)}@${createHash("sha1").update(vector).digest("hex").slice(0, 12)}`;
 }
 
 // The enqueue tail shared by "top of stack" and "end of stack": pause
@@ -769,9 +770,11 @@ async function runStackEnqueue(
   const bottom = members[0]!;
   const topPull = pulls[pulls.length - 1]!;
   const dedupKey = stackDedupKey(stackId, members);
-  // The per-vector key never stale-matches superseded queued runs — mark them
-  // before enqueueing so a member push does not leave two queued stack jobs.
-  const staleJobIds = ctx.input.store.staleQueuedStackJobs(ctx.repoFullName, stackId, dedupKey);
+  // The per-vector key never stale-matches superseded runs — mark open jobs
+  // for this stack stale before enqueueing, and fold the ids into the
+  // enqueue result so dispatchEnqueue aborts in-flight runs too (a member
+  // push must stop a running review from publishing pre-push SHAs).
+  const staleJobIds = ctx.input.store.staleOpenStackJobs(ctx.repoFullName, stackId, dedupKey);
   const enqueue = ctx.input.store.enqueue({
     repoFullName: ctx.repoFullName,
     repoOwner: ctx.repoOwner,
@@ -821,13 +824,14 @@ async function runStackEnqueue(
         members.map((m) => `#${m.prNumber}@${m.headSha.slice(0, 8)}`).join(" → "),
     );
   }
+  enqueue.staleJobIds.unshift(...staleJobIds);
   const result = ctx.finish(enqueue.created ? `${via}-enqueued` : `${via}-deduped`, {
     ok: true,
     command: via,
     stackId,
     enqueued: enqueue.created,
     jobId: enqueue.job.id,
-    staleJobIds: [...staleJobIds, ...enqueue.staleJobIds],
+    staleJobIds: enqueue.staleJobIds,
   });
   return { ...result, enqueue };
 }
@@ -888,7 +892,13 @@ async function runStackEnd(ctx: StackCommandContext, stackId?: string, endPrNumb
       ctx,
       'Could not run a stack review: this build cannot list open pull requests — use "top of stack <id>: #a, #b" instead.',
     );
-    return { status: 202, body: { ok: true, ignored: true, reason: "github client cannot list open pull requests" } };
+    return ctx.finish("end-unsupported", {
+      ok: true,
+      command: "end",
+      stackId,
+      enqueued: false,
+      error: "github client cannot list open pull requests",
+    });
   }
   let openPulls: ResolvedPull[];
   try {
@@ -921,7 +931,13 @@ async function runStackEnd(ctx: StackCommandContext, stackId?: string, endPrNumb
     }
     resolvedPulls = chain.pulls;
   } else {
-    const chain = resolveStackChain({ pulls: openPulls, endPrNumber });
+    // Start markers are explicit lower boundaries: a PR declaring one
+    // terminates the natural-bottom walk so a foreign PR based on the
+    // stack's base branch is never spliced into the chain.
+    const startPrNumbers = new Set(
+      ctx.input.store.listStackStarts(ctx.repoFullName).map((s) => s.pr_number),
+    );
+    const chain = resolveStackChain({ pulls: openPulls, startPrNumbers, endPrNumber });
     if (!chain.ok) {
       await stackReply(ctx, `Could not run a stack review: ${chain.error}.`);
       return ctx.finish("end-invalid", { ok: true, command: "end", enqueued: false, error: chain.error });
@@ -1205,17 +1221,42 @@ async function handleStackBodyMarker(
   if (marker.kind === "invalid") {
     // A body is prose: a line that merely starts with a stack keyword must
     // not suppress the review. Reply with usage so the author sees the
-    // correction, then fall through to the normal enqueue.
-    await stackReply(ctx, STACK_USAGE);
+    // correction, then fall through to the normal enqueue. The body cannot
+    // change on synchronize (only "edited" could alter it, and that action
+    // is not subscribed), so the usage reply fires once per non-synchronize
+    // action instead of spamming a comment per push.
+    if (payload.action !== "synchronize") {
+      await stackReply(ctx, STACK_USAGE);
+    }
     return null;
   }
   // Post-resolution member events (push/reopen on a marked PR) resume the
-  // cumulative review — see resumeResolvedStack.
+  // cumulative review — see resumeResolvedStack. A failed resume (top
+  // merged, chain broken) falls through to the normal review like every
+  // other marker failure — it can never leave the PR unreviewed.
   if (marker.kind !== "end") {
     const resumed = await resumeResolvedStack(ctx, marker.stackId);
-    if (resumed) return resumed;
+    if (resumed) return resumed.body.error == null ? resumed : null;
   }
   if (marker.kind === "part") {
+    // Leave a GitHub-visible trace that review is deferred: an invisible
+    // HTML-comment marker plus invisible suppression must not be the only
+    // record that a PR is skipping automatic review.
+    const noteGithub = ctx.input.github;
+    if (noteGithub && typeof noteGithub.listIssueComments === "function") {
+      try {
+        await upsertStackSuppressionNote({
+          github: noteGithub,
+          installationId: ctx.installationId,
+          repoOwner: ctx.repoOwner,
+          repoName: ctx.repoName,
+          selfPrNumber: ctx.prNumber,
+          stackId: marker.stackId,
+        });
+      } catch (error) {
+        console.warn(`stack marker: could not post suppression note on ${ctx.repoFullName}#${ctx.prNumber}: ${error instanceof Error ? error.message : error}`);
+      }
+    }
     return finish("member-marker", {
       ok: true,
       ignored: true,

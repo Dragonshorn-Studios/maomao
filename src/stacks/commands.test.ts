@@ -105,7 +105,10 @@ describe("parseStackCommand", () => {
     // Prose that mentions an "issue X of Y" form without "in stack" is not intent.
     expect(looksLikeStackCommand("issue 2 of 3 tasks left")).toBe(false);
     expect(looksLikeStackCommand("issue 1 of 4 pages")).toBe(false);
-    expect(looksLikeStackCommand("end of stack extra words")).toBe(true);
+    expect(looksLikeStackCommand("end of stack : #41")).toBe(true);
+    // A free-form tail reads as prose, not a mangled command.
+    expect(looksLikeStackCommand("end of stack traces are hard to debug")).toBe(false);
+    expect(looksLikeStackCommand("end of stack extra words")).toBe(false);
     expect(looksLikeStackCommand("please review the stack")).toBe(false);
     expect(looksLikeStackCommand("LGTM")).toBe(false);
   });
@@ -161,6 +164,39 @@ describe("resolveStackChain", () => {
     expect(resolveStackChain({ pulls: openPulls(), startPrNumber: 41, endPrNumber: 41 }).ok).toBe(false);
     expect(resolveStackChain({ pulls: openPulls(), startPrNumber: 55, endPrNumber: 43 }).ok).toBe(false);
     expect(resolveStackChain({ pulls: [pull({ prNumber: 9, baseRef: "main", headRef: "x" })], endPrNumber: 9 }).ok).toBe(false);
+  });
+
+  it("stops the natural-bottom walk at a start-declaring PR", () => {
+    // #80's head IS the stack's base branch — without the marker boundary it
+    // would be spliced in under whatever stack it happens to declare.
+    const foreign = pull({ prNumber: 80, baseRef: "release", headRef: "main" });
+    const result = resolveStackChain({ pulls: [...openPulls(), foreign], startPrNumbers: new Set([41]), endPrNumber: 43 });
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.pulls.map((p) => p.prNumber)).toEqual([41, 42, 43]);
+  });
+
+  it("ignores a fork PR based on the top's head branch", () => {
+    const forkOnTop = pull({ prNumber: 77, baseRef: "feat-c", headRef: "fork-x", headRepoFullName: "mallory/widgets" });
+    const result = resolveStackChain({ pulls: [...openPulls(), forkOnTop], startPrNumber: 41, endPrNumber: 43 });
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.pulls.map((p) => p.prNumber)).toEqual([41, 42, 43]);
+  });
+
+  it("excludes a PR whose head repo was deleted", () => {
+    // headRepoFullName null = deleted fork: without exclusion it would make
+    // the 'feat-b' head match ambiguous.
+    const ghost = pull({ prNumber: 78, baseRef: "main", headRef: "feat-b", headRepoFullName: null });
+    const result = resolveStackChain({ pulls: [...openPulls(), ghost], startPrNumber: 41, endPrNumber: 43 });
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.pulls.map((p) => p.prNumber)).toEqual([41, 42, 43]);
+  });
+
+  it("fails once the chain exceeds 100 pull requests", () => {
+    const many = [pull({ prNumber: 1, baseRef: "main", headRef: "b1" })];
+    for (let i = 2; i <= 101; i++) many.push(pull({ prNumber: i, baseRef: `b${i - 1}`, headRef: `b${i}` }));
+    const result = resolveStackChain({ pulls: many, endPrNumber: 101 });
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error).toMatch(/exceeds 100/);
   });
 });
 
@@ -285,6 +321,8 @@ describe("extractStackBodyMarker", () => {
     expect(extractStackBodyMarker("part of stack traces and the heap")).toBeNull();
     expect(extractStackBodyMarker("end of stack overflow handling")).toBeNull();
     expect(extractStackBodyMarker("@maomao end of stack u1")).toEqual({ kind: "end", stackId: "u1" });
+    // A promoted top PR keeps its old 'part' line: the 'end' marker wins.
+    expect(extractStackBodyMarker("<!-- part of stack u1 -->\n<!-- end of stack u1 -->")).toEqual({ kind: "end", stackId: "u1" });
     expect(extractStackBodyMarker("@devin-ai-integration[bot] issue 1 of 2 in stack u1"))
       .toEqual({ kind: "declare", stackId: "u1", position: 1, expectedCount: 2 });
   });

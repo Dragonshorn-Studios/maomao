@@ -58,8 +58,9 @@ export interface ResolvedPull {
   baseRef: string;
   headRef: string;
   /** Repo the head branch lives in — differs from repoFullName on fork PRs.
-   *  Undefined only when the API omits it (deleted fork heads). */
-  headRepoFullName?: string;
+   *  Null when the API reports the head repo as deleted (a removed fork);
+   *  undefined only when the field is absent from a partial payload. */
+  headRepoFullName?: string | null;
   draft: boolean;
 }
 
@@ -257,7 +258,7 @@ function toResolvedPull(
     headSha: pr.head.sha,
     baseRef: pr.base.ref ?? "",
     headRef: pr.head.ref ?? "",
-    headRepoFullName: pr.head.repo?.full_name ?? undefined,
+    headRepoFullName: pr.head.repo === null ? null : (pr.head.repo?.full_name ?? undefined),
     draft: Boolean(pr.draft),
   };
 }

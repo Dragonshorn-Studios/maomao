@@ -43,8 +43,14 @@ const END_RE = new RegExp(`^end\\s+of\\s+stack(?:\\s+(${STACK_ID_RE}))?$`, "i");
 // A comment that clearly intends a stack command but fails the grammar still
 // deserves an answer — the webhook replies with usage instead of ignoring it.
 // The issue form requires "in stack" so prose like "issue 2 of 3 tasks left"
-// never earns a reply.
-const STACK_INTENT_RE = /^(?:issue\s+\d+\s+of\s+\d+\s+in\s+stack\b|(?:top|start|end)\s+of\s+stack)\b/i;
+// never earns a reply, and the tail must be empty, a separator, or an id-like
+// token followed by a separator — "end of stack traces are hard" is prose,
+// not a command.
+const STACK_INTENT_RE = new RegExp(
+  `^(?:issue\\s+\\d+\\s+of\\s+\\d+\\s+in\\s+stack|(?:top|start|end)\\s+of\\s+stack)` +
+    `(?=$|\\s*[:#,]|\\s+${STACK_ID_RE}(?:\\s*[:#,]|\\s*$))`,
+  "i",
+);
 
 export function looksLikeStackCommand(body: string): boolean {
   return STACK_INTENT_RE.test(stripMentions(body).replace(/\s+/g, " ").trim());
@@ -60,6 +66,19 @@ export function looksLikeStackCommand(body: string): boolean {
 // members that carry no command of their own.
 const PART_RE = new RegExp(`^part\\s+of\\s+stack(?:\\s+(${STACK_ID_RE}))?$`, "i");
 
+/** Dedup-key prefix every stack_review job uses — also the LIKE prefix store
+ *  queries match on. Centralized so the 'stack:<id>' / 'stack:<id>@<vec>'
+ *  format cannot drift between webhooks, the job store, and the pipeline. */
+export function stackDedupPrefix(stackId: string): string {
+  return `stack:${stackId}`;
+}
+
+/** The stack id a stack_review job's dedup key encodes — both the legacy
+ *  'stack:<id>' form and the per-vector 'stack:<id>@<vec>' form. */
+export function stackIdFromDedupKey(dedupKey: string): string {
+  return dedupKey.slice("stack:".length).replace(/@[0-9a-f]{12}$/, "");
+}
+
 export type StackBodyMarker =
   | { kind: "start"; stackId?: string }
   | { kind: "end"; stackId?: string }
@@ -68,10 +87,15 @@ export type StackBodyMarker =
   | { kind: "invalid" };
 
 export function extractStackBodyMarker(body: string): StackBodyMarker | null {
-  // Scan every marked line: the first VALID marker wins. A malformed marked
-  // line only earns a usage reply when no valid marker follows it, so prose
-  // like "<!-- end of stack: see docs -->" can never mask a real marker below.
+  // Scan every marked line. A malformed marked line only earns a usage reply
+  // when no valid marker exists, so prose like "<!-- end of stack: see docs -->"
+  // can never mask a real marker below. When several valid markers exist the
+  // first "end" wins — it is the close signal, so a PR promoted to the top
+  // that still carries a "part of stack" line resolves the stack instead of
+  // suppressing itself forever.
   let sawInvalid = false;
+  let first: StackBodyMarker | null = null;
+  let firstEnd: StackBodyMarker | null = null;
   for (const rawLine of body.split("\n")) {
     let line = rawLine.trim();
     if (!line) continue;
@@ -82,25 +106,33 @@ export function extractStackBodyMarker(body: string): StackBodyMarker | null {
     if (htmlComment) line = htmlComment[1]!.trim();
     else if (mention) line = line.slice(mention[0].length).trim();
     else continue;
+    let marker: StackBodyMarker | null = null;
     const declare = DECLARE_RE.exec(line);
     if (declare) {
       const position = Number(declare[1]);
       const expectedCount = Number(declare[2]);
       if (position < 1 || expectedCount < 1 || position > expectedCount || expectedCount > 100) {
         sawInvalid = true;
-        continue;
+      } else {
+        marker = { kind: "declare", stackId: declare[3]!, position, expectedCount };
       }
-      return { kind: "declare", stackId: declare[3]!, position, expectedCount };
+    } else {
+      const start = START_RE.exec(line);
+      if (start) marker = { kind: "start", stackId: start[1] };
+      else {
+        const end = END_RE.exec(line);
+        if (end) marker = { kind: "end", stackId: end[1] };
+        else {
+          const part = PART_RE.exec(line);
+          if (part) marker = { kind: "part", stackId: part[1] };
+          else if (STACK_INTENT_RE.test(line)) sawInvalid = true;
+        }
+      }
     }
-    const start = START_RE.exec(line);
-    if (start) return { kind: "start", stackId: start[1] };
-    const end = END_RE.exec(line);
-    if (end) return { kind: "end", stackId: end[1] };
-    const part = PART_RE.exec(line);
-    if (part) return { kind: "part", stackId: part[1] };
-    if (STACK_INTENT_RE.test(line)) sawInvalid = true;
+    if (marker && !first) first = marker;
+    if (marker?.kind === "end" && !firstEnd) firstEnd = marker;
   }
-  return sawInvalid ? { kind: "invalid" } : null;
+  return firstEnd ?? first ?? (sawInvalid ? { kind: "invalid" } : null);
 }
 
 /** Strip "@name" mention tokens (same charset GitHub allows in logins plus [bot]). */
@@ -158,6 +190,10 @@ export function resolveStackChain(input: {
   pulls: ResolvedPull[];
   /** Declared start PR; omit to walk down to the chain's natural base. */
   startPrNumber?: number;
+  /** PR numbers carrying a "start of stack" declaration — used only when
+   *  startPrNumber is omitted, to stop the natural-bottom walk at the first
+   *  start marker instead of walking through it into the stack below. */
+  startPrNumbers?: ReadonlySet<number>;
   endPrNumber: number;
 }): { ok: true; pulls: ResolvedPull[] } | { ok: false; error: string } {
   const { pulls, startPrNumber, endPrNumber } = input;
@@ -172,24 +208,26 @@ export function resolveStackChain(input: {
   if (startPrNumber === endPrNumber) {
     return { ok: false, error: "the start and end of a stack cannot be the same pull request" };
   }
+  // A stack is a chain of branches inside ONE repository: a fork PR shares
+  // the base repo but its head branch lives in the fork, so it can neither be
+  // a chain predecessor nor extend the stack upward — both the head-side
+  // walk and the base-side "not the top" check ignore it. A null head repo
+  // (the API's signal for a deleted fork) is excluded outright; an absent
+  // field falls back to same-repo so partial payloads keep working.
+  const sameRepoHead = (p: ResolvedPull) =>
+    p.headRepoFullName !== null &&
+    (p.headRepoFullName ?? p.repoFullName).toLowerCase() === end.repoFullName.toLowerCase();
   // Boundaries are validated before walking: the trigger PR must be the top
   // (no other open PR bases on its head) and a declared start must be the
   // bottom (no other open PR's head is its base). Both would otherwise
   // silently review a truncated slice of the real stack.
-  const above = pulls.filter((p) => p.prNumber !== end.prNumber && p.baseRef === end.headRef);
+  const above = pulls.filter((p) => p.prNumber !== end.prNumber && p.baseRef === end.headRef && sameRepoHead(p));
   if (above.length > 0) {
     return {
       ok: false,
       error: `#${end.prNumber} is not the top of its stack — ${above.map((p) => `#${p.prNumber}`).join(", ")} ${above.length > 1 ? "are" : "is"} based on its head branch ${mdRef(end.headRef)}`,
     };
   }
-  // A stack is a chain of branches inside ONE repository: a fork PR shares
-  // the base repo but its head branch lives in the fork, so it can never be a
-  // chain predecessor — and must not poison head-side matching. (PRs whose
-  // head repo is unknown are treated as same-repo; the API only omits it for
-  // deleted forks.)
-  const sameRepoHead = (p: ResolvedPull) =>
-    (p.headRepoFullName ?? p.repoFullName).toLowerCase() === end.repoFullName.toLowerCase();
   if (start) {
     const below = pulls.filter((p) => p.prNumber !== start.prNumber && sameRepoHead(p) && p.headRef === start.baseRef);
     if (below.length > 0) {
@@ -209,6 +247,11 @@ export function resolveStackChain(input: {
   const chain: ResolvedPull[] = [end];
   const seen = new Set<number>([end.prNumber]);
   while (!start || chain[0]!.prNumber !== start.prNumber) {
+    // With no declared start the walk terminates at the first PR carrying a
+    // start marker — the marker is an explicit lower boundary, so an
+    // unrelated PR based on the stack's base branch is never spliced into
+    // the chain (and its stack id never swallows foreign members).
+    if (!start && input.startPrNumbers?.has(chain[0]!.prNumber)) break;
     const baseRef = chain[0]!.baseRef;
     const predecessors = byHead.get(baseRef) ?? [];
     if (predecessors.length === 0) {
@@ -233,7 +276,7 @@ export function resolveStackChain(input: {
           : `branch chain loops back to #${predecessor.prNumber}`,
       };
     }
-    if (chain.length > 100) {
+    if (chain.length >= 100) {
       return { ok: false, error: "the chain exceeds 100 pull requests" };
     }
     seen.add(predecessor.prNumber);

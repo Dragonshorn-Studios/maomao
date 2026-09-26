@@ -6,6 +6,7 @@ import type { ForgeScope } from "../forge/types.js";
 import { normalizeScope } from "../forge/types.js";
 import type { FindingRow, FindingStatus } from "../findings/types.js";
 import { nowIso } from "../util.js";
+import { stackDedupPrefix } from "../stacks/commands.js";
 import { publish } from "../events.js";
 import { ReviewConfigStore } from "../config-revisions.js";
 import { PromptRevisionStore } from "../prompt-revisions.js";
@@ -658,9 +659,12 @@ export class JobStore {
   }
 
   /**
-   * Records a whole resolved member list atomically: a conflict mid-batch
-   * rolls the transaction back so a failed "end of stack" never leaves a
-   * torn declaration set behind.
+   * Records a whole resolved member list atomically, reconciling it against
+   * what the stack already knows. Unlike a manual "issue X of Y" declaration
+   * the resolved branch layout is authoritative: members that left the chain
+   * (merged, rebased out) lose their row, and surviving members have their
+   * position and expected_count updated — so a stack that grew or shrank
+   * re-resolves cleanly instead of deadlocking on the stored count.
    */
   recordStackDeclarations(input: {
     repoFullName: string;
@@ -670,21 +674,50 @@ export class JobStore {
     provider?: string;
     providerInstance?: string;
   }): { ok: true; created: number } | { ok: false; error: string } {
+    const scope = normalizeScope({ provider: input.provider, instance: input.providerInstance });
+    const memberPrs = new Set(input.members.map((m) => m.prNumber));
     let created = 0;
     const apply = this.db.transaction(() => {
+      const existing = this.db
+        .prepare(
+          `SELECT * FROM stack_declarations
+           WHERE provider = ? AND provider_instance = ? AND repo_full_name = ? AND stack_id = ?`,
+        )
+        .all(scope.provider, scope.instance, input.repoFullName, input.stackId) as StackDeclarationRow[];
+      for (const row of existing) {
+        if (!memberPrs.has(row.pr_number)) {
+          this.db.prepare(`DELETE FROM stack_declarations WHERE id = ?`).run(row.id);
+        }
+      }
+      const byPr = new Map(existing.map((row) => [row.pr_number, row]));
       for (const member of input.members) {
-        const result = this.upsertStackDeclaration({
-          repoFullName: input.repoFullName,
-          stackId: input.stackId,
-          prNumber: member.prNumber,
-          position: member.position,
-          expectedCount: member.expectedCount,
-          actor: input.actor,
-          provider: input.provider,
-          providerInstance: input.providerInstance,
-        });
-        if (!result.ok) throw new Error(result.error);
-        if (result.created) created += 1;
+        const row = byPr.get(member.prNumber);
+        if (row) {
+          if (row.position !== member.position || row.expected_count !== member.expectedCount) {
+            this.db
+              .prepare(`UPDATE stack_declarations SET position = ?, expected_count = ? WHERE id = ?`)
+              .run(member.position, member.expectedCount, row.id);
+          }
+          continue;
+        }
+        this.db
+          .prepare(
+            `INSERT INTO stack_declarations (provider, provider_instance, repo_full_name, stack_id, pr_number, position, expected_count, actor, comment_id, created_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          )
+          .run(
+            scope.provider,
+            scope.instance,
+            input.repoFullName,
+            input.stackId,
+            member.prNumber,
+            member.position,
+            member.expectedCount,
+            input.actor,
+            null,
+            nowIso(),
+          );
+        created += 1;
       }
     });
     try {
@@ -777,6 +810,16 @@ export class JobStore {
   }
 
   /** Start markers sitting on one PR — the lookup for a bare "end of stack". */
+  listStackStarts(repoFullName: string, provider?: string, providerInstance?: string): StackStartRow[] {
+    const scope = normalizeScope({ provider, instance: providerInstance });
+    return this.db
+      .prepare(
+        `SELECT * FROM stack_starts
+         WHERE provider = ? AND provider_instance = ? AND repo_full_name = ?`,
+      )
+      .all(scope.provider, scope.instance, repoFullName) as StackStartRow[];
+  }
+
   listStackStartsForPull(repoFullName: string, prNumber: number, provider?: string, providerInstance?: string): StackStartRow[] {
     const scope = normalizeScope({ provider, instance: providerInstance });
     return this.db
@@ -789,23 +832,36 @@ export class JobStore {
   }
 
   /**
-   * Supersedes still-queued stack runs whose member vector differs from the
+   * Supersedes still-open stack runs whose member vector differs from the
    * re-trigger's — the per-vector dedup key ('stack:<id>@<vector>') never
-   * stale-matches them, so this marks them stale explicitly. Jobs already
-   * running or finished are untouched: phase-1 re-pinning and the pre-publish
-   * staleness check handle moves during a run.
+   * stale-matches them, so this marks them stale explicitly. Mirrors
+   * enqueue's own stale step (every state but stale/cancelled), matching
+   * both the legacy 'stack:<id>' key and the vector form so a queued job
+   * from before the vector keys shipped is superseded too. The caller must
+   * abort the returned ids so an in-flight run stops publishing reviews for
+   * the superseded SHAs.
    */
-  staleQueuedStackJobs(repoFullName: string, stackId: string, exceptDedupKey: string, provider?: string, providerInstance?: string): number[] {
+  staleOpenStackJobs(repoFullName: string, stackId: string, exceptDedupKey: string, provider?: string, providerInstance?: string): number[] {
     const scope = normalizeScope({ provider, instance: providerInstance });
     const now = nowIso();
     const rows = this.db
       .prepare(
         `UPDATE jobs SET state = 'stale', updated_at = ?, finished_at = COALESCE(finished_at, ?)
          WHERE provider = ? AND provider_instance = ? AND repo_full_name = ? AND job_type = 'stack_review'
-           AND state = 'queued' AND dedup_key LIKE ? ESCAPE '\\' AND dedup_key != ?
+           AND state NOT IN ('stale', 'cancelled')
+           AND (dedup_key = ? OR dedup_key LIKE ? ESCAPE '\\') AND dedup_key != ?
          RETURNING id`,
       )
-      .all(now, now, scope.provider, scope.instance, repoFullName, `stack:${escapeLike(stackId)}@%`, exceptDedupKey) as { id: number }[];
+      .all(
+        now,
+        now,
+        scope.provider,
+        scope.instance,
+        repoFullName,
+        stackDedupPrefix(stackId),
+        `${stackDedupPrefix(escapeLike(stackId))}@%`,
+        exceptDedupKey,
+      ) as { id: number }[];
     return rows.map((r) => r.id);
   }
 
@@ -821,7 +877,7 @@ export class JobStore {
            AND (dedup_key = ? OR dedup_key LIKE ? ESCAPE '\\')
          LIMIT 1`,
       )
-      .get(scope.provider, scope.instance, repoFullName, `stack:${stackId}`, `stack:${escapeLike(stackId)}@%`);
+      .get(scope.provider, scope.instance, repoFullName, stackDedupPrefix(stackId), `stack:${escapeLike(stackId)}@%`);
   }
 
   /** Ordered SHA vector snapshot for a stack_review job (issue #99). */
