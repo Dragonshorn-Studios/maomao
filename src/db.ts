@@ -444,6 +444,18 @@ function migrate(db: SqliteDb): void {
       UNIQUE (provider, provider_instance, repo_full_name, stack_id, pr_number)
     );
 
+    CREATE TABLE IF NOT EXISTS stack_starts (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      ${PROVIDER_COLUMNS},
+      repo_full_name TEXT NOT NULL,
+      stack_id TEXT NOT NULL,
+      pr_number INTEGER NOT NULL,
+      actor TEXT NOT NULL,
+      comment_id TEXT,
+      created_at TEXT NOT NULL,
+      UNIQUE (provider, provider_instance, repo_full_name, stack_id)
+    );
+
     CREATE TABLE IF NOT EXISTS stack_run_members (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       job_id INTEGER NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,

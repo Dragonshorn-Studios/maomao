@@ -71,6 +71,8 @@ export interface ManualTriggerPort {
 
 export interface GithubPort {
   getInstallationToken(installationId: number): Promise<string>;
+  /** Every open pull request in the repository — the input for stack chain resolution. */
+  listOpenPulls?(installationId: number, owner: string, repo: string): Promise<ResolvedPull[]>;
   getPullDiff(
     installationId: number,
     owner: string,
@@ -209,6 +211,53 @@ export function buildIssueSearchQuery(owner: string, repo: string, query: string
   return `repo:${owner}/${repo} is:issue is:open ${safeQuery}`;
 }
 
+/** Maps a pulls.get / pulls.list payload to ResolvedPull. */
+function toResolvedPull(
+  pr: {
+    number: number;
+    title?: string | null;
+    body?: string | null;
+    html_url?: string;
+    draft?: boolean;
+    user?: { login?: string } | null;
+    base: { sha?: string; ref?: string; repo?: { id?: number; owner?: { id?: number } | null } | null };
+    head: { sha?: string; ref?: string };
+  },
+  installationId: number,
+  owner: string,
+  repo: string,
+): ResolvedPull {
+  if (!pr.head?.sha || !pr.base?.sha) {
+    throw new Error("pull request is missing base or head SHA");
+  }
+  const repositoryId = Number(pr.base.repo?.id);
+  const accountId = Number(pr.base.repo?.owner?.id);
+  if (!Number.isSafeInteger(repositoryId) || repositoryId <= 0) {
+    throw new Error("pull request is missing a numeric repository id");
+  }
+  if (!Number.isSafeInteger(accountId) || accountId <= 0) {
+    throw new Error("pull request is missing a numeric account id");
+  }
+  return {
+    installationId,
+    accountId,
+    repositoryId,
+    repoOwner: owner,
+    repoName: repo,
+    repoFullName: `${owner}/${repo}`,
+    prNumber: pr.number,
+    prTitle: pr.title ?? "",
+    prBody: pr.body ?? "",
+    prHtmlUrl: pr.html_url ?? `https://github.com/${owner}/${repo}/pull/${pr.number}`,
+    prAuthor: pr.user?.login ?? "",
+    baseSha: pr.base.sha,
+    headSha: pr.head.sha,
+    baseRef: pr.base.ref ?? "",
+    headRef: pr.head.ref ?? "",
+    draft: Boolean(pr.draft),
+  };
+}
+
 export class GithubClient implements GithubPort, ManualTriggerPort {
   constructor(private readonly config: Config) {}
 
@@ -288,36 +337,7 @@ export class GithubClient implements GithubPort, ManualTriggerPort {
         repo,
         pull_number: pullNumber,
       });
-      const pr = response.data;
-      if (!pr.head?.sha || !pr.base?.sha) {
-        throw new Error("pull request is missing base or head SHA");
-      }
-      const repositoryId = Number(pr.base.repo?.id);
-      const accountId = Number(pr.base.repo?.owner?.id);
-      if (!Number.isSafeInteger(repositoryId) || repositoryId <= 0) {
-        throw new Error("pull request is missing a numeric repository id");
-      }
-      if (!Number.isSafeInteger(accountId) || accountId <= 0) {
-        throw new Error("pull request is missing a numeric account id");
-      }
-      return {
-        installationId,
-        accountId,
-        repositoryId,
-        repoOwner: owner,
-        repoName: repo,
-        repoFullName: `${owner}/${repo}`,
-        prNumber: pr.number,
-        prTitle: pr.title ?? "",
-        prBody: pr.body ?? "",
-        prHtmlUrl: pr.html_url ?? `https://github.com/${owner}/${repo}/pull/${pr.number}`,
-        prAuthor: pr.user?.login ?? "",
-        baseSha: pr.base.sha,
-        headSha: pr.head.sha,
-        baseRef: pr.base.ref ?? "",
-        headRef: pr.head.ref ?? "",
-        draft: Boolean(pr.draft),
-      };
+      return toResolvedPull(response.data, installationId, owner, repo);
     } catch (error) {
       const status = error && typeof error === "object" && "status" in error ? Number(error.status) : 0;
       if (status === 404) {
@@ -325,6 +345,17 @@ export class GithubClient implements GithubPort, ManualTriggerPort {
       }
       throw error instanceof Error ? error : new Error(`Could not load ${owner}/${repo}#${pullNumber}`);
     }
+  }
+
+  async listOpenPulls(installationId: number, owner: string, repo: string): Promise<ResolvedPull[]> {
+    const octokit = this.installationOctokit(installationId);
+    const pulls = await octokit.paginate(octokit.rest.pulls.list, {
+      owner,
+      repo,
+      state: "open",
+      per_page: 100,
+    });
+    return pulls.map((pr) => toResolvedPull(pr, installationId, owner, repo));
   }
 
   async getPullDiff(

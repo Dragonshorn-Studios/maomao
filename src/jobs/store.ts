@@ -194,6 +194,18 @@ export interface StackDeclarationRow {
   created_at: string;
 }
 
+export interface StackStartRow {
+  id: number;
+  provider: string;
+  provider_instance: string;
+  repo_full_name: string;
+  stack_id: string;
+  pr_number: number;
+  actor: string;
+  comment_id: string | null;
+  created_at: string;
+}
+
 export interface StackMemberRow {
   id: number;
   job_id: number;
@@ -645,6 +657,44 @@ export class JobStore {
     return { ok: true, created: true };
   }
 
+  /**
+   * Records a whole resolved member list atomically: a conflict mid-batch
+   * rolls the transaction back so a failed "end of stack" never leaves a
+   * torn declaration set behind.
+   */
+  recordStackDeclarations(input: {
+    repoFullName: string;
+    stackId: string;
+    actor: string;
+    members: { prNumber: number; position: number; expectedCount: number }[];
+    provider?: string;
+    providerInstance?: string;
+  }): { ok: true; created: number } | { ok: false; error: string } {
+    let created = 0;
+    const apply = this.db.transaction(() => {
+      for (const member of input.members) {
+        const result = this.upsertStackDeclaration({
+          repoFullName: input.repoFullName,
+          stackId: input.stackId,
+          prNumber: member.prNumber,
+          position: member.position,
+          expectedCount: member.expectedCount,
+          actor: input.actor,
+          provider: input.provider,
+          providerInstance: input.providerInstance,
+        });
+        if (!result.ok) throw new Error(result.error);
+        if (result.created) created += 1;
+      }
+    });
+    try {
+      apply();
+      return { ok: true, created };
+    } catch (error) {
+      return { ok: false, error: error instanceof Error ? error.message : String(error) };
+    }
+  }
+
   listStackDeclarations(repoFullName: string, stackId: string, provider?: string, providerInstance?: string): StackDeclarationRow[] {
     const scope = normalizeScope({ provider, instance: providerInstance });
     return this.db
@@ -654,6 +704,88 @@ export class JobStore {
          ORDER BY position`,
       )
       .all(scope.provider, scope.instance, repoFullName, stackId) as StackDeclarationRow[];
+  }
+
+  /** Every stack a PR is declared in — infers the id on a bare "top of stack" trigger. */
+  listStackDeclarationsForPull(repoFullName: string, prNumber: number, provider?: string, providerInstance?: string): StackDeclarationRow[] {
+    const scope = normalizeScope({ provider, instance: providerInstance });
+    return this.db
+      .prepare(
+        `SELECT * FROM stack_declarations
+         WHERE provider = ? AND provider_instance = ? AND repo_full_name = ? AND pr_number = ?
+         ORDER BY stack_id`,
+      )
+      .all(scope.provider, scope.instance, repoFullName, prNumber) as StackDeclarationRow[];
+  }
+
+  /**
+   * Marks the bottom PR of a start/end stack (issue #99). One start per stack
+   * id per repository: a repeat on the same PR is idempotent, on a different
+   * PR it is a conflict so a uid can never quietly move stacks.
+   */
+  upsertStackStart(input: {
+    repoFullName: string;
+    stackId: string;
+    prNumber: number;
+    actor: string;
+    commentId?: string;
+    provider?: string;
+    providerInstance?: string;
+  }): { ok: true; created: boolean } | { ok: false; error: string } {
+    const scope = normalizeScope({ provider: input.provider, instance: input.providerInstance });
+    const existing = this.db
+      .prepare(
+        `SELECT * FROM stack_starts
+         WHERE provider = ? AND provider_instance = ? AND repo_full_name = ? AND stack_id = ?`,
+      )
+      .get(scope.provider, scope.instance, input.repoFullName, input.stackId) as StackStartRow | undefined;
+    if (existing) {
+      if (existing.pr_number === input.prNumber) {
+        return { ok: true, created: false };
+      }
+      return {
+        ok: false,
+        error: `stack "${input.stackId}" already starts at PR #${existing.pr_number} — pick a new id or reuse it for that stack`,
+      };
+    }
+    this.db
+      .prepare(
+        `INSERT INTO stack_starts (provider, provider_instance, repo_full_name, stack_id, pr_number, actor, comment_id, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        scope.provider,
+        scope.instance,
+        input.repoFullName,
+        input.stackId,
+        input.prNumber,
+        input.actor,
+        input.commentId ?? null,
+        nowIso(),
+      );
+    return { ok: true, created: true };
+  }
+
+  getStackStart(repoFullName: string, stackId: string, provider?: string, providerInstance?: string): StackStartRow | undefined {
+    const scope = normalizeScope({ provider, instance: providerInstance });
+    return this.db
+      .prepare(
+        `SELECT * FROM stack_starts
+         WHERE provider = ? AND provider_instance = ? AND repo_full_name = ? AND stack_id = ?`,
+      )
+      .get(scope.provider, scope.instance, repoFullName, stackId) as StackStartRow | undefined;
+  }
+
+  /** Start markers sitting on one PR — the lookup for a bare "end of stack". */
+  listStackStartsForPull(repoFullName: string, prNumber: number, provider?: string, providerInstance?: string): StackStartRow[] {
+    const scope = normalizeScope({ provider, instance: providerInstance });
+    return this.db
+      .prepare(
+        `SELECT * FROM stack_starts
+         WHERE provider = ? AND provider_instance = ? AND repo_full_name = ? AND pr_number = ?
+         ORDER BY stack_id`,
+      )
+      .all(scope.provider, scope.instance, repoFullName, prNumber) as StackStartRow[];
   }
 
   /** Ordered SHA vector snapshot for a stack_review job (issue #99). */
