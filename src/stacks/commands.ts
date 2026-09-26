@@ -36,18 +36,22 @@ const END_RE = new RegExp(`^end\\s+of\\s+stack(?:\\s+(${STACK_ID_RE}))?$`, "i");
 
 // A comment that clearly intends a stack command but fails the grammar still
 // deserves an answer — the webhook replies with usage instead of ignoring it.
-const STACK_INTENT_RE = /^(?:issue\s+\d+\s+of\s+\d+|(?:top|start|end)\s+of\s+stack)\b/i;
+// The issue form requires "in stack" so prose like "issue 2 of 3 tasks left"
+// never earns a reply.
+const STACK_INTENT_RE = /^(?:issue\s+\d+\s+of\s+\d+\s+in\s+stack\b|(?:top|start|end)\s+of\s+stack)\b/i;
 
 export function looksLikeStackCommand(body: string): boolean {
   return STACK_INTENT_RE.test(stripMentions(body).replace(/\s+/g, " ").trim());
 }
 
 // Stack markers may also live in the PR body, where a body is prose rather
-// than a single command — so the grammar is matched per whole line, allowing
-// an HTML-comment wrapper ("<!-- start of stack x -->") and a leading
-// @mention. Any marker suppresses automatic per-PR review until "end of
-// stack" resolves the chain; "part of stack <id>" is the suppression-only
-// marker for middle members that carry no command of their own.
+// than a single command — so a body marker must be marked up to count: the
+// line must be HTML-comment wrapped ("<!-- start of stack x -->") or carry a
+// leading @mention. Bare lines are ignored entirely, so prose mentioning
+// "end of stack" or "part of stack traces" can never become a marker. Any
+// marker suppresses automatic per-PR review until "end of stack" resolves
+// the chain; "part of stack <id>" is the suppression-only marker for middle
+// members that carry no command of their own.
 const PART_RE = new RegExp(`^part\\s+of\\s+stack(?:\\s+(${STACK_ID_RE}))?$`, "i");
 
 export type StackBodyMarker =
@@ -62,8 +66,12 @@ export function extractStackBodyMarker(body: string): StackBodyMarker | null {
     let line = rawLine.trim();
     if (!line) continue;
     const htmlComment = /^<!--(.*)-->$/.exec(line);
+    const mention = /^@[A-Za-z0-9][A-Za-z0-9-]*(?:\[bot\])?\s+/.exec(line);
+    // Unmarked prose is never a marker — require the comment wrapper or an
+    // explicit mention so an ordinary line cannot suppress the review.
     if (htmlComment) line = htmlComment[1]!.trim();
-    line = line.replace(/^@[A-Za-z0-9][A-Za-z0-9-]*(?:\[bot\])?\s+/, "").trim();
+    else if (mention) line = line.slice(mention[0].length).trim();
+    else continue;
     const declare = DECLARE_RE.exec(line);
     if (declare) {
       const position = Number(declare[1]);

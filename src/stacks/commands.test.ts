@@ -102,6 +102,9 @@ describe("parseStackCommand", () => {
   it("detects malformed stack commands for a usage reply", () => {
     expect(looksLikeStackCommand("top of stack : broken")).toBe(true);
     expect(looksLikeStackCommand("issue 5 of 5 in stack")).toBe(true);
+    // Prose that mentions an "issue X of Y" form without "in stack" is not intent.
+    expect(looksLikeStackCommand("issue 2 of 3 tasks left")).toBe(false);
+    expect(looksLikeStackCommand("issue 1 of 4 pages")).toBe(false);
     expect(looksLikeStackCommand("end of stack extra words")).toBe(true);
     expect(looksLikeStackCommand("please review the stack")).toBe(false);
     expect(looksLikeStackCommand("LGTM")).toBe(false);
@@ -268,16 +271,22 @@ describe("validateStackMembers", () => {
 
 describe("extractStackBodyMarker", () => {
   it("finds a marker on its own line inside a prose body", () => {
-    expect(extractStackBodyMarker("Adds a thing.\n\nstart of stack u1\nMore text."))
+    expect(extractStackBodyMarker("Adds a thing.\n\n<!-- start of stack u1 -->\nMore text."))
       .toEqual({ kind: "start", stackId: "u1" });
-    expect(extractStackBodyMarker("end of stack")).toEqual({ kind: "end", stackId: undefined });
-    expect(extractStackBodyMarker("part of stack u1")).toEqual({ kind: "part", stackId: "u1" });
-    expect(extractStackBodyMarker("issue 2 of 3 in stack u1")).toEqual({ kind: "declare", stackId: "u1", position: 2, expectedCount: 3 });
+    expect(extractStackBodyMarker("<!-- end of stack -->")).toEqual({ kind: "end", stackId: undefined });
+    expect(extractStackBodyMarker("<!-- part of stack u1 -->")).toEqual({ kind: "part", stackId: "u1" });
+    expect(extractStackBodyMarker("<!-- issue 2 of 3 in stack u1 -->")).toEqual({ kind: "declare", stackId: "u1", position: 2, expectedCount: 3 });
   });
 
-  it("accepts an HTML-comment wrapper and a leading @mention", () => {
-    expect(extractStackBodyMarker("Body.\n<!-- start of stack u1 -->")).toEqual({ kind: "start", stackId: "u1" });
-    expect(extractStackBodyMarker("@maomao-review-bot end of stack u1")).toEqual({ kind: "end", stackId: "u1" });
+  it("requires the HTML-comment wrapper or a leading @mention — bare lines are prose", () => {
+    expect(extractStackBodyMarker("Adds a thing.\n\nstart of stack u1")).toBeNull();
+    expect(extractStackBodyMarker("end of stack u1")).toBeNull();
+    expect(extractStackBodyMarker("part of stack u1")).toBeNull();
+    expect(extractStackBodyMarker("part of stack traces and the heap")).toBeNull();
+    expect(extractStackBodyMarker("end of stack overflow handling")).toBeNull();
+    expect(extractStackBodyMarker("@maomao end of stack u1")).toEqual({ kind: "end", stackId: "u1" });
+    expect(extractStackBodyMarker("@devin-ai-integration[bot] issue 1 of 2 in stack u1"))
+      .toEqual({ kind: "declare", stackId: "u1", position: 1, expectedCount: 2 });
   });
 
   it("ignores prose that merely mentions the phrases mid-line", () => {
@@ -287,7 +296,7 @@ describe("extractStackBodyMarker", () => {
   });
 
   it("flags a malformed marker line as invalid", () => {
-    expect(extractStackBodyMarker("Body.\nend of stack : with junk")).toEqual({ kind: "invalid" });
+    expect(extractStackBodyMarker("Body.\n<!-- end of stack : with junk -->")).toEqual({ kind: "invalid" });
   });
 });
 

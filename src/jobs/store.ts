@@ -788,6 +788,27 @@ export class JobStore {
       .all(scope.provider, scope.instance, repoFullName, prNumber) as StackStartRow[];
   }
 
+  /**
+   * Supersedes still-queued stack runs whose member vector differs from the
+   * re-trigger's — the per-vector dedup key ('stack:<id>@<vector>') never
+   * stale-matches them, so this marks them stale explicitly. Jobs already
+   * running or finished are untouched: phase-1 re-pinning and the pre-publish
+   * staleness check handle moves during a run.
+   */
+  staleQueuedStackJobs(repoFullName: string, stackId: string, exceptDedupKey: string, provider?: string, providerInstance?: string): number[] {
+    const scope = normalizeScope({ provider, instance: providerInstance });
+    const now = nowIso();
+    const rows = this.db
+      .prepare(
+        `UPDATE jobs SET state = 'stale', updated_at = ?, finished_at = COALESCE(finished_at, ?)
+         WHERE provider = ? AND provider_instance = ? AND repo_full_name = ? AND job_type = 'stack_review'
+           AND state = 'queued' AND dedup_key LIKE ? AND dedup_key != ?
+         RETURNING id`,
+      )
+      .all(now, now, scope.provider, scope.instance, repoFullName, `stack:${stackId}@%`, exceptDedupKey) as { id: number }[];
+    return rows.map((r) => r.id);
+  }
+
   /** Ordered SHA vector snapshot for a stack_review job (issue #99). */
   insertStackMembers(
     jobId: number,

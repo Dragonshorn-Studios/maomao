@@ -355,7 +355,18 @@ export class GithubClient implements GithubPort, ManualTriggerPort {
       state: "open",
       per_page: 100,
     });
-    return pulls.map((pr) => toResolvedPull(pr, installationId, owner, repo));
+    const resolved: ResolvedPull[] = [];
+    for (const pr of pulls) {
+      try {
+        resolved.push(toResolvedPull(pr, installationId, owner, repo));
+      } catch (error) {
+        // One pull with missing base/head data must not fail the whole
+        // listing — a stack end in the repo would otherwise be blocked by
+        // an unrelated odd PR until it changed.
+        console.warn(`listOpenPulls ${owner}/${repo}: skipping PR #${pr.number}: ${error instanceof Error ? error.message : error}`);
+      }
+    }
+    return resolved;
   }
 
   async getPullDiff(

@@ -11,7 +11,7 @@ import {
   type ManualTriggerPort,
   type ReviewThread,
 } from "./client.js";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import type { EnqueueResult, JobStore } from "../jobs/store.js";
 import { enqueuePullJob } from "../jobs/enqueue.js";
 import { extractStackBodyMarker, looksLikeStackCommand, parseStackCommand, resolveStackChain, validateStackMembers, type StackBodyMarker, type StackCommand } from "../stacks/commands.js";
@@ -607,6 +607,14 @@ async function refreshStackComments(
   }
 }
 
+// The member SHA vector joins the stack id in the dedup key: an identical
+// re-trigger dedups, while a push to ANY member — not only the top —
+// supersedes the queued run and can never dedup onto a finished job.
+function stackDedupKey(stackId: string, members: { prNumber: number; headSha: string }[]): string {
+  const vector = members.map((m) => `${m.prNumber}:${m.headSha}`).join("/");
+  return `stack:${stackId}@${createHash("sha1").update(vector).digest("hex").slice(0, 12)}`;
+}
+
 // The enqueue tail shared by "top of stack" and "end of stack": pause
 // check, job enqueue, marker comments on every member, stack_run_members.
 async function runStackEnqueue(
@@ -628,6 +636,10 @@ async function runStackEnqueue(
       await stackReply(ctx, `Could not run stack "${stackId}": reviews for ${ctx.repoFullName} are paused until ${repoPause.expires_at}.`);
       return ctx.finish(`${via}-paused`, { ok: true, command: via, stackId, enqueued: false, error: `paused until ${repoPause.expires_at}` });
     }
+    if (rateOn && ctx.githubRepositoryId == null) {
+      await stackReply(ctx, `Could not run stack "${stackId}": the webhook payload is missing the repository id needed for rate limiting.`);
+      return ctx.finish(`${via}-rate-limited`, { ok: true, command: via, stackId, enqueued: false, error: "missing repository id" });
+    }
     if (
       rateOn &&
       ctx.githubRepositoryId != null &&
@@ -642,6 +654,19 @@ async function runStackEnqueue(
       return ctx.finish(`${via}-rate-limited`, { ok: true, command: via, stackId, enqueued: false, error: "rate limited" });
     }
   }
+  // Draft members are not reviewable by default — the same REVIEW_DRAFTS gate
+  // every other entry point applies, fail-closed so an end trigger cannot
+  // spend on work an author marked not-ready.
+  if (!ctx.input.config.reviewDrafts) {
+    const drafts = pulls.filter((pull) => pull.draft);
+    if (drafts.length > 0) {
+      await stackReply(
+        ctx,
+        `Could not run stack "${stackId}": ${drafts.map((p) => `#${p.prNumber}`).join(", ")} ${drafts.length > 1 ? "are" : "is"} still draft — mark ${drafts.length > 1 ? "them" : "it"} ready for review or set REVIEW_DRAFTS=true.`,
+      );
+      return ctx.finish(`${via}-drafts`, { ok: true, command: via, stackId, enqueued: false, error: "draft members" });
+    }
+  }
   const members = pulls.map((pull, index) => ({
     position: index + 1,
     prNumber: pull.prNumber,
@@ -654,6 +679,10 @@ async function runStackEnqueue(
   const top = members[members.length - 1]!;
   const bottom = members[0]!;
   const topPull = pulls[pulls.length - 1]!;
+  const dedupKey = stackDedupKey(stackId, members);
+  // The per-vector key never stale-matches superseded queued runs — mark them
+  // before enqueueing so a member push does not leave two queued stack jobs.
+  const staleJobIds = ctx.input.store.staleQueuedStackJobs(ctx.repoFullName, stackId, dedupKey);
   const enqueue = ctx.input.store.enqueue({
     repoFullName: ctx.repoFullName,
     repoOwner: ctx.repoOwner,
@@ -676,7 +705,7 @@ async function runStackEnqueue(
     // the profile reviewers when runStackJob enqueues them as pr_review jobs.
     reviewers: [{ role: "stack_cumulative", title: "Stack cumulative" }],
     jobType: "stack_review",
-    dedupKey: `stack:${stackId}`,
+    dedupKey,
   });
   await refreshStackComments(
     ctx,
@@ -709,7 +738,7 @@ async function runStackEnqueue(
     stackId,
     enqueued: enqueue.created,
     jobId: enqueue.job.id,
-    staleJobIds: enqueue.staleJobIds,
+    staleJobIds: [...staleJobIds, ...enqueue.staleJobIds],
   });
   return { ...result, enqueue };
 }
@@ -764,7 +793,7 @@ async function runStackStart(ctx: StackCommandContext, stackId?: string): Promis
 // "end of stack <id>" on the top PR resolves the whole stack from the
 // branch layout: open PRs chain base→head down to the declared start. The id
 // is optional when exactly one start marker sits at the chain's base.
-async function runStackEnd(ctx: StackCommandContext, stackId?: string): Promise<WebhookHandleResult> {
+async function runStackEnd(ctx: StackCommandContext, stackId?: string, endPrNumber = ctx.prNumber): Promise<WebhookHandleResult> {
   if (typeof ctx.input.github?.listOpenPulls !== "function") {
     return { status: 202, body: { ok: true, ignored: true, reason: "github client cannot list open pull requests" } };
   }
@@ -792,14 +821,14 @@ async function runStackEnd(ctx: StackCommandContext, stackId?: string): Promise<
       await stackReply(ctx, `Could not run stack "${endStackId}": no "start of stack ${endStackId}" was seen in ${ctx.repoFullName}.`);
       return ctx.finish("end-no-start", { ok: true, command: "end", stackId: endStackId, enqueued: false, error: "no start marker" });
     }
-    const chain = resolveStackChain({ pulls: openPulls, startPrNumber: start.pr_number, endPrNumber: ctx.prNumber });
+    const chain = resolveStackChain({ pulls: openPulls, startPrNumber: start.pr_number, endPrNumber });
     if (!chain.ok) {
       await stackReply(ctx, `Could not run stack "${endStackId}": ${chain.error}.`);
       return ctx.finish("end-invalid", { ok: true, command: "end", stackId: endStackId, enqueued: false, error: chain.error });
     }
     resolvedPulls = chain.pulls;
   } else {
-    const chain = resolveStackChain({ pulls: openPulls, endPrNumber: ctx.prNumber });
+    const chain = resolveStackChain({ pulls: openPulls, endPrNumber });
     if (!chain.ok) {
       await stackReply(ctx, `Could not run a stack review: ${chain.error}.`);
       return ctx.finish("end-invalid", { ok: true, command: "end", enqueued: false, error: chain.error });
@@ -809,7 +838,7 @@ async function runStackEnd(ctx: StackCommandContext, stackId?: string): Promise<
       await stackReply(
         ctx,
         starts.length === 0
-          ? `Could not run a stack review: the chain below #${ctx.prNumber} bottoms out at #${chain.pulls[0]!.prNumber}, which has no "start of stack" marker — post "start of stack <id>" there or name the stack: "end of stack <id>".`
+          ? `Could not run a stack review: the chain below #${endPrNumber} bottoms out at #${chain.pulls[0]!.prNumber}, which has no "start of stack" marker — post "start of stack <id>" there or name the stack: "end of stack <id>".`
           : `Could not run a stack review: #${chain.pulls[0]!.prNumber} starts ${starts.length} stacks (${starts.map((s) => `"${s.stack_id}"`).join(", ")}) — name the stack: "end of stack <id>".`,
       );
       return ctx.finish("end-no-stack-id", { ok: true, command: "end", enqueued: false, error: "no stack id" });
@@ -836,6 +865,34 @@ async function runStackEnd(ctx: StackCommandContext, stackId?: string): Promise<
     return ctx.finish("end-declare-conflict", { ok: true, command: "end", stackId: endStackId, enqueued: false, error: recorded.error });
   }
   return runStackEnqueue(ctx, endStackId, resolvedPulls, "end");
+}
+
+// A marked member's event after the stack resolved re-runs the cumulative
+// review — the body marker suppresses per-PR review permanently, so a push
+// to a non-top member would otherwise land with no review at all. Resolves
+// the chain again so fresh SHAs are pinned; dedup on `stack:<id>` makes the
+// re-run safe. Returns null when the marker's stack has not resolved (or the
+// PR is not a member), leaving the normal marker handling to proceed.
+async function resumeResolvedStack(ctx: StackCommandContext, preferredId?: string): Promise<WebhookHandleResult | null> {
+  let stackId = preferredId;
+  if (!stackId) {
+    const ids = [
+      ...new Set([
+        ...ctx.input.store.listStackDeclarationsForPull(ctx.repoFullName, ctx.prNumber).map((d) => d.stack_id),
+        ...ctx.input.store.listStackStartsForPull(ctx.repoFullName, ctx.prNumber).map((s) => s.stack_id),
+      ]),
+    ];
+    if (ids.length !== 1) return null;
+    stackId = ids[0]!;
+  }
+  const start = ctx.input.store.getStackStart(ctx.repoFullName, stackId);
+  const declarations = ctx.input.store.listStackDeclarations(ctx.repoFullName, stackId);
+  const top = declarations[declarations.length - 1];
+  if (!start || !top) return null;
+  const isMember =
+    start.pr_number === ctx.prNumber || declarations.some((d) => d.pr_number === ctx.prNumber);
+  if (!isMember) return null;
+  return runStackEnd(ctx, stackId, top.pr_number);
 }
 
 async function handleStackCommand(
@@ -1074,6 +1131,12 @@ async function handleStackBodyMarker(
     // correction, then fall through to the normal enqueue.
     await stackReply(ctx, STACK_USAGE);
     return null;
+  }
+  // Post-resolution member events (push/reopen on a marked PR) resume the
+  // cumulative review — see resumeResolvedStack.
+  if (marker.kind !== "end") {
+    const resumed = await resumeResolvedStack(ctx, marker.stackId);
+    if (resumed) return resumed;
   }
   if (marker.kind === "part") {
     return finish("member-marker", {
