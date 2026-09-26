@@ -6,6 +6,7 @@ import { ForgeRegistry } from "../forge/registry.js";
 import type { ForgeConnectionStore } from "../forge/connections.js";
 import type { ForgeDiscussion, ForgeInlineComment, ForgeRepoTarget, ForgeSummary, ForgeVerdict } from "../forge/types.js";
 import { forgeTargetOf, scopeOf } from "../forge/types.js";
+import { stackIdFromDedupKey } from "../stacks/commands.js";
 import { publish } from "../events.js";
 import { buildReviewBody, findExistingReview, selectInlineComments, inlineCommentFingerprints } from "../forge/review-text.js";
 import type { CheckoutPort } from "../checkout.js";
@@ -1036,7 +1037,9 @@ async function runStackJob(deps: PipelineDeps, forge: ForgeRegistry, jobId: numb
       store.setJobState(jobId, "failed", { failure_reason: "stack review has no recorded members", finished_at: nowIso() });
       return;
     }
-    const stackId = job.dedup_key.startsWith("stack:") ? job.dedup_key.slice("stack:".length) : job.dedup_key;
+    // Keys carry the member SHA vector: `stack:<id>@<vec>` — the id is the part
+    // between the prefix and the last `@`.
+    const stackId = job.dedup_key.startsWith("stack:") ? stackIdFromDedupKey(job.dedup_key) : job.dedup_key;
     const memberTarget = (prNumber: number) => ({ ...forgeTargetOf(job), changeNumber: prNumber });
     store.setJobState(jobId, "preparing", { started_at: nowIso() });
 

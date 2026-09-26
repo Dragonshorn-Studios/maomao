@@ -26,6 +26,81 @@ function seedJob(store: JobStore, prNumber = 4, headSha = "cafebabe") {
   }).job.id;
 }
 
+function seedStackJob(store: JobStore, stackId: string, vector = "deadbeef0001", headSha = "cafebabe") {
+  return store.enqueue({
+    repoFullName: "acme/widgets",
+    repoOwner: "acme",
+    repoName: "widgets",
+    installationId: 9,
+    prNumber: 43,
+    prTitle: "t",
+    prBody: "",
+    prHtmlUrl: "",
+    prAuthor: "dev",
+    baseSha: "base",
+    headSha,
+    baseRef: "main",
+    headRef: "feat",
+    reviewers: [{ role: "stack_cumulative", title: "Stack cumulative" }],
+    jobType: "stack_review",
+    dedupKey: `stack:${stackId}@${vector}`,
+  }).job.id;
+}
+
+describe("stack job helpers", () => {
+  it("staleOpenStackJobs stales open same-stack rows only, and hasStackReview tracks resolution", () => {
+    const store = makeStore();
+    const queued = seedStackJob(store, "u1", "aaa111bbb222");
+    const rerun = seedStackJob(store, "u1", "ccc333ddd444", "other1");
+    const otherStack = seedStackJob(store, "u2", "aaa111bbb222", "other2");
+    const lookalike = seedStackJob(store, "aXb", "aaa111bbb222", "other3");
+    // A same-stack run already in flight is superseded too — the caller
+    // aborts the returned ids so it stops publishing pre-push reviews.
+    store.setJobState(rerun, "reviewing");
+
+    expect(store.hasStackReview("acme/widgets", "u1")).toBe(true);
+    expect(store.hasStackReview("acme/widgets", "never-ran")).toBe(false);
+
+    const staled = store.staleOpenStackJobs("acme/widgets", "u1", "stack:u1@newvector99");
+    expect(staled.sort((a, b) => a - b)).toEqual([queued, rerun].sort((a, b) => a - b));
+    expect(store.getJob(queued)?.state).toBe("stale");
+    expect(store.getJob(queued)?.finished_at).toBeTruthy();
+    expect(store.getJob(rerun)?.state).toBe("stale");
+    expect(store.getJob(otherStack)?.state).toBe("queued");
+
+    // LIKE metacharacters in the id must not over-match: 'a_b' != 'aXb'.
+    expect(store.staleOpenStackJobs("acme/widgets", "a_b", "stack:a_b@zzz")).toEqual([]);
+    expect(store.getJob(lookalike)?.state).toBe("queued");
+  });
+
+  it("staleOpenStackJobs also stales legacy 'stack:<id>' keys across the deploy boundary", () => {
+    const store = makeStore();
+    const legacy = store.enqueue({
+      repoFullName: "acme/widgets",
+      repoOwner: "acme",
+      repoName: "widgets",
+      installationId: 1,
+      prNumber: 9,
+      prTitle: "t",
+      prBody: "",
+      prHtmlUrl: "u",
+      prAuthor: "dev",
+      baseSha: "base",
+      headSha: "old",
+      baseRef: "main",
+      headRef: "feat",
+      reviewers: [{ role: "stack_cumulative", title: "Stack cumulative" }],
+      jobType: "stack_review",
+      dedupKey: "stack:u1",
+    }).job.id;
+
+    expect(store.hasStackReview("acme/widgets", "u1")).toBe(true);
+    const staled = store.staleOpenStackJobs("acme/widgets", "u1", "stack:u1@newvector1");
+    expect(staled).toEqual([legacy]);
+    expect(store.getJob(legacy)?.state).toBe("stale");
+  });
+});
+
 describe("JobQueue cancellation", () => {
   it("never runs a cancelled job that was still pending", async () => {
     const store = makeStore();
