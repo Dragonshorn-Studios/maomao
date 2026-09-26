@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { looksLikeStackCommand, parseStackCommand, resolveStackChain, validateStackMembers } from "./commands.js";
+import { extractStackBodyMarker, looksLikeStackCommand, parseStackCommand, resolveStackChain, validateStackMembers } from "./commands.js";
 import type { ResolvedPull } from "../github/client.js";
 import type { StackDeclarationRow } from "../jobs/store.js";
 
@@ -263,5 +263,30 @@ describe("validateStackMembers", () => {
       commentPrNumber: 42,
     });
     expect(result.ok).toBe(false);
+  });
+});
+
+describe("extractStackBodyMarker", () => {
+  it("finds a marker on its own line inside a prose body", () => {
+    expect(extractStackBodyMarker("Adds a thing.\n\nstart of stack u1\nMore text."))
+      .toEqual({ kind: "start", stackId: "u1" });
+    expect(extractStackBodyMarker("end of stack")).toEqual({ kind: "end", stackId: undefined });
+    expect(extractStackBodyMarker("part of stack u1")).toEqual({ kind: "part", stackId: "u1" });
+    expect(extractStackBodyMarker("issue 2 of 3 in stack u1")).toEqual({ kind: "declare", stackId: "u1", position: 2, expectedCount: 3 });
+  });
+
+  it("accepts an HTML-comment wrapper and a leading @mention", () => {
+    expect(extractStackBodyMarker("Body.\n<!-- start of stack u1 -->")).toEqual({ kind: "start", stackId: "u1" });
+    expect(extractStackBodyMarker("@maomao-review-bot end of stack u1")).toEqual({ kind: "end", stackId: "u1" });
+  });
+
+  it("ignores prose that merely mentions the phrases mid-line", () => {
+    expect(extractStackBodyMarker("This is the start of stack work.\nPlease review.")).toBeNull();
+    expect(extractStackBodyMarker("no markers here")).toBeNull();
+    expect(extractStackBodyMarker("")).toBeNull();
+  });
+
+  it("flags a malformed marker line as invalid", () => {
+    expect(extractStackBodyMarker("Body.\nend of stack : with junk")).toEqual({ kind: "invalid" });
   });
 });

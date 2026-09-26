@@ -1735,4 +1735,87 @@ describe("stack commands (issue #99)", () => {
     });
     expect(denied.body.ignored).toBe(true);
   });
+
+  const markedPr = (bodyText: string, prOverrides: Record<string, unknown> = {}) =>
+    JSON.stringify(
+      prPayload({ pull_request: { ...prPayload().pull_request, body: bodyText, ...prOverrides } }),
+    );
+
+  it("suppresses automatic review when the PR body carries a 'part of stack' marker", async () => {
+    const secret = "s3cret";
+    const config = stackConfig(secret);
+    const store = new JobStore(openDb(":memory:"));
+    const { github } = stackGithub();
+    const rawBody = markedPr("Adds the thing.\n\npart of stack u1\n");
+    const result = await handleGithubWebhook({
+      config,
+      store,
+      github,
+      request: { event: "pull_request", deliveryId: "m1", signature: sign(secret, rawBody), rawBody },
+    });
+    expect(result.status).toBe(200);
+    expect(result.body.ignored).toBe(true);
+    expect(result.body.reason).toContain("part of stack");
+    expect(store.listJobs(10)).toHaveLength(0);
+  });
+
+  it("records a start marker from the PR body and leaves a pending marker comment", async () => {
+    const secret = "s3cret";
+    const config = stackConfig(secret);
+    const store = new JobStore(openDb(":memory:"));
+    const { github, comments } = stackGithub();
+    const rawBody = markedPr("Adds the base.\n\n<!-- start of stack u1 -->");
+    const result = await handleGithubWebhook({
+      config,
+      store,
+      github,
+      request: { event: "pull_request", deliveryId: "m2", signature: sign(secret, rawBody), rawBody },
+    });
+    expect(result.status).toBe(200);
+    expect(store.getStackStart("acme/widgets", "u1")?.pr_number).toBe(7);
+    expect(comments[0]?.body).toContain("maomao-stack:u1");
+    expect(store.listJobs(10)).toHaveLength(0);
+  });
+
+  it("resolves 'end of stack' from the PR body and enqueues the stack review", async () => {
+    const secret = "s3cret";
+    const config = stackConfig(secret);
+    const store = new JobStore(openDb(":memory:"));
+    store.upsertStackStart({ repoFullName: "acme/widgets", stackId: "u1", prNumber: 41, actor: "alice" });
+    const { github } = stackGithub({ openPulls: chainPulls() });
+    const rawBody = markedPr("Adds the top.\n\nend of stack u1", {
+      number: 43,
+      base: { sha: "h42", ref: "feat-b" },
+      head: { sha: "h43", ref: "feat-c" },
+    });
+    const result = await handleGithubWebhook({
+      config,
+      store,
+      github,
+      request: { event: "pull_request", deliveryId: "m3", signature: sign(secret, rawBody), rawBody },
+    });
+    expect(result.status).toBe(200);
+    expect(result.body.enqueued).toBe(true);
+    const jobs = store.listJobs(10).filter((j) => j.job_type === "stack_review");
+    expect(jobs).toHaveLength(1);
+    expect(jobs[0]?.dedup_key).toBe("stack:u1");
+    expect(store.listStackMembers(jobs[0]!.id).map((m) => m.pr_number)).toEqual([41, 42, 43]);
+  });
+
+  it("reviews normally when the body marker's author is not authorized", async () => {
+    const secret = "s3cret";
+    const config = stackConfig(secret);
+    const store = new JobStore(openDb(":memory:"));
+    // "read" is explicit and weaker than write — never upgraded.
+    const { github } = stackGithub({ permission: "read" });
+    const rawBody = markedPr("part of stack u1");
+    const result = await handleGithubWebhook({
+      config,
+      store,
+      github,
+      request: { event: "pull_request", deliveryId: "m4", signature: sign(secret, rawBody), rawBody },
+    });
+    expect(result.body.created).toBe(true);
+    expect(store.listJobs(10)).toHaveLength(1);
+  });
 });

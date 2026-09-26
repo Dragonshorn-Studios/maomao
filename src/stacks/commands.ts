@@ -42,6 +42,48 @@ export function looksLikeStackCommand(body: string): boolean {
   return STACK_INTENT_RE.test(stripMentions(body).replace(/\s+/g, " ").trim());
 }
 
+// Stack markers may also live in the PR body, where a body is prose rather
+// than a single command — so the grammar is matched per whole line, allowing
+// an HTML-comment wrapper ("<!-- start of stack x -->") and a leading
+// @mention. Any marker suppresses automatic per-PR review until "end of
+// stack" resolves the chain; "part of stack <id>" is the suppression-only
+// marker for middle members that carry no command of their own.
+const PART_RE = new RegExp(`^part\\s+of\\s+stack(?:\\s+(${STACK_ID_RE}))?$`, "i");
+
+export type StackBodyMarker =
+  | { kind: "start"; stackId?: string }
+  | { kind: "end"; stackId?: string }
+  | { kind: "part"; stackId?: string }
+  | { kind: "declare"; stackId: string; position: number; expectedCount: number }
+  | { kind: "invalid" };
+
+export function extractStackBodyMarker(body: string): StackBodyMarker | null {
+  for (const rawLine of body.split("\n")) {
+    let line = rawLine.trim();
+    if (!line) continue;
+    const htmlComment = /^<!--(.*)-->$/.exec(line);
+    if (htmlComment) line = htmlComment[1]!.trim();
+    line = line.replace(/^@[A-Za-z0-9][A-Za-z0-9-]*(?:\[bot\])?\s+/, "").trim();
+    const declare = DECLARE_RE.exec(line);
+    if (declare) {
+      const position = Number(declare[1]);
+      const expectedCount = Number(declare[2]);
+      if (position < 1 || expectedCount < 1 || position > expectedCount || expectedCount > 100) {
+        return { kind: "invalid" };
+      }
+      return { kind: "declare", stackId: declare[3]!, position, expectedCount };
+    }
+    const start = START_RE.exec(line);
+    if (start) return { kind: "start", stackId: start[1] };
+    const end = END_RE.exec(line);
+    if (end) return { kind: "end", stackId: end[1] };
+    const part = PART_RE.exec(line);
+    if (part) return { kind: "part", stackId: part[1] };
+    if (STACK_INTENT_RE.test(line)) return { kind: "invalid" };
+  }
+  return null;
+}
+
 /** Strip "@name" mention tokens (same charset GitHub allows in logins plus [bot]). */
 function stripMentions(body: string): string {
   return body.replace(/@[A-Za-z0-9][A-Za-z0-9-]*(?:\[bot\])?/g, " ").trim();
