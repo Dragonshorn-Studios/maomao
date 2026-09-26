@@ -65,4 +65,61 @@ describe("review event resolution", () => {
     const result = resolveReviewEvent(input({ clean: false, findings: [{ severity: "low" }] }));
     expect(result).toEqual({ event: "COMMENT", reason: "findings below the request-changes threshold" });
   });
+
+  it("approves findings at or below the approve ceiling", () => {
+    const result = resolveReviewEvent(
+      input({ clean: false, approveMaxSeverity: "low", findings: [{ severity: "low" }, { severity: "info" }] }),
+    );
+    expect(result).toEqual({ event: "APPROVE", reason: "no findings above low severity" });
+  });
+
+  it("still comments when a finding exceeds the approve ceiling", () => {
+    const result = resolveReviewEvent(
+      input({ clean: false, approveMaxSeverity: "low", findings: [{ severity: "medium" }] }),
+    );
+    expect(result.event).toBe("COMMENT");
+    expect(result.reason).toContain("above the approve ceiling");
+    expect(result.reason).toContain("below request-changes threshold");
+  });
+
+  it("never approves over the ceiling when approve is disabled or the run is degraded", () => {
+    const findings = [{ severity: "low" }];
+    expect(
+      resolveReviewEvent(input({ clean: false, approveMaxSeverity: "low", allowApprove: false, findings })).event,
+    ).toBe("COMMENT");
+    expect(
+      resolveReviewEvent(input({ clean: false, approveMaxSeverity: "low", allReviewersDone: false, findings })).event,
+    ).toBe("COMMENT");
+    expect(
+      resolveReviewEvent(input({ clean: false, approveMaxSeverity: "low", aggregatorFallback: true, findings })).event,
+    ).toBe("COMMENT");
+  });
+
+  it("approves an empty publishable set when the aggregator was not clean", () => {
+    // A profile's minPublishableSeverity can filter every finding out, leaving
+    // verdict "comment" but nothing to publish — the ceiling treats that as
+    // approvable noise, not a clean review.
+    const result = resolveReviewEvent(input({ clean: false, approveMaxSeverity: "low", findings: [] }));
+    expect(result.event).toBe("APPROVE");
+    expect(result.reason).toContain("no findings above low");
+  });
+
+  it("never approves a stale job even when findings sit under the ceiling", () => {
+    const result = resolveReviewEvent(
+      input({ clean: false, approveMaxSeverity: "low", stale: true, findings: [{ severity: "low" }] }),
+    );
+    expect(result.event).toBe("COMMENT");
+  });
+
+  it("keeps request-changes precedence over the approve ceiling", () => {
+    const result = resolveReviewEvent(
+      input({
+        clean: false,
+        approveMaxSeverity: "high",
+        minSeverity: "blocker",
+        findings: [{ severity: "blocker" }, { severity: "low" }],
+      }),
+    );
+    expect(result.event).toBe("REQUEST_CHANGES");
+  });
 });

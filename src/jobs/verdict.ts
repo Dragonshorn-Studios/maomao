@@ -9,6 +9,12 @@ export interface ReviewEventInput {
   allowApprove: boolean;
   allowRequestChanges: boolean;
   minSeverity: Severity;
+  /**
+   * Highest severity that still permits APPROVE (e.g. "low" approves reviews whose
+   * worst findings are low/info). Undefined keeps the strict rule: APPROVE only
+   * when the review is clean.
+   */
+  approveMaxSeverity?: Severity | null;
   /** True when the aggregated review produced no publishable findings and verdict "clean". */
   clean: boolean;
   findings: Array<{ severity?: string | null }>;
@@ -51,11 +57,29 @@ export function resolveReviewEvent(input: ReviewEventInput): ReviewEventDecision
     }
     return { event: "COMMENT", reason: `request-changes disabled; ${blockerCount} finding(s) at or above ${input.minSeverity}` };
   }
-  if (input.clean) {
+  // "At or below" the approve ceiling means rank >= its rank (rank is inverted).
+  const approveCeiling = input.approveMaxSeverity ?? null;
+  const belowApproveCeiling =
+    approveCeiling != null &&
+    input.findings.every(
+      (finding) => severityRank((finding.severity ?? "info") as Severity) >= severityRank(approveCeiling),
+    );
+  if (input.clean || belowApproveCeiling) {
     if (input.allowApprove) {
-      return { event: "APPROVE", reason: "clean review, all reviewers finished" };
+      return {
+        event: "APPROVE",
+        reason: input.clean
+          ? "clean review, all reviewers finished"
+          : `no findings above ${approveCeiling} severity`,
+      };
     }
     return { event: "COMMENT", reason: "approve disabled; comment-only" };
   }
-  return { event: "COMMENT", reason: "findings below the request-changes threshold" };
+  return {
+    event: "COMMENT",
+    reason:
+      approveCeiling != null
+        ? `findings above the approve ceiling (${approveCeiling}); below request-changes threshold`
+        : "findings below the request-changes threshold",
+  };
 }
