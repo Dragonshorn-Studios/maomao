@@ -58,11 +58,11 @@ export function resolveReviewEvent(input: ReviewEventInput): ReviewEventDecision
     return { event: "COMMENT", reason: `request-changes disabled; ${blockerCount} finding(s) at or above ${input.minSeverity}` };
   }
   // "At or below" the approve ceiling means rank >= its rank (rank is inverted).
+  const approveCeiling = input.approveMaxSeverity ?? null;
   const belowApproveCeiling =
-    input.approveMaxSeverity != null &&
+    approveCeiling != null &&
     input.findings.every(
-      (finding) =>
-        severityRank((finding.severity ?? "info") as Severity) >= severityRank(input.approveMaxSeverity as Severity),
+      (finding) => severityRank((finding.severity ?? "info") as Severity) >= severityRank(approveCeiling),
     );
   if (input.clean || belowApproveCeiling) {
     if (input.allowApprove) {
@@ -70,10 +70,16 @@ export function resolveReviewEvent(input: ReviewEventInput): ReviewEventDecision
         event: "APPROVE",
         reason: input.clean
           ? "clean review, all reviewers finished"
-          : `no findings above ${input.approveMaxSeverity} severity`,
+          : `no findings above ${approveCeiling} severity`,
       };
     }
     return { event: "COMMENT", reason: "approve disabled; comment-only" };
   }
-  return { event: "COMMENT", reason: "findings below the request-changes threshold" };
+  return {
+    event: "COMMENT",
+    reason:
+      approveCeiling != null
+        ? `findings above the approve ceiling (${approveCeiling}); below request-changes threshold`
+        : "findings below the request-changes threshold",
+  };
 }
