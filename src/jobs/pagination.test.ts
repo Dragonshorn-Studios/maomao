@@ -1,3 +1,7 @@
+import Database from "better-sqlite3";
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { openDb } from "../db.js";
 import { JOBS_PAGE_SIZE_MAX } from "../config.js";
@@ -262,5 +266,32 @@ describe("listWebhookDeliveries", () => {
     expect(store.listWebhookDeliveries({}).find((row) => row.delivery_id === "d-2")!.result).toBe(
       "ignored: rate limited",
     );
+  });
+
+  it("backfills the ignored flag for rows recorded before the column existed", () => {
+    // Legacy shape: single-column PK, no provider columns, no ignored flag.
+    const file = join(mkdtempSync(join(tmpdir(), "maomao-migrate-")), "legacy.db");
+    const legacy = new Database(file);
+    legacy.exec(`CREATE TABLE webhook_deliveries (
+      delivery_id TEXT PRIMARY KEY,
+      event TEXT NOT NULL,
+      result TEXT NOT NULL,
+      created_at TEXT NOT NULL
+    )`);
+    legacy.exec(`INSERT INTO webhook_deliveries (delivery_id, event, result, created_at) VALUES
+      ('old-1', 'merge_request', 'ignored: rate limited', '2026-01-01T00:00:00.000Z'),
+      ('old-2', 'pull_request', 'enqueued', '2026-01-01T00:00:01.000Z')`);
+    legacy.close();
+
+    const store = new JobStore(openDb(file));
+    const rows = store.listWebhookDeliveries({});
+    const ignoredRow = rows.find((row) => row.delivery_id === "old-1")!;
+    expect(ignoredRow.ignored).toBe(1);
+    expect(ignoredRow.result).toBe("ignored: rate limited");
+    expect(store.hasWebhookDelivery("old-1")).toBe(false);
+    const kept = rows.find((row) => row.delivery_id === "old-2")!;
+    expect(kept.ignored).toBe(0);
+    expect(kept.provider).toBe("github");
+    expect(store.hasWebhookDelivery("old-2")).toBe(true);
   });
 });

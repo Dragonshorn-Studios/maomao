@@ -426,8 +426,13 @@ describe("GitLab note events", () => {
     expect(result.body.reason).toMatch(/not authorized/);
     const finding = input.store.listFindings("acme/widgets", 7, { provider: "gitlab", instance: "gitlab.com" })[0];
     expect(finding?.status).toBe("open");
-    // The unauthorized outcome is claimed so redeliveries do not retry authz.
-    expect(input.store.hasWebhookDelivery(input.request.webhookId!, { provider: "gitlab", instance: "gitlab.com" })).toBe(true);
+    // Recorded as ignored — observational only, so a redelivery after the
+    // actor gains access reprocesses instead of answering `duplicate`.
+    const scope = { provider: "gitlab", instance: "gitlab.com" };
+    expect(input.store.hasWebhookDelivery(input.request.webhookId!, scope)).toBe(false);
+    const row = input.store.listWebhookDeliveries({})[0];
+    expect(row?.result).toBe("ignored: actor is not authorized");
+    expect(row?.ignored).toBe(1);
   });
 
   it("reopens a finding and unresolves the discussion", async () => {
@@ -641,6 +646,31 @@ describe("GitLab note events", () => {
     const job = input.store.getJob(result.dispatchJobId!);
     expect(job?.manual_escalate_requested).toBe(1);
     expect(input.store.listWebhookDeliveries({}).find((d) => d.result === "escalate")).toBeDefined();
+  });
+
+  it("claims a same-SHA redelivery as skipped, not ignored", async () => {
+    const connections = newConnections();
+    const { id, secret } = createConnection(connections);
+    const input = baseInput(connections, id, signedRequest(secret, "merge_request", JSON.stringify(mrPayload())));
+    const opened = await handleGitLabWebhook(input);
+    expect(opened.enqueue?.created).toBe(true);
+
+    // A real push event (new delivery id) whose head SHA already has a job.
+    const updateBody = JSON.stringify(
+      mrPayload({
+        object_attributes: { ...mrPayload().object_attributes, action: "update", oldrev: "old111" },
+      }),
+    );
+    const update = await handleGitLabWebhook({
+      ...baseInput(connections, id, signedRequest(secret, "merge_request", updateBody)),
+      store: input.store,
+    });
+    expect(update.enqueue?.created).toBe(false);
+    const row = input.store
+      .listWebhookDeliveries({})
+      .find((d) => d.result === "skipped: job already queued for this SHA");
+    expect(row).toBeDefined();
+    expect(row?.repo_full_name).toBe("acme/widgets");
   });
 });
 

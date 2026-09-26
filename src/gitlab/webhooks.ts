@@ -395,7 +395,9 @@ async function handleNoteEvent(input: {
       appSlug: input.config.github.appSlug,
     })
   ) {
-    store.claimWebhookDelivery(input.deliveryId, input.request.event, "unauthorized", scope);
+    // Unclaimed on purpose: the boundary records this as `ignored:`, which is
+    // observational only — a redelivery after the actor's access level rises
+    // must reprocess, not answer `duplicate`.
     return {
       status: 202,
       body: { ok: true, ignored: true, reason: "actor is not authorized", actor: actorUsername, permission },

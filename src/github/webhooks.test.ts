@@ -1689,6 +1689,28 @@ describe("webhook delivery log", () => {
     expect(row?.actor).toBe("octocat");
   });
 
+  it("answers a redelivered merge close as duplicate without disturbing the recorded row", async () => {
+    const secret = "s3cret";
+    const config = loadConfig({ GITHUB_WEBHOOK_SECRET: secret, GITHUB_APP_ID: "1", GITHUB_APP_PRIVATE_KEY: "k" });
+    const store = new JobStore(openDb(":memory:"));
+    const rawBody = JSON.stringify(
+      prPayload({ action: "closed", pull_request: { ...prPayload().pull_request, merged: true }, sender: { login: "octocat" } }),
+    );
+    const request = { event: "pull_request", deliveryId: "dup-1", signature: sign(secret, rawBody), rawBody };
+    await handleGithubWebhook({ config, store, request });
+
+    const second = await handleGithubWebhook({ config, store, request });
+    expect(second.body.duplicate).toBe(true);
+
+    // The boundary's "duplicate" claim must not overwrite the real result —
+    // the row stays pr_merged_cancel and keeps its context.
+    const row = loggedDelivery(store, "dup-1");
+    expect(row?.result).toBe("pr_merged_cancel");
+    expect(row?.ignored).toBe(0);
+    expect(row?.repo_full_name).toBe("acme/widgets");
+    expect(row?.actor).toBe("octocat");
+  });
+
   it("records non-command issue comments and falls back to the comment author", async () => {
     const secret = "s3cret";
     const config = loadConfig({ GITHUB_WEBHOOK_SECRET: secret });

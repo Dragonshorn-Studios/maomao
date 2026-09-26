@@ -1,6 +1,17 @@
 import type { ForgeScope, WebhookDeliveryContext } from "./types.js";
 import { IGNORED_RESULT_PREFIX } from "./types.js";
-import type { JobStore } from "../jobs/store.js";
+
+/** The slice of JobStore the boundary recorder needs — structural, so this
+ * module stays forge-layer and doesn't import the concrete store. */
+export interface DeliveryClaimStore {
+  claimWebhookDelivery(
+    deliveryId: string,
+    event: string,
+    result: string,
+    scope?: Partial<ForgeScope>,
+    context?: WebhookDeliveryContext,
+  ): boolean;
+}
 
 /**
  * Delivery log bookkeeping shared by the GitHub and GitLab webhook handlers.
@@ -33,7 +44,7 @@ import type { JobStore } from "../jobs/store.js";
  * result, but the claim call backfills repo/action/actor on the existing row.
  */
 export function recordWebhookDelivery(input: {
-  store: JobStore;
+  store: DeliveryClaimStore;
   deliveryId: string;
   event: string;
   rawBody: string;
@@ -95,16 +106,18 @@ export function webhookDeliveryContext(rawBody: string): WebhookDeliveryContext 
       pull_request?: { user?: { login?: string } };
       user?: { username?: string; name?: string };
     };
+    // Payload fields are untrusted: a signed-but-malformed body could carry
+    // non-strings (e.g. full_name: {...}) which better-sqlite3 would reject at
+    // bind time — after the handler already ran. Guard every field.
     return {
-      repoFullName: payload.repository?.full_name ?? payload.project?.path_with_namespace ?? null,
-      action: payload.action ?? payload.object_attributes?.action ?? null,
+      repoFullName: firstString(payload.repository?.full_name) ?? firstString(payload.project?.path_with_namespace),
+      action: firstString(payload.action) ?? firstString(payload.object_attributes?.action),
       actor:
-        payload.sender?.login ??
-        payload.comment?.user?.login ??
-        payload.pull_request?.user?.login ??
-        payload.user?.username ??
-        payload.user?.name ??
-        null,
+        firstString(payload.sender?.login) ??
+        firstString(payload.comment?.user?.login) ??
+        firstString(payload.pull_request?.user?.login) ??
+        firstString(payload.user?.username) ??
+        firstString(payload.user?.name),
     };
   } catch {
     return {};

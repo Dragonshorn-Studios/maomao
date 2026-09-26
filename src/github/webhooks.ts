@@ -797,7 +797,9 @@ async function handleReviewCommentWebhook(input: {
 
   const permission = await input.github.getCollaboratorPermission(installationId, repoOwner, repoName, actor);
   if (!canIssueOverride(permission, payload.comment?.author_association)) {
-    input.store.claimWebhookDelivery(input.request.deliveryId, input.request.event, "unauthorized");
+    // Unclaimed on purpose: the boundary records this as `ignored:`, which is
+    // observational only — a redelivery after the actor gains permission must
+    // reprocess, not answer `duplicate`.
     return {
       status: 202,
       body: { ok: true, ignored: true, reason: "unauthorized", actor, permission },
