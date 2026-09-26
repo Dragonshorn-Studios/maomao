@@ -21,14 +21,21 @@ export function renderStackComment(input: {
   selfPrNumber: number;
   expectedCount: number;
   members: StackCommentMember[];
+  /** True while only the stack's base is known — no member list to render. */
+  pending?: boolean;
 }): string {
   const { stackId, selfPrNumber, expectedCount, members } = input;
   const self = members.find((m) => m.prNumber === selfPrNumber);
-  const lines = [
-    stackCommentMarker(stackId),
-    `🥞 This pull request is part of review stack \`${stackId}\` — issue ${self?.position ?? "?"} of ${expectedCount}.`,
-  ];
-  if (members.length) {
+  const lines = input.pending
+    ? [
+        stackCommentMarker(stackId),
+        `🥞 This pull request is the base of review stack \`${stackId}\` — awaiting \`end of stack\` on the top pull request.`,
+      ]
+    : [
+        stackCommentMarker(stackId),
+        `🥞 This pull request is part of review stack \`${stackId}\` — issue ${self?.position ?? "?"} of ${expectedCount}.`,
+      ];
+  if (members.length && !input.pending) {
     const rows = [...members].sort((a, b) => a.position - b.position).map((m) => {
       const isSelf = m.prNumber === selfPrNumber;
       const sha = m.headSha ? ` @ \`${m.headSha.slice(0, 8)}\`` : "";
@@ -59,6 +66,7 @@ export async function upsertStackComment(input: {
   stackId: string;
   expectedCount: number;
   members: StackCommentMember[];
+  pending?: boolean;
 }): Promise<void> {
   const body = renderStackComment(input);
   const marker = stackCommentMarker(input.stackId);

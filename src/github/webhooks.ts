@@ -11,9 +11,10 @@ import {
   type ManualTriggerPort,
   type ReviewThread,
 } from "./client.js";
+import { randomUUID } from "node:crypto";
 import type { EnqueueResult, JobStore } from "../jobs/store.js";
 import { enqueuePullJob } from "../jobs/enqueue.js";
-import { parseStackCommand, validateStackMembers, type StackCommand } from "../stacks/commands.js";
+import { looksLikeStackCommand, parseStackCommand, resolveStackChain, validateStackMembers, type StackCommand } from "../stacks/commands.js";
 import { upsertStackComment } from "../stacks/comments.js";
 import type { ResolvedPull } from "./client.js";
 import { cancelJobsForPull } from "../jobs/cancel.js";
@@ -458,7 +459,7 @@ async function handleIssueComment(input: {
   // identities (MAOMAO_STACK_AUTHORS) may issue them; every other actor is
   // authorized by collaborator permission inside the handler.
   const stackCommand = parseStackCommand(body);
-  if (stackCommand) {
+  if (stackCommand || looksLikeStackCommand(body)) {
     return handleStackCommand(input, payload, stackCommand);
   }
   if (isBotActor({ login: actor?.login, type: actor?.type })) {
@@ -518,7 +519,7 @@ async function handleStackCommand(
     github?: GithubPort & Partial<ManualTriggerPort>;
   },
   payload: IssueCommentWebhookPayload,
-  command: StackCommand,
+  command: StackCommand | null,
 ): Promise<WebhookHandleResult> {
   const actor = payload.comment?.user ?? payload.sender;
   const actorLogin = actor?.login;
@@ -579,6 +580,7 @@ async function handleStackCommand(
   // declaration set still shows the same shared picture. Per-member failures
   // warn only — the comment is informational, the command still stands.
   const refreshStackComments = async (
+    stackId: string,
     members: { position: number; prNumber: number; headSha?: string; expectedCount: number }[],
   ): Promise<void> => {
     for (const member of members) {
@@ -589,7 +591,7 @@ async function handleStackCommand(
           repoOwner,
           repoName,
           selfPrNumber: member.prNumber,
-          stackId: command.stackId,
+          stackId,
           expectedCount: member.expectedCount,
           members,
         });
@@ -598,6 +600,16 @@ async function handleStackCommand(
       }
     }
   };
+
+  // The comment clearly intended a stack command but missed the grammar —
+  // authorized actors get the usage reply; everyone else was filtered above.
+  if (!command) {
+    await reply(
+      `Not a stack command I can run. Use "start of stack <id>" here and "end of stack <id>" on the top PR, ` +
+        `or declare each member ("issue X of Y in stack <id>") and trigger with "top of stack <id>: #a, #b" — ids are optional when they are unambiguous.`,
+    );
+    return finish("command-invalid", { ok: true, ignored: false, reason: "unrecognized stack command" });
+  }
 
   if (command.kind === "declare") {
     const result = input.store.upsertStackDeclaration({
@@ -616,6 +628,7 @@ async function handleStackCommand(
     if (result.created) {
       const declarations = input.store.listStackDeclarations(repoFullName, command.stackId);
       await refreshStackComments(
+        command.stackId,
         declarations.map((d) => ({ position: d.position, prNumber: d.pr_number, expectedCount: d.expected_count })),
       );
     }
@@ -625,6 +638,196 @@ async function handleStackCommand(
       stackId: command.stackId,
       recorded: result.created,
     });
+  }
+
+  // The enqueue tail shared by "top of stack" and "end of stack": pause
+  // check, job enqueue, marker comments on every member, stack_run_members.
+  const runStack = async (stackId: string, pulls: ResolvedPull[], via: "top" | "end"): Promise<WebhookHandleResult> => {
+    // A stack run is reviews: the global pause blocks it like any other
+    // enqueue. Checked after validation so the reply is still a useful error.
+    if (input.store.getGlobalPause()) {
+      await reply(`Could not run stack "${stackId}": reviews are paused globally — resume on /pause.`);
+      return finish(`${via}-paused`, { ok: true, command: via, stackId, enqueued: false, error: "reviews paused globally" });
+    }
+    const members = pulls.map((pull, index) => ({
+      position: index + 1,
+      prNumber: pull.prNumber,
+      baseRef: pull.baseRef,
+      headRef: pull.headRef,
+      baseSha: pull.baseSha,
+      headSha: pull.headSha,
+      prTitle: pull.prTitle,
+    }));
+    const top = members[members.length - 1]!;
+    const bottom = members[0]!;
+    const topPull = pulls[pulls.length - 1]!;
+    const enqueue = input.store.enqueue({
+      repoFullName,
+      repoOwner,
+      repoName,
+      installationId,
+      githubAccountId: numericId(payload.installation?.account?.id) ?? numericId(payload.repository?.owner?.id),
+      githubRepositoryId: numericId(payload.repository?.id),
+      prNumber: top.prNumber,
+      prTitle: topPull.prTitle,
+      prBody: topPull.prBody,
+      prHtmlUrl: topPull.prHtmlUrl,
+      prAuthor: topPull.prAuthor,
+      baseSha: bottom.baseSha,
+      headSha: top.headSha,
+      baseRef: bottom.baseRef,
+      headRef: top.headRef,
+      webhookDeliveryId: input.request.deliveryId,
+      webhookEvent: "issue_comment",
+      // One placeholder run row for the cumulative pass; member reviews get
+      // the profile reviewers when runStackJob enqueues them as pr_review jobs.
+      reviewers: [{ role: "stack_cumulative", title: "Stack cumulative" }],
+      jobType: "stack_review",
+      dedupKey: `stack:${stackId}`,
+    });
+    await refreshStackComments(
+      stackId,
+      members.map((m) => ({
+        position: m.position,
+        prNumber: m.prNumber,
+        headSha: m.headSha,
+        expectedCount: members.length,
+      })),
+    );
+    if (enqueue.created) {
+      input.store.insertStackMembers(enqueue.job.id, members);
+      input.store.log(
+        enqueue.job.id,
+        `Stack "${stackId}" of ${members.length} triggered by ${actorLogin}: ` +
+          members.map((m) => `#${m.prNumber}@${m.headSha.slice(0, 8)}`).join(" → "),
+      );
+    }
+    const result = finish(enqueue.created ? `${via}-enqueued` : `${via}-deduped`, {
+      ok: true,
+      command: via,
+      stackId,
+      enqueued: enqueue.created,
+      jobId: enqueue.job.id,
+      staleJobIds: enqueue.staleJobIds,
+    });
+    return { ...result, enqueue };
+  };
+
+  // "start of stack <id>" marks the bottom PR; the marker comment is the only
+  // trace. A bare "start of stack" generates the id so authors never need one.
+  if (command.kind === "start") {
+    const startId = command.stackId ?? `stack-${randomUUID().slice(0, 8)}`;
+    const start = input.store.upsertStackStart({
+      repoFullName,
+      stackId: startId,
+      prNumber,
+      actor: actorLogin,
+      commentId: commentId != null ? String(commentId) : undefined,
+    });
+    if (!start.ok) {
+      await reply(`Could not start a stack: ${start.error}.`);
+      return finish("start-conflict", { ok: true, command: "start", stackId: startId, recorded: false, error: start.error });
+    }
+    try {
+      await upsertStackComment({
+        github: input.github!,
+        installationId,
+        repoOwner,
+        repoName,
+        selfPrNumber: prNumber,
+        stackId: startId,
+        expectedCount: 1,
+        members: [{ position: 1, prNumber }],
+        pending: true,
+      });
+    } catch (error) {
+      console.warn(`stack command: could not update stack comment on ${repoFullName}#${prNumber}: ${error instanceof Error ? error.message : error}`);
+    }
+    return finish(start.created ? "start-recorded" : "start-duplicate", {
+      ok: true,
+      command: "start",
+      stackId: startId,
+      recorded: start.created,
+    });
+  }
+
+  // "end of stack <id>" on the top PR resolves the whole stack from the
+  // branch layout: open PRs chain base→head down to the declared start. The id
+  // is optional when exactly one start marker sits at the chain's base.
+  if (command.kind === "end") {
+    if (typeof input.github.listOpenPulls !== "function") {
+      return { status: 202, body: { ok: true, ignored: true, reason: "github client cannot list open pull requests" } };
+    }
+    const openPulls = await input.github.listOpenPulls(installationId, repoOwner, repoName);
+    let endStackId = command.stackId;
+    let resolvedPulls: ResolvedPull[];
+    if (endStackId) {
+      const start = input.store.getStackStart(repoFullName, endStackId);
+      if (!start) {
+        await reply(`Could not run stack "${endStackId}": no "start of stack ${endStackId}" was seen in ${repoFullName}.`);
+        return finish("end-no-start", { ok: true, command: "end", stackId: endStackId, enqueued: false, error: "no start marker" });
+      }
+      const chain = resolveStackChain({ pulls: openPulls, startPrNumber: start.pr_number, endPrNumber: prNumber });
+      if (!chain.ok) {
+        await reply(`Could not run stack "${endStackId}": ${chain.error}.`);
+        return finish("end-invalid", { ok: true, command: "end", stackId: endStackId, enqueued: false, error: chain.error });
+      }
+      resolvedPulls = chain.pulls;
+    } else {
+      const chain = resolveStackChain({ pulls: openPulls, endPrNumber: prNumber });
+      if (!chain.ok) {
+        await reply(`Could not run a stack review: ${chain.error}.`);
+        return finish("end-invalid", { ok: true, command: "end", enqueued: false, error: chain.error });
+      }
+      const starts = input.store.listStackStartsForPull(repoFullName, chain.pulls[0]!.prNumber);
+      if (starts.length !== 1) {
+        await reply(
+          starts.length === 0
+            ? `Could not run a stack review: the chain below #${prNumber} bottoms out at #${chain.pulls[0]!.prNumber}, which has no "start of stack" marker — post "start of stack <id>" there or name the stack: "end of stack <id>".`
+            : `Could not run a stack review: #${chain.pulls[0]!.prNumber} starts ${starts.length} stacks (${starts.map((s) => `"${s.stack_id}"`).join(", ")}) — name the stack: "end of stack <id>".`,
+        );
+        return finish("end-no-stack-id", { ok: true, command: "end", enqueued: false, error: "no stack id" });
+      }
+      endStackId = starts[0]!.stack_id;
+      resolvedPulls = chain.pulls;
+    }
+    // Record each resolved member as a declaration so marker comments and any
+    // later "top of stack" re-trigger see the same picture. A pre-existing
+    // declaration that disagrees with the branch layout aborts the run.
+    for (let i = 0; i < resolvedPulls.length; i += 1) {
+      const member = resolvedPulls[i]!;
+      const decl = input.store.upsertStackDeclaration({
+        repoFullName,
+        stackId: endStackId,
+        prNumber: member.prNumber,
+        position: i + 1,
+        expectedCount: resolvedPulls.length,
+        actor: actorLogin,
+      });
+      if (!decl.ok) {
+        await reply(`Could not run stack "${endStackId}": ${decl.error}.`);
+        return finish("end-declare-conflict", { ok: true, command: "end", stackId: endStackId, enqueued: false, error: decl.error });
+      }
+    }
+    return runStack(endStackId, resolvedPulls, "end");
+  }
+
+  // "top of stack: #a, #b" without an id is legal — infer it from the stacks
+  // this PR is declared in. Exactly one is unambiguous; zero or several get
+  // an actionable error.
+  let stackId = command.stackId;
+  if (!stackId) {
+    const stackIds = [...new Set(input.store.listStackDeclarationsForPull(repoFullName, prNumber).map((d) => d.stack_id))];
+    if (stackIds.length === 1) {
+      stackId = stackIds[0]!;
+    } else {
+      await reply(
+        stackIds.length === 0
+          ? `Could not run a stack review: no stack id given and PR #${prNumber} is not declared in any stack — declare it first ("issue X of Y in stack <id>") or name the stack: "top of stack <id>: #a, #b".`
+          : `Could not run a stack review: no stack id given and PR #${prNumber} is declared in ${stackIds.length} stacks (${stackIds.map((id) => `"${id}"`).join(", ")}) — name the stack: "top of stack <id>: #a, #b".`,
+      );
+      return finish("top-no-stack-id", { ok: true, command: "top", enqueued: false, error: "no stack id" });
+    }
   }
 
   if (typeof input.github.getPull !== "function") {
@@ -637,13 +840,13 @@ async function handleStackCommand(
       pulls.push(await getPull(installationId, repoOwner, repoName, n));
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      await reply(`Could not run stack "${command.stackId}": PR #${n} does not resolve in ${repoFullName} (${message}).`);
-      return finish("top-unresolved", { ok: true, command: "top", stackId: command.stackId, enqueued: false, error: `PR #${n} unresolved` });
+      await reply(`Could not run stack "${stackId}": PR #${n} does not resolve in ${repoFullName} (${message}).`);
+      return finish("top-unresolved", { ok: true, command: "top", stackId, enqueued: false, error: `PR #${n} unresolved` });
     }
   }
-  const declarations = input.store.listStackDeclarations(repoFullName, command.stackId);
+  const declarations = input.store.listStackDeclarations(repoFullName, stackId);
   const validation = validateStackMembers({
-    stackId: command.stackId,
+    stackId,
     prNumbers: command.prNumbers,
     pulls,
     declarations,
@@ -651,69 +854,10 @@ async function handleStackCommand(
     commentPrNumber: prNumber,
   });
   if (!validation.ok) {
-    await reply(`Could not run stack "${command.stackId}": ${validation.error}.`);
-    return finish("top-invalid", { ok: true, command: "top", stackId: command.stackId, enqueued: false, error: validation.error });
+    await reply(`Could not run stack "${stackId}": ${validation.error}.`);
+    return finish("top-invalid", { ok: true, command: "top", stackId, enqueued: false, error: validation.error });
   }
-
-  // A stack run is reviews: the global pause blocks it like any other enqueue.
-  // Checked after validation so the reply is still a useful error.
-  if (input.store.getGlobalPause()) {
-    await reply(`Could not run stack "${command.stackId}": reviews are paused globally — resume on /pause.`);
-    return finish("top-paused", { ok: true, command: "top", stackId: command.stackId, enqueued: false, error: "reviews paused globally" });
-  }
-
-  const top = validation.members[validation.members.length - 1]!;
-  const bottom = validation.members[0]!;
-  const topPull = pulls[pulls.length - 1]!;
-  const enqueue = input.store.enqueue({
-    repoFullName,
-    repoOwner,
-    repoName,
-    installationId,
-    githubAccountId: numericId(payload.installation?.account?.id) ?? numericId(payload.repository?.owner?.id),
-    githubRepositoryId: numericId(payload.repository?.id),
-    prNumber: top.prNumber,
-    prTitle: topPull.prTitle,
-    prBody: topPull.prBody,
-    prHtmlUrl: topPull.prHtmlUrl,
-    prAuthor: topPull.prAuthor,
-    baseSha: bottom.baseSha,
-    headSha: top.headSha,
-    baseRef: bottom.baseRef,
-    headRef: top.headRef,
-    webhookDeliveryId: input.request.deliveryId,
-    webhookEvent: "issue_comment",
-    // One placeholder run row for the cumulative pass; member reviews get the
-    // profile reviewers when runStackJob enqueues them as pr_review jobs.
-    reviewers: [{ role: "stack_cumulative", title: "Stack cumulative" }],
-    jobType: "stack_review",
-    dedupKey: `stack:${command.stackId}`,
-  });
-  await refreshStackComments(
-    validation.members.map((m) => ({
-      position: m.position,
-      prNumber: m.prNumber,
-      headSha: m.headSha,
-      expectedCount: validation.members.length,
-    })),
-  );
-  if (enqueue.created) {
-    input.store.insertStackMembers(enqueue.job.id, validation.members);
-    input.store.log(
-      enqueue.job.id,
-      `Stack "${command.stackId}" of ${validation.members.length} triggered by ${actorLogin}: ` +
-        validation.members.map((m) => `#${m.prNumber}@${m.headSha.slice(0, 8)}`).join(" → "),
-    );
-  }
-  const result = finish(enqueue.created ? "top-enqueued" : "top-deduped", {
-    ok: true,
-    command: "top",
-    stackId: command.stackId,
-    enqueued: enqueue.created,
-    jobId: enqueue.job.id,
-    staleJobIds: enqueue.staleJobIds,
-  });
-  return { ...result, enqueue };
+  return runStack(stackId, pulls, "top");
 }
 
 async function handleReviewCommentWebhook(input: {

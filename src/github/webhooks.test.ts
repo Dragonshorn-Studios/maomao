@@ -1253,10 +1253,12 @@ function stackGithub(overrides: {
   permission?: RepoPermission;
   pulls?: Record<number, ReturnType<typeof resolvedStackPull> | undefined>;
   comments?: { pullNumber: number; body: string }[];
+  openPulls?: ReturnType<typeof resolvedStackPull>[];
 } = {}) {
   const comments = overrides.comments ?? [];
   const github = {
     ...githubForCommands({ permission: overrides.permission ?? "write" }),
+    listOpenPulls: async () => overrides.openPulls ?? [],
     listIssueComments: async (_i: number, _o: string, _r: string, pullNumber: number) =>
       comments
         .map((c, index) => ({ id: index + 1, body: c.body, pullNumber: c.pullNumber }))
@@ -1611,5 +1613,126 @@ describe("stack commands (issue #99)", () => {
     expect(markers.map((c) => c.pullNumber).sort()).toEqual([41, 42]);
     expect(markers.find((c) => c.pullNumber === 41)?.body).toContain("h41");
     expect(markers.find((c) => c.pullNumber === 42)?.body).toContain("h42");
+  });
+
+  const chainPulls = () => [
+    resolvedStackPull(41, { baseRef: "main", headRef: "feat-a", baseSha: "m0", headSha: "h41" }),
+    resolvedStackPull(42, { baseRef: "feat-a", headRef: "feat-b", baseSha: "h41", headSha: "h42" }),
+    resolvedStackPull(43, { baseRef: "feat-b", headRef: "feat-c", baseSha: "h42", headSha: "h43" }),
+  ];
+  const stackCommentOn = (n: number, body: string, commentId = 9001) =>
+    JSON.stringify(
+      commentPayload({
+        issue: { number: n, pull_request: { url: `https://github.com/acme/widgets/pull/${n}` } },
+        comment: { id: commentId, body, user: { login: "alice", type: "User" }, author_association: "OWNER" },
+      }),
+    );
+
+  it("marks the stack base with 'start of stack' and a pending marker comment", async () => {
+    const secret = "s3cret";
+    const config = stackConfig(secret);
+    const store = new JobStore(openDb(":memory:"));
+    const { github, comments } = stackGithub();
+    const body = stackCommentOn(41, "@maomao start of stack u1");
+    const result = await handleGithubWebhook({
+      config,
+      store,
+      github,
+      request: { event: "issue_comment", deliveryId: "s1", signature: sign(secret, body), rawBody: body },
+    });
+    expect(result.status).toBe(200);
+    expect(store.getStackStart("acme/widgets", "u1")?.pr_number).toBe(41);
+    expect(comments).toHaveLength(1);
+    expect(comments[0]?.pullNumber).toBe(41);
+    expect(comments[0]?.body).toContain("maomao-stack:u1");
+    expect(comments[0]?.body).toContain("base of review stack");
+  });
+
+  it("resolves a start/end stack by branch layout and enqueues one review", async () => {
+    const secret = "s3cret";
+    const config = stackConfig(secret);
+    const store = new JobStore(openDb(":memory:"));
+    store.upsertStackStart({ repoFullName: "acme/widgets", stackId: "u1", prNumber: 41, actor: "alice" });
+    const { github, comments } = stackGithub({ openPulls: chainPulls() });
+    const body = stackCommentOn(43, "@maomao end of stack u1");
+    const result = await handleGithubWebhook({
+      config,
+      store,
+      github,
+      request: { event: "issue_comment", deliveryId: "e1", signature: sign(secret, body), rawBody: body },
+    });
+    expect(result.status).toBe(200);
+    expect(result.body.enqueued).toBe(true);
+    const jobs = store.listJobs(10).filter((j) => j.job_type === "stack_review");
+    expect(jobs).toHaveLength(1);
+    expect(jobs[0]?.dedup_key).toBe("stack:u1");
+    expect(store.listStackMembers(jobs[0]!.id).map((m) => m.pr_number)).toEqual([41, 42, 43]);
+    // Resolved members are recorded as declarations too.
+    expect(store.listStackDeclarations("acme/widgets", "u1").map((d) => d.pr_number)).toEqual([41, 42, 43]);
+    const markers = comments.filter((c) => c.body.includes("maomao-stack:u1"));
+    expect(markers.map((c) => c.pullNumber).sort()).toEqual([41, 42, 43]);
+    expect(markers.find((c) => c.pullNumber === 41)?.body).toContain("issue 1 of 3");
+    expect(markers.find((c) => c.pullNumber === 43)?.body).toContain("top of the stack");
+  });
+
+  it("infers the stack id on a bare 'end of stack' from the start marker at the chain base", async () => {
+    const secret = "s3cret";
+    const config = stackConfig(secret);
+    const store = new JobStore(openDb(":memory:"));
+    store.upsertStackStart({ repoFullName: "acme/widgets", stackId: "u1", prNumber: 41, actor: "alice" });
+    const { github } = stackGithub({ openPulls: chainPulls() });
+    const body = stackCommentOn(43, "end of stack");
+    const result = await handleGithubWebhook({
+      config,
+      store,
+      github,
+      request: { event: "issue_comment", deliveryId: "e2", signature: sign(secret, body), rawBody: body },
+    });
+    expect(result.body.enqueued).toBe(true);
+    expect(store.listJobs(10)[0]?.dedup_key).toBe("stack:u1");
+  });
+
+  it("errors on 'end of stack' with no start marker or a broken chain", async () => {
+    const secret = "s3cret";
+    const config = stackConfig(secret);
+    const store = new JobStore(openDb(":memory:"));
+    const { github, comments } = stackGithub({ openPulls: chainPulls() });
+    const body = stackCommentOn(43, "end of stack ghost");
+    const result = await handleGithubWebhook({
+      config,
+      store,
+      github,
+      request: { event: "issue_comment", deliveryId: "e3", signature: sign(secret, body), rawBody: body },
+    });
+    expect(result.body.enqueued).toBe(false);
+    expect(comments[0]?.body).toMatch(/no "start of stack/);
+    expect(store.listJobs(10)).toHaveLength(0);
+  });
+
+  it("replies with usage on a malformed stack command but stays silent for unauthorized actors", async () => {
+    const secret = "s3cret";
+    const config = stackConfig(secret);
+    const store = new JobStore(openDb(":memory:"));
+    const { github, comments } = stackGithub();
+    const body = stackCommentOn(42, "@maomao top of stack : broken words");
+    const result = await handleGithubWebhook({
+      config,
+      store,
+      github,
+      request: { event: "issue_comment", deliveryId: "x1", signature: sign(secret, body), rawBody: body },
+    });
+    expect(result.status).toBe(200);
+    expect(comments).toHaveLength(1);
+    expect(comments[0]?.body).toMatch(/Not a stack command/);
+    expect(comments[0]?.body).toContain("start of stack");
+
+    const botBody = stackCommentOn(42, "top of stack : also broken", 9002).replace('"login":"alice"', '"login":"other[bot]"').replace('"type":"User"', '"type":"Bot"');
+    const denied = await handleGithubWebhook({
+      config,
+      store,
+      github: stackGithub().github,
+      request: { event: "issue_comment", deliveryId: "x2", signature: sign(secret, botBody), rawBody: botBody },
+    });
+    expect(denied.body.ignored).toBe(true);
   });
 });
