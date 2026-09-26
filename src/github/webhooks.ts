@@ -339,16 +339,25 @@ export async function handleGithubWebhook(input: {
     }
 
     // Stack markers in the PR body (start/end/part of stack, or an
-    // "issue X of Y" declaration on its own line, optionally inside an HTML
-    // comment) suppress the automatic per-PR review and drive the stack
+    // "issue X of Y" declaration — the line must be HTML-comment wrapped or
+    // @mention-prefixed) suppress the automatic per-PR review and drive the stack
     // lifecycle instead. Checked before the pauses: markers are bookkeeping,
     // and an "end" marker reports the global pause rather than vanishing like
     // a skipped review. An unactionable marker (no client, unauthorized
     // actor) returns null and falls through to the normal review below.
     const stackMarker = extractStackBodyMarker(parsed.prBody);
     if (stackMarker) {
+      // Marker handling can post comments — a redelivered event must not
+      // duplicate them (the comment path dedupes by comment id already).
+      if (input.store.hasWebhookDelivery(input.request.deliveryId)) {
+        input.store.claimWebhookDelivery(input.request.deliveryId, input.request.event, "duplicate-delivery");
+        return { status: 200, body: { ok: true, duplicate: true } };
+      }
       const handled = await handleStackBodyMarker(input, parsed, payload, stackMarker);
       if (handled) return handled;
+      // The marker fell through to the normal review — claim the delivery so
+      // a redelivery does not re-post the marker's usage reply.
+      input.store.claimWebhookDelivery(input.request.deliveryId, input.request.event, "marker-fallthrough");
     }
 
     // Instance-wide review pause: the operator's global switch stops every
@@ -1176,6 +1185,11 @@ async function handleStackBodyMarker(
   }
   if (marker.kind === "start") {
     return runStackStart(ctx, marker.stackId);
+  }
+  // An "end" the port cannot resolve must not swallow the PR's review —
+  // fall through and let the normal enqueue handle it.
+  if (typeof input.github?.listOpenPulls !== "function") {
+    return null;
   }
   return runStackEnd(ctx, marker.stackId);
 }

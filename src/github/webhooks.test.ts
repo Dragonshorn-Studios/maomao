@@ -2151,6 +2151,44 @@ describe("stack commands (issue #99)", () => {
     expect(store.listJobs(10).filter((j) => j.job_type === "stack_review")).toHaveLength(0);
   });
 
+  it("does not re-post the usage reply on a redelivered marker event", async () => {
+    const secret = "s3cret";
+    const config = stackConfig(secret);
+    const store = new JobStore(openDb(":memory:"));
+    const { github, comments } = stackGithub();
+    const rawBody = markedPr("<!-- end of stack : misconfigured -->");
+    for (const i of [0, 1]) {
+      const result = await handleGithubWebhook({
+        config,
+        store,
+        github,
+        request: { event: "pull_request", deliveryId: "m30", signature: sign(secret, rawBody), rawBody },
+      });
+      if (i === 1) expect(result.body.duplicate).toBe(true);
+    }
+    expect(comments.filter((c) => c.body.includes("Not a stack command"))).toHaveLength(1);
+    expect(store.listJobs(10)).toHaveLength(1);
+  });
+
+  it("falls back to the normal review when 'end of stack' cannot list open PRs", async () => {
+    const secret = "s3cret";
+    const config = stackConfig(secret);
+    const store = new JobStore(openDb(":memory:"));
+    const github = {
+      ...githubForCommands({ permission: "write" }),
+      createIssueComment: async () => ({ id: "1", url: "u" }),
+    };
+    const rawBody = markedPr("<!-- end of stack u1 -->");
+    const result = await handleGithubWebhook({
+      config,
+      store,
+      github: github as unknown as GithubPort,
+      request: { event: "pull_request", deliveryId: "m31", signature: sign(secret, rawBody), rawBody },
+    });
+    expect(result.body.created).toBe(true);
+    expect(store.listJobs(10)).toHaveLength(1);
+  });
+
   it("infers the stack id on a bare 'top of stack' from the PR's declaration", async () => {
     const secret = "s3cret";
     const config = stackConfig(secret);
