@@ -153,6 +153,26 @@ export function resolveStackChain(input: {
   if (startPrNumber === endPrNumber) {
     return { ok: false, error: "the start and end of a stack cannot be the same pull request" };
   }
+  // Boundaries are validated before walking: the trigger PR must be the top
+  // (no other open PR bases on its head) and a declared start must be the
+  // bottom (no other open PR's head is its base). Both would otherwise
+  // silently review a truncated slice of the real stack.
+  const above = pulls.filter((p) => p.prNumber !== end.prNumber && p.baseRef === end.headRef);
+  if (above.length > 0) {
+    return {
+      ok: false,
+      error: `#${end.prNumber} is not the top of its stack — ${above.map((p) => `#${p.prNumber}`).join(", ")} ${above.length > 1 ? "are" : "is"} based on its head branch "${end.headRef}"`,
+    };
+  }
+  if (start) {
+    const below = pulls.filter((p) => p.prNumber !== start.prNumber && p.headRef === start.baseRef);
+    if (below.length > 0) {
+      return {
+        ok: false,
+        error: `declared start #${start.prNumber} is not the bottom of its stack — its base branch "${start.baseRef}" is the head of ${below.map((p) => `#${p.prNumber}`).join(", ")}`,
+      };
+    }
+  }
   const byHead = new Map<string, ResolvedPull[]>();
   for (const pull of pulls) {
     const list = byHead.get(pull.headRef) ?? [];

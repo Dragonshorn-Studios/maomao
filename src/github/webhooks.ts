@@ -541,6 +541,7 @@ interface StackCommandContext {
     store: JobStore;
     request: WebhookRequest;
     github?: GithubPort & Partial<ManualTriggerPort>;
+    rateLimiter?: RepoRateLimiter;
   };
   installationId: number;
   repoOwner: string;
@@ -554,6 +555,10 @@ interface StackCommandContext {
   /** The triggering PR already resolved — set on the body-marker path. */
   selfPull?: ResolvedPull;
   commentId?: number;
+  /** True on the body-marker path: stack runs are automatic work there, so
+   * the repo pause and per-repo rate limiter apply (comment commands are
+   * deliberately exempt as manual operator acts). */
+  enforceSpendControls?: boolean;
   finish: (result: string, body: Record<string, unknown>) => WebhookHandleResult;
 }
 
@@ -616,6 +621,27 @@ async function runStackEnqueue(
     await stackReply(ctx, `Could not run stack "${stackId}": reviews are paused globally — resume on /pause.`);
     return ctx.finish(`${via}-paused`, { ok: true, command: via, stackId, enqueued: false, error: "reviews paused globally" });
   }
+  const rateOn = repoRateLimitActive(ctx.input.config.repoRateLimitPerWindow, ctx.input.config.repoRateWindowMs);
+  if (ctx.enforceSpendControls) {
+    const repoPause = ctx.input.store.getActivePause(ctx.repoFullName);
+    if (repoPause) {
+      await stackReply(ctx, `Could not run stack "${stackId}": reviews for ${ctx.repoFullName} are paused until ${repoPause.expires_at}.`);
+      return ctx.finish(`${via}-paused`, { ok: true, command: via, stackId, enqueued: false, error: `paused until ${repoPause.expires_at}` });
+    }
+    if (
+      rateOn &&
+      ctx.githubRepositoryId != null &&
+      ctx.input.rateLimiter &&
+      !ctx.input.rateLimiter.wouldAllow(
+        ctx.githubRepositoryId,
+        ctx.input.config.repoRateLimitPerWindow,
+        ctx.input.config.repoRateWindowMs,
+      )
+    ) {
+      await stackReply(ctx, `Could not run stack "${stackId}": ${ctx.repoFullName} is rate limited — retry once the window resets.`);
+      return ctx.finish(`${via}-rate-limited`, { ok: true, command: via, stackId, enqueued: false, error: "rate limited" });
+    }
+  }
   const members = pulls.map((pull, index) => ({
     position: index + 1,
     prNumber: pull.prNumber,
@@ -662,6 +688,13 @@ async function runStackEnqueue(
       expectedCount: members.length,
     })),
   );
+  if (enqueue.created && ctx.enforceSpendControls && rateOn && ctx.githubRepositoryId != null && ctx.input.rateLimiter) {
+    ctx.input.rateLimiter.record(
+      ctx.githubRepositoryId,
+      ctx.input.config.repoRateLimitPerWindow,
+      ctx.input.config.repoRateWindowMs,
+    );
+  }
   if (enqueue.created) {
     ctx.input.store.insertStackMembers(enqueue.job.id, members);
     ctx.input.store.log(
@@ -684,7 +717,12 @@ async function runStackEnqueue(
 // "start of stack <id>" marks the bottom PR; the marker comment is the only
 // trace. A bare "start of stack" generates the id so authors never need one.
 async function runStackStart(ctx: StackCommandContext, stackId?: string): Promise<WebhookHandleResult> {
-  const startId = stackId ?? `stack-${randomUUID().slice(0, 8)}`;
+  // A bare "start" reuses the id this PR already holds — important on the
+  // body-marker path, where every handled pull_request action re-fires it.
+  const startId =
+    stackId ??
+    ctx.input.store.listStackStartsForPull(ctx.repoFullName, ctx.prNumber)[0]?.stack_id ??
+    `stack-${randomUUID().slice(0, 8)}`;
   const start = ctx.input.store.upsertStackStart({
     repoFullName: ctx.repoFullName,
     stackId: startId,
@@ -730,11 +768,21 @@ async function runStackEnd(ctx: StackCommandContext, stackId?: string): Promise<
   if (typeof ctx.input.github?.listOpenPulls !== "function") {
     return { status: 202, body: { ok: true, ignored: true, reason: "github client cannot list open pull requests" } };
   }
-  const openPulls = await ctx.input.github.listOpenPulls(ctx.installationId, ctx.repoOwner, ctx.repoName);
-  // The body-marker path fires on the PR's own event, which can race the API's
-  // open-PR listing — supply the payload's copy when it is not listed yet.
-  if (ctx.selfPull && !openPulls.some((p) => p.prNumber === ctx.selfPull!.prNumber)) {
-    openPulls.push(ctx.selfPull);
+  let openPulls: ResolvedPull[];
+  try {
+    openPulls = await ctx.input.github.listOpenPulls(ctx.installationId, ctx.repoOwner, ctx.repoName);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    await stackReply(ctx, `Could not run stack${stackId ? ` "${stackId}"` : ""}: could not list open pull requests in ${ctx.repoFullName} (${message}).`);
+    return ctx.finish("end-error", { ok: true, command: "end", stackId, enqueued: false, error: message });
+  }
+  // The payload's copy of the triggering PR is authoritative: splice it over
+  // the API entry so a listing that is missing the PR — or still shows the
+  // pre-push SHA — cannot pin the review to stale data.
+  if (ctx.selfPull) {
+    const idx = openPulls.findIndex((p) => p.prNumber === ctx.selfPull!.prNumber);
+    if (idx >= 0) openPulls[idx] = ctx.selfPull;
+    else openPulls.push(ctx.selfPull);
   }
   let endStackId = stackId;
   let resolvedPulls: ResolvedPull[];
@@ -771,21 +819,21 @@ async function runStackEnd(ctx: StackCommandContext, stackId?: string): Promise<
   }
   // Record each resolved member as a declaration so marker comments and any
   // later "top of stack" re-trigger see the same picture. A pre-existing
-  // declaration that disagrees with the branch layout aborts the run.
-  for (let i = 0; i < resolvedPulls.length; i += 1) {
-    const member = resolvedPulls[i]!;
-    const decl = ctx.input.store.upsertStackDeclaration({
-      repoFullName: ctx.repoFullName,
-      stackId: endStackId,
+  // declaration that disagrees with the branch layout aborts the run —
+  // atomically, so a failed end never leaves a torn declaration set.
+  const recorded = ctx.input.store.recordStackDeclarations({
+    repoFullName: ctx.repoFullName,
+    stackId: endStackId,
+    actor: ctx.actorLogin,
+    members: resolvedPulls.map((member, i) => ({
       prNumber: member.prNumber,
       position: i + 1,
       expectedCount: resolvedPulls.length,
-      actor: ctx.actorLogin,
-    });
-    if (!decl.ok) {
-      await stackReply(ctx, `Could not run stack "${endStackId}": ${decl.error}.`);
-      return ctx.finish("end-declare-conflict", { ok: true, command: "end", stackId: endStackId, enqueued: false, error: decl.error });
-    }
+    })),
+  });
+  if (!recorded.ok) {
+    await stackReply(ctx, `Could not run stack "${endStackId}": ${recorded.error}.`);
+    return ctx.finish("end-declare-conflict", { ok: true, command: "end", stackId: endStackId, enqueued: false, error: recorded.error });
   }
   return runStackEnqueue(ctx, endStackId, resolvedPulls, "end");
 }
@@ -960,6 +1008,7 @@ async function handleStackBodyMarker(
     store: JobStore;
     request: WebhookRequest;
     github?: GithubPort & Partial<ManualTriggerPort>;
+    rateLimiter?: RepoRateLimiter;
   },
   parsed: ReturnType<typeof parsePullRequestPayload>,
   payload: PullRequestWebhookPayload,
@@ -998,6 +1047,7 @@ async function handleStackBodyMarker(
     githubAccountId: parsed.githubAccountId,
     githubRepositoryId: parsed.githubRepositoryId,
     webhookEvent: `pull_request.${payload.action}`,
+    enforceSpendControls: true,
     selfPull: {
       installationId: parsed.installationId,
       accountId: parsed.githubAccountId ?? 0,
@@ -1019,8 +1069,11 @@ async function handleStackBodyMarker(
     finish,
   };
   if (marker.kind === "invalid") {
+    // A body is prose: a line that merely starts with a stack keyword must
+    // not suppress the review. Reply with usage so the author sees the
+    // correction, then fall through to the normal enqueue.
     await stackReply(ctx, STACK_USAGE);
-    return finish("command-invalid", { ok: true, ignored: false, reason: "unrecognized stack body marker" });
+    return null;
   }
   if (marker.kind === "part") {
     return finish("member-marker", {

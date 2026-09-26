@@ -290,3 +290,47 @@ describe("extractStackBodyMarker", () => {
     expect(extractStackBodyMarker("Body.\nend of stack : with junk")).toEqual({ kind: "invalid" });
   });
 });
+
+describe("resolveStackChain boundaries", () => {
+  const chain = () => [
+    pull({ prNumber: 41, baseRef: "main", headRef: "feat-a" }),
+    pull({ prNumber: 42, baseRef: "feat-a", headRef: "feat-b" }),
+    pull({ prNumber: 43, baseRef: "feat-b", headRef: "feat-c" }),
+  ];
+
+  it("rejects an end PR that is not the top of its stack", () => {
+    const pulls = [...chain(), pull({ prNumber: 44, baseRef: "feat-c", headRef: "feat-d" })];
+    const result = resolveStackChain({ pulls, startPrNumber: 41, endPrNumber: 43 });
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error).toMatch(/not the top.*#44/);
+  });
+
+  it("rejects a declared start that is not the bottom of its stack", () => {
+    const pulls = [pull({ prNumber: 40, baseRef: "dev", headRef: "main" }), ...chain()];
+    const result = resolveStackChain({ pulls, startPrNumber: 41, endPrNumber: 43 });
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error).toMatch(/not the bottom/);
+  });
+
+  it("rejects a cyclic branch chain", () => {
+    // The cycle sits below the end PR: 44 bases into the 42⇄43 loop.
+    const pulls = [
+      pull({ prNumber: 42, baseRef: "feat-b", headRef: "feat-a" }),
+      pull({ prNumber: 43, baseRef: "feat-a", headRef: "feat-b" }),
+      pull({ prNumber: 44, baseRef: "feat-b", headRef: "feat-d" }),
+      pull({ prNumber: 45, baseRef: "feat-d", headRef: "feat-e" }),
+    ];
+    const result = resolveStackChain({ pulls, endPrNumber: 45 });
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error).toMatch(/loops back/);
+  });
+
+  it("rejects a chain over 100 pull requests", () => {
+    const pulls = Array.from({ length: 103 }, (_, i) =>
+      pull({ prNumber: i + 1, baseRef: i === 0 ? "main" : `b${i}`, headRef: `b${i + 1}` }),
+    );
+    const result = resolveStackChain({ pulls, endPrNumber: 103 });
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error).toMatch(/exceeds 100/);
+  });
+});

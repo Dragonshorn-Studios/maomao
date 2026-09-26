@@ -657,6 +657,44 @@ export class JobStore {
     return { ok: true, created: true };
   }
 
+  /**
+   * Records a whole resolved member list atomically: a conflict mid-batch
+   * rolls the transaction back so a failed "end of stack" never leaves a
+   * torn declaration set behind.
+   */
+  recordStackDeclarations(input: {
+    repoFullName: string;
+    stackId: string;
+    actor: string;
+    members: { prNumber: number; position: number; expectedCount: number }[];
+    provider?: string;
+    providerInstance?: string;
+  }): { ok: true; created: number } | { ok: false; error: string } {
+    let created = 0;
+    const apply = this.db.transaction(() => {
+      for (const member of input.members) {
+        const result = this.upsertStackDeclaration({
+          repoFullName: input.repoFullName,
+          stackId: input.stackId,
+          prNumber: member.prNumber,
+          position: member.position,
+          expectedCount: member.expectedCount,
+          actor: input.actor,
+          provider: input.provider,
+          providerInstance: input.providerInstance,
+        });
+        if (!result.ok) throw new Error(result.error);
+        if (result.created) created += 1;
+      }
+    });
+    try {
+      apply();
+      return { ok: true, created };
+    } catch (error) {
+      return { ok: false, error: error instanceof Error ? error.message : String(error) };
+    }
+  }
+
   listStackDeclarations(repoFullName: string, stackId: string, provider?: string, providerInstance?: string): StackDeclarationRow[] {
     const scope = normalizeScope({ provider, instance: providerInstance });
     return this.db
