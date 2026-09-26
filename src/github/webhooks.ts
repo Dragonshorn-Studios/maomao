@@ -25,7 +25,7 @@ import {
   isBotActor,
   mentionsEscalateCommand,
 } from "../routing/escalation.js";
-import { recordWebhookDelivery } from "../forge/deliveries.js";
+import { enqueueClaimResult, recordWebhookDelivery } from "../forge/deliveries.js";
 
 export interface WebhookRequest {
   event: string;
@@ -429,12 +429,10 @@ async function handleGithubWebhookRequest(input: GithubWebhookInput): Promise<We
         input.config.repoRateWindowMs,
       );
     }
-    // Same claim result vocabulary as the GitLab enqueue path ("enqueued" /
-    // "skipped: <reason>") so the deliveries log reads uniformly.
     input.store.claimWebhookDelivery(
       input.request.deliveryId,
       input.request.event,
-      enqueue.created ? "enqueued" : `skipped${enqueue.skippedReason ? `: ${enqueue.skippedReason}` : ""}`,
+      enqueueClaimResult(enqueue),
     );
     return {
       status: enqueue.created ? 202 : 200,
@@ -523,6 +521,9 @@ async function handleIssueComment(input: {
   }
   input.store.patchJob(job.id, { manual_escalate_requested: 1 });
   input.store.log(job.id, `Authorized escalate command from ${actorLogin}`);
+  // Claim with the command name like the GitLab escalate path so the
+  // deliveries log shows "escalate", not a bare boundary-recorded "ok".
+  input.store.claimWebhookDelivery(input.request.deliveryId, input.request.event, "escalate");
   return {
     status: 202,
     body: { ok: true, dispatchJobId: job.id, jobId: job.id, headSha: job.head_sha },

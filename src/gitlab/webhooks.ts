@@ -22,7 +22,7 @@ import { cancelJobsForPull } from "../jobs/cancel.js";
 import type { ForgeConnectionStore, OpenedConnection } from "../forge/connections.js";
 import { commentLooksLikeMaomaoEscalation, mentionsEscalateCommand } from "../routing/escalation.js";
 import type { RepoRateLimiter } from "../github/rate-limit.js";
-import { recordWebhookDelivery } from "../forge/deliveries.js";
+import { enqueueClaimResult, recordWebhookDelivery } from "../forge/deliveries.js";
 
 export interface GitLabWebhookRequest {
   event: string;
@@ -231,7 +231,7 @@ function enqueueMergeRequestJob(input: {
   store.claimWebhookDelivery(
     input.deliveryId,
     input.event,
-    enqueue.created ? "enqueued" : `skipped${enqueue.skippedReason ? `: ${enqueue.skippedReason}` : ""}`,
+    enqueueClaimResult(enqueue),
     { provider: "gitlab", instance: connection.instance.hostname },
   );
   return {

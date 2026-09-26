@@ -1073,7 +1073,7 @@ export interface ConfigPageData {
   /** Inbound webhook deliveries for /config/deliveries. */
   deliveries?: WebhookDeliveryRow[];
   /** Keyset cursor for the "Older deliveries" link; null when exhausted. */
-  deliveriesBefore?: number | null;
+  deliveriesBefore?: string | null;
   identity?: UiIdentity;
 }
 
@@ -1750,7 +1750,7 @@ export function renderNewProfilePage(data: ConfigPageData): string {
 function deliveriesTable(deliveries: WebhookDeliveryRow[]): string {
   const rows = deliveries
     .map((delivery) => {
-      const ignored = delivery.result.startsWith("ignored:");
+      const ignored = delivery.ignored === 1;
       const scope = delivery.provider_instance
         ? `${delivery.provider} · ${delivery.provider_instance}`
         : delivery.provider;
@@ -1777,7 +1777,7 @@ export function renderConfigDeliveriesPage(data: ConfigPageData): string {
   const deliveries = data.deliveries ?? [];
   const older =
     data.deliveriesBefore != null
-      ? `<nav class="jobs-pagination" aria-label="Webhook delivery pages"><a rel="next" href="/config/deliveries?before=${data.deliveriesBefore}">Older deliveries</a></nav>`
+      ? `<nav class="jobs-pagination" aria-label="Webhook delivery pages"><a rel="next" href="/config/deliveries?before=${encodeURIComponent(data.deliveriesBefore)}">Older deliveries</a></nav>`
       : "";
   const body = `
     <h1>Webhook deliveries</h1>

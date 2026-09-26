@@ -484,6 +484,9 @@ describe("webhook handling", () => {
     });
     expect(ok.dispatchJobId).toBe(jobId);
     expect(store.getJob(jobId!)?.manual_escalate_requested).toBe(1);
+    // The escalate path claims its own result — the deliveries log shows
+    // "escalate", not a boundary-recorded bare "ok".
+    expect(store.listWebhookDeliveries({}).find((d) => d.delivery_id === "c3")?.result).toBe("escalate");
 
     store.patchJob(jobId!, { manual_escalate_requested: 0 });
     const memberBody = JSON.stringify({
@@ -1672,17 +1675,62 @@ describe("webhook delivery log", () => {
     // A merged close claims with its own result before the boundary wrapper
     // runs; the wrapper only backfills context, never rewrites the result.
     const rawBody = JSON.stringify(
-      prPayload({ action: "closed", sender: { login: "octocat" } }),
+      prPayload({ action: "closed", pull_request: { ...prPayload().pull_request, merged: true }, sender: { login: "octocat" } }),
     );
-    // payload carries merged=false → closed without merge is ignored
     await handleGithubWebhook({
       config,
       store,
       request: { event: "pull_request", deliveryId: "close-1", signature: sign(secret, rawBody), rawBody },
     });
     const row = loggedDelivery(store, "close-1");
-    expect(row?.result).toBe("ignored: pull request closed without merge");
+    expect(row?.result).toBe("pr_merged_cancel");
+    expect(row?.ignored).toBe(0);
     expect(row?.repo_full_name).toBe("acme/widgets");
+    expect(row?.actor).toBe("octocat");
+  });
+
+  it("records non-command issue comments and falls back to the comment author", async () => {
+    const secret = "s3cret";
+    const config = loadConfig({ GITHUB_WEBHOOK_SECRET: secret });
+    const store = new JobStore(openDb(":memory:"));
+    // No sender: the comment's author is the actor-context fallback.
+    const rawBody = JSON.stringify(
+      commentPayload({
+        comment: {
+          id: 9100,
+          body: "lgtm",
+          user: { login: "alice", type: "User" },
+          author_association: "OWNER",
+        },
+      }),
+    );
+    const result = await handleGithubWebhook({
+      config,
+      store,
+      request: { event: "issue_comment", deliveryId: "ic-1", signature: sign(secret, rawBody), rawBody },
+    });
+    expect(result.body.ignored).toBe(true);
+    const row = loggedDelivery(store, "ic-1");
+    expect(row?.result).toBe("ignored: not an escalate command");
+    expect(row?.ignored).toBe(1);
+    expect(row?.actor).toBe("alice");
+    expect(row?.repo_full_name).toBe("acme/widgets");
+  });
+
+  it("records a contextless row when the payload carries no repo or actor", async () => {
+    const secret = "s3cret";
+    const config = loadConfig({ GITHUB_WEBHOOK_SECRET: secret });
+    const store = new JobStore(openDb(":memory:"));
+    const rawBody = JSON.stringify({ action: "edited" });
+    await handleGithubWebhook({
+      config,
+      store,
+      request: { event: "pull_request", deliveryId: "ctx-0", signature: sign(secret, rawBody), rawBody },
+    });
+    const row = loggedDelivery(store, "ctx-0");
+    expect(row?.result).toBe("ignored: ignored action edited");
+    expect(row?.repo_full_name).toBeNull();
+    expect(row?.actor).toBeNull();
   });
 
   it("does not record unverified deliveries", async () => {

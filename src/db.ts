@@ -229,6 +229,7 @@ function migrate(db: SqliteDb): void {
       repo_full_name TEXT,
       actor TEXT,
       result TEXT NOT NULL,
+      ignored INTEGER NOT NULL DEFAULT 0,
       created_at TEXT NOT NULL,
       PRIMARY KEY (provider, provider_instance, delivery_id)
     );
@@ -507,6 +508,9 @@ function migrate(db: SqliteDb): void {
     ensureColumn(db, "webhook_deliveries", "action", "TEXT");
     ensureColumn(db, "webhook_deliveries", "repo_full_name", "TEXT");
     ensureColumn(db, "webhook_deliveries", "actor", "TEXT");
+    ensureColumn(db, "webhook_deliveries", "ignored", "INTEGER NOT NULL DEFAULT 0");
+    // Backfill rows written before the column existed (idempotent).
+    db.exec(`UPDATE webhook_deliveries SET ignored = 1 WHERE ignored = 0 AND result LIKE 'ignored:%'`);
     const jobColumns: Array<[string, string]> = [
       ["brief_json", "TEXT"],
       ["routing_state", "TEXT NOT NULL DEFAULT 'queued'"],

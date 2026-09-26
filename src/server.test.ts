@@ -1793,6 +1793,11 @@ describe("config page IA", () => {
       actor: "octocat",
     });
     store.claimWebhookDelivery("del-ping", "ping", "ok: ping", { provider: "gitlab", instance: "gitlab.example" });
+    // Payload-derived context is untrusted: it must be HTML-escaped in the table.
+    store.claimWebhookDelivery("del-evil", "pull_request", "enqueued", undefined, {
+      repoFullName: `<img src=x onerror=alert(1)>`,
+      actor: `<script>alert(1)</script>`,
+    });
 
     // A malformed cursor falls back to the first page rather than 500ing.
     expect((await app.request("/config/deliveries?before=abc", { headers: { cookie: session } })).status).toBe(200);
@@ -1805,6 +1810,9 @@ describe("config page IA", () => {
     expect(html).toContain("octocat");
     expect(html).toContain("ok: ping");
     expect(html).toContain("gitlab · gitlab.example");
+    expect(html).toContain("&lt;img src=x onerror=alert(1)&gt;");
+    expect(html).toContain("&lt;script&gt;");
+    expect(html).not.toContain("<img src=x onerror");
     // Active sub-nav section renders as <strong>, siblings stay links.
     expect(html).toContain("<strong>Deliveries</strong>");
     expect(html).toContain('href="/config/audit"');

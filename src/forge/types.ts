@@ -47,6 +47,16 @@ export function normalizeScope(scope?: Partial<ForgeScope>): ForgeScope {
   return { provider, instance };
 }
 
+/**
+ * Claim-result prefix marking a webhook delivery as observational-only: the
+ * event was seen and logged, but no work claimed the dedup slot, so a
+ * redelivery must still reprocess. `webhook_deliveries.ignored` is derived
+ * from this prefix at claim time (single sniff point in `claimWebhookDelivery`)
+ * and every consumer gates on the column — authoring or renaming claim
+ * strings cannot silently change dedup semantics.
+ */
+export const IGNORED_RESULT_PREFIX = "ignored:";
+
 /** Payload context recorded alongside a webhook delivery claim: which repo it
  * touched, the event action, and who sent it. Extracted from the raw body at
  * the handler boundary; all fields optional because payloads are untrusted. */

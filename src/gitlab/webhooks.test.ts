@@ -640,6 +640,7 @@ describe("GitLab note events", () => {
     expect(result.dispatchJobId).toBe(opened.enqueue?.job.id);
     const job = input.store.getJob(result.dispatchJobId!);
     expect(job?.manual_escalate_requested).toBe(1);
+    expect(input.store.listWebhookDeliveries({}).find((d) => d.result === "escalate")).toBeDefined();
   });
 });
 

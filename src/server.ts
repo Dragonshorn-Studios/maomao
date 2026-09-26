@@ -1449,16 +1449,22 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
   app.get("/config/deliveries", (c) => {
     if (!gateOn) return c.redirect("/", 302);
     const pageSize = 50;
-    const beforeRaw = Number(c.req.query("before"));
-    const before = Number.isSafeInteger(beforeRaw) && beforeRaw > 0 ? beforeRaw : undefined;
+    // Cursor is "<created_at>|<delivery_id>" — value columns, stable across
+    // VACUUM (unlike rowid). created_at ISO stamps never contain "|".
+    const beforeRaw = c.req.query("before");
+    const sep = beforeRaw?.indexOf("|") ?? -1;
+    const before =
+      beforeRaw && sep > 0 ? { createdAt: beforeRaw.slice(0, sep), deliveryId: beforeRaw.slice(sep + 1) } : undefined;
     const deliveries = ctx.store.listWebhookDeliveries({ limit: pageSize, before });
+    const oldest = deliveries[deliveries.length - 1];
     return c.html(
       renderConfigDeliveriesPage({
         identity: c.get("identity"),
         revisions: [],
         audit: [],
         deliveries,
-        deliveriesBefore: deliveries.length === pageSize ? deliveries[deliveries.length - 1].rowid : null,
+        deliveriesBefore:
+          deliveries.length === pageSize && oldest ? `${oldest.created_at}|${oldest.delivery_id}` : null,
         canWrite: gateOn,
       }),
     );

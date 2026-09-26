@@ -197,15 +197,21 @@ describe("listWebhookDeliveries", () => {
     return store;
   }
 
-  it("serves the newest deliveries first and pages with a rowid cursor", () => {
+  it("serves the newest deliveries first and pages with a (created_at, delivery_id) cursor", () => {
     const store = seededDeliveries(7);
     const first = store.listWebhookDeliveries({ limit: 3 });
     expect(first.map((row) => row.delivery_id)).toEqual(["delivery-7", "delivery-6", "delivery-5"]);
 
-    const older = store.listWebhookDeliveries({ limit: 3, before: first[2]!.rowid });
+    const older = store.listWebhookDeliveries({
+      limit: 3,
+      before: { createdAt: first[2]!.created_at, deliveryId: first[2]!.delivery_id },
+    });
     expect(older.map((row) => row.delivery_id)).toEqual(["delivery-4", "delivery-3", "delivery-2"]);
 
-    const last = store.listWebhookDeliveries({ limit: 3, before: older[2]!.rowid });
+    const last = store.listWebhookDeliveries({
+      limit: 3,
+      before: { createdAt: older[2]!.created_at, deliveryId: older[2]!.delivery_id },
+    });
     expect(last.map((row) => row.delivery_id)).toEqual(["delivery-1"]);
   });
 
@@ -240,12 +246,15 @@ describe("listWebhookDeliveries", () => {
     // claim the dedup slot — a redelivery after the window/job change retries.
     store.claimWebhookDelivery("d-rl", "merge_request", "ignored: rate limited");
     expect(store.hasWebhookDelivery("d-rl")).toBe(false);
+    expect(store.listWebhookDeliveries({})[0]!.ignored).toBe(1);
 
     // The redelivery is then handled for real: the row upgrades to the real
     // outcome rather than keeping a stale ignored reason.
     store.claimWebhookDelivery("d-rl", "merge_request", "enqueued");
     expect(store.hasWebhookDelivery("d-rl")).toBe(true);
-    expect(store.listWebhookDeliveries({})[0]!.result).toBe("enqueued");
+    const upgraded = store.listWebhookDeliveries({})[0]!;
+    expect(upgraded.result).toBe("enqueued");
+    expect(upgraded.ignored).toBe(0);
 
     // A redelivery that is still ignored keeps the first recorded reason.
     store.claimWebhookDelivery("d-2", "note", "ignored: rate limited");
