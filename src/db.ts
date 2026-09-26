@@ -225,6 +225,9 @@ function migrate(db: SqliteDb): void {
       ${PROVIDER_COLUMNS},
       delivery_id TEXT NOT NULL,
       event TEXT NOT NULL,
+      action TEXT,
+      repo_full_name TEXT,
+      actor TEXT,
       result TEXT NOT NULL,
       created_at TEXT NOT NULL,
       PRIMARY KEY (provider, provider_instance, delivery_id)
@@ -501,6 +504,9 @@ function migrate(db: SqliteDb): void {
     ensureColumn(db, "jobs", "cancelled_reason", "TEXT");
     ensureColumn(db, "jobs", "cancelled_by", "TEXT");
     ensureColumn(db, "jobs", "forge_connection_id", "TEXT");
+    ensureColumn(db, "webhook_deliveries", "action", "TEXT");
+    ensureColumn(db, "webhook_deliveries", "repo_full_name", "TEXT");
+    ensureColumn(db, "webhook_deliveries", "actor", "TEXT");
     const jobColumns: Array<[string, string]> = [
       ["brief_json", "TEXT"],
       ["routing_state", "TEXT NOT NULL DEFAULT 'queued'"],

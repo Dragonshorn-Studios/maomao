@@ -243,6 +243,28 @@ export interface EnqueueResult {
   staleJobIds: number[];
 }
 
+/** Payload context recorded alongside a webhook delivery claim: which repo it
+ * touched, the event action, and who sent it. Extracted from the raw body at
+ * the handler boundary; all fields optional because payloads are untrusted. */
+export interface WebhookDeliveryContext {
+  repoFullName?: string | null;
+  action?: string | null;
+  actor?: string | null;
+}
+
+export interface WebhookDeliveryRow {
+  rowid: number;
+  provider: string;
+  provider_instance: string;
+  delivery_id: string;
+  event: string;
+  action: string | null;
+  repo_full_name: string | null;
+  actor: string | null;
+  result: string;
+  created_at: string;
+}
+
 export interface EscalationDispatchRow {
   id: number;
   escalation_id: string;
@@ -1495,15 +1517,71 @@ export class JobStore {
     return { finding, changed: true };
   }
 
-  claimWebhookDelivery(deliveryId: string, event: string, result: string, scope?: Partial<ForgeScope>): boolean {
+  claimWebhookDelivery(
+    deliveryId: string,
+    event: string,
+    result: string,
+    scope?: Partial<ForgeScope>,
+    context?: WebhookDeliveryContext,
+  ): boolean {
     if (!deliveryId) return true;
     const resolved = normalizeScope(scope);
     const insert = this.db
       .prepare(
-        `INSERT OR IGNORE INTO webhook_deliveries (delivery_id, event, result, created_at, provider, provider_instance) VALUES (?, ?, ?, ?, ?, ?)`,
+        `INSERT OR IGNORE INTO webhook_deliveries (delivery_id, event, result, created_at, provider, provider_instance, repo_full_name, action, actor) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
-      .run(deliveryId, event, result, nowIso(), resolved.provider, resolved.instance);
+      .run(
+        deliveryId,
+        event,
+        result,
+        nowIso(),
+        resolved.provider,
+        resolved.instance,
+        context?.repoFullName ?? null,
+        context?.action ?? null,
+        context?.actor ?? null,
+      );
+    if (insert.changes === 0 && context) {
+      // The row exists (claimed earlier by the handler with a specific result):
+      // backfill context without overwriting it or the recorded result.
+      this.db
+        .prepare(
+          `UPDATE webhook_deliveries SET
+            repo_full_name = COALESCE(repo_full_name, ?),
+            action = COALESCE(action, ?),
+            actor = COALESCE(actor, ?)
+          WHERE provider = ? AND provider_instance = ? AND delivery_id = ?`,
+        )
+        .run(
+          context.repoFullName ?? null,
+          context.action ?? null,
+          context.actor ?? null,
+          resolved.provider,
+          resolved.instance,
+          deliveryId,
+        );
+    }
     return insert.changes > 0;
+  }
+
+  /** Newest-first delivery log for the /config/deliveries page. `before` is a
+   * keyset cursor on rowid (insertion order == chronological order). */
+  listWebhookDeliveries(options: { limit?: number; before?: number } = {}): WebhookDeliveryRow[] {
+    const limit = Math.max(1, Math.min(Math.floor(options.limit ?? 100), 500));
+    if (options.before != null) {
+      return this.db
+        .prepare(
+          `SELECT rowid, provider, provider_instance, delivery_id, event, action, repo_full_name, actor, result, created_at
+           FROM webhook_deliveries WHERE rowid < ? ORDER BY rowid DESC LIMIT ?`,
+        )
+        .all(options.before, limit) as WebhookDeliveryRow[];
+    }
+    return this.db
+      .prepare(
+        `SELECT rowid, provider, provider_instance, delivery_id, event, action, repo_full_name, actor, result, created_at
+         FROM webhook_deliveries ORDER BY rowid DESC LIMIT ?`,
+      )
+      .all(limit) as WebhookDeliveryRow[];
   }
 
   hasWebhookDelivery(deliveryId: string, scope?: Partial<ForgeScope>): boolean {

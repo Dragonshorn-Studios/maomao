@@ -1613,3 +1613,87 @@ describe("stack commands (issue #99)", () => {
     expect(markers.find((c) => c.pullNumber === 42)?.body).toContain("h42");
   });
 });
+
+describe("webhook delivery log", () => {
+  function loggedDelivery(store: JobStore, deliveryId: string) {
+    return store.listWebhookDeliveries({ limit: 20 }).find((row) => row.delivery_id === deliveryId);
+  }
+
+  it("records ignored pull_request actions with their reason and context", async () => {
+    const secret = "s3cret";
+    const config = loadConfig({ GITHUB_WEBHOOK_SECRET: secret, GITHUB_APP_ID: "1", GITHUB_APP_PRIVATE_KEY: "k" });
+    const store = new JobStore(openDb(":memory:"));
+    const rawBody = JSON.stringify(
+      prPayload({ action: "edited", sender: { login: "octocat" } }),
+    );
+    const result = await handleGithubWebhook({
+      config,
+      store,
+      request: { event: "pull_request", deliveryId: "ignored-1", signature: sign(secret, rawBody), rawBody },
+    });
+    expect(result.body.ignored).toBe(true);
+
+    const row = loggedDelivery(store, "ignored-1");
+    expect(row).toBeDefined();
+    expect(row!.event).toBe("pull_request");
+    expect(row!.action).toBe("edited");
+    expect(row!.repo_full_name).toBe("acme/widgets");
+    expect(row!.actor).toBe("octocat");
+    expect(row!.result).toBe("ignored: ignored action edited");
+  });
+
+  it("records unsupported events as ignored deliveries", async () => {
+    const secret = "s3cret";
+    const config = loadConfig({ GITHUB_WEBHOOK_SECRET: secret });
+    const store = new JobStore(openDb(":memory:"));
+    const rawBody = JSON.stringify(prPayload({ sender: { login: "octocat" } }));
+    const result = await handleGithubWebhook({
+      config,
+      store,
+      request: { event: "check_run", deliveryId: "ev-1", signature: sign(secret, rawBody), rawBody },
+    });
+    expect(result.body.ignored).toBe(true);
+    const row = loggedDelivery(store, "ev-1");
+    expect(row?.result).toBe("ignored: event check_run");
+  });
+
+  it("records pings and keeps the specific result on already-claimed deliveries", async () => {
+    const secret = "s3cret";
+    const config = loadConfig({ GITHUB_WEBHOOK_SECRET: secret, GITHUB_APP_ID: "1", GITHUB_APP_PRIVATE_KEY: "k" });
+    const store = new JobStore(openDb(":memory:"));
+    const ping = await handleGithubWebhook({
+      config,
+      store,
+      request: { event: "ping", deliveryId: "ping-1", signature: sign(secret, "{}"), rawBody: "{}" },
+    });
+    expect(ping.status).toBe(200);
+    expect(loggedDelivery(store, "ping-1")?.result).toBe("ok: ping");
+
+    // A merged close claims with its own result before the boundary wrapper
+    // runs; the wrapper only backfills context, never rewrites the result.
+    const rawBody = JSON.stringify(
+      prPayload({ action: "closed", sender: { login: "octocat" } }),
+    );
+    // payload carries merged=false → closed without merge is ignored
+    await handleGithubWebhook({
+      config,
+      store,
+      request: { event: "pull_request", deliveryId: "close-1", signature: sign(secret, rawBody), rawBody },
+    });
+    const row = loggedDelivery(store, "close-1");
+    expect(row?.result).toBe("ignored: pull request closed without merge");
+    expect(row?.repo_full_name).toBe("acme/widgets");
+  });
+
+  it("does not record unverified deliveries", async () => {
+    const config = loadConfig({ GITHUB_WEBHOOK_SECRET: "s3cret" });
+    const store = new JobStore(openDb(":memory:"));
+    const result = await handleGithubWebhook({
+      config,
+      store,
+      request: { event: "pull_request", deliveryId: "bad-1", signature: "sha256=deadbeef", rawBody: "{}" },
+    });
+    expect(result.status).toBe(401);
+    expect(store.listWebhookDeliveries({})).toHaveLength(0);
+  });
+});

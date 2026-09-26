@@ -25,6 +25,7 @@ import {
   isBotActor,
   mentionsEscalateCommand,
 } from "../routing/escalation.js";
+import { recordWebhookDelivery } from "../forge/deliveries.js";
 
 export interface WebhookRequest {
   event: string;
@@ -259,7 +260,7 @@ function handlePullClosed(
   };
 }
 
-export async function handleGithubWebhook(input: {
+export interface GithubWebhookInput {
   config: Config;
   store: JobStore;
   request: WebhookRequest;
@@ -267,7 +268,25 @@ export async function handleGithubWebhook(input: {
   github?: GithubPort & Partial<ManualTriggerPort>;
   /** Queue hook so cancelled jobs are dropped from memory before the claim/audit steps. */
   abortJobs?: (jobIds: number[]) => void;
-}): Promise<WebhookHandleResult> {
+}
+
+export async function handleGithubWebhook(input: GithubWebhookInput): Promise<WebhookHandleResult> {
+  const result = await handleGithubWebhookRequest(input);
+  // Boundary bookkeeping: record verified deliveries the inner handlers left
+  // unclaimed — every `ignored` answer (unsupported events, non-command
+  // comments, out-of-scope actions) plus clean `ok` results. Failures stay
+  // unclaimed so redeliveries can retry.
+  recordWebhookDelivery({
+    store: input.store,
+    deliveryId: input.request.deliveryId,
+    event: input.request.event,
+    rawBody: input.request.rawBody,
+    result,
+  });
+  return result;
+}
+
+async function handleGithubWebhookRequest(input: GithubWebhookInput): Promise<WebhookHandleResult> {
   const valid = await verifyGithubSignature(
     input.config.github.webhookSecret,
     input.request.rawBody,
@@ -410,6 +429,13 @@ export async function handleGithubWebhook(input: {
         input.config.repoRateWindowMs,
       );
     }
+    // Same claim result vocabulary as the GitLab enqueue path ("enqueued" /
+    // "skipped: <reason>") so the deliveries log reads uniformly.
+    input.store.claimWebhookDelivery(
+      input.request.deliveryId,
+      input.request.event,
+      enqueue.created ? "enqueued" : `skipped${enqueue.skippedReason ? `: ${enqueue.skippedReason}` : ""}`,
+    );
     return {
       status: enqueue.created ? 202 : 200,
       body: {

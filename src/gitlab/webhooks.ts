@@ -22,6 +22,7 @@ import { cancelJobsForPull } from "../jobs/cancel.js";
 import type { ForgeConnectionStore, OpenedConnection } from "../forge/connections.js";
 import { commentLooksLikeMaomaoEscalation, mentionsEscalateCommand } from "../routing/escalation.js";
 import type { RepoRateLimiter } from "../github/rate-limit.js";
+import { recordWebhookDelivery } from "../forge/deliveries.js";
 
 export interface GitLabWebhookRequest {
   event: string;
@@ -495,7 +496,7 @@ async function handleNoteEvent(input: {
   };
 }
 
-export async function handleGitLabWebhook(input: {
+export interface GitLabWebhookInput {
   config: Config;
   store: JobStore;
   connections: ForgeConnectionStore;
@@ -505,7 +506,48 @@ export async function handleGitLabWebhook(input: {
   /** Queued aborts for cancelled jobs; wired from the server like the GitHub path. */
   abortJobs?: (jobIds: number[]) => void;
   gitlabFactory?: (connection: OpenedConnection) => GitLabCommandApi;
-}): Promise<GitLabWebhookHandleResult> {
+}
+
+export async function handleGitLabWebhook(input: GitLabWebhookInput): Promise<GitLabWebhookHandleResult> {
+  const result = await handleGitLabWebhookRequest(input);
+  recordGitLabDelivery(input, result);
+  return result;
+}
+
+/** Boundary bookkeeping mirroring the GitHub path: claims every verified
+ * delivery the inner handler left unclaimed (ignored events, non-command
+ * notes, out-of-scope actions) with its reason and payload context. The
+ * delivery id and provider scope are recomputed here — they are pure
+ * functions of the request and connection id. Unknown connections and
+ * failures stay unrecorded (no scope to file them under, or retryable). */
+function recordGitLabDelivery(input: GitLabWebhookInput, result: GitLabWebhookHandleResult): void {
+  let connection: OpenedConnection;
+  try {
+    connection = input.connections.open(input.connectionId);
+  } catch {
+    return;
+  }
+  const { request } = input;
+  const deliveryId = deliveryIdFrom(
+    {
+      "webhook-id": request.webhookId,
+      "x-gitlab-event-uuid": request.eventUuid,
+      "x-gitlab-webhook-uuid": request.webhookUuid,
+    },
+    request.event,
+    `${connection.row.id}:${request.rawBody}`,
+  );
+  recordWebhookDelivery({
+    store: input.store,
+    deliveryId,
+    event: request.event,
+    rawBody: request.rawBody,
+    result,
+    scope: { provider: "gitlab", instance: connection.instance.hostname },
+  });
+}
+
+async function handleGitLabWebhookRequest(input: GitLabWebhookInput): Promise<GitLabWebhookHandleResult> {
   const { store, request } = input;
   let connection: OpenedConnection;
   try {

@@ -1783,6 +1783,38 @@ describe("config page IA", () => {
     log.mockRestore();
   });
 
+  it("renders the webhook deliveries log with ignored results and context", async () => {
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    const { app, store } = testApp(gateEnv);
+    const { session } = await loginSession(app);
+    store.claimWebhookDelivery("del-ignored", "pull_request", "ignored: ignored action edited", undefined, {
+      repoFullName: "acme/widgets",
+      action: "edited",
+      actor: "octocat",
+    });
+    store.claimWebhookDelivery("del-ping", "ping", "ok: ping", { provider: "gitlab", instance: "gitlab.example" });
+
+    const html = await (await app.request("/config/deliveries", { headers: { cookie: session } })).text();
+    expect(html).toContain("Webhook deliveries");
+    expect(html).toContain("ignored: ignored action edited");
+    expect(html).toContain("pull_request · edited");
+    expect(html).toContain("acme/widgets");
+    expect(html).toContain("octocat");
+    expect(html).toContain("ok: ping");
+    expect(html).toContain("gitlab · gitlab.example");
+    // Active sub-nav section renders as <strong>, siblings stay links.
+    expect(html).toContain("<strong>Deliveries</strong>");
+    expect(html).toContain('href="/config/audit"');
+
+    // Keyset link appears once a page fills up.
+    for (let index = 0; index < 50; index += 1) {
+      store.claimWebhookDelivery(`flood-${index}`, "ping", "ok: ping");
+    }
+    const paged = await (await app.request("/config/deliveries", { headers: { cookie: session } })).text();
+    expect(paged).toContain("Older deliveries");
+    log.mockRestore();
+  });
+
   it("duplicates a revision (active included) into a new draft and lands on its editor", async () => {
     const log = vi.spyOn(console, "log").mockImplementation(() => {});
     const { app, store } = testApp(

@@ -46,6 +46,7 @@ import {
   renderNewProfilePage,
   renderDraftEditPage,
   renderConfigAuditPage,
+  renderConfigDeliveriesPage,
   renderProfileForm,
   renderHome,
   renderJob,
@@ -1440,6 +1441,24 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
         identity: c.get("identity"),
         revisions: [],
         audit: ctx.store.configs.listAudit(100),
+        canWrite: gateOn,
+      }),
+    );
+  });
+
+  app.get("/config/deliveries", (c) => {
+    if (!gateOn) return c.redirect("/", 302);
+    const pageSize = 50;
+    const beforeRaw = Number(c.req.query("before"));
+    const before = Number.isSafeInteger(beforeRaw) && beforeRaw > 0 ? beforeRaw : undefined;
+    const deliveries = ctx.store.listWebhookDeliveries({ limit: pageSize, before });
+    return c.html(
+      renderConfigDeliveriesPage({
+        identity: c.get("identity"),
+        revisions: [],
+        audit: [],
+        deliveries,
+        deliveriesBefore: deliveries.length === pageSize ? deliveries[deliveries.length - 1].rowid : null,
         canWrite: gateOn,
       }),
     );

@@ -723,3 +723,73 @@ describe("accessLevelToPermission / decodeSigningSecret / toForgeDiscussions", (
     expect(resolved[0]?.isResolved).toBe(true);
   });
 });
+
+describe("GitLab delivery log", () => {
+  it("records ignored note actions with reason and payload context", async () => {
+    const connections = newConnections();
+    const { id, secret } = createConnection(connections);
+    const input = baseInput(
+      connections,
+      id,
+      signedRequest(
+        secret,
+        "note",
+        JSON.stringify(
+          notePayload({
+            object_attributes: { id: 9001, note: "@maomao bury", noteable_type: "MergeRequest", action: "edited" },
+          }),
+        ),
+      ),
+    );
+    const result = await handleGitLabWebhook(input);
+    expect(result.body.ignored).toBe(true);
+
+    const row = input.store
+      .listWebhookDeliveries({ limit: 10 })
+      .find((entry) => entry.delivery_id === input.request.webhookId);
+    expect(row?.provider).toBe("gitlab");
+    expect(row?.provider_instance).toBe("gitlab.com");
+    expect(row?.result).toBe("ignored: ignored note action edited");
+    expect(row?.repo_full_name).toBe("acme/widgets");
+    expect(row?.action).toBe("edited");
+    expect(row?.actor).toBe("maintainer");
+  });
+
+  it("records deliveries ignored before dispatch (unsupported object kinds)", async () => {
+    const connections = newConnections();
+    const { id, secret } = createConnection(connections);
+    const input = baseInput(
+      connections,
+      id,
+      signedRequest(
+        secret,
+        "issue",
+        JSON.stringify({ object_kind: "issue", project: { path_with_namespace: "acme/widgets" }, user: { username: "maintainer" } }),
+      ),
+    );
+    const result = await handleGitLabWebhook(input);
+    expect(result.body.ignored).toBe(true);
+
+    const row = input.store
+      .listWebhookDeliveries({ limit: 10 })
+      .find((entry) => entry.delivery_id === input.request.webhookId);
+    expect(row?.result).toBe("ignored: event issue");
+    expect(row?.repo_full_name).toBe("acme/widgets");
+    expect(row?.actor).toBe("maintainer");
+  });
+
+  it("does not record failed verifications", async () => {
+    const connections = newConnections();
+    const { id } = createConnection(connections);
+    const input = baseInput(connections, id, {
+      event: "merge_request",
+      rawBody: JSON.stringify(mrPayload()),
+      webhookId: "whid-bad",
+      webhookTimestamp: String(Math.floor(Date.now() / 1000)),
+      webhookSignature: "v1,garbage",
+    });
+    const result = await handleGitLabWebhook(input);
+    expect(result.status).toBe(401);
+    expect(input.store.listWebhookDeliveries({})).toHaveLength(0);
+  });
+});
