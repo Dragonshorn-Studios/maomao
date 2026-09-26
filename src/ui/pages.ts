@@ -1,4 +1,4 @@
-import type { JobRow, JobStore, ReviewerRunRow } from "../jobs/store.js";
+import type { JobRow, JobStore, ReviewerRunRow, WebhookDeliveryRow } from "../jobs/store.js";
 import { forgeBadgeTitle, forgeBadgeTitleHtml, forgeChipLabel, providerLabel } from "./forge-badge.js";
 import { MODEL_PICKER_HREF, modelPicker, type ModelPickerEntry } from "./model-picker.js";
 import type { FindingRow } from "../findings/types.js";
@@ -1070,6 +1070,10 @@ export interface ConfigPageData {
     /** A failed create save re-renders submitted values with field errors in place. */
     form?: { values: ProfileFormValues; errors?: ProfileFieldErrors };
   };
+  /** Inbound webhook deliveries for /config/deliveries. */
+  deliveries?: WebhookDeliveryRow[];
+  /** Keyset cursor for the "Older deliveries" link; null when exhausted. */
+  deliveriesBefore?: string | null;
   identity?: UiIdentity;
 }
 
@@ -1128,7 +1132,7 @@ function renderEffectiveConfigSection(entries: EffectiveConfigEntry[]): string {
 }
 
 /** Shared sub-nav across the /config pages so each section is one click away. */
-export type ConfigSection = "effective" | "profiles" | "providers" | "prompts" | "audit";
+export type ConfigSection = "effective" | "profiles" | "providers" | "prompts" | "audit" | "deliveries";
 
 export function configSubNav(active: ConfigSection): string {
   const links: Array<[ConfigSection, string, string]> = [
@@ -1137,6 +1141,7 @@ export function configSubNav(active: ConfigSection): string {
     ["providers", "/config/providers", "Provider keys"],
     ["prompts", "/config/prompts", "Specialist prompts"],
     ["audit", "/config/audit", "Audit"],
+    ["deliveries", "/config/deliveries", "Deliveries"],
   ];
   return `<p class="config-nav">${links
     .map(([id, href, label]) =>
@@ -1735,6 +1740,54 @@ export function renderNewProfilePage(data: ConfigPageData): string {
     ${data.error ? `<p class="error" role="alert">${escapeHtml(data.error)}</p>` : ""}
     ${editor}`;
   return layout("New draft", body, {
+    showLogout: data.canWrite || Boolean(data.csrfToken),
+    csrfToken: data.csrfToken,
+    identity: data.identity,
+    surface: "operator",
+  });
+}
+
+function deliveriesTable(deliveries: WebhookDeliveryRow[]): string {
+  const rows = deliveries
+    .map((delivery) => {
+      const ignored = delivery.ignored === 1;
+      const scope = delivery.provider_instance
+        ? `${delivery.provider} · ${delivery.provider_instance}`
+        : delivery.provider;
+      const eventLabel = delivery.action ? `${delivery.event} · ${delivery.action}` : delivery.event;
+      return `<tr${ignored ? ' class="muted"' : ""}>
+        <td>${escapeHtml(delivery.created_at)}</td>
+        <td>${escapeHtml(scope)}</td>
+        <td title="delivery ${escapeHtml(delivery.delivery_id)}">${escapeHtml(eventLabel)}</td>
+        <td>${delivery.repo_full_name ? escapeHtml(delivery.repo_full_name) : "—"}</td>
+        <td>${delivery.actor ? escapeHtml(delivery.actor) : "—"}</td>
+        <td>${escapeHtml(delivery.result)}</td>
+      </tr>`;
+    })
+    .join("");
+  return `<table class="config-audit">
+    <thead><tr><th>When</th><th>Forge</th><th>Event</th><th>Repo</th><th>Actor</th><th>Result</th></tr></thead>
+    <tbody>${rows || `<tr><td colspan="6">No deliveries recorded yet</td></tr>`}</tbody>
+  </table>`;
+}
+
+/** /config/deliveries: the webhook delivery log — what maomao saw, what it
+ * did with it, and what it ignored (with the reason). */
+export function renderConfigDeliveriesPage(data: ConfigPageData): string {
+  const deliveries = data.deliveries ?? [];
+  const older =
+    data.deliveriesBefore != null
+      ? `<nav class="jobs-pagination" aria-label="Webhook delivery pages"><a rel="next" href="/config/deliveries?before=${encodeURIComponent(data.deliveriesBefore)}">Older deliveries</a></nav>`
+      : "";
+  const body = `
+    <h1>Webhook deliveries</h1>
+    <p class="lede">Every verified webhook delivery maomao answered — most recent first. <span class="muted">Dimmed rows were ignored</span>; the result column carries the reason (stack chatter, unsupported events, non-command comments) alongside handled outcomes.</p>
+    ${configSubNav("deliveries")}
+    ${data.notice ? `<p class="notice" role="status">${escapeHtml(data.notice)}</p>` : ""}
+    ${data.error ? `<p class="error" role="alert">${escapeHtml(data.error)}</p>` : ""}
+    ${deliveriesTable(deliveries)}
+    ${older}`;
+  return layout("Webhook deliveries", body, {
     showLogout: data.canWrite || Boolean(data.csrfToken),
     csrfToken: data.csrfToken,
     identity: data.identity,

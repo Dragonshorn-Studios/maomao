@@ -2,8 +2,8 @@ import { randomUUID } from "node:crypto";
 import type { SqliteDb } from "../db.js";
 import type { CancelReason, JobState, ReviewerState } from "../config.js";
 import { JOBS_PAGE_SIZE_DEFAULT, JOBS_PAGE_SIZE_MAX, LIVE_JOB_STATES } from "../config.js";
-import type { ForgeScope } from "../forge/types.js";
-import { normalizeScope } from "../forge/types.js";
+import type { ForgeScope, WebhookDeliveryContext } from "../forge/types.js";
+import { IGNORED_RESULT_PREFIX, normalizeScope } from "../forge/types.js";
 import type { FindingRow, FindingStatus } from "../findings/types.js";
 import { nowIso } from "../util.js";
 import { publish } from "../events.js";
@@ -241,6 +241,21 @@ export interface EnqueueResult {
   created: boolean;
   skippedReason?: string;
   staleJobIds: number[];
+}
+
+export interface WebhookDeliveryRow {
+  provider: string;
+  provider_instance: string;
+  delivery_id: string;
+  event: string;
+  action: string | null;
+  repo_full_name: string | null;
+  actor: string | null;
+  result: string;
+  /** 1 when the result carries IGNORED_RESULT_PREFIX — observational rows
+   * that never claim the dedup slot. Read the column, never the prefix. */
+  ignored: number;
+  created_at: string;
 }
 
 export interface EscalationDispatchRow {
@@ -1495,23 +1510,101 @@ export class JobStore {
     return { finding, changed: true };
   }
 
-  claimWebhookDelivery(deliveryId: string, event: string, result: string, scope?: Partial<ForgeScope>): boolean {
+  claimWebhookDelivery(
+    deliveryId: string,
+    event: string,
+    result: string,
+    scope?: Partial<ForgeScope>,
+    context?: WebhookDeliveryContext,
+  ): boolean {
     if (!deliveryId) return true;
     const resolved = normalizeScope(scope);
+    // The ignored flag is derived here — the single sniff point for the
+    // result-prefix vocabulary — so every consumer gates on the stored column.
+    const ignored = result.startsWith(IGNORED_RESULT_PREFIX) ? 1 : 0;
     const insert = this.db
       .prepare(
-        `INSERT OR IGNORE INTO webhook_deliveries (delivery_id, event, result, created_at, provider, provider_instance) VALUES (?, ?, ?, ?, ?, ?)`,
+        `INSERT OR IGNORE INTO webhook_deliveries (delivery_id, event, result, ignored, created_at, provider, provider_instance, repo_full_name, action, actor) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
-      .run(deliveryId, event, result, nowIso(), resolved.provider, resolved.instance);
+      .run(
+        deliveryId,
+        event,
+        result,
+        ignored,
+        nowIso(),
+        resolved.provider,
+        resolved.instance,
+        context?.repoFullName ?? null,
+        context?.action ?? null,
+        context?.actor ?? null,
+      );
+    if (insert.changes === 0) {
+      // The row exists: a previously ignored delivery that a redelivery now
+      // handled (rate-limit window passed, job landed, …) takes the real
+      // outcome; a redelivery still ignored keeps the first reason. Context
+      // columns only backfill — never overwrite a claim's own result or
+      // context.
+      this.db
+        .prepare(
+          `UPDATE webhook_deliveries SET
+            result = CASE WHEN ignored = 1 AND ? = 0 THEN ? ELSE result END,
+            ignored = CASE WHEN ignored = 1 AND ? = 0 THEN 0 ELSE ignored END,
+            repo_full_name = COALESCE(repo_full_name, ?),
+            action = COALESCE(action, ?),
+            actor = COALESCE(actor, ?)
+          WHERE provider = ? AND provider_instance = ? AND delivery_id = ?`,
+        )
+        .run(
+          ignored,
+          result,
+          ignored,
+          context?.repoFullName ?? null,
+          context?.action ?? null,
+          context?.actor ?? null,
+          resolved.provider,
+          resolved.instance,
+          deliveryId,
+        );
+    }
     return insert.changes > 0;
   }
 
+  /** Newest-first delivery log for the /config/deliveries page. `before` is a
+   * keyset cursor on (created_at, delivery_id) — value columns, not rowid, so
+   * issued links survive a VACUUM (webhook_deliveries has a composite TEXT
+   * primary key, so rowids are not stable across one). created_at is the
+   * insert-time ISO stamp; delivery_id breaks same-millisecond ties. */
+  listWebhookDeliveries(
+    options: { limit?: number; before?: { createdAt: string; deliveryId: string } } = {},
+  ): WebhookDeliveryRow[] {
+    const limit = Math.max(1, Math.min(Math.floor(options.limit ?? 100), 500));
+    const columns =
+      "provider, provider_instance, delivery_id, event, action, repo_full_name, actor, result, ignored, created_at";
+    if (options.before != null) {
+      return this.db
+        .prepare(
+          `SELECT ${columns} FROM webhook_deliveries
+           WHERE created_at < ? OR (created_at = ? AND delivery_id < ?)
+           ORDER BY created_at DESC, delivery_id DESC LIMIT ?`,
+        )
+        .all(options.before.createdAt, options.before.createdAt, options.before.deliveryId, limit) as WebhookDeliveryRow[];
+    }
+    return this.db
+      .prepare(`SELECT ${columns} FROM webhook_deliveries ORDER BY created_at DESC, delivery_id DESC LIMIT ?`)
+      .all(limit) as WebhookDeliveryRow[];
+  }
+
+  /** Delivery dedup gate. Ignored rows are observational only — they do NOT
+   * dedup, so a redelivery of a transiently ignored event (rate limited,
+   * escalated before any job existed) still reprocesses, restoring the
+   * pre-logging retry behavior. Handled results (enqueued, commands, …) gate
+   * redeliveries to `duplicate` as before. */
   hasWebhookDelivery(deliveryId: string, scope?: Partial<ForgeScope>): boolean {
     if (!deliveryId) return false;
     const resolved = normalizeScope(scope);
     const row = this.db
       .prepare(
-        `SELECT delivery_id FROM webhook_deliveries WHERE provider = ? AND provider_instance = ? AND delivery_id = ?`,
+        `SELECT delivery_id FROM webhook_deliveries WHERE provider = ? AND provider_instance = ? AND delivery_id = ? AND ignored = 0`,
       )
       .get(resolved.provider, resolved.instance, deliveryId) as { delivery_id: string } | undefined;
     return Boolean(row);
