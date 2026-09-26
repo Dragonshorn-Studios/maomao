@@ -57,6 +57,9 @@ export interface ResolvedPull {
   headSha: string;
   baseRef: string;
   headRef: string;
+  /** Repo the head branch lives in — differs from repoFullName on fork PRs.
+   *  Undefined only when the API omits it (deleted fork heads). */
+  headRepoFullName?: string;
   draft: boolean;
 }
 
@@ -221,7 +224,7 @@ function toResolvedPull(
     draft?: boolean;
     user?: { login?: string } | null;
     base: { sha?: string; ref?: string; repo?: { id?: number; owner?: { id?: number } | null } | null };
-    head: { sha?: string; ref?: string };
+    head: { sha?: string; ref?: string; repo?: { full_name?: string } | null };
   },
   installationId: number,
   owner: string,
@@ -254,6 +257,7 @@ function toResolvedPull(
     headSha: pr.head.sha,
     baseRef: pr.base.ref ?? "",
     headRef: pr.head.ref ?? "",
+    headRepoFullName: pr.head.repo?.full_name ?? undefined,
     draft: Boolean(pr.draft),
   };
 }

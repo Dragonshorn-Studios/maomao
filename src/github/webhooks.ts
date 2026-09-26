@@ -105,7 +105,7 @@ export interface PullRequestWebhookPayload {
     user?: { login?: string; type?: string };
     author_association?: string;
     base?: { sha?: string; ref?: string };
-    head?: { sha?: string; ref?: string };
+    head?: { sha?: string; ref?: string; repo?: { full_name?: string } | null };
   };
 }
 
@@ -154,6 +154,7 @@ export function parsePullRequestPayload(payload: PullRequestWebhookPayload): {
   headSha: string;
   baseRef: string;
   headRef: string;
+  headRepoFullName?: string;
 } {
   const installationId = numericId(payload.installation?.id);
   const githubAccountId =
@@ -184,6 +185,7 @@ export function parsePullRequestPayload(payload: PullRequestWebhookPayload): {
     headSha: pr.head.sha,
     baseRef: pr.base.ref ?? "",
     headRef: pr.head.ref ?? "",
+    headRepoFullName: pr.head.repo?.full_name ?? undefined,
   };
 }
 
@@ -589,6 +591,84 @@ async function stackReply(ctx: StackCommandContext, text: string): Promise<void>
   }
 }
 
+// Dynamic text interpolated into posted comments — API error strings and
+// anything else attacker-influenced — is rendered as a literal code span so
+// it can never break or fake markdown in the reply.
+function mdInline(text: string): string {
+  return "`" + text.replace(/[\r\n]+/g, " ").replace(/`/g, "'") + "`";
+}
+
+// Stack commands are privileged: allowlisted bot identities, or humans with
+// write-level authorization. Shared by the comment and PR-body entry points
+// so the two paths can never drift apart on who may drive a stack.
+async function authorizeStackActor(
+  input: {
+    config: Config;
+    github?: GithubPort & Partial<ManualTriggerPort>;
+  },
+  actor: {
+    login: string;
+    type?: string;
+    association?: string;
+    installationId: number;
+    repoOwner: string;
+    repoName: string;
+  },
+): Promise<{ ok: true } | { ok: false; reason: string; permission?: string }> {
+  if (isBotActor({ login: actor.login, type: actor.type })) {
+    // Automation identities are admitted only via the explicit allowlist.
+    if (!input.config.stackCommandAuthors.includes(actor.login.toLowerCase())) {
+      return { ok: false, reason: "bot actor is not an allowlisted stack command author" };
+    }
+    return { ok: true };
+  }
+  const permission = await input.github!.getCollaboratorPermission(
+    actor.installationId,
+    actor.repoOwner,
+    actor.repoName,
+    actor.login,
+  );
+  if (!canIssueOverride(permission, actor.association)) {
+    return { ok: false, reason: "actor is not authorized for stack commands", permission };
+  }
+  return { ok: true };
+}
+
+// "issue X of Y in stack <id>" records one member declaration. Shared by the
+// comment and PR-body paths so both enforce the same conflict rules.
+async function runStackDeclare(
+  ctx: StackCommandContext,
+  decl: { stackId: string; position: number; expectedCount: number },
+): Promise<WebhookHandleResult> {
+  const result = ctx.input.store.upsertStackDeclaration({
+    repoFullName: ctx.repoFullName,
+    stackId: decl.stackId,
+    prNumber: ctx.prNumber,
+    position: decl.position,
+    expectedCount: decl.expectedCount,
+    actor: ctx.actorLogin,
+    commentId: ctx.commentId != null ? String(ctx.commentId) : undefined,
+  });
+  if (!result.ok) {
+    await stackReply(ctx, `Could not record stack membership: ${result.error}.`);
+    return ctx.finish("declare-conflict", { ok: true, command: "declare", stackId: decl.stackId, recorded: false, error: result.error });
+  }
+  if (result.created) {
+    const declarations = ctx.input.store.listStackDeclarations(ctx.repoFullName, decl.stackId);
+    await refreshStackComments(
+      ctx,
+      decl.stackId,
+      declarations.map((d) => ({ position: d.position, prNumber: d.pr_number, expectedCount: d.expected_count })),
+    );
+  }
+  return ctx.finish(result.created ? "declare-recorded" : "declare-duplicate", {
+    ok: true,
+    command: "declare",
+    stackId: decl.stackId,
+    recorded: result.created,
+  });
+}
+
 // Every member PR carries one marker comment naming its position in the
 // stack; each accepted declare/trigger rewrites all of them so a partial
 // declaration set still shows the same shared picture. Per-member failures
@@ -804,6 +884,10 @@ async function runStackStart(ctx: StackCommandContext, stackId?: string): Promis
 // is optional when exactly one start marker sits at the chain's base.
 async function runStackEnd(ctx: StackCommandContext, stackId?: string, endPrNumber = ctx.prNumber): Promise<WebhookHandleResult> {
   if (typeof ctx.input.github?.listOpenPulls !== "function") {
+    await stackReply(
+      ctx,
+      'Could not run a stack review: this build cannot list open pull requests — use "top of stack <id>: #a, #b" instead.',
+    );
     return { status: 202, body: { ok: true, ignored: true, reason: "github client cannot list open pull requests" } };
   }
   let openPulls: ResolvedPull[];
@@ -811,7 +895,7 @@ async function runStackEnd(ctx: StackCommandContext, stackId?: string, endPrNumb
     openPulls = await ctx.input.github.listOpenPulls(ctx.installationId, ctx.repoOwner, ctx.repoName);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    await stackReply(ctx, `Could not run stack${stackId ? ` "${stackId}"` : ""}: could not list open pull requests in ${ctx.repoFullName} (${message}).`);
+    await stackReply(ctx, `Could not run stack${stackId ? ` "${stackId}"` : ""}: could not list open pull requests in ${ctx.repoFullName} (${mdInline(message)}).`);
     return ctx.finish("end-error", { ok: true, command: "end", stackId, enqueued: false, error: message });
   }
   // The payload's copy of the triggering PR is authoritative: splice it over
@@ -879,9 +963,9 @@ async function runStackEnd(ctx: StackCommandContext, stackId?: string, endPrNumb
 // A marked member's event after the stack resolved re-runs the cumulative
 // review — the body marker suppresses per-PR review permanently, so a push
 // to a non-top member would otherwise land with no review at all. Resolves
-// the chain again so fresh SHAs are pinned; dedup on `stack:<id>` makes the
-// re-run safe. Returns null when the marker's stack has not resolved (or the
-// PR is not a member), leaving the normal marker handling to proceed.
+// the chain again so fresh SHAs are pinned; the per-vector dedup key makes
+// the re-run safe. Returns null when the marker's stack has not resolved (or
+// the PR is not a member), leaving the normal marker handling to proceed.
 async function resumeResolvedStack(ctx: StackCommandContext, preferredId?: string): Promise<WebhookHandleResult | null> {
   let stackId = preferredId;
   if (!stackId) {
@@ -894,6 +978,10 @@ async function resumeResolvedStack(ctx: StackCommandContext, preferredId?: strin
     if (ids.length !== 1) return null;
     stackId = ids[0]!;
   }
+  // Only a stack that actually resolved before may auto-run on member events
+  // — a start row plus declarations alone (no end/top ever fired) is just a
+  // pending declaration set and must not turn a member push into spend.
+  if (!ctx.input.store.hasStackReview(ctx.repoFullName, stackId)) return null;
   const start = ctx.input.store.getStackStart(ctx.repoFullName, stackId);
   const declarations = ctx.input.store.listStackDeclarations(ctx.repoFullName, stackId);
   const top = declarations[declarations.length - 1];
@@ -930,19 +1018,19 @@ async function handleStackCommand(
     return { status: 202, body: { ok: true, ignored: true, reason: "stack commands require a pull request comment" } };
   }
 
-  if (isBotActor({ login: actor?.login, type: actor?.type })) {
-    // Automation identities are admitted only via the explicit allowlist.
-    if (!input.config.stackCommandAuthors.includes(actorLogin.toLowerCase())) {
-      return { status: 202, body: { ok: true, ignored: true, reason: "bot actor is not an allowlisted stack command author", actor: actorLogin } };
-    }
-  } else {
-    const permission = await input.github.getCollaboratorPermission(installationId, repoOwner, repoName, actorLogin);
-    if (!canIssueOverride(permission, payload.comment?.author_association)) {
-      return {
-        status: 202,
-        body: { ok: true, ignored: true, reason: "actor is not authorized for stack commands", actor: actorLogin, permission },
-      };
-    }
+  const authorization = await authorizeStackActor(input, {
+    login: actorLogin,
+    type: actor?.type,
+    association: payload.comment?.author_association,
+    installationId,
+    repoOwner,
+    repoName,
+  });
+  if (!authorization.ok) {
+    return {
+      status: 202,
+      body: { ok: true, ignored: true, reason: authorization.reason, actor: actorLogin, permission: authorization.permission },
+    };
   }
 
   const commentId = payload.comment?.id;
@@ -955,6 +1043,10 @@ async function handleStackCommand(
     if (commentId != null) input.store.claimReviewCommand(String(commentId), input.request.deliveryId, "stack-command", result);
     return { status: 200, body };
   };
+  // enforceSpendControls stays unset here on purpose: comment commands are
+  // manual operator acts and are exempt from the automatic-review spend
+  // controls (repo pause/rate limiter), while the body-marker path enforces
+  // them because it is automatic work.
   const ctx: StackCommandContext = {
     input,
     installationId,
@@ -978,33 +1070,7 @@ async function handleStackCommand(
   }
 
   if (command.kind === "declare") {
-    const result = input.store.upsertStackDeclaration({
-      repoFullName,
-      stackId: command.stackId,
-      prNumber,
-      position: command.position,
-      expectedCount: command.expectedCount,
-      actor: actorLogin,
-      commentId: commentId != null ? String(commentId) : undefined,
-    });
-    if (!result.ok) {
-      await stackReply(ctx, `Could not record stack membership: ${result.error}.`);
-      return finish("declare-conflict", { ok: true, command: "declare", stackId: command.stackId, recorded: false, error: result.error });
-    }
-    if (result.created) {
-      const declarations = input.store.listStackDeclarations(repoFullName, command.stackId);
-      await refreshStackComments(
-        ctx,
-        command.stackId,
-        declarations.map((d) => ({ position: d.position, prNumber: d.pr_number, expectedCount: d.expected_count })),
-      );
-    }
-    return finish(result.created ? "declare-recorded" : "declare-duplicate", {
-      ok: true,
-      command: "declare",
-      stackId: command.stackId,
-      recorded: result.created,
-    });
+    return runStackDeclare(ctx, command);
   }
 
   if (command.kind === "start") {
@@ -1043,7 +1109,7 @@ async function handleStackCommand(
       pulls.push(await getPull(installationId, repoOwner, repoName, n));
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      await stackReply(ctx, `Could not run stack "${stackId}": PR #${n} does not resolve in ${repoFullName} (${message}).`);
+      await stackReply(ctx, `Could not run stack "${stackId}": PR #${n} does not resolve in ${repoFullName} (${mdInline(message)}).`);
       return finish("top-unresolved", { ok: true, command: "top", stackId, enqueued: false, error: `PR #${n} unresolved` });
     }
   }
@@ -1080,23 +1146,24 @@ async function handleStackBodyMarker(
   payload: PullRequestWebhookPayload,
   marker: StackBodyMarker,
 ): Promise<WebhookHandleResult | null> {
-  if (!input.github || !parsed.prAuthor) {
+  if (
+    !input.github ||
+    !parsed.prAuthor ||
+    parsed.githubAccountId == null ||
+    parsed.githubRepositoryId == null
+  ) {
     return null;
   }
-  if (isBotActor({ login: parsed.prAuthor, type: parsed.prAuthorType })) {
-    if (!input.config.stackCommandAuthors.includes(parsed.prAuthor.toLowerCase())) {
-      return null;
-    }
-  } else {
-    const permission = await input.github.getCollaboratorPermission(
-      parsed.installationId,
-      parsed.repoOwner,
-      parsed.repoName,
-      parsed.prAuthor,
-    );
-    if (!canIssueOverride(permission, parsed.prAuthorAssociation)) {
-      return null;
-    }
+  const authorization = await authorizeStackActor(input, {
+    login: parsed.prAuthor,
+    type: parsed.prAuthorType,
+    association: parsed.prAuthorAssociation,
+    installationId: parsed.installationId,
+    repoOwner: parsed.repoOwner,
+    repoName: parsed.repoName,
+  });
+  if (!authorization.ok) {
+    return null;
   }
   const finish = (result: string, body: Record<string, unknown>): WebhookHandleResult => {
     input.store.claimWebhookDelivery(input.request.deliveryId, input.request.event, result);
@@ -1116,8 +1183,8 @@ async function handleStackBodyMarker(
     enforceSpendControls: true,
     selfPull: {
       installationId: parsed.installationId,
-      accountId: parsed.githubAccountId ?? 0,
-      repositoryId: parsed.githubRepositoryId ?? 0,
+      accountId: parsed.githubAccountId,
+      repositoryId: parsed.githubRepositoryId,
       repoOwner: parsed.repoOwner,
       repoName: parsed.repoName,
       repoFullName: parsed.repoFullName,
@@ -1130,6 +1197,7 @@ async function handleStackBodyMarker(
       headSha: parsed.headSha,
       baseRef: parsed.baseRef,
       headRef: parsed.headRef,
+      headRepoFullName: parsed.headRepoFullName,
       draft: payload.pull_request?.draft ?? false,
     },
     finish,
@@ -1155,43 +1223,26 @@ async function handleStackBodyMarker(
       stackId: marker.stackId,
     });
   }
+  // A grammar-valid marker whose command FAILED posts its error reply and
+  // falls through to the normal review — a typo'd stack id must never leave
+  // the PR unreviewed. (The delivery is already claimed, so a redelivery
+  // dedupes instead of double-reviewing.)
+  const fallThroughOnError = (result: WebhookHandleResult): WebhookHandleResult | null =>
+    result.body.error == null ? result : null;
   if (marker.kind === "declare") {
-    const result = input.store.upsertStackDeclaration({
-      repoFullName: parsed.repoFullName,
-      stackId: marker.stackId,
-      prNumber: parsed.prNumber,
-      position: marker.position,
-      expectedCount: marker.expectedCount,
-      actor: parsed.prAuthor,
-    });
-    if (!result.ok) {
-      await stackReply(ctx, `Could not record stack membership: ${result.error}.`);
-      return finish("declare-conflict", { ok: true, command: "declare", stackId: marker.stackId, recorded: false, error: result.error });
-    }
-    if (result.created) {
-      const declarations = input.store.listStackDeclarations(parsed.repoFullName, marker.stackId);
-      await refreshStackComments(
-        ctx,
-        marker.stackId,
-        declarations.map((d) => ({ position: d.position, prNumber: d.pr_number, expectedCount: d.expected_count })),
-      );
-    }
-    return finish(result.created ? "declare-recorded" : "declare-duplicate", {
-      ok: true,
-      command: "declare",
-      stackId: marker.stackId,
-      recorded: result.created,
-    });
+    return fallThroughOnError(
+      await runStackDeclare(ctx, { stackId: marker.stackId, position: marker.position, expectedCount: marker.expectedCount }),
+    );
   }
   if (marker.kind === "start") {
-    return runStackStart(ctx, marker.stackId);
+    return fallThroughOnError(await runStackStart(ctx, marker.stackId));
   }
   // An "end" the port cannot resolve must not swallow the PR's review —
   // fall through and let the normal enqueue handle it.
   if (typeof input.github?.listOpenPulls !== "function") {
     return null;
   }
-  return runStackEnd(ctx, marker.stackId);
+  return fallThroughOnError(await runStackEnd(ctx, marker.stackId));
 }
 
 async function handleReviewCommentWebhook(input: {

@@ -26,6 +26,53 @@ function seedJob(store: JobStore, prNumber = 4, headSha = "cafebabe") {
   }).job.id;
 }
 
+function seedStackJob(store: JobStore, stackId: string, vector = "deadbeef0001", headSha = "cafebabe") {
+  return store.enqueue({
+    repoFullName: "acme/widgets",
+    repoOwner: "acme",
+    repoName: "widgets",
+    installationId: 9,
+    prNumber: 43,
+    prTitle: "t",
+    prBody: "",
+    prHtmlUrl: "",
+    prAuthor: "dev",
+    baseSha: "base",
+    headSha,
+    baseRef: "main",
+    headRef: "feat",
+    reviewers: [{ role: "stack_cumulative", title: "Stack cumulative" }],
+    jobType: "stack_review",
+    dedupKey: `stack:${stackId}@${vector}`,
+  }).job.id;
+}
+
+describe("stack job helpers", () => {
+  it("staleQueuedStackJobs stales queued same-stack rows only, and hasStackReview tracks resolution", () => {
+    const store = makeStore();
+    const queued = seedStackJob(store, "u1", "aaa111bbb222");
+    const rerun = seedStackJob(store, "u1", "ccc333ddd444", "other1");
+    const otherStack = seedStackJob(store, "u2", "aaa111bbb222", "other2");
+    const lookalike = seedStackJob(store, "aXb", "aaa111bbb222", "other3");
+    // A non-queued same-stack row is left alone.
+    store.setJobState(rerun, "reviewing");
+
+    expect(store.hasStackReview("acme/widgets", "u1")).toBe(true);
+    expect(store.hasStackReview("acme/widgets", "never-ran")).toBe(false);
+
+    const staled = store.staleQueuedStackJobs("acme/widgets", "u1", "stack:u1@ccc333ddd444");
+    expect(staled).toEqual([queued]);
+    expect(store.getJob(queued)?.state).toBe("stale");
+    expect(store.getJob(queued)?.finished_at).toBeTruthy();
+    expect(store.getJob(rerun)?.state).toBe("reviewing");
+    expect(store.getJob(otherStack)?.state).toBe("queued");
+
+    // LIKE metacharacters in the id must not over-match: 'a_b' != 'aXb'.
+    expect(store.staleQueuedStackJobs("acme/widgets", "a_b", "stack:a_b@zzz")).toEqual([]);
+    expect(store.getJob(lookalike)?.state).toBe("queued");
+  });
+});
+
 describe("JobQueue cancellation", () => {
   it("never runs a cancelled job that was still pending", async () => {
     const store = makeStore();

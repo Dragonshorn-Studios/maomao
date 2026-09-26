@@ -18,6 +18,12 @@
 import type { ResolvedPull } from "../github/client.js";
 import type { StackDeclarationRow } from "../jobs/store.js";
 
+// Branch names are attacker-chosen and git refnames permit backticks — render
+// them as literal code so they can never break (or fake) comment markdown.
+function mdRef(ref: string): string {
+  return "`" + ref.replace(/[\r\n]/g, " ").replace(/`/g, "'") + "`";
+}
+
 export type StackCommand =
   | { kind: "declare"; stackId: string; position: number; expectedCount: number }
   | { kind: "top"; stackId?: string; prNumbers: number[] }
@@ -62,6 +68,10 @@ export type StackBodyMarker =
   | { kind: "invalid" };
 
 export function extractStackBodyMarker(body: string): StackBodyMarker | null {
+  // Scan every marked line: the first VALID marker wins. A malformed marked
+  // line only earns a usage reply when no valid marker follows it, so prose
+  // like "<!-- end of stack: see docs -->" can never mask a real marker below.
+  let sawInvalid = false;
   for (const rawLine of body.split("\n")) {
     let line = rawLine.trim();
     if (!line) continue;
@@ -77,7 +87,8 @@ export function extractStackBodyMarker(body: string): StackBodyMarker | null {
       const position = Number(declare[1]);
       const expectedCount = Number(declare[2]);
       if (position < 1 || expectedCount < 1 || position > expectedCount || expectedCount > 100) {
-        return { kind: "invalid" };
+        sawInvalid = true;
+        continue;
       }
       return { kind: "declare", stackId: declare[3]!, position, expectedCount };
     }
@@ -87,9 +98,9 @@ export function extractStackBodyMarker(body: string): StackBodyMarker | null {
     if (end) return { kind: "end", stackId: end[1] };
     const part = PART_RE.exec(line);
     if (part) return { kind: "part", stackId: part[1] };
-    if (STACK_INTENT_RE.test(line)) return { kind: "invalid" };
+    if (STACK_INTENT_RE.test(line)) sawInvalid = true;
   }
-  return null;
+  return sawInvalid ? { kind: "invalid" } : null;
 }
 
 /** Strip "@name" mention tokens (same charset GitHub allows in logins plus [bot]). */
@@ -169,20 +180,28 @@ export function resolveStackChain(input: {
   if (above.length > 0) {
     return {
       ok: false,
-      error: `#${end.prNumber} is not the top of its stack — ${above.map((p) => `#${p.prNumber}`).join(", ")} ${above.length > 1 ? "are" : "is"} based on its head branch "${end.headRef}"`,
+      error: `#${end.prNumber} is not the top of its stack — ${above.map((p) => `#${p.prNumber}`).join(", ")} ${above.length > 1 ? "are" : "is"} based on its head branch ${mdRef(end.headRef)}`,
     };
   }
+  // A stack is a chain of branches inside ONE repository: a fork PR shares
+  // the base repo but its head branch lives in the fork, so it can never be a
+  // chain predecessor — and must not poison head-side matching. (PRs whose
+  // head repo is unknown are treated as same-repo; the API only omits it for
+  // deleted forks.)
+  const sameRepoHead = (p: ResolvedPull) =>
+    (p.headRepoFullName ?? p.repoFullName).toLowerCase() === end.repoFullName.toLowerCase();
   if (start) {
-    const below = pulls.filter((p) => p.prNumber !== start.prNumber && p.headRef === start.baseRef);
+    const below = pulls.filter((p) => p.prNumber !== start.prNumber && sameRepoHead(p) && p.headRef === start.baseRef);
     if (below.length > 0) {
       return {
         ok: false,
-        error: `declared start #${start.prNumber} is not the bottom of its stack — its base branch "${start.baseRef}" is the head of ${below.map((p) => `#${p.prNumber}`).join(", ")}`,
+        error: `declared start #${start.prNumber} is not the bottom of its stack — its base branch ${mdRef(start.baseRef)} is the head of ${below.map((p) => `#${p.prNumber}`).join(", ")}`,
       };
     }
   }
   const byHead = new Map<string, ResolvedPull[]>();
   for (const pull of pulls) {
+    if (!sameRepoHead(pull)) continue;
     const list = byHead.get(pull.headRef) ?? [];
     list.push(pull);
     byHead.set(pull.headRef, list);
@@ -196,13 +215,13 @@ export function resolveStackChain(input: {
       if (!start) break;
       return {
         ok: false,
-        error: `no open pull request has head branch "${baseRef}" — the chain below #${chain[0]!.prNumber} is broken before reaching the declared start #${start.prNumber}`,
+        error: `no open pull request has head branch ${mdRef(baseRef)} — the chain below #${chain[0]!.prNumber} is broken before reaching the declared start #${start.prNumber}`,
       };
     }
     if (predecessors.length > 1) {
       return {
         ok: false,
-        error: `branch "${baseRef}" is the head of ${predecessors.length} open pull requests (${predecessors.map((p) => `#${p.prNumber}`).join(", ")}) — the stack is ambiguous`,
+        error: `branch ${mdRef(baseRef)} is the head of ${predecessors.length} open pull requests (${predecessors.map((p) => `#${p.prNumber}`).join(", ")}) — the stack is ambiguous`,
       };
     }
     const predecessor = predecessors[0]!;
@@ -295,7 +314,7 @@ export function validateStackMembers(input: {
       if (pull.baseRef !== previous.headRef) {
         return {
           ok: false,
-          error: `dependency order broken: PR #${prNumber} targets "${pull.baseRef}", but PR #${previous.prNumber}'s head is "${previous.headRef}"`,
+          error: `dependency order broken: PR #${prNumber} targets ${mdRef(pull.baseRef)}, but PR #${previous.prNumber}'s head is ${mdRef(previous.headRef)}`,
         };
       }
     }

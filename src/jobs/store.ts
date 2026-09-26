@@ -802,11 +802,26 @@ export class JobStore {
       .prepare(
         `UPDATE jobs SET state = 'stale', updated_at = ?, finished_at = COALESCE(finished_at, ?)
          WHERE provider = ? AND provider_instance = ? AND repo_full_name = ? AND job_type = 'stack_review'
-           AND state = 'queued' AND dedup_key LIKE ? AND dedup_key != ?
+           AND state = 'queued' AND dedup_key LIKE ? ESCAPE '\\' AND dedup_key != ?
          RETURNING id`,
       )
-      .all(now, now, scope.provider, scope.instance, repoFullName, `stack:${stackId}@%`, exceptDedupKey) as { id: number }[];
+      .all(now, now, scope.provider, scope.instance, repoFullName, `stack:${escapeLike(stackId)}@%`, exceptDedupKey) as { id: number }[];
     return rows.map((r) => r.id);
+  }
+
+  /** A stack counts as resolved once any stack_review job exists for it —
+   *  the signal resumeResolvedStack uses so undeclared stacks can't auto-run.
+   *  Matches both `stack:<id>` (pre-vector keys) and `stack:<id>@<vec>`. */
+  hasStackReview(repoFullName: string, stackId: string, provider?: string, providerInstance?: string): boolean {
+    const scope = normalizeScope({ provider, instance: providerInstance });
+    return !!this.db
+      .prepare(
+        `SELECT 1 FROM jobs
+         WHERE provider = ? AND provider_instance = ? AND repo_full_name = ? AND job_type = 'stack_review'
+           AND (dedup_key = ? OR dedup_key LIKE ? ESCAPE '\\')
+         LIMIT 1`,
+      )
+      .get(scope.provider, scope.instance, repoFullName, `stack:${stackId}`, `stack:${escapeLike(stackId)}@%`);
   }
 
   /** Ordered SHA vector snapshot for a stack_review job (issue #99). */
@@ -1696,6 +1711,11 @@ export class JobStore {
       .get(resolved.provider, resolved.instance, commentId) as { comment_id: string } | undefined;
     return Boolean(row);
   }
+}
+
+// LIKE escaping for user-supplied stack ids ('_' and '%' are wildcards).
+function escapeLike(value: string): string {
+  return value.replace(/[\\%_]/g, (c) => `\\${c}`);
 }
 
 function skipReason(existing: JobRow): string | undefined {

@@ -1244,6 +1244,7 @@ function resolvedStackPull(prNumber: number, overrides: Record<string, unknown> 
     headSha: `head${prNumber}`,
     baseRef: "main",
     headRef: `feat-${prNumber}`,
+    headRepoFullName: "acme/widgets",
     draft: false,
     ...overrides,
   };
@@ -1940,7 +1941,8 @@ describe("stack commands (issue #99)", () => {
       github: pausedGithub,
       request: { event: "pull_request", deliveryId: "m10", signature: sign(secret, pausedBody), rawBody: pausedBody },
     });
-    expect(pausedResult.body.enqueued).toBe(false);
+    // The pause still blocks both the stack trigger and the fall-through review.
+    expect(pausedResult.body.created).not.toBe(true);
     expect(pausedComments[0]?.body).toMatch(/paused until/);
     expect(pausedStore.listJobs(10)).toHaveLength(0);
 
@@ -1971,7 +1973,9 @@ describe("stack commands (issue #99)", () => {
       rateLimiter: limiter,
       request: { event: "pull_request", deliveryId: "m12", signature: sign(secret, limitedBody), rawBody: limitedBody },
     });
-    expect(limitedResult.body.enqueued).toBe(false);
+    // Rate limit still blocks: stack trigger errors and the fall-through
+    // review hits the same limiter in the normal path.
+    expect(limitedResult.body.created).not.toBe(true);
     expect(limitedComments[0]?.body).toMatch(/rate limited/);
     expect(limitedStore.listJobs(10).filter((j) => j.job_type === "stack_review")).toHaveLength(0);
   });
@@ -2000,7 +2004,7 @@ describe("stack commands (issue #99)", () => {
     expect(store.listJobs(10)).toHaveLength(0);
   });
 
-  it("replies and still suppresses on a conflicting body declaration", async () => {
+  it("replies and falls back to the normal review on a conflicting body declaration", async () => {
     const secret = "s3cret";
     const config = stackConfig(secret);
     const store = new JobStore(openDb(":memory:"));
@@ -2017,10 +2021,11 @@ describe("stack commands (issue #99)", () => {
       github,
       request: { event: "pull_request", deliveryId: "m21", signature: sign(secret, rawBody), rawBody },
     });
-    expect(result.body.command).toBe("declare");
-    expect(result.body.recorded).toBe(false);
+    // The marker failed — the author gets the conflict reply and the PR gets
+    // its normal review rather than being suppressed forever.
+    expect(result.body.created).toBe(true);
     expect(comments.some((c) => c.pullNumber === 41 && c.body.includes("Could not record stack membership"))).toBe(true);
-    expect(store.listJobs(10)).toHaveLength(0);
+    expect(store.listJobs(10)).toHaveLength(1);
   });
 
   it("honors the bot-author allowlist on PR body markers", async () => {
@@ -2078,7 +2083,8 @@ describe("stack commands (issue #99)", () => {
       github,
       request: { event: "pull_request", deliveryId: "m24", signature: sign(secret, endBody), rawBody: endBody },
     });
-    expect(store.listJobs(10).filter((j) => j.job_type === "stack_review")).toHaveLength(1);
+    const firstJob = store.listJobs(10).find((j) => j.job_type === "stack_review");
+    expect(firstJob).toBeDefined();
 
     // A synchronize on the marked base PR re-resolves the chain and enqueues
     // a fresh cumulative review instead of being silently suppressed.
@@ -2094,6 +2100,10 @@ describe("stack commands (issue #99)", () => {
     });
     expect(resumed.body.enqueued).toBe(true);
     expect(store.listJobs(10).filter((j) => j.job_type === "stack_review")).toHaveLength(2);
+    // The moved member head supersedes the first queued run — two queued
+    // cumulative reviews for one stack would be double spend.
+    expect(store.getJob(firstJob!.id)?.state).toBe("stale");
+    expect(store.getJob(firstJob!.id)?.finished_at).toBeTruthy();
     // The base PR's marker keeps the resolved member list — the pending
     // placeholder is never reposted.
     const baseComments = comments.filter((c) => c.pullNumber === 41 && c.body.includes("maomao-stack:u1"));
@@ -2145,10 +2155,12 @@ describe("stack commands (issue #99)", () => {
       rateLimiter: new RepoRateLimiter(),
       request: { event: "pull_request", deliveryId: "m27", signature: sign(secret, rawBody), rawBody },
     });
-    expect(result.body.enqueued).toBe(false);
-    expect(result.body.error).toBe("missing repository id");
-    expect(comments.some((c) => c.body.includes("repository id"))).toBe(true);
-    expect(store.listJobs(10).filter((j) => j.job_type === "stack_review")).toHaveLength(0);
+    // Without a repository id the marker cannot even be verified — the
+    // delivery degrades to the normal path's own missing-id handling (no
+    // job, no reply), never to an unguarded stack run.
+    expect(result.body.ignored).toBe(true);
+    expect(result.body.reason).toBe("missing repository id");
+    expect(store.listJobs(10)).toHaveLength(0);
   });
 
   it("does not re-post the usage reply on a redelivered marker event", async () => {
@@ -2298,5 +2310,125 @@ describe("stack commands (issue #99)", () => {
     expect(result.body.enqueued).toBe(false);
     expect(comments[0]?.body).toMatch(/paused globally/);
     expect(store.listJobs(10)).toHaveLength(0);
+  });
+
+  it("ignores fork PRs when walking the branch chain", async () => {
+    const secret = "s3cret";
+    const config = stackConfig(secret);
+    const store = new JobStore(openDb(":memory:"));
+    store.upsertStackStart({ repoFullName: "acme/widgets", stackId: "u1", prNumber: 41, actor: "alice" });
+    // A fork PR whose head branch is also "feat-b" must not make the chain
+    // ambiguous, and must never be spliced in as a member.
+    const fork = resolvedStackPull(77, {
+      baseRef: "main",
+      headRef: "feat-b",
+      headSha: "evil77",
+      headRepoFullName: "mallory/widgets",
+    });
+    const { github } = stackGithub({ openPulls: [...chainPulls(), fork] });
+    const body = stackCommentOn(43, "end of stack u1");
+    const result = await handleGithubWebhook({
+      config,
+      store,
+      github,
+      request: { event: "issue_comment", deliveryId: "f1", signature: sign(secret, body), rawBody: body },
+    });
+    expect(result.body.enqueued).toBe(true);
+    const members = store.listStackMembers(store.listJobs(10)[0]!.id);
+    expect(members.map((m) => m.pr_number)).toEqual([41, 42, 43]);
+    expect(members.every((m) => m.head_sha !== "evil77")).toBe(true);
+  });
+
+  it("resolves a valid marker after a malformed marked line in the body", async () => {
+    const secret = "s3cret";
+    const config = stackConfig(secret);
+    const store = new JobStore(openDb(":memory:"));
+    store.upsertStackStart({ repoFullName: "acme/widgets", stackId: "u1", prNumber: 41, actor: "alice" });
+    const { github } = stackGithub({ openPulls: chainPulls() });
+    // The first marked line fails the grammar; the real end marker below
+    // must still win instead of being masked by the usage reply.
+    const rawBody = markedPr("Adds the top.\n\n<!-- end of stack: see docs -->\n<!-- end of stack u1 -->", {
+      number: 43,
+      base: { sha: "h42", ref: "feat-b" },
+      head: { sha: "h43", ref: "feat-c" },
+    });
+    const result = await handleGithubWebhook({
+      config,
+      store,
+      github,
+      request: { event: "pull_request", deliveryId: "f2", signature: sign(secret, rawBody), rawBody },
+    });
+    expect(result.body.enqueued).toBe(true);
+    expect(store.listJobs(10).filter((j) => j.job_type === "stack_review")).toHaveLength(1);
+  });
+
+  it("falls back to the normal review when a grammar-valid 'end of stack' fails", async () => {
+    const secret = "s3cret";
+    const config = stackConfig(secret);
+    const store = new JobStore(openDb(":memory:"));
+    const { github, comments } = stackGithub({ openPulls: chainPulls() });
+    // No start marker for "typo-id" — the failed command must not suppress review.
+    const rawBody = markedPr("<!-- end of stack typo-id -->", {
+      number: 43,
+      base: { sha: "h42", ref: "feat-b" },
+      head: { sha: "h43", ref: "feat-c" },
+    });
+    const result = await handleGithubWebhook({
+      config,
+      store,
+      github,
+      request: { event: "pull_request", deliveryId: "f3", signature: sign(secret, rawBody), rawBody },
+    });
+    expect(result.body.created).toBe(true);
+    expect(store.listJobs(10).filter((j) => j.job_type === "stack_review")).toHaveLength(0);
+    expect(store.listJobs(10)).toHaveLength(1);
+    expect(comments.some((c) => c.pullNumber === 43 && c.body.includes("no \"start of stack typo-id\""))).toBe(true);
+  });
+
+  it("does not resume a stack that only has a start marker and declarations", async () => {
+    const secret = "s3cret";
+    const config = stackConfig(secret);
+    const store = new JobStore(openDb(":memory:"));
+    store.upsertStackStart({ repoFullName: "acme/widgets", stackId: "u1", prNumber: 41, actor: "alice" });
+    store.upsertStackDeclaration({ repoFullName: "acme/widgets", stackId: "u1", prNumber: 41, position: 1, expectedCount: 2, actor: "alice" });
+    store.upsertStackDeclaration({ repoFullName: "acme/widgets", stackId: "u1", prNumber: 42, position: 2, expectedCount: 2, actor: "alice" });
+    const { github } = stackGithub({ openPulls: chainPulls() });
+    // No end/top ever ran — a member push must stay suppressed, not spend.
+    const push = JSON.stringify({
+      ...JSON.parse(markedPr("<!-- part of stack u1 -->", { number: 42, base: { sha: "h41", ref: "feat-a" }, head: { sha: "h42b", ref: "feat-b" } })),
+      action: "synchronize",
+    });
+    const result = await handleGithubWebhook({
+      config,
+      store,
+      github,
+      request: { event: "pull_request", deliveryId: "f4", signature: sign(secret, push), rawBody: push },
+    });
+    expect(result.body.ignored).toBe(true);
+    expect(store.listJobs(10)).toHaveLength(0);
+  });
+
+  it("replies on a comment 'end of stack' when the port cannot list open PRs", async () => {
+    const secret = "s3cret";
+    const config = stackConfig(secret);
+    const store = new JobStore(openDb(":memory:"));
+    store.upsertStackStart({ repoFullName: "acme/widgets", stackId: "u1", prNumber: 41, actor: "alice" });
+    const comments: { pullNumber: number; body: string }[] = [];
+    const github = {
+      ...githubForCommands({ permission: "write" }),
+      createIssueComment: async (input: { pullNumber: number; body: string }) => {
+        comments.push({ pullNumber: input.pullNumber, body: input.body });
+        return { id: "1", url: "u" };
+      },
+    };
+    const body = stackCommentOn(43, "end of stack u1");
+    const result = await handleGithubWebhook({
+      config,
+      store,
+      github: github as unknown as GithubPort,
+      request: { event: "issue_comment", deliveryId: "f5", signature: sign(secret, body), rawBody: body },
+    });
+    expect(result.status).toBe(202);
+    expect(comments.some((c) => c.pullNumber === 43 && c.body.includes("top of stack <id>"))).toBe(true);
   });
 });
