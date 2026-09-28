@@ -426,11 +426,6 @@ button, summary {
   animation: breathe 2.6s ease-in-out infinite;
 }
 
-/* Stack jobs keep the single card border every specimen uses; a faint
-   plum tint is the only card-level tell, with the strip below carrying it. */
-.specimen-stack {
-  background: color-mix(in srgb, var(--plum-soft) 22%, var(--surface));
-}
 /* Kind chips borrow the .state badge shape (flat, small caps) in plum. */
 .kind-chip {
   display: inline-flex;
@@ -681,11 +676,7 @@ h1 a.pr-external { font-size: 0.72em; }
   gap: 0.3rem 0.7rem;
   align-items: center;
   justify-content: space-between;
-  margin-top: 0.6rem;
-  padding: 0.4rem 0.6rem;
-  border: 1px dashed color-mix(in srgb, var(--plum) 45%, var(--line));
-  border-radius: var(--radius);
-  background: color-mix(in srgb, var(--plum-soft) 30%, transparent);
+  margin-top: 0.55rem;
   font-size: 0.85rem;
 }
 .stack-mini {
