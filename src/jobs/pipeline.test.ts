@@ -5838,6 +5838,42 @@ describe("stack reviews (issue #99)", () => {
     const members = store.listStackMembers(stack.job.id);
     expect(members.map((m) => m.state)).toEqual(["done", "done"]);
   });
+
+  it("skips the cumulative pass when member diffs share no changed paths (issue #123)", async () => {
+    const config = stackConfig();
+    const store = new JobStore(openDb(":memory:"));
+    const stack = enqueueStackJob(store);
+    const issueComments: { pullNumber: number; body: string }[] = [];
+    let cumulativeCalls = 0;
+    const github = {
+      ...githubPort(),
+      getPull: async (_i: number, _o: string, _r: string, n: number) => resolvedPull(n, `h${n}`),
+      getPullDiff: async (_i: number, _o: string, _r: string, n: number) =>
+        n === 41 ? "diff --git a/a.ts b/a.ts\n" : "diff --git a/b.ts b/b.ts\n",
+      createCommentReview: async () => ({ id: "9", url: "u" }),
+      createIssueComment: async (input: { pullNumber: number; body: string }) => {
+        issueComments.push({ pullNumber: input.pullNumber, body: input.body });
+        return { id: "1", url: "u" };
+      },
+    } as unknown as GithubPort;
+    const opencode: OpenCodePort = {
+      async run(input) {
+        if (/stack reviewer/i.test(input.prompt)) cumulativeCalls += 1;
+        return stackOpencode.run(input);
+      },
+    };
+    const pipeline = createPipeline({ config, store, github, checkout: await fixtureCheckout(), opencode });
+    await pipeline.run(stack.job.id);
+
+    expect(store.getJob(stack.job.id)?.state).toBe("completed");
+    // Disjoint diffs cannot interact: no cumulative model call, the run row is
+    // closed out, and the posted summary explains the skip.
+    expect(cumulativeCalls).toBe(0);
+    const cumulative = store.listReviewerRuns(stack.job.id).find((r) => r.role === "stack_cumulative");
+    expect(cumulative?.state).toBe("done");
+    expect(issueComments[0]?.body).toContain("Cross-PR pass skipped");
+    expect(issueComments.some((c) => /Cross-PR finding \(/.test(c.body))).toBe(false);
+  });
 });
 
 describe("global pause claim guard", () => {

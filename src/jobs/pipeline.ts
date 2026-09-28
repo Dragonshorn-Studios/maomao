@@ -50,7 +50,7 @@ import type { ReconciliationSnapshot } from "../findings/types.js";
 import { currentFindingsForRisk } from "../findings/types.js";
 import { mapLimit, nowIso, sleep, truncate } from "../util.js";
 import { authorizationLogLine, authorizeGithubTarget, logAuthorizationRejection } from "../github/authorize.js";
-import { scanRoutingSignals, relevantDiffHunks } from "../routing/signals.js";
+import { parseUnifiedDiff, scanRoutingSignals, relevantDiffHunks } from "../routing/signals.js";
 import {
   diagnosisFallback,
   deterministicDecision,
@@ -1068,6 +1068,23 @@ async function stackMemberReviewMode(
   return "verify";
 }
 
+/**
+ * Changed paths shared by two or more members — the only situation where a
+ * cross-PR breakage pass can find anything. Disjoint diffs cannot interact,
+ * so the expensive cumulative run is skipped for them.
+ */
+function stackSharedPaths(members: StackMemberRow[], diffs: Map<number, string>): string[] {
+  const seen = new Map<string, number>();
+  for (const member of members) {
+    for (const file of parseUnifiedDiff(diffs.get(member.pr_number) ?? "")) {
+      const first = seen.get(file.path);
+      if (first === undefined) seen.set(file.path, member.pr_number);
+      else if (first !== member.pr_number) seen.set(file.path, -1);
+    }
+  }
+  return [...seen.entries()].filter(([, pr]) => pr === -1).map(([path]) => path).sort();
+}
+
 async function runStackJob(deps: PipelineDeps, forge: ForgeRegistry, jobId: number, signal: AbortSignal): Promise<void> {
   const { store, config } = deps;
   const job = store.getJob(jobId);
@@ -1265,34 +1282,58 @@ async function runStackJob(deps: PipelineDeps, forge: ForgeRegistry, jobId: numb
     }
 
     // Phase 4 — cumulative pass over the stack tip plus every member diff.
+    // Only worth the cost when members actually touch shared paths: disjoint
+    // diffs cannot interact, so the pass is skipped and the summary says why.
     const cumulativeRun = store.listReviewerRuns(jobId).find((entry) => entry.role === "stack_cumulative");
-    const clone = await provider.cloneSpec(memberTarget(members[members.length - 1]!.pr_number), {
-      anonymous: job.installation_id === 0,
-    });
     const top = members[members.length - 1]!;
-    const workspace = await deps.checkout.prepare({
-      jobId,
-      cloneUrl: clone.cloneUrl,
-      gitAuthArgs: clone.gitAuthArgs,
-      remoteRef: clone.remoteRef,
-      secrets: [...clone.secrets, ...globalSecrets(config)],
-      baseSha: top.head_sha,
-      headSha: top.head_sha,
-      signal,
-      fetchDiff: async () => diffs.get(top.pr_number) ?? "",
-      metadata: {
-        repo: job.repo_full_name,
-        pr: top.pr_number,
-        title: job.pr_title,
+    const sharedPaths = stackSharedPaths(members, diffs);
+    let cumulative: ReviewerResult | undefined;
+    let cumulativeNote = "";
+    if (sharedPaths.length === 0) {
+      cumulative = { schema_version: 1, verdict: "clean", summary: "", findings: [] };
+      cumulativeNote = "Cross-PR pass skipped — member diffs share no changed paths.";
+      if (cumulativeRun) {
+        store.patchReviewer(cumulativeRun.id, {
+          state: "done",
+          normalized_json: JSON.stringify({ ...cumulative, summary: cumulativeNote }, null, 2),
+          finished_at: nowIso(),
+          duration_ms: 0,
+          validation_error: null,
+        });
+      }
+      store.log(jobId, "Stack cumulative pass skipped: member diffs share no changed paths");
+    } else {
+      store.log(
+        jobId,
+        `Stack cumulative pass covering ${sharedPaths.length} shared path(s): ${sharedPaths.slice(0, 5).join(", ")}${sharedPaths.length > 5 ? "…" : ""}`,
+      );
+      const clone = await provider.cloneSpec(memberTarget(top.pr_number), {
+        anonymous: job.installation_id === 0,
+      });
+      const workspace = await deps.checkout.prepare({
+        jobId,
+        cloneUrl: clone.cloneUrl,
+        gitAuthArgs: clone.gitAuthArgs,
+        remoteRef: clone.remoteRef,
+        secrets: [...clone.secrets, ...globalSecrets(config)],
         baseSha: top.head_sha,
         headSha: top.head_sha,
-      },
-    });
-    store.patchJob(jobId, { workspace_path: workspace.dir });
-    throwIfStale(store, jobId, signal);
-    const cumulative = await runStackCumulativeRun(deps, job, cumulativeRun, workspace.repoDir, stackId, members, diffs, meta, signal);
-    if (!cumulative) {
-      throw new Error("stack cumulative pass failed");
+        signal,
+        fetchDiff: async () => diffs.get(top.pr_number) ?? "",
+        metadata: {
+          repo: job.repo_full_name,
+          pr: top.pr_number,
+          title: job.pr_title,
+          baseSha: top.head_sha,
+          headSha: top.head_sha,
+        },
+      });
+      store.patchJob(jobId, { workspace_path: workspace.dir });
+      throwIfStale(store, jobId, signal);
+      cumulative = await runStackCumulativeRun(deps, job, cumulativeRun, workspace.repoDir, stackId, members, diffs, meta, signal);
+      if (!cumulative) {
+        throw new Error("stack cumulative pass failed");
+      }
     }
 
     // Phase 5 — publish the stack summary and each cross-PR finding as issue
@@ -1312,7 +1353,7 @@ async function runStackJob(deps: PipelineDeps, forge: ForgeRegistry, jobId: numb
           .join(", ") || "none"
       }.\n\n` +
       (memberEscalations.length ? `**Needs human review** — ${memberEscalations.join("; ")}.\n\n` : "") +
-      (cumulative.summary ? `${cumulative.summary}\n\n` : "") +
+      (cumulativeNote ? `${cumulativeNote}\n\n` : cumulative.summary ? `${cumulative.summary}\n\n` : "") +
       `Cross-PR findings: ${cumulative.findings.length}.`;
     await postStackComment(deps, job, top.pr_number, summaryBody);
     for (const finding of cumulative.findings) {
