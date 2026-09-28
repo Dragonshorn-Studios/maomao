@@ -5451,6 +5451,53 @@ describe("stack reviews (issue #99)", () => {
     return stack;
   }
 
+  function enqueueStackJobN(store: JobStore, count: number) {
+    const stack = store.enqueue({
+      repoFullName: "acme/widgets",
+      repoOwner: "acme",
+      repoName: "widgets",
+      installationId: 9,
+      prNumber: 40 + count,
+      prTitle: "top of stack",
+      prBody: "",
+      prHtmlUrl: "",
+      prAuthor: "alice",
+      baseSha: "b41",
+      headSha: `h${40 + count}`,
+      baseRef: "main",
+      headRef: `feat-${40 + count}`,
+      reviewers: [{ role: "stack_cumulative", title: "Stack cumulative" }],
+      jobType: "stack_review",
+      dedupKey: "stack:s1",
+    });
+    store.insertStackMembers(
+      stack.job.id,
+      Array.from({ length: count }, (_, i) => {
+        const pr = 41 + i;
+        return {
+          position: i + 1,
+          prNumber: pr,
+          baseRef: i === 0 ? "main" : `feat-${pr - 1}`,
+          headRef: `feat-${pr}`,
+          baseSha: `b${pr}`,
+          headSha: `h${pr}`,
+        };
+      }),
+    );
+    return stack;
+  }
+
+  function anyPull(prNumber: number, headSha: string) {
+    return {
+      ...resolvedPull(prNumber in { 41: 1, 42: 1 } ? prNumber : 42, headSha),
+      prNumber,
+      prTitle: `PR ${prNumber}`,
+      prHtmlUrl: `https://example.test/pull/${prNumber}`,
+      baseRef: prNumber === 41 ? "main" : `feat-${prNumber - 1}`,
+      headRef: `feat-${prNumber}`,
+    };
+  }
+
   function resolvedPull(prNumber: number, headSha: string) {
     const bases: Record<number, [string, string]> = { 41: ["main", "feat-a"], 42: ["feat-a", "feat-b"] };
     const [baseRef, headRef] = bases[prNumber]!;
@@ -5873,6 +5920,80 @@ describe("stack reviews (issue #99)", () => {
     expect(cumulative?.state).toBe("done");
     expect(issueComments[0]?.body).toContain("Cross-PR pass skipped");
     expect(issueComments.some((c) => /Cross-PR finding \(/.test(c.body))).toBe(false);
+  });
+
+  it("downgrades middle members past STACK_MAX_MEMBERS to verify or skipped-budget (issue #123)", async () => {
+    const config = stackConfig();
+    const store = new JobStore(openDb(":memory:"));
+    // #43 has a prior pass at an old head → verify-only; the other middle
+    // members have nothing to verify → skipped-budget.
+    const prior = completedReview(store, 43, "h43-old");
+    const stack = enqueueStackJobN(store, 11);
+    const issueComments: { pullNumber: number; body: string }[] = [];
+    const github = {
+      ...githubPort(),
+      getPull: async (_i: number, _o: string, _r: string, n: number) => anyPull(n, `h${n}`),
+      createCommentReview: async () => ({ id: "9", url: "u" }),
+      createIssueComment: async (input: { pullNumber: number; body: string }) => {
+        issueComments.push({ pullNumber: input.pullNumber, body: input.body });
+        return { id: "1", url: "u" };
+      },
+    } as unknown as GithubPort;
+    const pipeline = createPipeline({ config, store, github, checkout: await fixtureCheckout(), opencode: stackOpencode });
+    await pipeline.run(stack.job.id);
+
+    expect(store.getJob(stack.job.id)?.state).toBe("completed");
+    const members = store.listStackMembers(stack.job.id);
+    // Bottom (#41) and tip (#51) keep the normal path; middle members are
+    // downgraded — #43 verifies, the rest skip.
+    expect(members[0]!.state).toBe("done");
+    expect(members[10]!.state).toBe("done");
+    expect(members.filter((m) => m.state === "skipped").map((m) => m.pr_number).sort((a, b) => a - b)).toEqual([
+      42, 44, 45, 46, 47, 48, 49, 50,
+    ]);
+    const prJobs = store.listJobs(50).filter((j) => j.job_type === "pr_review" && j.id !== prior.id);
+    expect(prJobs.map((j) => j.pr_number).sort((a, b) => a - b)).toEqual([41, 43, 51]);
+    expect(prJobs.find((j) => j.pr_number === 43)?.review_mode).toBe("verify");
+    expect(prJobs.find((j) => j.pr_number === 41)?.review_mode).toBe("full");
+    expect(prJobs.find((j) => j.pr_number === 51)?.review_mode).toBe("full");
+    expect(issueComments[0]?.body).toContain("Stack budget");
+    expect(issueComments[0]?.body).toContain("11 members (max 10)");
+    expect(issueComments[0]?.body).toContain("Skipped-budget");
+  });
+
+  it("skips the cumulative pass once member spend exceeds the stack token cap (issue #123)", async () => {
+    const config = stackConfig();
+    const store = new JobStore(openDb(":memory:"));
+    const stack = enqueueStackJob(store);
+    const issueComments: { pullNumber: number; body: string }[] = [];
+    let cumulativeCalls = 0;
+    const fatOpencode: OpenCodePort = {
+      async run(input) {
+        if (/stack reviewer/i.test(input.prompt)) cumulativeCalls += 1;
+        const result = await stackOpencode.run(input);
+        return { ...result, usage: { promptTokens: 500_000, completionTokens: 1 } };
+      },
+    };
+    const github = {
+      ...githubPort(),
+      getPull: async (_i: number, _o: string, _r: string, n: number) => resolvedPull(n, `h${n}`),
+      createCommentReview: async () => ({ id: "9", url: "u" }),
+      createIssueComment: async (input: { pullNumber: number; body: string }) => {
+        issueComments.push({ pullNumber: input.pullNumber, body: input.body });
+        return { id: "1", url: "u" };
+      },
+    } as unknown as GithubPort;
+    const pipeline = createPipeline({ config, store, github, checkout: await fixtureCheckout(), opencode: fatOpencode });
+    await pipeline.run(stack.job.id);
+
+    expect(store.getJob(stack.job.id)?.state).toBe("completed");
+    // Bottom + tip still ran their normal reviews; the cross-PR pass was the
+    // spend that got cut once recorded member usage crossed the cap.
+    expect(cumulativeCalls).toBe(0);
+    const cumulative = store.listReviewerRuns(stack.job.id).find((r) => r.role === "stack_cumulative");
+    expect(cumulative?.state).toBe("done");
+    expect(issueComments[0]?.body).toContain("Stack budget");
+    expect(issueComments[0]?.body).toContain("Cross-PR pass skipped — stack token cap");
   });
 });
 

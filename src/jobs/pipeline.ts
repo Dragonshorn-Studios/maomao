@@ -1025,6 +1025,22 @@ async function runBriefJob(deps: PipelineDeps, forge: ForgeRegistry, jobId: numb
 // summary while the rest of the stack proceeds.
 const STACK_MEMBER_MAX_RETRIES = 2;
 
+/**
+ * Stack envelope (issue #123): a stack bigger than this only gets the normal
+ * mode at the bottom and the tip — middle members are downgraded to
+ * verify-only when they have a prior pass to check, or skipped outright
+ * (skipped-budget) when they do not.
+ */
+const STACK_MAX_MEMBERS = 10;
+
+/**
+ * Whole-run token ceiling summed across member jobs (routing + specialist
+ * runs + aggregation + escalations). Once recorded spend passes it, the same
+ * middle-member downgrade applies and the cumulative pass is skipped; the
+ * bottom and tip members always keep their normal mode.
+ */
+const STACK_TOKEN_CAP = 400_000;
+
 /** Members the run never reached must not render QUEUED forever on the member rail. */
 function skipUnreachedStackMembers(store: JobStore, jobId: number): void {
   for (const member of store.listStackMembers(jobId)) {
@@ -1037,6 +1053,10 @@ function skipUnreachedStackMembers(store: JobStore, jobId: number): void {
  * earlier head, a moved head only re-checks its open findings. Hard-risk
  * diffs (auth/secrets/billing/migrations/deploy) always get the full
  * specialist pipeline; a first pass has nothing to verify and runs full.
+ *
+ * A `budgeted` middle member (over the member cap or the token ceiling)
+ * never gets specialists at all: verify when there is a prior pass to
+ * re-check, otherwise skip — a first pass has nothing a verify can check.
  */
 async function stackMemberReviewMode(
   deps: PipelineDeps,
@@ -1044,13 +1064,15 @@ async function stackMemberReviewMode(
   job: JobRow,
   member: StackMemberRow,
   info: { title: string; body: string },
-): Promise<"full" | "verify"> {
+  budgeted: boolean,
+): Promise<"full" | "verify" | "skip"> {
   const prior = deps.store.latestCompletedReviewAtOtherHead(
     job.repo_full_name,
     member.pr_number,
     member.head_sha,
     scopeOf(job),
   );
+  if (budgeted) return prior ? "verify" : "skip";
   if (!prior) return "full";
   const diff = await provider.getChangeDiff({ ...forgeTargetOf(job), changeNumber: member.pr_number }, deps.config.maxDiffBytes);
   const signals = scanRoutingSignals({ diff, title: info.title, body: info.body });
@@ -1083,6 +1105,28 @@ function stackSharedPaths(members: StackMemberRow[], diffs: Map<number, string>)
     }
   }
   return [...seen.entries()].filter(([, pr]) => pr === -1).map(([path]) => path).sort();
+}
+
+/** Recorded model spend of one member job: routing, specialists, aggregation, escalations. */
+function memberJobSpend(store: JobStore, jobId: number): { cost: number; tokens: number } {
+  const job = store.getJob(jobId);
+  let cost = 0;
+  let tokens = 0;
+  if (job) {
+    cost += (job.routing_cost ?? 0) + (job.aggregator_cost ?? 0) + (job.internal_escalation_cost ?? 0);
+    tokens += (job.routing_total_tokens ?? 0) + (job.aggregator_total_tokens ?? 0) + (job.internal_escalation_total_tokens ?? 0);
+  }
+  for (const run of store.listReviewerRuns(jobId)) {
+    cost += run.cost ?? 0;
+    tokens +=
+      run.total_tokens ??
+      (run.prompt_tokens ?? 0) +
+        (run.completion_tokens ?? 0) +
+        (run.reasoning_tokens ?? 0) +
+        (run.cache_read_tokens ?? 0) +
+        (run.cache_write_tokens ?? 0);
+  }
+  return { cost, tokens };
 }
 
 async function runStackJob(deps: PipelineDeps, forge: ForgeRegistry, jobId: number, signal: AbortSignal): Promise<void> {
@@ -1157,9 +1201,28 @@ async function runStackJob(deps: PipelineDeps, forge: ForgeRegistry, jobId: numb
     store.setJobState(jobId, "reviewing");
     const memberJobs: { member: (typeof members)[number]; jobId: number }[] = [];
     const memberEscalations: string[] = [];
-    for (const member of members) {
+    const memberSkips: string[] = [];
+    let stackTokens = 0;
+    for (let index = 0; index < members.length; index++) {
+      const member = members[index]!;
       const info = meta.get(member.pr_number)!;
-      const reviewMode = await stackMemberReviewMode(deps, provider, job, member, info);
+      // Envelope: the bottom and the tip always keep their normal mode. A
+      // middle member in an oversized stack — or after recorded member spend
+      // crosses STACK_TOKEN_CAP — is downgraded: verify when it has a prior
+      // pass to re-check, skipped-budget when it does not.
+      const edgeMember = index === 0 || index === members.length - 1;
+      const budgeted = !edgeMember && (members.length > STACK_MAX_MEMBERS || stackTokens > STACK_TOKEN_CAP);
+      const reviewMode = await stackMemberReviewMode(deps, provider, job, member, info, budgeted);
+      if (reviewMode === "skip") {
+        const reason =
+          members.length > STACK_MAX_MEMBERS
+            ? `stack has ${members.length} members (max ${STACK_MAX_MEMBERS})`
+            : `stack token cap ${STACK_TOKEN_CAP} exceeded`;
+        store.patchStackMember(member.id, { state: "skipped" });
+        memberSkips.push(`#${member.pr_number}`);
+        store.log(jobId, `Stack member #${member.pr_number} skipped-budget: ${reason}`, "warn");
+        continue;
+      }
       let memberJobId: number | null = null;
       let outcome = "missing";
       let attempt = 0;
@@ -1260,6 +1323,7 @@ async function runStackJob(deps: PipelineDeps, forge: ForgeRegistry, jobId: numb
       }
       store.patchStackMember(member.id, { state: "done" });
       memberJobs.push({ member, jobId: memberJobId! });
+      stackTokens += memberJobSpend(store, memberJobId!).tokens;
     }
 
     // Phase 3 — re-check every head before anything stack-level is published.
@@ -1282,16 +1346,20 @@ async function runStackJob(deps: PipelineDeps, forge: ForgeRegistry, jobId: numb
     }
 
     // Phase 4 — cumulative pass over the stack tip plus every member diff.
-    // Only worth the cost when members actually touch shared paths: disjoint
-    // diffs cannot interact, so the pass is skipped and the summary says why.
+    // Two gates keep it cheap: it only runs when members share changed paths
+    // (disjoint diffs cannot interact), and never after the stack token
+    // ceiling already tripped inside the member loop.
     const cumulativeRun = store.listReviewerRuns(jobId).find((entry) => entry.role === "stack_cumulative");
     const top = members[members.length - 1]!;
     const sharedPaths = stackSharedPaths(members, diffs);
+    const overBudget = stackTokens > STACK_TOKEN_CAP;
     let cumulative: ReviewerResult;
     let cumulativeNote = "";
-    if (sharedPaths.length === 0) {
+    if (sharedPaths.length === 0 || overBudget) {
       cumulative = { schema_version: 1, reviewer: "stack_cumulative", verdict: "clean", summary: "", findings: [] };
-      cumulativeNote = "Cross-PR pass skipped — member diffs share no changed paths.";
+      cumulativeNote = overBudget
+        ? `Cross-PR pass skipped — stack token cap ${STACK_TOKEN_CAP} exceeded (${stackTokens} tokens recorded across member reviews).`
+        : "Cross-PR pass skipped — member diffs share no changed paths.";
       if (cumulativeRun) {
         store.patchReviewer(cumulativeRun.id, {
           state: "done",
@@ -1301,7 +1369,7 @@ async function runStackJob(deps: PipelineDeps, forge: ForgeRegistry, jobId: numb
           validation_error: null,
         });
       }
-      store.log(jobId, "Stack cumulative pass skipped: member diffs share no changed paths");
+      store.log(jobId, `Stack cumulative pass skipped: ${overBudget ? "stack token cap exceeded" : "member diffs share no changed paths"}`);
     } else {
       store.log(
         jobId,
@@ -1354,6 +1422,13 @@ async function runStackJob(deps: PipelineDeps, forge: ForgeRegistry, jobId: numb
           .join(", ") || "none"
       }.\n\n` +
       (memberEscalations.length ? `**Needs human review** — ${memberEscalations.join("; ")}.\n\n` : "") +
+      (members.length > STACK_MAX_MEMBERS || overBudget
+        ? `**Stack budget** — ${
+            members.length > STACK_MAX_MEMBERS
+              ? `stack has ${members.length} members (max ${STACK_MAX_MEMBERS})`
+              : `member reviews recorded ${stackTokens} tokens (cap ${STACK_TOKEN_CAP})`
+          }; middle members run verify-only.${memberSkips.length ? ` Skipped-budget (no prior pass to verify): ${memberSkips.join(", ")}.` : ""}\n\n`
+        : "") +
       (cumulativeNote ? `${cumulativeNote}\n\n` : cumulative.summary ? `${cumulative.summary}\n\n` : "") +
       `Cross-PR findings: ${cumulative.findings.length}.`;
     await postStackComment(deps, job, top.pr_number, summaryBody);
