@@ -1041,10 +1041,10 @@ const STACK_MAX_MEMBERS = 10;
  */
 const STACK_TOKEN_CAP = 400_000;
 
-/** Members the run never reached must not render QUEUED forever on the member rail. */
+/** Members the run never finished must not render QUEUED/REVIEWING forever on the member rail. */
 function skipUnreachedStackMembers(store: JobStore, jobId: number): void {
   for (const member of store.listStackMembers(jobId)) {
-    if (member.state === "queued") store.patchStackMember(member.id, { state: "skipped" });
+    if (member.state === "queued" || member.state === "reviewing") store.patchStackMember(member.id, { state: "skipped" });
   }
 }
 
@@ -1228,13 +1228,10 @@ async function runStackJob(deps: PipelineDeps, forge: ForgeRegistry, jobId: numb
       let attempt = 0;
       for (; attempt <= STACK_MEMBER_MAX_RETRIES; attempt++) {
         throwIfStale(store, jobId, signal);
-        let freshDedupKey: string | undefined;
         if (attempt > 0) {
           // Re-resolve the head before retrying: a stale member usually means
           // it moved. A moved head keeps the shared dedup key so the retry
-          // joins (or reuses) whichever job superseded the last attempt; at an
-          // unchanged head the terminal job would dedup onto itself, so a
-          // per-attempt key forces a fresh one.
+          // joins (or reuses) whichever job superseded the last attempt.
           const change = await provider.getChange(memberTarget(member.pr_number));
           if (change.headSha !== member.head_sha || change.baseSha !== member.base_sha) {
             store.patchStackMember(member.id, { baseSha: change.baseSha, headSha: change.headSha });
@@ -1244,8 +1241,12 @@ async function runStackJob(deps: PipelineDeps, forge: ForgeRegistry, jobId: numb
               jobId,
               `Re-pinned #${member.pr_number} at ${change.headSha.slice(0, 8)} (base ${change.baseSha.slice(0, 8)}) for retry`,
             );
-          } else {
-            freshDedupKey = `stack-member-retry:${jobId}:${member.pr_number}:${attempt}`;
+          } else if (memberJobId != null) {
+            // Unchanged coordinates: the previous attempt's row would dedup
+            // onto itself. It is terminal now — move its dedup key aside so
+            // this retry's row lands back on the shared key and stays covered
+            // by webhook dedup and head-move supersession.
+            store.retireJobDedupKey(memberJobId, `stack-member-retired:${jobId}:${member.pr_number}:${attempt}`);
           }
         }
         store.patchStackMember(member.id, { state: "reviewing" });
@@ -1270,7 +1271,6 @@ async function runStackJob(deps: PipelineDeps, forge: ForgeRegistry, jobId: numb
           reviewers: reviewMode === "verify" ? [] : reviewerSpecs(config),
           jobType: "pr_review",
           reviewMode,
-          dedupKey: freshDedupKey,
         });
         memberJobId = enqueued.job.id;
         store.patchStackMember(member.id, { memberJobId, state: "reviewing" });
@@ -1309,7 +1309,10 @@ async function runStackJob(deps: PipelineDeps, forge: ForgeRegistry, jobId: numb
         }
       }
       if (outcome !== "completed") {
-        store.patchStackMember(member.id, { state: "failed" });
+        // Cancelled means someone stopped it on purpose; 'skipped' renders
+        // that honestly on the member rail while the escalation still says
+        // exactly which outcome ended it.
+        store.patchStackMember(member.id, { state: outcome === "cancelled" ? "skipped" : "failed" });
         const attempts = Math.min(attempt + 1, STACK_MEMBER_MAX_RETRIES + 1);
         memberEscalations.push(
           `#${member.pr_number} ended ${outcome}${memberJobId ? ` (job ${memberJobId})` : ""} after ${attempts} attempt(s) — review this PR manually`,

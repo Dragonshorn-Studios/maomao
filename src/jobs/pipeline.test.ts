@@ -5651,7 +5651,8 @@ describe("stack reviews (issue #99)", () => {
     const config = stackConfig();
     const store = new JobStore(openDb(":memory:"));
     // A stale pr_review for #41@h41 already exists: attempt 0 dedups onto it,
-    // sees the terminal stale outcome, and retries under a fresh dedup key.
+    // sees the terminal stale outcome, and retries on the shared dedup key —
+    // the stale row's key is moved aside so the fresh row claims it.
     const staleMember = store.enqueue({
       repoFullName: "acme/widgets",
       repoOwner: "acme",
@@ -5685,6 +5686,12 @@ describe("stack reviews (issue #99)", () => {
     expect(members.map((m) => m.state)).toEqual(["done", "done"]);
     const jobs41 = store.listJobs(30).filter((j) => j.job_type === "pr_review" && j.pr_number === 41);
     expect(jobs41.map((j) => j.state).sort()).toEqual(["completed", "stale"]);
+    // Both rows sit at the same coordinates; only the live one keeps the
+    // shared dedup identity so a new head still supersedes it.
+    const fresh = jobs41.find((j) => j.state === "completed")!;
+    const stale = jobs41.find((j) => j.state === "stale")!;
+    expect(fresh.dedup_key).toBe("");
+    expect(stale.dedup_key).toContain("stack-member-retired:");
   });
 
   it("fails a member after bounded retries, finishes the stack, and escalates in the summary (issue #123)", async () => {
@@ -5722,7 +5729,7 @@ describe("stack reviews (issue #99)", () => {
     expect(jobs41).toHaveLength(3);
     expect(jobs41.every((j) => j.state === "failed")).toBe(true);
     expect(issueComments[0]?.body).toContain("Needs human review");
-    expect(issueComments[0]?.body).toContain("#41");
+    expect(issueComments[0]?.body).toContain("#41 ended");
   });
 
   it("marks unreached members skipped when the run dies before phase 2 (issue #123)", async () => {
@@ -5994,6 +6001,53 @@ describe("stack reviews (issue #99)", () => {
     expect(cumulative?.state).toBe("done");
     expect(issueComments[0]?.body).toContain("Stack budget");
     expect(issueComments[0]?.body).toContain("Cross-PR pass skipped — stack token cap");
+  });
+
+  it("marks a member whose review ended cancelled as skipped and still escalates (issue #123)", async () => {
+    const config = stackConfig();
+    const store = new JobStore(openDb(":memory:"));
+    // #41's only job at the pinned head was deliberately cancelled: the stack
+    // run dedups onto it, gets 'cancelled' instantly, and does not resurrect
+    // cancelled work with retries.
+    const cancelledJob = store.enqueue({
+      repoFullName: "acme/widgets",
+      repoOwner: "acme",
+      repoName: "widgets",
+      installationId: 9,
+      prNumber: 41,
+      prTitle: "PR 41",
+      prBody: "",
+      prHtmlUrl: "",
+      prAuthor: "alice",
+      baseSha: "b41",
+      headSha: "h41",
+      baseRef: "main",
+      headRef: "feat-a",
+      reviewers: [],
+      jobType: "pr_review",
+    });
+    store.cancelJobs({ jobId: cancelledJob.job.id }, "manual_cancel", "alice");
+    const stack = enqueueStackJob(store);
+    const issueComments: { pullNumber: number; body: string }[] = [];
+    const github = {
+      ...githubPort(),
+      getPull: async (_i: number, _o: string, _r: string, n: number) => resolvedPull(n, `h${n}`),
+      createCommentReview: async () => ({ id: "9", url: "u" }),
+      createIssueComment: async (input: { pullNumber: number; body: string }) => {
+        issueComments.push({ pullNumber: input.pullNumber, body: input.body });
+        return { id: "1", url: "u" };
+      },
+    } as unknown as GithubPort;
+    const pipeline = createPipeline({ config, store, github, checkout: await fixtureCheckout(), opencode: stackOpencode });
+    await pipeline.run(stack.job.id);
+
+    expect(store.getJob(stack.job.id)?.state).toBe("completed");
+    const members = store.listStackMembers(stack.job.id);
+    expect(members.map((m) => m.state)).toEqual(["skipped", "done"]);
+    // The cancelled job was left alone — no retry rows were created for #41.
+    const jobs41 = store.listJobs(30).filter((j) => j.job_type === "pr_review" && j.pr_number === 41);
+    expect(jobs41.map((j) => j.id)).toEqual([cancelledJob.job.id]);
+    expect(issueComments[0]?.body).toContain("#41 ended cancelled");
   });
 });
 

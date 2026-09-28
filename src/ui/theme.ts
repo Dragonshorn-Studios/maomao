@@ -732,6 +732,9 @@ h1 a.pr-external { font-size: 0.72em; }
   color: var(--cinnabar);
   background: var(--cinnabar-soft);
 }
+.stack-mini-member.st-cancelled .stack-mini-node {
+  border-style: dashed;
+}
 .stack-strip-count { color: var(--ink-muted); font-size: 0.8rem; white-space: nowrap; }
 
 .meta-grid {
