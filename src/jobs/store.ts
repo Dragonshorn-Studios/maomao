@@ -915,6 +915,27 @@ export class JobStore {
       .all(jobId) as StackMemberRow[];
   }
 
+  /** Compact member rows for stack_review jobs — the queue cards render a mini
+   * member rail from these. One query for the whole page. */
+  stackMemberSummaries(
+    jobIds: number[],
+  ): Map<number, { position: number; prNumber: number; memberJobId: number | null; state: string }[]> {
+    const summaries = new Map<number, { position: number; prNumber: number; memberJobId: number | null; state: string }[]>();
+    if (!jobIds.length) return summaries;
+    const placeholders = jobIds.map(() => "?").join(",");
+    const rows = this.db
+      .prepare(
+        `SELECT job_id, position, pr_number, member_job_id, state FROM stack_run_members WHERE job_id IN (${placeholders}) ORDER BY job_id, position`,
+      )
+      .all(...jobIds) as { job_id: number; position: number; pr_number: number; member_job_id: number | null; state: string }[];
+    for (const row of rows) {
+      const list = summaries.get(row.job_id) ?? [];
+      list.push({ position: row.position, prNumber: row.pr_number, memberJobId: row.member_job_id, state: row.state });
+      summaries.set(row.job_id, list);
+    }
+    return summaries;
+  }
+
   patchStackMember(id: number, patch: { baseSha?: string; headSha?: string; memberJobId?: number; state?: string }): void {
     if (patch.baseSha === undefined && patch.headSha === undefined && patch.memberJobId === undefined && patch.state === undefined) return;
     this.db

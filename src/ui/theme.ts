@@ -426,6 +426,23 @@ button, summary {
   animation: breathe 2.6s ease-in-out infinite;
 }
 
+/* Kind chips borrow the .state badge shape (flat, small caps) in plum. */
+.kind-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  padding: 0.08rem 0.45rem;
+  border: 1px solid var(--plum);
+  background: var(--plum-soft);
+  color: var(--ink);
+  font-size: 0.75rem;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  vertical-align: middle;
+  white-space: nowrap;
+}
+.kind-chip svg { width: 0.9em; height: 0.9em; display: block; color: var(--plum); }
+
 .specimen-head {
   display: flex;
   flex-wrap: wrap;
@@ -567,6 +584,155 @@ h1 a.pr-external { font-size: 0.72em; }
 .sev-blocker, .sev-high { background: var(--cinnabar-soft); border-color: var(--cinnabar); }
 .sev-medium { background: var(--amber-soft); border-color: var(--amber); }
 .sev-low, .sev-info { background: var(--jade-soft); border-color: var(--herb); }
+
+/* Stack members on a stack_review job page: numbered nodes on a connecting
+   rail, in the bottom-up order the runner reviews them. */
+.stack-rail {
+  list-style: none;
+  margin: 0.7rem 0 0;
+  padding: 0;
+}
+.stack-member {
+  display: flex;
+  gap: 0.75rem;
+  position: relative;
+  padding-bottom: 0.9rem;
+}
+.stack-member:last-child { padding-bottom: 0; }
+.stack-member::before {
+  content: "";
+  position: absolute;
+  left: 0.72rem;
+  top: 1.6rem;
+  bottom: 0.1rem;
+  width: 1px;
+  background: var(--line-strong);
+}
+.stack-member:last-child::before { display: none; }
+.stack-node {
+  width: 1.45rem;
+  height: 1.45rem;
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--line-strong);
+  border-radius: 50%;
+  background: var(--surface);
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  color: var(--ink-muted);
+}
+.stack-member.is-current .stack-node {
+  border-color: var(--working);
+  color: var(--working);
+  box-shadow: 0 0 0 3px var(--working-soft);
+}
+.stack-member-body {
+  flex: 1;
+  min-width: 0;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  padding: 0.5rem 0.7rem;
+}
+.stack-member.is-current .stack-member-body { border-color: color-mix(in srgb, var(--working) 55%, var(--line)); }
+.stack-member-head {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.3rem 0.7rem;
+  align-items: center;
+  justify-content: space-between;
+}
+.stack-member-pr { font-weight: 600; }
+.stack-edge {
+  margin-left: 0.45rem;
+  padding: 0 0.35rem;
+  border: 1px dashed var(--line-strong);
+  border-radius: var(--radius);
+  color: var(--ash);
+  font-size: 0.66rem;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+.stack-member-meta {
+  margin-top: 0.2rem;
+  font-size: 0.85rem;
+  color: var(--ink-muted);
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.15rem 0.45rem;
+  align-items: baseline;
+}
+.stack-member-meta code { font-size: 0.85em; }
+
+/* Miniature member rail on stack queue cards: same node vocabulary as the
+   job-page .stack-rail, laid out horizontally inside a dashed panel. */
+.stack-strip {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.3rem 0.7rem;
+  align-items: center;
+  justify-content: space-between;
+  margin-top: 0.55rem;
+  font-size: 0.85rem;
+}
+.stack-mini {
+  list-style: none;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  row-gap: 0.25rem;
+  margin: 0;
+  padding: 0;
+}
+.stack-mini-member {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  font-weight: 600;
+}
+.stack-mini-member + .stack-mini-member::before {
+  content: "";
+  width: 0.85rem;
+  height: 1px;
+  background: var(--line-strong);
+  margin: 0 0.35rem;
+}
+.stack-mini-member a { color: inherit; text-decoration: none; }
+.stack-mini-member a:hover { color: var(--jade); text-decoration: underline; }
+.stack-mini-node {
+  width: 1.15rem;
+  height: 1.15rem;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--line-strong);
+  border-radius: 50%;
+  background: var(--surface);
+  font-family: var(--font-mono);
+  font-size: 0.62rem;
+  color: var(--ink-muted);
+}
+.stack-mini-member.st-done .stack-mini-node {
+  border-color: var(--jade);
+  color: var(--jade);
+  background: var(--jade-soft);
+}
+.stack-mini-member.st-reviewing .stack-mini-node {
+  border-color: var(--working);
+  color: var(--working);
+  box-shadow: 0 0 0 2px var(--working-soft);
+}
+.stack-mini-member.st-failed { color: var(--cinnabar); }
+.stack-mini-member.st-failed .stack-mini-node {
+  border-color: var(--cinnabar);
+  color: var(--cinnabar);
+  background: var(--cinnabar-soft);
+}
+.stack-strip-count { color: var(--ink-muted); font-size: 0.8rem; white-space: nowrap; }
 
 .meta-grid {
   display: grid;

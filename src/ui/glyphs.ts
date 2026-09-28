@@ -52,6 +52,15 @@ export function externalLinkGlyph(): string {
   return `<svg ${SIZE}><path d="M9.2 2.6h4.2v4.2M13.4 2.6 7.6 8.4" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="square"/><path d="M12.6 9.4v4H2.6v-9h4" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="square" stroke-linejoin="miter"/></svg>`;
 }
 
+/** Layered sheets: marks stack_review jobs and stack member lists. */
+export function stackMark(): string {
+  return `<svg ${SIZE}>
+    <path d="M8 2.2 14 4.8 8 7.4 2 4.8Z" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linejoin="miter"/>
+    <path d="m3.4 7.7-1.4.7L8 10.9l6-2.5-1.4-.7" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linejoin="miter"/>
+    <path d="m3.4 10.7-1.4.7L8 13.9l6-2.5-1.4-.7" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linejoin="miter"/>
+  </svg>`.replace(/\n\s+/g, "");
+}
+
 /** Pancake stack with a butter pat: the easter-egg treat for completed reviews. */
 export function pancakeMark(): string {
   return `<svg ${SIZE}>

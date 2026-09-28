@@ -32,12 +32,13 @@ import {
   runStateLabel,
   severityLabel,
   settledFindingsCopy,
+  stackMemberStateBadge,
   staleBanner,
   unconfirmedFindingsBanner,
   usageIncompleteCopy,
   usageReportedCopy,
 } from "./copy.js";
-import { externalLinkGlyph, pancakeMark, roleGlyph } from "./glyphs.js";
+import { externalLinkGlyph, pancakeMark, roleGlyph, stackMark } from "./glyphs.js";
 import { TYPEAHEAD_HREF } from "./typeahead.js";
 import { csrfInput, layout, type PageOptions, type UiIdentity } from "./layout.js";
 import {
@@ -106,8 +107,13 @@ export function renderLogin(options: LoginOptions = {}): string {
 
 export function renderHome(jobs: JobRow[], store: JobStore, options: PageOptions = {}): string {
   const empty = emptyQueueCopy();
+  const stackSummaries = store.stackMemberSummaries(
+    jobs.filter((job) => job.job_type === "stack_review").map((job) => job.id),
+  );
   const cards = jobs
-    .map((job) => renderQueueCard(job, jobMetrics(job, store), options.uiFlavor, options.csrfToken))
+    .map((job) =>
+      renderQueueCard(job, jobMetrics(job, store), options.uiFlavor, options.csrfToken, stackSummaries.get(job.id)),
+    )
     .join("");
   const paginationNav = renderJobsPagination(jobs, options.pagination, options.activeForge);
   const pancakeChip = pancakeChipFor(store, options.uiFlavor);
@@ -216,21 +222,44 @@ export type JobPageOptions = PageOptions & {
   }>;
 };
 
-/** Ordered member list with pinned SHAs and links to each member's review job. */
+/** Ordered member rail with pinned SHAs, per-member state badges, and links
+ * to each member's review job. The numbered node column reads bottom-up,
+ * matching the order the stack runner reviews members in. */
 function renderStackMembers(members: NonNullable<JobPageOptions["stackMembers"]>): string {
+  const doneCount = members.filter((member) => member.state === "done").length;
+  const multi = members.length > 1;
   const rows = members
-    .map(
-      (member) => `<tr>
-        <td class="metric">${member.position}</td>
-        <td>#${member.pr_number}${member.member_job_id != null ? ` · <a href="/jobs/${member.member_job_id}">job ${member.member_job_id}</a>` : ""}</td>
-        <td><code>${escapeHtml(member.base_ref || "—")}</code> → <code>${escapeHtml(member.head_ref || "—")}</code></td>
-        <td><code class="sha">${escapeHtml(shortSha(member.head_sha, 12))}</code></td>
-        <td>${escapeHtml(member.state)}</td>
-      </tr>`,
-    )
+    .map((member, index) => {
+      const badge = stackMemberStateBadge(member.state);
+      const edge =
+        multi && index === 0
+          ? `<span class="stack-edge">base</span>`
+          : multi && index === members.length - 1
+            ? `<span class="stack-edge">tip</span>`
+            : "";
+      const jobLink =
+        member.member_job_id != null
+          ? `<a href="/jobs/${member.member_job_id}">job ${member.member_job_id}</a>`
+          : `<span class="muted">no job yet</span>`;
+      return `<li class="stack-member${member.state === "reviewing" ? " is-current" : ""}">
+        <span class="stack-node" aria-hidden="true">${member.position}</span>
+        <div class="stack-member-body">
+          <div class="stack-member-head">
+            <span class="stack-member-pr">#${member.pr_number}${edge}</span>
+            ${renderState(badge.stateClass, badge.text, badge.hint, badge.mark)}
+          </div>
+          <div class="stack-member-meta">
+            <code>${escapeHtml(member.base_ref || "—")}</code> → <code>${escapeHtml(member.head_ref || "—")}</code>
+            <span class="muted">·</span> head <code class="sha">${escapeHtml(shortSha(member.head_sha, 12))}</code>
+            <span class="muted">·</span> ${jobLink}
+          </div>
+        </div>
+      </li>`;
+    })
     .join("");
   return `<h2>Stack members</h2>
-    <table class="config-audit"><thead><tr><th>#</th><th>Pull request</th><th>Refs</th><th>Pinned head</th><th>State</th></tr></thead><tbody>${rows}</tbody></table>`;
+    <ol class="stack-rail" aria-label="Pull requests in stack review order">${rows}</ol>
+    <p class="muted">Reviewed bottom-up; each member is pinned to the head SHA shown. ${doneCount} / ${members.length} done.</p>`;
 }
 
 function renderScanIssuesAudit(rows: NonNullable<JobPageOptions["scanIssues"]>): string {
@@ -262,11 +291,14 @@ export function renderJob(
   const failedToRetry = retryableFailedCount(job, runs);
   const isScan = job.job_type === "health_scan";
   const isBrief = job.job_type === "repo_brief";
+  const isStack = job.job_type === "stack_review";
   const heading = isBrief
     ? `Repo brief · ${escapeHtml(job.repo_full_name)} @ ${escapeHtml(shortSha(job.head_sha, 12))}`
     : isScan
       ? `Health scan · ${escapeHtml(job.repo_full_name)} @ ${escapeHtml(shortSha(job.head_sha, 12))}`
-      : `${forgeBadgeTitleHtml(job, job.repo_full_name, job.pr_number)}`;
+      : isStack
+        ? `Stack · ${forgeBadgeTitleHtml(job, job.repo_full_name, job.pr_number)}`
+        : `${forgeBadgeTitleHtml(job, job.repo_full_name, job.pr_number)}`;
   const cancelledBanner =
     job.state === "cancelled"
       ? renderCancelledBanner(job)
@@ -471,11 +503,44 @@ function prExternalLinkHtml(job: JobRow): string {
   return `<a class="pr-external" href="${escapeHtml(job.pr_html_url)}" target="_blank" rel="noopener noreferrer" title="${escapeHtml(label)}" aria-label="${escapeHtml(label)}">${externalLinkGlyph()}</a>`;
 }
 
-function renderQueueCard(job: JobRow, metrics: JobMetrics, uiFlavor?: UiFlavor, csrfToken?: string): string {
+type StackMemberSummary = { position: number; prNumber: number; memberJobId: number | null; state: string };
+
+/** Miniature of the job-page member rail for the queue card: numbered nodes
+ * chained left to right, tinted by member state, linking to each member job. */
+function renderStackStrip(members: StackMemberSummary[]): string {
+  const done = members.filter((member) => member.state === "done").length;
+  const items = members
+    .map((member) => {
+      const badge = stackMemberStateBadge(member.state);
+      const pr =
+        member.memberJobId != null
+          ? `<a href="/jobs/${member.memberJobId}" title="${escapeHtml(badge.text)} — member job ${member.memberJobId}">#${member.prNumber}</a>`
+          : `<span title="${escapeHtml(badge.hint)}">#${member.prNumber}</span>`;
+      return `<li class="stack-mini-member st-${escapeHtml(badge.stateClass)}"><span class="stack-mini-node" aria-hidden="true">${member.position}</span>${pr}</li>`;
+    })
+    .join("");
+  return `<div class="stack-strip" aria-label="Stack members: ${done} of ${members.length} done">
+    <ol class="stack-mini">${items}</ol>
+    <span class="stack-strip-count">${done} / ${members.length} done</span>
+  </div>`;
+}
+
+function renderQueueCard(
+  job: JobRow,
+  metrics: JobMetrics,
+  uiFlavor?: UiFlavor,
+  csrfToken?: string,
+  stackMembers?: StackMemberSummary[],
+): string {
   const state = jobStateLabel(job.state);
   const elapsed = formatDuration(elapsedMs(job.started_at, job.finished_at) ?? elapsedMs(job.created_at));
   const isLive = LIVE_JOB_STATES.includes(job.state);
+  const isStack = job.job_type === "stack_review";
   const flavor = flavorForJob(job.state, job.pr_number, uiFlavor);
+  const memberCount = stackMembers?.length;
+  const stackChip = isStack
+    ? `<span class="kind-chip" title="Stack review over ${memberCount != null ? `${memberCount} pull request${memberCount === 1 ? "" : "s"}` : "multiple pull requests"}">${stackMark()} Stack${memberCount != null ? ` ×${memberCount}` : ""}</span> `
+    : "";
   let cardAction = "";
   if (job.state === "queued") {
     cardAction = dequeueForm(job.id, csrfToken);
@@ -483,13 +548,14 @@ function renderQueueCard(job: JobRow, metrics: JobMetrics, uiFlavor?: UiFlavor, 
     cardAction = cancelReviewLink(job.id);
   }
   return `<li>
-    <article class="specimen${isLive ? " is-live" : ""}">
+    <article class="specimen${isLive ? " is-live" : ""}${isStack ? " specimen-stack" : ""}">
       <div class="specimen-head">
-        <span class="specimen-id">Specimen · job ${job.id}</span>
+        <span class="specimen-id">${isStack ? "Stack" : "Specimen"} · job ${job.id}</span>
         ${renderState(job.state, state.text, state.hint, state.mark)}
       </div>
-      <p class="specimen-title"><a href="/jobs/${job.id}">${forgeBadgeTitleHtml(job, job.repo_full_name, job.pr_number)} · ${escapeHtml(job.pr_title || "(no title)")}</a>${prExternalLinkHtml(job)}</p>
+      <p class="specimen-title">${stackChip}<a href="/jobs/${job.id}">${forgeBadgeTitleHtml(job, job.repo_full_name, job.pr_number)} · ${escapeHtml(job.pr_title || "(no title)")}</a>${prExternalLinkHtml(job)}</p>
       ${flavor ? `<p class="muted">${escapeHtml(flavor)}</p>` : ""}
+      ${isStack && stackMembers?.length ? renderStackStrip(stackMembers) : ""}
       <div class="meta-row">
         <span class="pair">SHA <strong><code class="sha">${escapeHtml(shortSha(job.head_sha, 10))}</code></strong></span>
         <span class="pair">Elapsed <strong class="metric">${escapeHtml(elapsed)}</strong></span>

@@ -225,6 +225,21 @@ export function internalEscalationBadge(state: string | null | undefined): Label
   }
 }
 
+/** Badge for a stack_review member row. Member states are a small subset of job
+ * states — the stack runner only writes queued/reviewing/done/failed. */
+export function stackMemberStateBadge(state: string): LabeledState & { stateClass: string } {
+  switch (state) {
+    case "reviewing":
+      return { stateClass: "reviewing", text: "Reviewing", hint: "Member review in flight", mark: "◉" };
+    case "done":
+      return { stateClass: "done", text: "Done", hint: "Member review completed", mark: "●" };
+    case "failed":
+      return { stateClass: "failed", text: "Failed", hint: "Member review did not complete", mark: "!" };
+    default:
+      return { stateClass: "queued", text: "Queued", hint: "Waiting for earlier stack members", mark: "○" };
+  }
+}
+
 /** Badge for the external (fire-and-forget) dispatch channel; same visual language as run states.
  * `decided` marks that the pipeline already decided not to dispatch (status not_requested + reason),
  * as opposed to the enqueue-time default where dispatch simply has not been reached yet. */

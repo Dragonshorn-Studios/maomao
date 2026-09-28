@@ -87,6 +87,7 @@ export function seedDemoJobs(store: JobStore): void {
   seedPoisonInternalOnly(store);
   seedPoisonSniffing(store);
   seedCancelled(store);
+  seedStackReview(store);
 }
 
 function seedCompletedWithFindings(store: JobStore): void {
@@ -519,6 +520,122 @@ function seedAggregating(store: JobStore): void {
  * through the production cancellation service (marker before cancel, exactly
  * like the webhook handler). A failed seed must crash the demo loudly rather
  * than silently omitting the cancelled jobs. */
+/** Stack review mid-flight: member 1 done (linked to its completed member
+ * job), member 2 reviewing against a live member job, member 3 still queued
+ * with no job. Exercises the member rail's done/reviewing/queued badges and
+ * the stacked-card queue treatment. */
+function seedStackReview(store: JobStore): void {
+  const memberSha = {
+    301: "aaaabbbbccccddddeeeeffff0000111122223301",
+    302: "aaaabbbbccccddddeeeeffff0000111122223302",
+    303: "aaaabbbbccccddddeeeeffff0000111122223303",
+  } as const;
+
+  const { job: memberOne } = store.enqueue(
+    baseJob({
+      prNumber: 301,
+      prTitle: "Add deferred_capture column to charges",
+      headSha: memberSha[301],
+      headRef: "billing/schema",
+    }),
+  );
+  for (const run of store.listReviewerRuns(memberOne.id)) {
+    store.patchReviewer(run.id, {
+      state: "done",
+      attempt: 1,
+      model: MODEL,
+      provider: PROVIDER,
+      started_at: ago(20),
+      finished_at: ago(15),
+      duration_ms: 74_000,
+      prompt_tokens: 2600,
+      completion_tokens: 150,
+      cost: 0.017,
+      normalized_json: clean(run.role),
+    });
+  }
+  store.setJobState(memberOne.id, "completed", {
+    started_at: ago(20),
+    finished_at: ago(14),
+    aggregator_state: "done",
+    aggregator_model: AGG_MODEL,
+    aggregator_provider: PROVIDER,
+    aggregator_normalized: JSON.stringify({
+      schema_version: 1,
+      verdict: "clean",
+      summary: "Specialist reviewers reported no validated findings for this commit.",
+      findings: [],
+    }),
+    github_review_id: "90301",
+    github_review_url: "https://github.com/acme/ledger/pull/301#pullrequestreview-90301",
+  });
+
+  const { job: memberTwo } = store.enqueue(
+    baseJob({
+      prNumber: 302,
+      prTitle: "Expose capture-later flag on the charges API",
+      headSha: memberSha[302],
+      baseRef: "billing/schema",
+      headRef: "billing/api",
+    }),
+  );
+  const memberTwoRuns = store.listReviewerRuns(memberTwo.id);
+  store.setJobState(memberTwo.id, "reviewing", { started_at: ago(4), aggregator_state: "queued" });
+  memberTwoRuns.forEach((run, index) => {
+    if (index < 3) {
+      store.patchReviewer(run.id, {
+        state: "done",
+        attempt: 1,
+        model: MODEL,
+        provider: PROVIDER,
+        started_at: ago(4),
+        finished_at: ago(1),
+        duration_ms: 66_000 + index * 1000,
+        prompt_tokens: 2400,
+        completion_tokens: 170,
+        cost: 0.016,
+        normalized_json: clean(run.role),
+      });
+    } else if (index === 3) {
+      store.patchReviewer(run.id, {
+        state: "running",
+        attempt: 1,
+        model: MODEL,
+        provider: PROVIDER,
+        started_at: ago(1),
+      });
+    }
+  });
+
+  const { job: stackJob } = store.enqueue(
+    baseJob({
+      prNumber: 303,
+      prTitle: "Wire billing UI to the new capture API",
+      headSha: memberSha[303],
+      baseRef: "main",
+      headRef: "billing/ui",
+      webhookEvent: "stack_review",
+      reviewers: [{ role: "stack_cumulative", title: "Stack cumulative" }],
+      jobType: "stack_review",
+      dedupKey: `stack:billing-rollout@${memberSha[301].slice(0, 8)}.${memberSha[302].slice(0, 8)}.${memberSha[303].slice(0, 8)}`,
+    }),
+  );
+  store.insertStackMembers(stackJob.id, [
+    { position: 1, prNumber: 301, baseRef: "main", headRef: "billing/schema", baseSha: "aa11bb22cc33dd44ee55ff6677889900aabbccdd", headSha: memberSha[301] },
+    { position: 2, prNumber: 302, baseRef: "billing/schema", headRef: "billing/api", baseSha: memberSha[301], headSha: memberSha[302] },
+    { position: 3, prNumber: 303, baseRef: "billing/api", headRef: "billing/ui", baseSha: memberSha[302], headSha: memberSha[303] },
+  ]);
+  const members = store.listStackMembers(stackJob.id);
+  store.patchStackMember(members[0].id, { memberJobId: memberOne.id, state: "done" });
+  store.patchStackMember(members[1].id, { memberJobId: memberTwo.id, state: "reviewing" });
+  store.setJobState(stackJob.id, "reviewing", { started_at: ago(19) });
+  store.log(
+    stackJob.id,
+    `Stack "billing-rollout" of 3 triggered by octocat: #301@${memberSha[301].slice(0, 8)} → #302@${memberSha[302].slice(0, 8)} → #303@${memberSha[303].slice(0, 8)}`,
+  );
+  store.log(stackJob.id, `Reviewing stack member #302 as job ${memberTwo.id}`);
+}
+
 function seedCancelled(store: JobStore): void {
   const { job: merged } = store.enqueue(
     baseJob({
