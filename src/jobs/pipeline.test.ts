@@ -5752,6 +5752,130 @@ describe("stack reviews (issue #99)", () => {
     expect(jobs41.map((j) => j.id)).toEqual([cancelledJob.job.id]);
     expect(issueComments[0]?.body).toContain("#41 ended cancelled");
   });
+
+  it("retries a member at the same head after a base-only move instead of burning the attempt (issue #123)", async () => {
+    const config = stackConfig();
+    const store = new JobStore(openDb(":memory:"));
+    // #41's last review at the pinned head failed. On retry only the base
+    // moved — dedup matches head_sha alone, so the dead row's key must still
+    // be retired or the attempt dedups onto it and does zero work.
+    const failedMember = store.enqueue({
+      repoFullName: "acme/widgets",
+      repoOwner: "acme",
+      repoName: "widgets",
+      installationId: 9,
+      prNumber: 41,
+      prTitle: "PR 41",
+      prBody: "",
+      prHtmlUrl: "",
+      prAuthor: "alice",
+      baseSha: "b41",
+      headSha: "h41",
+      baseRef: "main",
+      headRef: "feat-a",
+      reviewers: [],
+      jobType: "pr_review",
+    });
+    store.setJobState(failedMember.job.id, "failed", { failure_reason: "boom", finished_at: new Date().toISOString() });
+    const stack = enqueueStackJob(store);
+    const github = {
+      ...githubPort(),
+      getPull: async (_i: number, _o: string, _r: string, n: number) =>
+        n === 41 ? { ...resolvedPull(n, `h${n}`), baseSha: "b41-moved" } : resolvedPull(n, `h${n}`),
+      createCommentReview: async () => ({ id: "9", url: "u" }),
+      createIssueComment: async () => ({ id: "1", url: "u" }),
+    } as unknown as GithubPort;
+    const pipeline = createPipeline({ config, store, github, checkout: await fixtureCheckout(), opencode: stackOpencode });
+    await pipeline.run(stack.job.id);
+
+    expect(store.getJob(stack.job.id)?.state).toBe("completed");
+    const members = store.listStackMembers(stack.job.id);
+    expect(members.map((m) => m.state)).toEqual(["done", "done"]);
+    const jobs41 = store.listJobs(30).filter((j) => j.job_type === "pr_review" && j.pr_number === 41);
+    expect(jobs41.map((j) => j.state).sort()).toEqual(["completed", "failed"]);
+    // The base-only retry itself succeeded — no second dedup-burned attempt.
+    const logs = store.listLogs(stack.job.id).map((l) => l.message).join("\n");
+    expect(logs).toContain("retry 1/2");
+    expect(logs).not.toContain("retry 2/2");
+  });
+
+  it("marks members skipped when the stack job is cancelled before it runs (issue #123)", async () => {
+    const config = stackConfig();
+    const store = new JobStore(openDb(":memory:"));
+    const stack = enqueueStackJob(store);
+    store.cancelJobs({ jobId: stack.job.id }, "manual_cancel", "alice");
+    const pipeline = createPipeline({ config, store, github: githubPort() as unknown as GithubPort, checkout: await fixtureCheckout(), opencode: stackOpencode });
+    await pipeline.run(stack.job.id);
+
+    expect(store.getJob(stack.job.id)?.state).toBe("cancelled");
+    const members = store.listStackMembers(stack.job.id);
+    expect(members.map((m) => m.state)).toEqual(["skipped", "skipped"]);
+  });
+
+  it("marks a finished member done and skips the rest when the run dies mid-review (issue #123)", async () => {
+    const config = stackConfig();
+    const store = new JobStore(openDb(":memory:"));
+    const stack = enqueueStackJob(store);
+    const github = {
+      ...githubPort(),
+      // #42's member job completes, then the live-head re-check blows up:
+      // member 42 sits 'reviewing' with a completed job when the run dies.
+      getPull: async (_i: number, _o: string, _r: string, n: number) => {
+        if (n === 42) {
+          const memberJobId = store.listStackMembers(stack.job.id).find((m) => m.pr_number === 42)?.member_job_id;
+          if (memberJobId != null && store.getJob(memberJobId)?.state === "completed") {
+            throw new Error("pull lookup blew up after completion");
+          }
+        }
+        return resolvedPull(n, `h${n}`);
+      },
+      createCommentReview: async () => ({ id: "9", url: "u" }),
+      createIssueComment: async () => ({ id: "1", url: "u" }),
+    } as unknown as GithubPort;
+    const pipeline = createPipeline({ config, store, github, checkout: await fixtureCheckout(), opencode: stackOpencode });
+    await pipeline.run(stack.job.id);
+
+    expect(store.getJob(stack.job.id)?.state).toBe("failed");
+    const members = store.listStackMembers(stack.job.id);
+    // The completed review is live — the rail must not regress it to Skipped.
+    expect(members.map((m) => m.state)).toEqual(["done", "done"]);
+  });
+
+  it("marks a member skipped when the run dies while its review is still in flight (issue #123)", async () => {
+    const config = stackConfig();
+    const store = new JobStore(openDb(":memory:"));
+    const stack = enqueueStackJob(store);
+    const github = {
+      ...githubPort(),
+      // #42's member job fails; the retry's head re-resolve then blows up,
+      // leaving member 42 'reviewing' with a failed job when the run dies.
+      getPull: async (_i: number, _o: string, _r: string, n: number) => {
+        if (n === 42) {
+          const memberJobId = store.listStackMembers(stack.job.id).find((m) => m.pr_number === 42)?.member_job_id;
+          if (memberJobId != null && store.getJob(memberJobId)?.state === "failed") {
+            throw new Error("pull lookup blew up during retry");
+          }
+        }
+        return resolvedPull(n, `h${n}`);
+      },
+      createCommentReview: async () => ({ id: "9", url: "u" }),
+      createIssueComment: async () => ({ id: "1", url: "u" }),
+    } as unknown as GithubPort;
+    const failingOpencode: OpenCodePort = {
+      async run(input) {
+        if (/Role id:/.test(input.prompt) && input.prompt.includes("PR: #42")) {
+          return { stdout: "not json", stderr: "", exitCode: 0, text: "not json", usage: { promptTokens: 1, completionTokens: 1 } };
+        }
+        return stackOpencode.run(input);
+      },
+    };
+    const pipeline = createPipeline({ config, store, github, checkout: await fixtureCheckout(), opencode: failingOpencode });
+    await pipeline.run(stack.job.id);
+
+    expect(store.getJob(stack.job.id)?.state).toBe("failed");
+    const members = store.listStackMembers(stack.job.id);
+    expect(members.map((m) => m.state)).toEqual(["done", "skipped"]);
+  });
 });
 
 describe("global pause claim guard", () => {

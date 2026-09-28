@@ -249,6 +249,17 @@ export interface NewJobInput {
   dedupKey?: string;
 }
 
+/**
+ * Dedup-key namespace for terminal member rows moved aside by
+ * `retireJobDedupKey`: '' stays the live, shared identity covered by dedup
+ * and head-move supersession; `stack-member-retired:*` marks a dead row that
+ * no longer claims the slot. Pipeline callers build keys through this so the
+ * convention lives next to the store that interprets it.
+ */
+export function retiredMemberDedupKey(stackJobId: number, prNumber: number, attempt: number): string {
+  return `stack-member-retired:${stackJobId}:${prNumber}:${attempt}`;
+}
+
 export interface EnqueueResult {
   job: JobRow;
   created: boolean;
@@ -427,7 +438,7 @@ export class JobStore {
 
       const existing = this.db
         .prepare(
-          `SELECT * FROM jobs WHERE provider = ? AND provider_instance = ? AND repo_full_name = ? AND pr_number = ? AND head_sha = ? AND job_type = ? AND dedup_key = ? ORDER BY id DESC`,
+          `SELECT * FROM jobs WHERE provider = ? AND provider_instance = ? AND repo_full_name = ? AND pr_number = ? AND head_sha = ? AND job_type = ? AND dedup_key = ?`,
         )
         .get(scope.provider, scope.instance, input.repoFullName, input.prNumber, input.headSha, jobType, dedupKey) as JobRow | undefined;
 
@@ -499,7 +510,7 @@ export class JobStore {
    * attempt's job before re-enqueueing: the fresh row lands back on the
    * shared '' key, so webhook dedup and the head-move stale sweep keep
    * covering it. Terminal rows need no supersession, so only those are
-   * rekeyed — the call is a no-op on a live job.
+   * rekeyed — the call is a no-op on a live job (returns false).
    */
   retireJobDedupKey(jobId: number, dedupKey: string): boolean {
     const row = this.db
