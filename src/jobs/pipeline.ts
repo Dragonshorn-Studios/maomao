@@ -1287,10 +1287,10 @@ async function runStackJob(deps: PipelineDeps, forge: ForgeRegistry, jobId: numb
     const cumulativeRun = store.listReviewerRuns(jobId).find((entry) => entry.role === "stack_cumulative");
     const top = members[members.length - 1]!;
     const sharedPaths = stackSharedPaths(members, diffs);
-    let cumulative: ReviewerResult | undefined;
+    let cumulative: ReviewerResult;
     let cumulativeNote = "";
     if (sharedPaths.length === 0) {
-      cumulative = { schema_version: 1, verdict: "clean", summary: "", findings: [] };
+      cumulative = { schema_version: 1, reviewer: "stack_cumulative", verdict: "clean", summary: "", findings: [] };
       cumulativeNote = "Cross-PR pass skipped — member diffs share no changed paths.";
       if (cumulativeRun) {
         store.patchReviewer(cumulativeRun.id, {
@@ -1330,10 +1330,11 @@ async function runStackJob(deps: PipelineDeps, forge: ForgeRegistry, jobId: numb
       });
       store.patchJob(jobId, { workspace_path: workspace.dir });
       throwIfStale(store, jobId, signal);
-      cumulative = await runStackCumulativeRun(deps, job, cumulativeRun, workspace.repoDir, stackId, members, diffs, meta, signal);
-      if (!cumulative) {
+      const result = await runStackCumulativeRun(deps, job, cumulativeRun, workspace.repoDir, stackId, members, diffs, meta, signal);
+      if (!result) {
         throw new Error("stack cumulative pass failed");
       }
+      cumulative = result;
     }
 
     // Phase 5 — publish the stack summary and each cross-PR finding as issue
