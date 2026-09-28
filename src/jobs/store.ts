@@ -47,6 +47,8 @@ export interface JobRow {
   cancelled_by: string | null;
   profile_revision_id: number | null;
   job_type: "pr_review" | "health_scan" | "repo_brief" | "stack_review";
+  /** "full" runs the specialist pipeline; "verify" only reconciles open findings (issue #123). */
+  review_mode: "full" | "verify";
   scan_branch: string | null;
   /** Repo-brief payload (TOC + persisted file fragments), JSON; null for other job types. */
   brief_json: string | null;
@@ -244,6 +246,8 @@ export interface NewJobInput {
   webhookEvent?: string;
   reviewers: { role: string; title: string; model?: string }[];
   jobType?: "pr_review" | "health_scan" | "repo_brief" | "stack_review";
+  /** Only meaningful for pr_review jobs; other types ignore it. */
+  reviewMode?: "full" | "verify";
   scanBranch?: string | null;
   /** Dedup discriminator inside the jobs UNIQUE; repo_brief overrides this with a nonce. */
   dedupKey?: string;
@@ -442,8 +446,8 @@ export class JobStore {
             repo_full_name, repo_owner, repo_name, installation_id, provider, provider_instance, forge_connection_id,
             github_account_id, github_repository_id, pr_number,
             pr_title, pr_body, pr_html_url, pr_author, base_sha, head_sha, base_ref, head_ref,
-            webhook_delivery_id, webhook_event, profile_revision_id, job_type, scan_branch, dedup_key, state, created_at, updated_at
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?)`,
+            webhook_delivery_id, webhook_event, profile_revision_id, job_type, review_mode, scan_branch, dedup_key, state, created_at, updated_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?)`,
         )
         .run(
           input.repoFullName,
@@ -468,6 +472,7 @@ export class JobStore {
           input.webhookEvent ?? null,
           input.profileRevisionId ?? this.configs.resolveProfileForRepo(input.repoFullName)?.id ?? null,
           jobType,
+          input.reviewMode ?? "full",
           input.scanBranch ?? null,
           dedupKey,
           createdAt,
@@ -893,6 +898,29 @@ export class JobStore {
          LIMIT 1`,
       )
       .get(scope.provider, scope.instance, repoFullName, stackDedupPrefix(stackId), `stack:${escapeLike(stackId)}@%`);
+  }
+
+  /**
+   * Newest completed pr_review for a pull request at a head other than
+   * `headSha` — the "first completed pass" the stack cost path (issue #123)
+   * checks before choosing verify-first over a full specialist re-run.
+   */
+  latestCompletedReviewAtOtherHead(
+    repoFullName: string,
+    prNumber: number,
+    headSha: string,
+    scope?: Partial<ForgeScope>,
+  ): JobRow | undefined {
+    const resolved = normalizeScope(scope);
+    return this.db
+      .prepare(
+        `SELECT * FROM jobs
+         WHERE provider = ? AND provider_instance = ? AND repo_full_name = ? AND pr_number = ?
+           AND job_type = 'pr_review' AND state = 'completed' AND head_sha != ?
+         ORDER BY finished_at DESC, id DESC
+         LIMIT 1`,
+      )
+      .get(resolved.provider, resolved.instance, repoFullName, prNumber, headSha) as JobRow | undefined;
   }
 
   /** Ordered SHA vector snapshot for a stack_review job (issue #99). */

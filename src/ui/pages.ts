@@ -298,7 +298,7 @@ export function renderJob(
       ? `Health scan · ${escapeHtml(job.repo_full_name)} @ ${escapeHtml(shortSha(job.head_sha, 12))}`
       : isStack
         ? `Stack · ${forgeBadgeTitleHtml(job, job.repo_full_name, job.pr_number)}`
-        : `${forgeBadgeTitleHtml(job, job.repo_full_name, job.pr_number)}`;
+        : `${forgeBadgeTitleHtml(job, job.repo_full_name, job.pr_number)}${job.review_mode === "verify" ? " · verify" : ""}`;
   const cancelledBanner =
     job.state === "cancelled"
       ? renderCancelledBanner(job)

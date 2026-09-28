@@ -5698,6 +5698,146 @@ describe("stack reviews (issue #99)", () => {
     const members = store.listStackMembers(stack.job.id);
     expect(members.map((m) => m.state)).toEqual(["skipped", "skipped"]);
   });
+
+  function completedReview(store: JobStore, prNumber: number, headSha: string) {
+    const created = store.enqueue({
+      repoFullName: "acme/widgets",
+      repoOwner: "acme",
+      repoName: "widgets",
+      installationId: 9,
+      prNumber,
+      prTitle: `PR ${prNumber}`,
+      prBody: "",
+      prHtmlUrl: "",
+      prAuthor: "alice",
+      baseSha: `b${prNumber}`,
+      headSha,
+      baseRef: "main",
+      headRef: "feat",
+      reviewers: [],
+      jobType: "pr_review",
+    });
+    store.setJobState(created.job.id, "completed", { finished_at: new Date().toISOString() });
+    return created.job;
+  }
+
+  it("reuses the completed member review when the head is unchanged (issue #123)", async () => {
+    const config = stackConfig();
+    const store = new JobStore(openDb(":memory:"));
+    const prior = completedReview(store, 41, "h41");
+    const stack = enqueueStackJob(store);
+    const github = {
+      ...githubPort(),
+      getPull: async (_i: number, _o: string, _r: string, n: number) => resolvedPull(n, `h${n}`),
+      createCommentReview: async () => ({ id: "9", url: "u" }),
+      createIssueComment: async () => ({ id: "1", url: "u" }),
+    } as unknown as GithubPort;
+    const pipeline = createPipeline({ config, store, github, checkout: await fixtureCheckout(), opencode: stackOpencode });
+    await pipeline.run(stack.job.id);
+
+    expect(store.getJob(stack.job.id)?.state).toBe("completed");
+    const jobs41 = store.listJobs(30).filter((j) => j.job_type === "pr_review" && j.pr_number === 41);
+    // The completed review at h41 covers the member: no second job was enqueued.
+    expect(jobs41.map((j) => j.id)).toEqual([prior.id]);
+    const members = store.listStackMembers(stack.job.id);
+    expect(members.map((m) => m.state)).toEqual(["done", "done"]);
+  });
+
+  it("runs verify-first on a moved member head with a prior completed review (issue #123)", async () => {
+    const config = stackConfig();
+    const store = new JobStore(openDb(":memory:"));
+    const prior = completedReview(store, 41, "h41-old");
+    store.upsertFinding({
+      repoFullName: "acme/widgets",
+      prNumber: 41,
+      fingerprint: "f-41",
+      status: "open",
+      reviewedSha: "h41-old",
+      summary: "possible leak in example.ts",
+    });
+    const stack = enqueueStackJob(store);
+    const verifierCalls: string[] = [];
+    const reviews: number[] = [];
+    const verifyOpencode: OpenCodePort = {
+      async run(input) {
+        if (input.prompt.includes("finding verifier")) {
+          verifierCalls.push(input.prompt);
+          return {
+            stdout: "",
+            stderr: "",
+            exitCode: 0,
+            text: JSON.stringify({
+              classifications: [
+                { fingerprint: "f-41", status: "still_valid", confidence: 0.9, reason: "still present", file: "example.ts", line: 2 },
+              ],
+            }),
+            usage: {},
+          };
+        }
+        return stackOpencode.run(input);
+      },
+    };
+    const github = {
+      ...githubPort(),
+      getPull: async (_i: number, _o: string, _r: string, n: number) => resolvedPull(n, `h${n}`),
+      createCommentReview: async (input: { pullNumber: number }) => {
+        reviews.push(input.pullNumber);
+        return { id: "9", url: "u" };
+      },
+      createIssueComment: async () => ({ id: "1", url: "u" }),
+    } as unknown as GithubPort;
+    const pipeline = createPipeline({ config, store, github, checkout: await fixtureCheckout(), opencode: verifyOpencode });
+    await pipeline.run(stack.job.id);
+
+    expect(store.getJob(stack.job.id)?.state).toBe("completed");
+    const jobs41 = store
+      .listJobs(30)
+      .filter((j) => j.job_type === "pr_review" && j.pr_number === 41 && j.id !== prior.id);
+    expect(jobs41).toHaveLength(1);
+    expect(jobs41[0]!.review_mode).toBe("verify");
+    expect(jobs41[0]!.state).toBe("completed");
+    // No specialist runs were seeded or executed for the member; the verifier
+    // re-checked the open finding instead.
+    expect(store.listReviewerRuns(jobs41[0]!.id)).toHaveLength(0);
+    expect(verifierCalls).toHaveLength(1);
+    expect(store.getFinding("acme/widgets", 41, "f-41")?.status).toBe("still_valid");
+    expect(reviews).toContain(41);
+    // #42 had no prior pass, so it still ran the full pipeline.
+    const job42 = store.listJobs(30).find((j) => j.job_type === "pr_review" && j.pr_number === 42);
+    expect(job42?.review_mode).toBe("full");
+    const members = store.listStackMembers(stack.job.id);
+    expect(members.map((m) => m.state)).toEqual(["done", "done"]);
+  });
+
+  it("keeps the full specialist pass when the moved member diff is hard-risk (issue #123)", async () => {
+    const config = stackConfig();
+    const store = new JobStore(openDb(":memory:"));
+    const prior = completedReview(store, 41, "h41-old");
+    const stack = enqueueStackJob(store);
+    const github = {
+      ...githubPort(),
+      getPull: async (_i: number, _o: string, _r: string, n: number) => resolvedPull(n, `h${n}`),
+      getPullDiff: async (_i: number, _o: string, _r: string, n: number) =>
+        n === 41
+          ? "diff --git a/db/migrations/001_users.sql b/db/migrations/001_users.sql\n+alter table users add column plan text;\n"
+          : "diff --git a/example.ts b/example.ts\n",
+      createCommentReview: async () => ({ id: "9", url: "u" }),
+      createIssueComment: async () => ({ id: "1", url: "u" }),
+    } as unknown as GithubPort;
+    const pipeline = createPipeline({ config, store, github, checkout: await fixtureCheckout(), opencode: stackOpencode });
+    await pipeline.run(stack.job.id);
+
+    expect(store.getJob(stack.job.id)?.state).toBe("completed");
+    const jobs41 = store
+      .listJobs(30)
+      .filter((j) => j.job_type === "pr_review" && j.pr_number === 41 && j.id !== prior.id);
+    expect(jobs41).toHaveLength(1);
+    expect(jobs41[0]!.review_mode).toBe("full");
+    expect(jobs41[0]!.state).toBe("completed");
+    expect(store.listReviewerRuns(jobs41[0]!.id).some((r) => r.state === "done")).toBe(true);
+    const members = store.listStackMembers(stack.job.id);
+    expect(members.map((m) => m.state)).toEqual(["done", "done"]);
+  });
 });
 
 describe("global pause claim guard", () => {

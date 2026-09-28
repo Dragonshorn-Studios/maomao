@@ -1,5 +1,5 @@
 import type { Config } from "../config.js";
-import type { JobStore, JobRow, ReviewerRunRow, NewJobInput } from "./store.js";
+import type { JobStore, JobRow, ReviewerRunRow, NewJobInput, StackMemberRow } from "./store.js";
 import type { GithubPort } from "../github/client.js";
 import type { ForgePort } from "../forge/port.js";
 import { ForgeRegistry } from "../forge/registry.js";
@@ -425,86 +425,99 @@ async function runJob(deps: PipelineDeps, forge: ForgeRegistry, jobId: number, s
     const profileBudget = createProfileBudget(profileDefinition);
     const snapshot = await reconcileAndRoute(deps, provider, job, workspace.repoDir, workspace.dir, diff, signal, profileBudget);
     throwIfStale(store, jobId, signal);
-    await routeSpecialists(deps, job, diff, workspace.repoDir, [workspace.diffPath, workspace.metaPath], signal, profileBudget);
-    const routed = store.getJob(jobId);
-    const currentFindings = currentFindingsForRisk(snapshot.items);
-    store.patchJob(jobId, {
-      risk_profile: routed?.routing_profile ?? null,
-      risk_reason: routed?.routing_reason ?? null,
-    });
-    store.log(
-      jobId,
-      `Risk route: ${routed?.routing_profile ?? "diagnosis"} — ${routed?.routing_reason ?? ""}; current findings=${currentFindings.length} (resolved/dismissed excluded)`,
-    );
-    throwIfStale(store, jobId, signal);
 
-    store.setJobState(jobId, "reviewing");
-    const runs = store.listReviewerRuns(jobId).filter((run) => run.state !== "done");
-    await runProfileReviewers(
-      deps,
-      job,
-      runs,
-      workspace.repoDir,
-      [workspace.diffPath, workspace.metaPath],
-      signal,
-      profileBudget,
-      reviewerTimeouts,
-      snapshot.humanOverrides,
-    );
-    throwIfStale(store, jobId, signal);
-
-    const completedRuns = store.listReviewerRuns(jobId);
-    const parsedReviewers: ReviewerResult[] = [];
-    for (const run of completedRuns) {
-      if (run.state === "done" && run.normalized_json) {
-        parsedReviewers.push(JSON.parse(run.normalized_json) as ReviewerResult);
-      }
-    }
-    if (parsedReviewers.length === 0) {
-      // Degrade cannot rescue zero output: with no reviewer results there is nothing
-      // to publish, so this path still fails — but with an explicit budget reason.
-      const over = profileBudget.check();
-      if (over) throw new Error(`profile budget exceeded — ${over}`);
-      throw new Error("all specialist reviewers failed or produced invalid JSON");
-    }
-
-    let aggregated = await runBudgetedAggregation(
-      deps,
-      job,
-      parsedReviewers,
-      workspace.repoDir,
-      [workspace.diffPath],
-      signal,
-      profileBudget,
-      snapshot.humanOverrides,
-    );
-    throwIfStale(store, jobId, signal);
-
-    const afterReviewers = store.getJob(jobId);
-    if (afterReviewers && shouldRunInternal(config.poisonAlert.policy, config.poisonAlert.internal.enabled, afterReviewers.routing_profile ?? "")) {
-      const internalOver = profileBudget.check();
-      if (internalOver) {
-        if (profileBudget.behavior === "fail") throw new Error(`profile budget exceeded — ${internalOver}`);
-        patchBudgetWarning(store, jobId, internalOver);
-        store.patchJob(jobId, {
-          internal_escalation_state: "skipped",
-          internal_escalation_reason: `profile budget exceeded — ${internalOver}`,
-        });
-        store.log(jobId, `Internal poison-alert pass skipped: ${internalOver}`, "warn");
-      } else {
-        aggregated = await runInternalEscalation(deps, afterReviewers, aggregated, diff, workspace.repoDir, signal, profileBudget);
-      }
+    // Verify-first (issue #123): the reconciler already re-checked every open
+    // finding against this head, so a verify-mode job publishes that result
+    // directly — no router call, no specialist fan-out, no aggregation.
+    let aggregated: AggregatorResult;
+    let reviewerCount = 0;
+    if (job.review_mode === "verify") {
+      aggregated = verifyOnlyAggregate(job, snapshot);
+      store.patchJob(jobId, { aggregator_normalized: JSON.stringify(aggregated, null, 2) });
+      store.log(jobId, `Verify-first pass: ${aggregated.summary}`);
+    } else {
+      await routeSpecialists(deps, job, diff, workspace.repoDir, [workspace.diffPath, workspace.metaPath], signal, profileBudget);
+      const routed = store.getJob(jobId);
+      const currentFindings = currentFindingsForRisk(snapshot.items);
+      store.patchJob(jobId, {
+        risk_profile: routed?.routing_profile ?? null,
+        risk_reason: routed?.routing_reason ?? null,
+      });
+      store.log(
+        jobId,
+        `Risk route: ${routed?.routing_profile ?? "diagnosis"} — ${routed?.routing_reason ?? ""}; current findings=${currentFindings.length} (resolved/dismissed excluded)`,
+      );
       throwIfStale(store, jobId, signal);
-    }
 
-    aggregated = {
-      ...aggregated,
-      findings: assignFindingIds(aggregated.findings),
-    };
-    store.patchJob(jobId, { aggregator_normalized: JSON.stringify(aggregated, null, 2) });
+      store.setJobState(jobId, "reviewing");
+      const runs = store.listReviewerRuns(jobId).filter((run) => run.state !== "done");
+      await runProfileReviewers(
+        deps,
+        job,
+        runs,
+        workspace.repoDir,
+        [workspace.diffPath, workspace.metaPath],
+        signal,
+        profileBudget,
+        reviewerTimeouts,
+        snapshot.humanOverrides,
+      );
+      throwIfStale(store, jobId, signal);
+
+      const completedRuns = store.listReviewerRuns(jobId);
+      const parsedReviewers: ReviewerResult[] = [];
+      for (const run of completedRuns) {
+        if (run.state === "done" && run.normalized_json) {
+          parsedReviewers.push(JSON.parse(run.normalized_json) as ReviewerResult);
+        }
+      }
+      if (parsedReviewers.length === 0) {
+        // Degrade cannot rescue zero output: with no reviewer results there is nothing
+        // to publish, so this path still fails — but with an explicit budget reason.
+        const over = profileBudget.check();
+        if (over) throw new Error(`profile budget exceeded — ${over}`);
+        throw new Error("all specialist reviewers failed or produced invalid JSON");
+      }
+      reviewerCount = parsedReviewers.length;
+
+      aggregated = await runBudgetedAggregation(
+        deps,
+        job,
+        parsedReviewers,
+        workspace.repoDir,
+        [workspace.diffPath],
+        signal,
+        profileBudget,
+        snapshot.humanOverrides,
+      );
+      throwIfStale(store, jobId, signal);
+
+      const afterReviewers = store.getJob(jobId);
+      if (afterReviewers && shouldRunInternal(config.poisonAlert.policy, config.poisonAlert.internal.enabled, afterReviewers.routing_profile ?? "")) {
+        const internalOver = profileBudget.check();
+        if (internalOver) {
+          if (profileBudget.behavior === "fail") throw new Error(`profile budget exceeded — ${internalOver}`);
+          patchBudgetWarning(store, jobId, internalOver);
+          store.patchJob(jobId, {
+            internal_escalation_state: "skipped",
+            internal_escalation_reason: `profile budget exceeded — ${internalOver}`,
+          });
+          store.log(jobId, `Internal poison-alert pass skipped: ${internalOver}`, "warn");
+        } else {
+          aggregated = await runInternalEscalation(deps, afterReviewers, aggregated, diff, workspace.repoDir, signal, profileBudget);
+        }
+        throwIfStale(store, jobId, signal);
+      }
+
+      aggregated = {
+        ...aggregated,
+        findings: assignFindingIds(aggregated.findings),
+      };
+      store.patchJob(jobId, { aggregator_normalized: JSON.stringify(aggregated, null, 2) });
+    }
 
     store.setJobState(jobId, "publishing", { aggregator_state: "done" });
-    const posted = await publishReview(deps, provider, job, aggregated, parsedReviewers.length, snapshot, diff, signal);
+    const posted = await publishReview(deps, provider, job, aggregated, reviewerCount, snapshot, diff, signal);
     const afterPublish = store.getJob(jobId) ?? job;
     if (posted) {
       store.patchJob(jobId, { github_review_id: posted.id, github_review_url: posted.url });
@@ -1019,6 +1032,42 @@ function skipUnreachedStackMembers(store: JobStore, jobId: number): void {
   }
 }
 
+/**
+ * Verify-first (issue #123): once a member has a completed review on an
+ * earlier head, a moved head only re-checks its open findings. Hard-risk
+ * diffs (auth/secrets/billing/migrations/deploy) always get the full
+ * specialist pipeline; a first pass has nothing to verify and runs full.
+ */
+async function stackMemberReviewMode(
+  deps: PipelineDeps,
+  provider: ForgePort,
+  job: JobRow,
+  member: StackMemberRow,
+  info: { title: string; body: string },
+): Promise<"full" | "verify"> {
+  const prior = deps.store.latestCompletedReviewAtOtherHead(
+    job.repo_full_name,
+    member.pr_number,
+    member.head_sha,
+    scopeOf(job),
+  );
+  if (!prior) return "full";
+  const diff = await provider.getChangeDiff({ ...forgeTargetOf(job), changeNumber: member.pr_number }, deps.config.maxDiffBytes);
+  const signals = scanRoutingSignals({ diff, title: info.title, body: info.body });
+  if (signals.hardRiskFamilies.length > 0) {
+    deps.store.log(
+      job.id,
+      `Stack member #${member.pr_number}: hard-risk diff families (${signals.hardRiskFamilies.join(", ")}) — full specialist re-run`,
+    );
+    return "full";
+  }
+  deps.store.log(
+    job.id,
+    `Stack member #${member.pr_number}: verify-first pass (prior completed review job ${prior.id} @ ${prior.head_sha.slice(0, 8)})`,
+  );
+  return "verify";
+}
+
 async function runStackJob(deps: PipelineDeps, forge: ForgeRegistry, jobId: number, signal: AbortSignal): Promise<void> {
   const { store, config } = deps;
   const job = store.getJob(jobId);
@@ -1084,11 +1133,16 @@ async function runStackJob(deps: PipelineDeps, forge: ForgeRegistry, jobId: numb
     // member that ends stale/failed is re-pinned and retried in place
     // (bounded by STACK_MEMBER_MAX_RETRIES); one that still cannot complete
     // is escalated in the stack summary while later members proceed.
+    // Verify-first (issue #123): a member that already has a completed
+    // review on an earlier head re-checks its open findings instead of
+    // burning the full specialist set again, unless the diff trips the
+    // router's hard-risk families.
     store.setJobState(jobId, "reviewing");
     const memberJobs: { member: (typeof members)[number]; jobId: number }[] = [];
     const memberEscalations: string[] = [];
     for (const member of members) {
       const info = meta.get(member.pr_number)!;
+      const reviewMode = await stackMemberReviewMode(deps, provider, job, member, info);
       let memberJobId: number | null = null;
       let outcome = "missing";
       let attempt = 0;
@@ -1133,8 +1187,9 @@ async function runStackJob(deps: PipelineDeps, forge: ForgeRegistry, jobId: numb
           headRef: member.head_ref,
           webhookDeliveryId: job.webhook_delivery_id ?? undefined,
           webhookEvent: "stack_review",
-          reviewers: reviewerSpecs(config),
+          reviewers: reviewMode === "verify" ? [] : reviewerSpecs(config),
           jobType: "pr_review",
+          reviewMode,
           dedupKey: freshDedupKey,
         });
         memberJobId = enqueued.job.id;
@@ -1248,7 +1303,14 @@ async function runStackJob(deps: PipelineDeps, forge: ForgeRegistry, jobId: numb
       .join(" → ");
     const summaryBody =
       `**Stack review "${stackId}"** — reviewed ${members.length} pull request(s) in order: ${ordered}.\n\n` +
-      `Member reviews: ${memberJobs.map((entry) => `#${entry.member.pr_number} (job ${entry.jobId})`).join(", ") || "none"}.\n\n` +
+      `Member reviews: ${
+        memberJobs
+          .map((entry) => {
+            const mode = store.getJob(entry.jobId)?.review_mode;
+            return `#${entry.member.pr_number} (job ${entry.jobId}${mode === "verify" ? ", verify" : ""})`;
+          })
+          .join(", ") || "none"
+      }.\n\n` +
       (memberEscalations.length ? `**Needs human review** — ${memberEscalations.join("; ")}.\n\n` : "") +
       (cumulative.summary ? `${cumulative.summary}\n\n` : "") +
       `Cross-PR findings: ${cumulative.findings.length}.`;
@@ -1690,6 +1752,34 @@ async function routeSpecialists(
       (runRoles !== decision.reviewers.join(", ") ? ` → profile ${decision.profile} list runs ${runRoles}` : "") +
       ` reason=${decision.reason}`,
   );
+}
+
+/**
+ * Compact aggregate for a verify-mode job (issue #123): the reconciler's
+ * classifications are the whole result — no new findings are produced, and
+ * `findingsForPublish` still re-publishes "moved" items inline from the
+ * snapshot. The verdict is "clean" only when nothing open survived.
+ */
+function verifyOnlyAggregate(job: JobRow, snapshot: ReconciliationSnapshot): AggregatorResult {
+  let resolved = 0;
+  let moved = 0;
+  let stillOpen = 0;
+  let checked = 0;
+  for (const item of snapshot.items) {
+    if (item.status === "dismissed") continue;
+    checked += 1;
+    if (item.status === "resolved") resolved += 1;
+    else if (item.status === "moved") moved += 1;
+    else stillOpen += 1;
+  }
+  return {
+    schema_version: 1,
+    verdict: stillOpen + moved > 0 ? "comment" : "clean",
+    summary:
+      `Verify-first pass at ${job.head_sha.slice(0, 8)}: re-checked ${checked} open finding(s) — ` +
+      `${resolved} resolved, ${moved} moved, ${stillOpen} still open. Specialist review skipped; request a full review to re-scan.`,
+    findings: [],
+  };
 }
 
 async function reconcileAndRoute(
