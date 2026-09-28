@@ -107,12 +107,12 @@ export function renderLogin(options: LoginOptions = {}): string {
 
 export function renderHome(jobs: JobRow[], store: JobStore, options: PageOptions = {}): string {
   const empty = emptyQueueCopy();
-  const stackCounts = store.stackMemberCounts(
+  const stackSummaries = store.stackMemberSummaries(
     jobs.filter((job) => job.job_type === "stack_review").map((job) => job.id),
   );
   const cards = jobs
     .map((job) =>
-      renderQueueCard(job, jobMetrics(job, store), options.uiFlavor, options.csrfToken, stackCounts.get(job.id)),
+      renderQueueCard(job, jobMetrics(job, store), options.uiFlavor, options.csrfToken, stackSummaries.get(job.id)),
     )
     .join("");
   const paginationNav = renderJobsPagination(jobs, options.pagination, options.activeForge);
@@ -503,20 +503,43 @@ function prExternalLinkHtml(job: JobRow): string {
   return `<a class="pr-external" href="${escapeHtml(job.pr_html_url)}" target="_blank" rel="noopener noreferrer" title="${escapeHtml(label)}" aria-label="${escapeHtml(label)}">${externalLinkGlyph()}</a>`;
 }
 
+type StackMemberSummary = { position: number; prNumber: number; memberJobId: number | null; state: string };
+
+/** Miniature of the job-page member rail for the queue card: numbered nodes
+ * chained left to right, tinted by member state, linking to each member job. */
+function renderStackStrip(members: StackMemberSummary[]): string {
+  const done = members.filter((member) => member.state === "done").length;
+  const items = members
+    .map((member) => {
+      const badge = stackMemberStateBadge(member.state);
+      const pr =
+        member.memberJobId != null
+          ? `<a href="/jobs/${member.memberJobId}" title="${escapeHtml(badge.text)} — member job ${member.memberJobId}">#${member.prNumber}</a>`
+          : `<span title="${escapeHtml(badge.hint)}">#${member.prNumber}</span>`;
+      return `<li class="stack-mini-member st-${escapeHtml(badge.stateClass)}"><span class="stack-mini-node" aria-hidden="true">${member.position}</span>${pr}</li>`;
+    })
+    .join("");
+  return `<div class="stack-strip" aria-label="Stack members: ${done} of ${members.length} done">
+    <ol class="stack-mini">${items}</ol>
+    <span class="stack-strip-count">${done} / ${members.length} done</span>
+  </div>`;
+}
+
 function renderQueueCard(
   job: JobRow,
   metrics: JobMetrics,
   uiFlavor?: UiFlavor,
   csrfToken?: string,
-  stackSize?: number,
+  stackMembers?: StackMemberSummary[],
 ): string {
   const state = jobStateLabel(job.state);
   const elapsed = formatDuration(elapsedMs(job.started_at, job.finished_at) ?? elapsedMs(job.created_at));
   const isLive = LIVE_JOB_STATES.includes(job.state);
   const isStack = job.job_type === "stack_review";
   const flavor = flavorForJob(job.state, job.pr_number, uiFlavor);
+  const memberCount = stackMembers?.length;
   const stackChip = isStack
-    ? `<span class="kind-chip" title="Stack review over ${stackSize != null ? `${stackSize} pull request${stackSize === 1 ? "" : "s"}` : "multiple pull requests"}">${stackMark()} Stack${stackSize != null ? ` ×${stackSize}` : ""}</span> `
+    ? `<span class="kind-chip" title="Stack review over ${memberCount != null ? `${memberCount} pull request${memberCount === 1 ? "" : "s"}` : "multiple pull requests"}">${stackMark()} Stack${memberCount != null ? ` ×${memberCount}` : ""}</span> `
     : "";
   let cardAction = "";
   if (job.state === "queued") {
@@ -532,6 +555,7 @@ function renderQueueCard(
       </div>
       <p class="specimen-title">${stackChip}<a href="/jobs/${job.id}">${forgeBadgeTitleHtml(job, job.repo_full_name, job.pr_number)} · ${escapeHtml(job.pr_title || "(no title)")}</a>${prExternalLinkHtml(job)}</p>
       ${flavor ? `<p class="muted">${escapeHtml(flavor)}</p>` : ""}
+      ${isStack && stackMembers?.length ? renderStackStrip(stackMembers) : ""}
       <div class="meta-row">
         <span class="pair">SHA <strong><code class="sha">${escapeHtml(shortSha(job.head_sha, 10))}</code></strong></span>
         <span class="pair">Elapsed <strong class="metric">${escapeHtml(elapsed)}</strong></span>

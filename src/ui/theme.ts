@@ -680,6 +680,76 @@ h1 a.pr-external { font-size: 0.72em; }
 }
 .stack-member-meta code { font-size: 0.85em; }
 
+/* Miniature member rail on stack queue cards: same node vocabulary as the
+   job-page .stack-rail, laid out horizontally inside a dashed panel. */
+.stack-strip {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.3rem 0.7rem;
+  align-items: center;
+  justify-content: space-between;
+  margin-top: 0.6rem;
+  padding: 0.4rem 0.6rem;
+  border: 1px dashed color-mix(in srgb, var(--plum) 45%, var(--line));
+  border-radius: var(--radius);
+  background: color-mix(in srgb, var(--plum-soft) 30%, transparent);
+  font-size: 0.85rem;
+}
+.stack-mini {
+  list-style: none;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  row-gap: 0.25rem;
+  margin: 0;
+  padding: 0;
+}
+.stack-mini-member {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  font-weight: 600;
+}
+.stack-mini-member + .stack-mini-member::before {
+  content: "";
+  width: 0.85rem;
+  height: 1px;
+  background: var(--line-strong);
+  margin: 0 0.35rem;
+}
+.stack-mini-member a { color: inherit; text-decoration: none; }
+.stack-mini-member a:hover { color: var(--jade); text-decoration: underline; }
+.stack-mini-node {
+  width: 1.15rem;
+  height: 1.15rem;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--line-strong);
+  border-radius: 50%;
+  background: var(--surface);
+  font-family: var(--font-mono);
+  font-size: 0.62rem;
+  color: var(--ink-muted);
+}
+.stack-mini-member.st-done .stack-mini-node {
+  border-color: var(--jade);
+  color: var(--jade);
+  background: var(--jade-soft);
+}
+.stack-mini-member.st-reviewing .stack-mini-node {
+  border-color: var(--working);
+  color: var(--working);
+  box-shadow: 0 0 0 2px var(--working-soft);
+}
+.stack-mini-member.st-failed { color: var(--cinnabar); }
+.stack-mini-member.st-failed .stack-mini-node {
+  border-color: var(--cinnabar);
+  color: var(--cinnabar);
+  background: var(--cinnabar-soft);
+}
+.stack-strip-count { color: var(--ink-muted); font-size: 0.8rem; white-space: nowrap; }
+
 .meta-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(14rem, 1fr));
