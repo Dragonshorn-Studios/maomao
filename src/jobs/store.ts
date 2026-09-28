@@ -915,6 +915,20 @@ export class JobStore {
       .all(jobId) as StackMemberRow[];
   }
 
+  /** Member counts for stack_review jobs — one grouped query for the queue cards. */
+  stackMemberCounts(jobIds: number[]): Map<number, number> {
+    const counts = new Map<number, number>();
+    if (!jobIds.length) return counts;
+    const placeholders = jobIds.map(() => "?").join(",");
+    const rows = this.db
+      .prepare(
+        `SELECT job_id, COUNT(*) AS n FROM stack_run_members WHERE job_id IN (${placeholders}) GROUP BY job_id`,
+      )
+      .all(...jobIds) as { job_id: number; n: number }[];
+    for (const row of rows) counts.set(row.job_id, row.n);
+    return counts;
+  }
+
   patchStackMember(id: number, patch: { baseSha?: string; headSha?: string; memberJobId?: number; state?: string }): void {
     if (patch.baseSha === undefined && patch.headSha === undefined && patch.memberJobId === undefined && patch.state === undefined) return;
     this.db
