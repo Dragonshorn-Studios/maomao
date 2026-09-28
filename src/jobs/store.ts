@@ -431,7 +431,7 @@ export class JobStore {
 
       const existing = this.db
         .prepare(
-          `SELECT * FROM jobs WHERE provider = ? AND provider_instance = ? AND repo_full_name = ? AND pr_number = ? AND head_sha = ? AND job_type = ? AND dedup_key = ?`,
+          `SELECT * FROM jobs WHERE provider = ? AND provider_instance = ? AND repo_full_name = ? AND pr_number = ? AND head_sha = ? AND job_type = ? AND dedup_key = ? ORDER BY id DESC`,
         )
         .get(scope.provider, scope.instance, input.repoFullName, input.prNumber, input.headSha, jobType, dedupKey) as JobRow | undefined;
 
@@ -496,6 +496,21 @@ export class JobStore {
     for (const id of staleJobIds) publish({ type: "job", jobId: id });
     if (result.job) publish({ type: "job", jobId: result.job.id });
     return result;
+  }
+
+  /**
+   * Move a terminal job's dedup_key aside so a same-coordinates retry can
+   * claim the shared slot. Stack member retries call this on the previous
+   * attempt's job before re-enqueueing: the fresh row lands back on the
+   * shared '' key, so webhook dedup and the head-move stale sweep keep
+   * covering it. Terminal rows need no supersession, so only those are
+   * rekeyed — the call is a no-op on a live job.
+   */
+  retireJobDedupKey(jobId: number, dedupKey: string): boolean {
+    const row = this.db
+      .prepare(`UPDATE jobs SET dedup_key = ?, updated_at = ? WHERE id = ? AND state NOT IN (${ACTIVE_STATES_SQL}) RETURNING id`)
+      .get(dedupKey, nowIso(), jobId) as { id: number } | undefined;
+    return row != null;
   }
 
   /**
