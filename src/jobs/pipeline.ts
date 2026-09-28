@@ -1,5 +1,6 @@
 import type { Config } from "../config.js";
 import type { JobStore, JobRow, ReviewerRunRow, NewJobInput, StackMemberRow } from "./store.js";
+import { retiredMemberDedupKey } from "./store.js";
 import type { GithubPort } from "../github/client.js";
 import type { ForgePort } from "../forge/port.js";
 import { ForgeRegistry } from "../forge/registry.js";
@@ -1025,10 +1026,21 @@ async function runBriefJob(deps: PipelineDeps, forge: ForgeRegistry, jobId: numb
 // summary while the rest of the stack proceeds.
 const STACK_MEMBER_MAX_RETRIES = 2;
 
-/** Members the run never finished must not render QUEUED/REVIEWING forever on the member rail. */
+/**
+ * Members the run never finished must not render QUEUED/REVIEWING forever on
+ * the member rail. A member left 'reviewing' whose member job already
+ * completed (the run died between the review finishing and the rail update)
+ * is marked 'done' — the review is live — while everything else ends
+ * 'skipped'.
+ */
 function skipUnreachedStackMembers(store: JobStore, jobId: number): void {
   for (const member of store.listStackMembers(jobId)) {
-    if (member.state === "queued" || member.state === "reviewing") store.patchStackMember(member.id, { state: "skipped" });
+    if (member.state === "queued") {
+      store.patchStackMember(member.id, { state: "skipped" });
+    } else if (member.state === "reviewing") {
+      const memberJob = member.member_job_id != null ? store.getJob(member.member_job_id) : null;
+      store.patchStackMember(member.id, { state: memberJob?.state === "completed" ? "done" : "skipped" });
+    }
   }
 }
 
@@ -1169,6 +1181,7 @@ async function runStackJob(deps: PipelineDeps, forge: ForgeRegistry, jobId: numb
           // Re-resolve the head before retrying: a stale member usually means
           // it moved. A moved head keeps the shared dedup key so the retry
           // joins (or reuses) whichever job superseded the last attempt.
+          const previousHead = member.head_sha;
           const change = await provider.getChange(memberTarget(member.pr_number));
           if (change.headSha !== member.head_sha || change.baseSha !== member.base_sha) {
             store.patchStackMember(member.id, { baseSha: change.baseSha, headSha: change.headSha });
@@ -1178,12 +1191,18 @@ async function runStackJob(deps: PipelineDeps, forge: ForgeRegistry, jobId: numb
               jobId,
               `Re-pinned #${member.pr_number} at ${change.headSha.slice(0, 8)} (base ${change.baseSha.slice(0, 8)}) for retry`,
             );
-          } else if (memberJobId != null) {
-            // Unchanged coordinates: the previous attempt's row would dedup
-            // onto itself. It is terminal now — move its dedup key aside so
-            // this retry's row lands back on the shared key and stays covered
-            // by webhook dedup and head-move supersession.
-            store.retireJobDedupKey(memberJobId, `stack-member-retired:${jobId}:${member.pr_number}:${attempt}`);
+          }
+          // Dedup matches on head_sha alone: whenever this retry lands at the
+          // previous attempt's head — fully unchanged coordinates or a
+          // base-only move — it would dedup onto the previous terminal row
+          // and consume the attempt doing zero work. That row is terminal
+          // now, so move its dedup key aside and let the fresh row claim the
+          // shared slot, keeping webhook dedup and supersession coverage.
+          if (memberJobId != null && change.headSha === previousHead) {
+            const retired = store.retireJobDedupKey(memberJobId, retiredMemberDedupKey(jobId, member.pr_number, attempt));
+            if (!retired) {
+              store.log(jobId, `Could not retire dedup key on job ${memberJobId} for #${member.pr_number} retry`, "warn");
+            }
           }
         }
         store.patchStackMember(member.id, { state: "reviewing" });
