@@ -1004,11 +1004,27 @@ async function runBriefJob(deps: PipelineDeps, forge: ForgeRegistry, jobId: numb
 // re-checks every head and — only when nothing moved — runs one cumulative
 // OpenCode pass for cross-PR breakage and posts the stack summary plus
 // cross-PR findings on the top PR.
+//
+// Member retries (issue #123): a member review that ends stale/failed is
+// re-pinned and retried in place instead of killing the whole run, so one
+// moving PR can no longer strand later members QUEUED forever. Retries are
+// bounded per member per run; an exhausted member is escalated in the stack
+// summary while the rest of the stack proceeds.
+const STACK_MEMBER_MAX_RETRIES = 2;
+
+/** Members the run never reached must not render QUEUED forever on the member rail. */
+function skipUnreachedStackMembers(store: JobStore, jobId: number): void {
+  for (const member of store.listStackMembers(jobId)) {
+    if (member.state === "queued") store.patchStackMember(member.id, { state: "skipped" });
+  }
+}
+
 async function runStackJob(deps: PipelineDeps, forge: ForgeRegistry, jobId: number, signal: AbortSignal): Promise<void> {
   const { store, config } = deps;
   const job = store.getJob(jobId);
   if (!job) return;
   if (["stale", "cancelled"].includes(job.state)) {
+    skipUnreachedStackMembers(store, jobId);
     store.log(jobId, `Skipped run: job is ${job.state}`, "warn");
     return;
   }
@@ -1064,52 +1080,114 @@ async function runStackJob(deps: PipelineDeps, forge: ForgeRegistry, jobId: numb
 
     // Phase 2 — member reviews in dependency order. Each runs as a standard
     // pr_review job so the existing budget, concurrency, dedup, and publish
-    // paths apply unchanged; a matching completed job is reused as-is.
+    // paths apply unchanged; a matching completed job is reused as-is. A
+    // member that ends stale/failed is re-pinned and retried in place
+    // (bounded by STACK_MEMBER_MAX_RETRIES); one that still cannot complete
+    // is escalated in the stack summary while later members proceed.
     store.setJobState(jobId, "reviewing");
     const memberJobs: { member: (typeof members)[number]; jobId: number }[] = [];
+    const memberEscalations: string[] = [];
     for (const member of members) {
-      throwIfStale(store, jobId, signal);
-      store.patchStackMember(member.id, { state: "reviewing" });
       const info = meta.get(member.pr_number)!;
-      const enqueued = store.enqueue({
-        repoFullName: job.repo_full_name,
-        repoOwner: job.repo_owner,
-        repoName: job.repo_name,
-        installationId: job.installation_id,
-        githubAccountId: job.github_account_id ?? undefined,
-        githubRepositoryId: job.github_repository_id ?? undefined,
-        prNumber: member.pr_number,
-        prTitle: info.title,
-        prBody: info.body,
-        prHtmlUrl: info.htmlUrl,
-        prAuthor: info.author,
-        baseSha: member.base_sha,
-        headSha: member.head_sha,
-        baseRef: member.base_ref,
-        headRef: member.head_ref,
-        webhookDeliveryId: job.webhook_delivery_id ?? undefined,
-        webhookEvent: "stack_review",
-        reviewers: reviewerSpecs(config),
-        jobType: "pr_review",
-      });
-      const memberJobId = enqueued.job.id;
-      memberJobs.push({ member, jobId: memberJobId });
-      store.patchStackMember(member.id, { memberJobId, state: "reviewing" });
-      if (enqueued.created) {
-        store.log(jobId, `Reviewing stack member #${member.pr_number} as job ${memberJobId}`);
-        await runJob(deps, forge, memberJobId, signal);
-      } else {
-        store.log(
-          jobId,
-          `Stack member #${member.pr_number} reuses existing job ${memberJobId} (${enqueued.job.state})`,
-        );
+      let memberJobId: number | null = null;
+      let outcome = "missing";
+      let attempt = 0;
+      for (; attempt <= STACK_MEMBER_MAX_RETRIES; attempt++) {
+        throwIfStale(store, jobId, signal);
+        let freshDedupKey: string | undefined;
+        if (attempt > 0) {
+          // Re-resolve the head before retrying: a stale member usually means
+          // it moved. A moved head keeps the shared dedup key so the retry
+          // joins (or reuses) whichever job superseded the last attempt; at an
+          // unchanged head the terminal job would dedup onto itself, so a
+          // per-attempt key forces a fresh one.
+          const change = await provider.getChange(memberTarget(member.pr_number));
+          if (change.headSha !== member.head_sha || change.baseSha !== member.base_sha) {
+            store.patchStackMember(member.id, { baseSha: change.baseSha, headSha: change.headSha });
+            member.base_sha = change.baseSha;
+            member.head_sha = change.headSha;
+            store.log(
+              jobId,
+              `Re-pinned #${member.pr_number} at ${change.headSha.slice(0, 8)} (base ${change.baseSha.slice(0, 8)}) for retry`,
+            );
+          } else {
+            freshDedupKey = `stack-member-retry:${jobId}:${member.pr_number}:${attempt}`;
+          }
+        }
+        store.patchStackMember(member.id, { state: "reviewing" });
+        const enqueued = store.enqueue({
+          repoFullName: job.repo_full_name,
+          repoOwner: job.repo_owner,
+          repoName: job.repo_name,
+          installationId: job.installation_id,
+          githubAccountId: job.github_account_id ?? undefined,
+          githubRepositoryId: job.github_repository_id ?? undefined,
+          prNumber: member.pr_number,
+          prTitle: info.title,
+          prBody: info.body,
+          prHtmlUrl: info.htmlUrl,
+          prAuthor: info.author,
+          baseSha: member.base_sha,
+          headSha: member.head_sha,
+          baseRef: member.base_ref,
+          headRef: member.head_ref,
+          webhookDeliveryId: job.webhook_delivery_id ?? undefined,
+          webhookEvent: "stack_review",
+          reviewers: reviewerSpecs(config),
+          jobType: "pr_review",
+          dedupKey: freshDedupKey,
+        });
+        memberJobId = enqueued.job.id;
+        store.patchStackMember(member.id, { memberJobId, state: "reviewing" });
+        if (enqueued.created) {
+          store.log(jobId, `Reviewing stack member #${member.pr_number} as job ${memberJobId}`);
+          await runJob(deps, forge, memberJobId, signal);
+        } else {
+          store.log(
+            jobId,
+            `Stack member #${member.pr_number} reuses existing job ${memberJobId} (${enqueued.job.state})`,
+          );
+        }
+        outcome = await waitForJob(deps.store, memberJobId, jobId, signal);
+        if (outcome === "completed") {
+          // A completed review only counts while it still describes the live
+          // head: finishing at a since-moved SHA is re-pinned and retried
+          // like a staled member rather than carried into the summary.
+          const change = await provider.getChange(memberTarget(member.pr_number));
+          if (change.headSha === member.head_sha) break;
+          outcome = "stale";
+          store.log(
+            jobId,
+            `Stack member #${member.pr_number} completed at ${member.head_sha.slice(0, 8)} but head moved to ${change.headSha.slice(0, 8)}; re-pinning`,
+            "warn",
+          );
+        }
+        // A cancelled member was stopped on purpose (operator or pause) —
+        // record it and move on rather than resurrecting cancelled work.
+        if (outcome === "cancelled") break;
+        if (attempt < STACK_MEMBER_MAX_RETRIES) {
+          store.log(
+            jobId,
+            `Stack member #${member.pr_number} review ended ${outcome} (job ${memberJobId}); retry ${attempt + 1}/${STACK_MEMBER_MAX_RETRIES}`,
+            "warn",
+          );
+        }
       }
-      const outcome = await waitForJob(deps.store, memberJobId, jobId, signal);
       if (outcome !== "completed") {
         store.patchStackMember(member.id, { state: "failed" });
-        throw new Error(`stack member #${member.pr_number} review ended ${outcome} (job ${memberJobId})`);
+        const attempts = Math.min(attempt + 1, STACK_MEMBER_MAX_RETRIES + 1);
+        memberEscalations.push(
+          `#${member.pr_number} ended ${outcome}${memberJobId ? ` (job ${memberJobId})` : ""} after ${attempts} attempt(s) — review this PR manually`,
+        );
+        store.log(
+          jobId,
+          `Stack member #${member.pr_number} review did not complete after ${attempts} attempt(s): ${outcome}`,
+          "warn",
+        );
+        continue;
       }
       store.patchStackMember(member.id, { state: "done" });
+      memberJobs.push({ member, jobId: memberJobId! });
     }
 
     // Phase 3 — re-check every head before anything stack-level is published.
@@ -1170,7 +1248,8 @@ async function runStackJob(deps: PipelineDeps, forge: ForgeRegistry, jobId: numb
       .join(" → ");
     const summaryBody =
       `**Stack review "${stackId}"** — reviewed ${members.length} pull request(s) in order: ${ordered}.\n\n` +
-      `Member reviews: ${memberJobs.map((entry) => `#${entry.member.pr_number} (job ${entry.jobId})`).join(", ")}.\n\n` +
+      `Member reviews: ${memberJobs.map((entry) => `#${entry.member.pr_number} (job ${entry.jobId})`).join(", ") || "none"}.\n\n` +
+      (memberEscalations.length ? `**Needs human review** — ${memberEscalations.join("; ")}.\n\n` : "") +
       (cumulative.summary ? `${cumulative.summary}\n\n` : "") +
       `Cross-PR findings: ${cumulative.findings.length}.`;
     await postStackComment(deps, job, top.pr_number, summaryBody);
@@ -1189,6 +1268,7 @@ async function runStackJob(deps: PipelineDeps, forge: ForgeRegistry, jobId: numb
       `Stack review completed: ${members.length} member(s), ${cumulative.findings.length} cross-PR finding(s)`,
     );
   } catch (error) {
+    skipUnreachedStackMembers(store, jobId);
     if (store.isStale(jobId) || signal.aborted) {
       const cancelled = store.getJob(jobId)?.state === "cancelled";
       store.log(jobId, cancelled ? "Stack review cancelled" : "Stack review aborted or marked stale", "warn");

@@ -226,7 +226,7 @@ export function internalEscalationBadge(state: string | null | undefined): Label
 }
 
 /** Badge for a stack_review member row. Member states are a small subset of job
- * states — the stack runner only writes queued/reviewing/done/failed. */
+ * states — the stack runner only writes queued/reviewing/done/failed/skipped. */
 export function stackMemberStateBadge(state: string): LabeledState & { stateClass: string } {
   switch (state) {
     case "reviewing":
@@ -235,6 +235,8 @@ export function stackMemberStateBadge(state: string): LabeledState & { stateClas
       return { stateClass: "done", text: "Done", hint: "Member review completed", mark: "●" };
     case "failed":
       return { stateClass: "failed", text: "Failed", hint: "Member review did not complete", mark: "!" };
+    case "skipped":
+      return { stateClass: "cancelled", text: "Skipped", hint: "The run ended before this member was reached", mark: "–" };
     default:
       return { stateClass: "queued", text: "Queued", hint: "Waiting for earlier stack members", mark: "○" };
   }
