@@ -426,34 +426,27 @@ button, summary {
   animation: breathe 2.6s ease-in-out infinite;
 }
 
-/* Stack reviews read as a small pile: plum accent plus two card edges
-   peeking out below, so stack jobs stand apart from single-PR specimens. */
+/* Stack jobs keep the single card border every specimen uses; a faint
+   plum tint is the only card-level tell, with the strip below carrying it. */
 .specimen-stack {
-  border-left: 3px solid var(--plum);
   background: color-mix(in srgb, var(--plum-soft) 22%, var(--surface));
-  box-shadow:
-    var(--shadow),
-    0 5px 0 -2px var(--surface-2),
-    0 5px 0 -1px color-mix(in srgb, var(--plum) 55%, var(--line)),
-    0 9px 0 -4px var(--surface-2),
-    0 9px 0 -3px color-mix(in srgb, var(--plum) 30%, var(--line));
 }
+/* Kind chips borrow the .state badge shape (flat, small caps) in plum. */
 .kind-chip {
   display: inline-flex;
   align-items: center;
   gap: 0.3rem;
-  padding: 0.02rem 0.4rem;
+  padding: 0.08rem 0.45rem;
   border: 1px solid var(--plum);
-  border-radius: var(--radius);
-  color: var(--plum);
-  font-size: 0.68rem;
-  font-weight: 700;
-  letter-spacing: 0.08em;
+  background: var(--plum-soft);
+  color: var(--ink);
+  font-size: 0.75rem;
+  letter-spacing: 0.04em;
   text-transform: uppercase;
   vertical-align: middle;
   white-space: nowrap;
 }
-.kind-chip svg { width: 0.95em; height: 0.95em; display: block; }
+.kind-chip svg { width: 0.9em; height: 0.9em; display: block; color: var(--plum); }
 
 .specimen-head {
   display: flex;
