@@ -236,7 +236,7 @@ export function stackMemberStateBadge(state: string): LabeledState & { stateClas
     case "failed":
       return { stateClass: "failed", text: "Failed", hint: "Member review did not complete", mark: "!" };
     case "skipped":
-      return { stateClass: "cancelled", text: "Skipped", hint: "The run ended before this member was reached", mark: "–" };
+      return { stateClass: "cancelled", text: "Skipped", hint: "Not reviewed — the run ended early or the member was stopped", mark: "–" };
     default:
       return { stateClass: "queued", text: "Queued", hint: "Waiting for earlier stack members", mark: "○" };
   }
