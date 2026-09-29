@@ -236,6 +236,7 @@ export function effectiveConfigEntries(
   );
   row("Limits", "Job concurrency", "JOB_CONCURRENCY", String(config.jobConcurrency));
   row("Limits", "Reviewer retries", "OPENCODE_MAX_RETRIES", String(config.opencode.maxRetries));
+  row("Limits", "Stack token cap", "STACK_TOKEN_CAP", String(config.stackTokenCap));
 
   // --- Routing ---
   row("Routing", "Routing mode", "REVIEWER_ROUTING", config.routing.mode);

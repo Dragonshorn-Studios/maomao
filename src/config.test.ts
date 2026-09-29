@@ -80,6 +80,7 @@ describe("loadConfig", () => {
     expect(config.overrideAuthors).toEqual([]);
     expect(config.maxDiffBytes).toBe(1_048_576);
     expect(config.repoRateLimitPerWindow).toBe(6);
+    expect(config.stackTokenCap).toBe(10_000_000);
     expect(config.opencode.maxRetries).toBe(1);
     expect(config.issueCreationEnabled).toBe(false);
   });
@@ -96,6 +97,7 @@ describe("loadConfig", () => {
       MAX_DIFF_BYTES: "2048",
       REPO_RATE_LIMIT_PER_WINDOW: "3",
       REPO_RATE_WINDOW_MS: "1000",
+      STACK_TOKEN_CAP: "2500000",
       OPENCODE_MAX_RETRIES: "99",
     });
     expect(config.allowedGithubAccountIds).toEqual([1001, 2002]);
@@ -103,7 +105,14 @@ describe("loadConfig", () => {
     expect(config.maxDiffBytes).toBe(2048);
     expect(config.repoRateLimitPerWindow).toBe(3);
     expect(config.repoRateWindowMs).toBe(1000);
+    expect(config.stackTokenCap).toBe(2_500_000);
     expect(config.opencode.maxRetries).toBe(5);
+  });
+
+  it("clamps STACK_TOKEN_CAP at 0 (disabled) and falls back to 10M when unparsable (issue #136)", () => {
+    expect(loadConfig({ STACK_TOKEN_CAP: "0" }).stackTokenCap).toBe(0);
+    expect(loadConfig({ STACK_TOKEN_CAP: "-5" }).stackTokenCap).toBe(0);
+    expect(loadConfig({ STACK_TOKEN_CAP: "abc" }).stackTokenCap).toBe(10_000_000);
   });
 
   it("parses maintainer override logins case-insensitively", () => {

@@ -492,6 +492,8 @@ function migrate(db: SqliteDb): void {
 
     CREATE INDEX IF NOT EXISTS idx_profile_revisions_name ON profile_revisions(name, status);
     CREATE INDEX IF NOT EXISTS idx_prompt_revisions_role ON prompt_revisions(role_id, status);
+
+    CREATE INDEX IF NOT EXISTS idx_stack_run_members_member_job ON stack_run_members(member_job_id, state);
   `);
 
     ensureColumn(db, "jobs", "review_event", "TEXT");

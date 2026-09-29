@@ -1,6 +1,7 @@
 import type { Config } from "../config.js";
+import { TERMINAL_JOB_STATES } from "../config.js";
 import type { JobStore, JobRow, ReviewerRunRow, NewJobInput, StackMemberRow } from "./store.js";
-import { retiredMemberDedupKey } from "./store.js";
+import { coveredMemberOutcome, retiredMemberDedupKey } from "./store.js";
 import type { GithubPort } from "../github/client.js";
 import type { ForgePort } from "../forge/port.js";
 import { ForgeRegistry } from "../forge/registry.js";
@@ -1034,13 +1035,13 @@ const STACK_MEMBER_MAX_RETRIES = 2;
  */
 const STACK_MAX_MEMBERS = 10;
 
-/**
- * Whole-run token ceiling summed across member jobs (routing + specialist
- * runs + aggregation + escalations). Once recorded spend passes it, the same
- * middle-member downgrade applies and the cumulative pass is skipped; the
- * bottom and tip members always keep their normal mode.
- */
-const STACK_TOKEN_CAP = 400_000;
+// The second envelope limit is the whole-run token ceiling summed across
+// member jobs (routing + specialist runs + aggregation + escalations). Only
+// spend this run itself enqueued counts (issue #136): reusing a completed
+// same-head member review is free. Once the run's recorded spend passes
+// `config.stackTokenCap` (env STACK_TOKEN_CAP, default 10M, 0 disables) the
+// same middle-member downgrade applies and the cumulative pass is skipped;
+// the bottom and tip members always keep their normal mode.
 
 /**
  * Members the run never finished must not render QUEUED/REVIEWING forever on
@@ -1055,7 +1056,11 @@ function skipUnreachedStackMembers(store: JobStore, jobId: number): void {
       store.patchStackMember(member.id, { state: "skipped" });
     } else if (member.state === "reviewing") {
       const memberJob = member.member_job_id != null ? store.getJob(member.member_job_id) : null;
-      store.patchStackMember(member.id, { state: memberJob?.state === "completed" ? "done" : "skipped" });
+      // A member job still in flight keeps the member 'reviewing': on a dead
+      // stack, resolveStackMemberCoverage settles it when that job ends, so
+      // the rail reflects the review the PR actually received (issue #136).
+      if (memberJob && !TERMINAL_JOB_STATES.includes(memberJob.state)) continue;
+      store.patchStackMember(member.id, { state: coveredMemberOutcome(memberJob?.state) });
     }
   }
 }
@@ -1211,7 +1216,7 @@ async function runStackJob(deps: PipelineDeps, forge: ForgeRegistry, jobId: numb
     // burning the full specialist set again, unless the diff trips the
     // router's hard-risk families.
     store.setJobState(jobId, "reviewing");
-    const memberJobs: { member: (typeof members)[number]; jobId: number }[] = [];
+    const memberJobs: { member: (typeof members)[number]; jobId: number; covered?: boolean; coveredEnded?: string }[] = [];
     const memberEscalations: string[] = [];
     const memberSkips: string[] = [];
     let stackTokens = 0;
@@ -1219,17 +1224,26 @@ async function runStackJob(deps: PipelineDeps, forge: ForgeRegistry, jobId: numb
       const member = members[index]!;
       const info = meta.get(member.pr_number)!;
       // Envelope: the bottom and the tip always keep their normal mode. A
-      // middle member in an oversized stack — or after recorded member spend
-      // crosses STACK_TOKEN_CAP — is downgraded: verify when it has a prior
-      // pass to re-check, skipped-budget when it does not.
+      // middle member in an oversized stack — or after this run's recorded
+      // member spend crosses the token cap — is downgraded: verify when it
+      // has a prior pass to re-check, skipped-budget when it does not. A
+      // member whose review already completed at this exact head is reused
+      // for free (issue #136), so the envelope never downgrades it. Only
+      // 'completed' counts — awaiting a queued/in-flight row is not free.
       const edgeMember = index === 0 || index === members.length - 1;
-      const budgeted = !edgeMember && (members.length > STACK_MAX_MEMBERS || stackTokens > STACK_TOKEN_CAP);
+      const freeReuse =
+        !edgeMember &&
+        store.completedReviewAtHead(job.repo_full_name, member.pr_number, member.head_sha, scopeOf(job)) != null;
+      const budgeted =
+        !edgeMember &&
+        !freeReuse &&
+        (members.length > STACK_MAX_MEMBERS || (config.stackTokenCap > 0 && stackTokens > config.stackTokenCap));
       const reviewMode = await stackMemberReviewMode(deps, provider, job, member, info, budgeted);
       if (reviewMode === "skip") {
         const reason =
           members.length > STACK_MAX_MEMBERS
             ? `stack has ${members.length} members (max ${STACK_MAX_MEMBERS})`
-            : `stack token cap ${STACK_TOKEN_CAP} exceeded`;
+            : `stack token cap ${config.stackTokenCap} exceeded`;
         store.patchStackMember(member.id, { state: "skipped" });
         memberSkips.push(`#${member.pr_number}`);
         store.log(jobId, `Stack member #${member.pr_number} skipped-budget: ${reason}`, "warn");
@@ -1237,6 +1251,7 @@ async function runStackJob(deps: PipelineDeps, forge: ForgeRegistry, jobId: numb
       }
       let memberJobId: number | null = null;
       let outcome = "missing";
+      let covered = false;
       let attempt = 0;
       for (; attempt <= STACK_MEMBER_MAX_RETRIES; attempt++) {
         throwIfStale(store, jobId, signal);
@@ -1296,13 +1311,29 @@ async function runStackJob(deps: PipelineDeps, forge: ForgeRegistry, jobId: numb
         if (enqueued.created) {
           store.log(jobId, `Reviewing stack member #${member.pr_number} as job ${memberJobId}`);
           await runJob(deps, forge, memberJobId, signal);
+          outcome = await waitForJob(deps.store, memberJobId, jobId, signal);
+          // Run envelope (issue #136): only spend this run itself enqueued
+          // counts — a reused job's recorded tokens belong to the run that
+          // spent them. Counted once the attempt reaches a terminal state.
+          stackTokens += memberJobSpend(store, memberJobId).tokens;
+        } else if (enqueued.job.state === "queued") {
+          // Coverage already in flight: a queued member job can never start
+          // while this run holds the only queue worker, so awaiting it would
+          // deadlock the run. Leave the member 'reviewing' — the queued job
+          // publishes itself when a worker frees (issue #136).
+          store.log(
+            jobId,
+            `Stack member #${member.pr_number} covered by queued job ${memberJobId} — continuing without waiting`,
+          );
+          covered = true;
+          break;
         } else {
           store.log(
             jobId,
             `Stack member #${member.pr_number} reuses existing job ${memberJobId} (${enqueued.job.state})`,
           );
+          outcome = await waitForJob(deps.store, memberJobId, jobId, signal);
         }
-        outcome = await waitForJob(deps.store, memberJobId, jobId, signal);
         if (outcome === "completed") {
           // A completed review only counts while it still describes the live
           // head: finishing at a since-moved SHA is re-pinned and retried
@@ -1327,6 +1358,10 @@ async function runStackJob(deps: PipelineDeps, forge: ForgeRegistry, jobId: numb
           );
         }
       }
+      if (covered) {
+        memberJobs.push({ member, jobId: memberJobId!, covered: true });
+        continue;
+      }
       if (outcome !== "completed") {
         // Cancelled means someone stopped it on purpose; 'skipped' renders
         // that honestly on the member rail while the escalation still says
@@ -1345,7 +1380,6 @@ async function runStackJob(deps: PipelineDeps, forge: ForgeRegistry, jobId: numb
       }
       store.patchStackMember(member.id, { state: "done" });
       memberJobs.push({ member, jobId: memberJobId! });
-      stackTokens += memberJobSpend(store, memberJobId!).tokens;
     }
 
     // Phase 3 — re-check every head before anything stack-level is published.
@@ -1374,13 +1408,13 @@ async function runStackJob(deps: PipelineDeps, forge: ForgeRegistry, jobId: numb
     const cumulativeRun = store.listReviewerRuns(jobId).find((entry) => entry.role === "stack_cumulative");
     const top = members[members.length - 1]!;
     const sharedPaths = stackSharedPaths(members, diffs);
-    const overBudget = stackTokens > STACK_TOKEN_CAP;
+    const overBudget = config.stackTokenCap > 0 && stackTokens > config.stackTokenCap;
     let cumulative: ReviewerResult;
     let cumulativeNote = "";
     if (sharedPaths.length === 0 || overBudget) {
       cumulative = { schema_version: 1, reviewer: "stack_cumulative", verdict: "clean", summary: "", findings: [] };
       cumulativeNote = overBudget
-        ? `Cross-PR pass skipped — stack token cap ${STACK_TOKEN_CAP} exceeded (${stackTokens} tokens recorded across member reviews).`
+        ? `Cross-PR pass skipped — stack token cap ${config.stackTokenCap} exceeded (${stackTokens} tokens recorded across member reviews).`
         : "Cross-PR pass skipped — member diffs share no changed paths.";
       if (cumulativeRun) {
         store.patchReviewer(cumulativeRun.id, {
@@ -1427,6 +1461,40 @@ async function runStackJob(deps: PipelineDeps, forge: ForgeRegistry, jobId: numb
       cumulative = result;
     }
 
+    // Reconcile delegated coverage (issue #136): a queued member job that
+    // already reached a terminal state resolves the member — 'done' when it
+    // completed, 'skipped' when it died — while coverage still in flight
+    // stays 'reviewing'. Runs once before publishing (the summary labels
+    // still-live coverage "coverage already queued" and carries dead
+    // coverage's escalation) and again at completion, closing the window in
+    // between. Coverage settling after the run ends is picked up by
+    // store.resolveStackMemberCoverage.
+    const reconcileCoverage = (): string[] => {
+      const dead: string[] = [];
+      for (const entry of memberJobs) {
+        if (!entry.covered || entry.coveredEnded) continue;
+        const coveredState = store.getJob(entry.jobId)?.state;
+        if (!coveredState || !TERMINAL_JOB_STATES.includes(coveredState)) continue;
+        store.patchStackMember(entry.member.id, { state: coveredMemberOutcome(coveredState) });
+        if (coveredState === "completed") {
+          // Settled as a review — stop tagging it as in-flight coverage.
+          entry.covered = false;
+        } else {
+          entry.coveredEnded = coveredState;
+          dead.push(
+            `#${entry.member.pr_number}'s queued coverage ended ${coveredState} (job ${entry.jobId}) — review this PR manually`,
+          );
+          store.log(
+            jobId,
+            `Stack member #${entry.member.pr_number}'s queued coverage (job ${entry.jobId}) ended ${coveredState}`,
+            "warn",
+          );
+        }
+      }
+      return dead;
+    };
+    memberEscalations.push(...reconcileCoverage());
+
     // Phase 5 — publish the stack summary and each cross-PR finding as issue
     // comments on the top PR, naming every PR and SHA involved.
     store.setJobState(jobId, "publishing");
@@ -1437,9 +1505,11 @@ async function runStackJob(deps: PipelineDeps, forge: ForgeRegistry, jobId: numb
       `**Stack review "${stackId}"** — reviewed ${members.length} pull request(s) in order: ${ordered}.\n\n` +
       `Member reviews: ${
         memberJobs
+          .filter((entry) => !entry.coveredEnded)
           .map((entry) => {
             const mode = store.getJob(entry.jobId)?.review_mode;
-            return `#${entry.member.pr_number} (job ${entry.jobId}${mode === "verify" ? ", verify" : ""})`;
+            const tag = mode === "verify" ? ", verify" : entry.covered ? ", coverage already queued" : "";
+            return `#${entry.member.pr_number} (job ${entry.jobId}${tag})`;
           })
           .join(", ") || "none"
       }.\n\n` +
@@ -1448,7 +1518,7 @@ async function runStackJob(deps: PipelineDeps, forge: ForgeRegistry, jobId: numb
         ? `**Stack budget** — ${
             members.length > STACK_MAX_MEMBERS
               ? `stack has ${members.length} members (max ${STACK_MAX_MEMBERS})`
-              : `member reviews recorded ${stackTokens} tokens (cap ${STACK_TOKEN_CAP})`
+              : `member reviews recorded ${stackTokens} tokens (cap ${config.stackTokenCap})`
           }; middle members run verify-only.${memberSkips.length ? ` Skipped-budget (no prior pass to verify): ${memberSkips.join(", ")}.` : ""}\n\n`
         : "") +
       (cumulativeNote ? `${cumulativeNote}\n\n` : cumulative.summary ? `${cumulative.summary}\n\n` : "") +
@@ -1462,6 +1532,13 @@ async function runStackJob(deps: PipelineDeps, forge: ForgeRegistry, jobId: numb
         top.pr_number,
         `**Cross-PR finding (${finding.severity})** — ${finding.summary}\n\n${location}${finding.reason}\n\n_Stack "${stackId}" · members ${ordered}_`,
       );
+    }
+    // Coverage that settled between the publish-time reconcile and now
+    // resolves its member the same way — plus a follow-up comment so dead
+    // coverage still escalates to a human.
+    const lateCoverageDeaths = reconcileCoverage();
+    if (lateCoverageDeaths.length) {
+      await postStackComment(deps, job, top.pr_number, `**Needs human review** — ${lateCoverageDeaths.join("; ")}.`);
     }
     store.setJobState(jobId, "completed", { finished_at: nowIso() });
     store.log(

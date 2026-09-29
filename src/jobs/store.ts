@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type { SqliteDb } from "../db.js";
 import type { CancelReason, JobState, ReviewerState } from "../config.js";
-import { JOBS_PAGE_SIZE_DEFAULT, JOBS_PAGE_SIZE_MAX, LIVE_JOB_STATES } from "../config.js";
+import { JOBS_PAGE_SIZE_DEFAULT, JOBS_PAGE_SIZE_MAX, LIVE_JOB_STATES, TERMINAL_JOB_STATES } from "../config.js";
 import type { ForgeScope, WebhookDeliveryContext } from "../forge/types.js";
 import { IGNORED_RESULT_PREFIX, normalizeScope } from "../forge/types.js";
 import type { FindingRow, FindingStatus } from "../findings/types.js";
@@ -222,6 +222,11 @@ export interface StackMemberRow {
   state: string;
 }
 
+/** Member-rail resolution for delegated coverage: the covering job's outcome is the member's. */
+export function coveredMemberOutcome(jobState: string | undefined): "done" | "skipped" {
+  return jobState === "completed" ? "done" : "skipped";
+}
+
 export interface NewJobInput {
   repoFullName: string;
   repoOwner: string;
@@ -316,6 +321,15 @@ const ACTIVE_STATES_SQL = ACTIVE_JOB_STATES.map((state) => `'${state}'`).join(",
 // Claimed-to-be-running states only (no 'queued'): the stack enqueue stales an
 // in-flight run on the same membership key so its abort propagates (issue #131).
 const LIVE_STATES_SQL = LIVE_JOB_STATES.map((state) => `'${state}'`).join(", ");
+
+// Terminal states, derived from the same constant the pipeline reconciles on.
+const TERMINAL_STATES_SQL = TERMINAL_JOB_STATES.map((state) => `'${state}'`).join(", ");
+
+// The non-stack dedup slot's WHERE clause — enqueue's exact-match lookup and
+// completedReviewAtHead must agree on these coordinates or the free-reuse
+// exemption drifts from what dedup actually lands on (issue #136).
+const NON_STACK_DEDUP_PREDICATE =
+  "provider = ? AND provider_instance = ? AND repo_full_name = ? AND pr_number = ? AND head_sha = ? AND job_type = ? AND dedup_key = ?";
 
 const TERMINAL_SKIP_REQUEUE: JobState[] = [
   "completed",
@@ -470,6 +484,7 @@ export class JobStore {
           )
           .all(createdAt, createdAt, scope.provider, scope.instance, input.repoFullName, input.prNumber, input.headSha, jobType, dedupKey) as { id: number }[];
         staleJobIds.push(...stale.map((row) => row.id));
+        for (const row of stale) this.resolveStackMemberCoverage(row.id, "stale");
       }
 
       const existing = this.db
@@ -479,7 +494,7 @@ export class JobStore {
               // anything else gets a fresh row on the same key.
               `SELECT * FROM jobs WHERE provider = ? AND provider_instance = ? AND repo_full_name = ?
                AND job_type = 'stack_review' AND dedup_key = ? AND state = 'queued'`
-            : `SELECT * FROM jobs WHERE provider = ? AND provider_instance = ? AND repo_full_name = ? AND pr_number = ? AND head_sha = ? AND job_type = ? AND dedup_key = ?`,
+            : `SELECT * FROM jobs WHERE ${NON_STACK_DEDUP_PREDICATE}`,
         )
         .get(
           ...(jobType === "stack_review"
@@ -991,6 +1006,62 @@ export class JobStore {
   }
 
   /**
+   * A completed pr_review at exactly `headSha` on the shared '' dedup slot —
+   * the only same-head row a stack member can reuse for free (issue #136):
+   * awaiting it is instant and adds no spend to this run's envelope. Queued
+   * or in-flight rows don't qualify — waiting on them is not free (a queued
+   * row may never start while the stack holds the only queue worker). The
+   * predicate is enqueue's own dedup coordinates, bound to the member shape
+   * (job_type 'pr_review', dedup_key '') so it cannot drift from dedup.
+   */
+  completedReviewAtHead(
+    repoFullName: string,
+    prNumber: number,
+    headSha: string,
+    scope?: Partial<ForgeScope>,
+  ): JobRow | undefined {
+    const resolved = normalizeScope(scope);
+    return this.db
+      .prepare(`SELECT * FROM jobs WHERE ${NON_STACK_DEDUP_PREDICATE} AND state = 'completed' LIMIT 1`)
+      .get(resolved.provider, resolved.instance, repoFullName, prNumber, headSha, "pr_review", "") as JobRow | undefined;
+  }
+
+  /**
+   * A member job that reached a terminal state resolves delegated coverage on
+   * finished stack runs (issue #136): 'reviewing' member rows on a dead stack
+   * can only be queued-coverage delegations — the member job's outcome is
+   * theirs ('done' when it completed, 'skipped' otherwise). Members of live
+   * runs are untouched; the run's own retry/reconcile logic owns them.
+   */
+  resolveStackMemberCoverage(jobId: number, jobState: JobState): void {
+    if (!TERMINAL_JOB_STATES.includes(jobState)) return;
+    const rows = this.db
+      .prepare(
+        `SELECT id, job_id, pr_number FROM stack_run_members
+         WHERE member_job_id = ? AND state = 'reviewing'
+           AND job_id IN (SELECT id FROM jobs WHERE state IN (${TERMINAL_STATES_SQL}))`,
+      )
+      .all(jobId) as { id: number; job_id: number; pr_number: number }[];
+    if (!rows.length) return;
+    this.db
+      .prepare(
+        `UPDATE stack_run_members SET state = ?
+         WHERE member_job_id = ? AND state = 'reviewing'
+           AND job_id IN (SELECT id FROM jobs WHERE state IN (${TERMINAL_STATES_SQL}))`,
+      )
+      .run(coveredMemberOutcome(jobState), jobId);
+    // The rail flips but no summary will be posted again — leave a visible
+    // trace on the stack job's own log for operators.
+    for (const row of rows) {
+      this.log(
+        row.job_id,
+        `Stack member #${row.pr_number}'s queued coverage (job ${jobId}) ended ${jobState}`,
+        "warn",
+      );
+    }
+  }
+
+  /**
    * Re-pin a still-queued stack_review job after a mid/tip push that kept the
    * membership: the row's top/bottom SHAs and the member snapshot move to the
    * new heads in place — no new stack-job row (issue #131). Returns false when
@@ -1210,7 +1281,7 @@ export class JobStore {
     const startedAt = extra.started_at ?? job.started_at ?? (state !== "queued" ? updatedAt : null);
     const finishedAt =
       extra.finished_at ??
-      (["completed", "failed", "stale", "cancelled"].includes(state) ? (job.finished_at ?? updatedAt) : job.finished_at);
+      (TERMINAL_JOB_STATES.includes(state) ? (job.finished_at ?? updatedAt) : job.finished_at);
     const fields: Record<string, unknown> = {
       state,
       started_at: startedAt,
@@ -1225,6 +1296,10 @@ export class JobStore {
     const assignments = Object.keys(fields).map((column) => `${column} = ?`);
     const values = Object.keys(fields).map((column) => fields[column]);
     this.db.prepare(`UPDATE jobs SET ${assignments.join(", ")} WHERE id = ?`).run(...values, id);
+    // Also settles delegated stack-member coverage: a covered member on a
+    // finished run takes this job's outcome. No-ops for members of live
+    // runs — the stack's own retry/reconcile logic owns those rows.
+    this.resolveStackMemberCoverage(id, state);
     publish({ type: "job", jobId: id });
     publish({ type: "jobs" });
   }
@@ -1290,6 +1365,7 @@ export class JobStore {
          RETURNING id`,
       )
       .all(...values) as { id: number }[];
+    for (const row of rows) this.resolveStackMemberCoverage(row.id, "cancelled");
     return rows.map((row) => row.id);
   }
 
