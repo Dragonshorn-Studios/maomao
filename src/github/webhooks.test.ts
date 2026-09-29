@@ -694,6 +694,100 @@ describe("webhook handling", () => {
     expect(denied.body.reason).toMatch(/not authorized/i);
     expect(store.listJobs(10)).toHaveLength(1);
   });
+
+  it("refuses @maomao review on merged and draft pull requests", async () => {
+    const secret = "s3cret";
+    const config = loadConfig({
+      GITHUB_WEBHOOK_SECRET: secret,
+      GITHUB_APP_ID: "1",
+      GITHUB_APP_PRIVATE_KEY: "k",
+      REVIEWER_ROUTING: "fixed",
+      REVIEWER_ROLES: "correctness",
+      POISON_ALERT_POLICY: "manual",
+    });
+    const store = new JobStore(openDb(":memory:"));
+    store.markPullMerged("acme/widgets", 42, "merged-earlier");
+
+    const { github, comments } = stackGithub({ pulls: { 42: resolvedStackPull(42) } });
+    const mergedBody = JSON.stringify(
+      commentPayload({ comment: { ...commentPayload().comment, body: "@maomao review" } }),
+    );
+    const merged = await handleGithubWebhook({
+      config,
+      store,
+      github,
+      request: { event: "issue_comment", deliveryId: "r5", signature: sign(secret, mergedBody), rawBody: mergedBody },
+    });
+    expect(merged.body.reason).toMatch(/merged/i);
+    expect(merged.body.ignored).toBe(true);
+    expect(store.listJobs(10)).toHaveLength(0);
+    expect(comments.at(-1)?.body).toMatch(/already merged/i);
+
+    const draftBody = JSON.stringify(
+      commentPayload({ comment: { ...commentPayload().comment, id: 9003, body: "@maomao review" } }),
+    );
+    const draftStore = new JobStore(openDb(":memory:"));
+    const { github: draftGithub, comments: draftComments } = stackGithub({
+      pulls: { 42: resolvedStackPull(42, { draft: true }) },
+    });
+    const draft = await handleGithubWebhook({
+      config,
+      store: draftStore,
+      github: draftGithub,
+      request: { event: "issue_comment", deliveryId: "r6", signature: sign(secret, draftBody), rawBody: draftBody },
+    });
+    expect(draft.body.reason).toMatch(/draft/i);
+    expect(draftStore.listJobs(10)).toHaveLength(0);
+    expect(draftComments.at(-1)?.body).toMatch(/draft/i);
+  });
+
+  it("rejects @maomao review for an unauthorized target and an unresolvable pull", async () => {
+    const secret = "s3cret";
+    const config = loadConfig({
+      GITHUB_WEBHOOK_SECRET: secret,
+      GITHUB_APP_ID: "1",
+      GITHUB_APP_PRIVATE_KEY: "k",
+      REVIEWER_ROUTING: "fixed",
+      REVIEWER_ROLES: "correctness",
+      POISON_ALERT_POLICY: "manual",
+      ALLOWED_GITHUB_ACCOUNT_IDS: "9999",
+    });
+    const store = new JobStore(openDb(":memory:"));
+    const { github } = stackGithub({ pulls: { 42: resolvedStackPull(42) } });
+    const blockedBody = JSON.stringify(
+      commentPayload({ comment: { ...commentPayload().comment, body: "@maomao review" } }),
+    );
+    const blocked = await handleGithubWebhook({
+      config,
+      store,
+      github,
+      request: { event: "issue_comment", deliveryId: "r7", signature: sign(secret, blockedBody), rawBody: blockedBody },
+    });
+    expect(blocked.body.ignored).toBe(true);
+    expect(blocked.body.reason).toMatch(/unauthorized/i);
+    expect(store.listJobs(10)).toHaveLength(0);
+
+    // getPull throws → the command replies with the failure, no job created.
+    const openStore = new JobStore(openDb(":memory:"));
+    const { github: emptyGithub, comments } = stackGithub({ pulls: {} });
+    const missingBody = JSON.stringify(
+      commentPayload({ comment: { ...commentPayload().comment, id: 9004, body: "@maomao review" } }),
+    );
+    const missing = await handleGithubWebhook({
+      config: loadConfig({
+        GITHUB_WEBHOOK_SECRET: secret,
+        GITHUB_APP_ID: "1",
+        GITHUB_APP_PRIVATE_KEY: "k",
+        POISON_ALERT_POLICY: "manual",
+      }),
+      store: openStore,
+      github: emptyGithub,
+      request: { event: "issue_comment", deliveryId: "r8", signature: sign(secret, missingBody), rawBody: missingBody },
+    });
+    expect(missing.body.error).toMatch(/pull unresolved/i);
+    expect(openStore.listJobs(10)).toHaveLength(0);
+    expect(comments.at(-1)?.body).toMatch(/does not resolve/i);
+  });
 });
 
 function githubForCommands(overrides: {
