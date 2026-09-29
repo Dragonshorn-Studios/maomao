@@ -123,6 +123,8 @@ export interface JobRow {
   escalation_id: string | null;
   poison_alert_policy: string | null;
   manual_escalate_requested: number | null;
+  /** Bumped by retryFailedReviewers — discriminates terminal summary lines per attempt. */
+  retry_count: number;
 }
 
 export interface ReviewerRunRow {
@@ -1527,6 +1529,7 @@ export class JobStore {
         .prepare(
           `UPDATE jobs SET
              state = 'queued', failure_reason = NULL, started_at = NULL, finished_at = NULL,
+             retry_count = retry_count + 1,
              aggregator_state = 'queued', aggregator_started_at = NULL, aggregator_finished_at = NULL,
              aggregator_raw = NULL, aggregator_normalized = NULL, aggregator_duration_ms = NULL,
              aggregator_prompt_tokens = NULL, aggregator_completion_tokens = NULL, aggregator_cost = NULL,

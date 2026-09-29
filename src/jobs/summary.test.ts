@@ -104,6 +104,20 @@ describe("jobSpend", () => {
     const spend = jobSpend(store.getJob(jobId), []);
     expect(spend.totalTokens).toBe(10);
   });
+
+  it("sums aggregator components including reasoning and cache tokens", () => {
+    const store = makeStore();
+    const jobId = seedJob(store);
+    store.patchJob(jobId, {
+      aggregator_prompt_tokens: 10,
+      aggregator_completion_tokens: 4,
+      aggregator_reasoning_tokens: 3,
+      aggregator_cache_read_tokens: 2,
+      aggregator_cache_write_tokens: 1,
+      aggregator_total_tokens: null,
+    });
+    expect(jobSpend(store.getJob(jobId), []).totalTokens).toBe(20);
+  });
 });
 
 describe("buildJobSummary", () => {
@@ -122,6 +136,7 @@ describe("buildJobSummary", () => {
       state: "completed",
       head_sha: "deadbeef01",
     });
+    expect(typeof payload.duration_ms).toBe("number");
     expect(payload.duration_ms).toBeGreaterThanOrEqual(0);
     expect(Object.keys(payload).sort()).toEqual(
       [
@@ -141,9 +156,28 @@ describe("buildJobSummary", () => {
         "head_sha",
         "finished_at",
         "usage_complete",
+        "attempt",
       ].sort(),
     );
     expect(payload.usage_complete).toBe(true);
+    expect(payload.attempt).toBe(1);
+  });
+
+  it("reports null duration_ms for a job with no finished_at", () => {
+    const store = makeStore();
+    const jobId = seedJob(store);
+    const payload = buildJobSummary(store.getJob(jobId)!, []);
+    expect(payload.finished_at).toBeNull();
+    expect(payload.duration_ms).toBeNull();
+  });
+
+  it("marks usage_complete false when a reviewer run reports incomplete usage", () => {
+    const store = makeStore();
+    const jobId = seedJob(store);
+    const run = store.listReviewerRuns(jobId)[0];
+    store.patchReviewer(run.id, { usage_complete: 0 });
+    const payload = buildJobSummary(store.getJob(jobId)!, store.listReviewerRuns(jobId));
+    expect(payload.usage_complete).toBe(false);
   });
 
   it("marks usage_complete false when a stage reports incomplete usage", () => {
@@ -250,6 +284,51 @@ describe("emitJobSummary", () => {
     expect(payloadLines()[0].duration_ms).toBe(
       Date.parse(job.finished_at!) - Date.parse(job.created_at),
     );
+  });
+
+  it("emits one line per attempt with an incrementing discriminator on retry", () => {
+    setJobSummarySink(capture);
+    const store = makeStore();
+    const jobId = seedJob(store);
+    const run = store.listReviewerRuns(jobId)[0];
+    store.patchReviewer(run.id, { state: "failed" });
+    store.setJobState(jobId, "failed");
+    expect(store.retryFailedReviewers(jobId).ok).toBe(true);
+    store.setJobState(jobId, "completed");
+    expect(payloadLines().map((p) => [p.job_id, p.state, p.attempt])).toEqual([
+      [jobId, "failed", 1],
+      [jobId, "completed", 2],
+    ]);
+  });
+
+  it("emits partialUsage when a live stack job is superseded by a new push", () => {
+    setJobSummarySink(capture);
+    const store = makeStore();
+    const first = seedStackJob(store, "vec1");
+    store.setJobState(first, "reviewing");
+    seedStackJob(store, "vec1"); // same dedup key — supersedes the live run
+    expect(store.getJob(first)!.state).toBe("stale");
+    expect(payloadLines()).toEqual([
+      expect.objectContaining({ job_id: first, state: "stale", usage_complete: false }),
+    ]);
+  });
+
+  it("marks usage incomplete on a direct live->stale transition", () => {
+    setJobSummarySink(capture);
+    const store = makeStore();
+    const jobId = seedJob(store);
+    store.setJobState(jobId, "reviewing");
+    store.setJobState(jobId, "stale");
+    expect(payloadLines()).toEqual([
+      expect.objectContaining({ job_id: jobId, state: "stale", usage_complete: false }),
+    ]);
+  });
+
+  it("no-ops for a missing job id", () => {
+    setJobSummarySink(capture);
+    const store = makeStore();
+    expect(() => emitJobSummary(store, 999999, {} as NodeJS.ProcessEnv)).not.toThrow();
+    expect(lines).toHaveLength(0);
   });
 
   it("a throwing sink does not break the job transition", () => {
@@ -364,6 +443,16 @@ describe("emitJobSummary", () => {
     expect(logged).not.toContain("user:pass");
   });
 
+  it("treats a whitespace-only OPENOBSERVE_LOGS_URL as unset", () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+    setJobSummarySink(capture);
+    const store = makeStore();
+    emitJobSummary(store, seedJob(store), { OPENOBSERVE_LOGS_URL: "   " } as NodeJS.ProcessEnv);
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(lines).toHaveLength(1);
+  });
+
   it("uses Basic auth when OPENOBSERVE_LOGS_USER is set", async () => {
     const fetchMock = vi.fn().mockResolvedValue({ ok: true, status: 200 });
     vi.stubGlobal("fetch", fetchMock);
@@ -379,6 +468,22 @@ describe("emitJobSummary", () => {
     const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
     expect((init.headers as Record<string, string>).authorization).toBe(
       `Basic ${Buffer.from("ingest-user:ingest-pass").toString("base64")}`,
+    );
+  });
+
+  it("sends Basic auth with an empty password when only USER is set", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true, status: 200 });
+    vi.stubGlobal("fetch", fetchMock);
+    setJobSummarySink(capture);
+    const store = makeStore();
+    emitJobSummary(store, seedJob(store), {
+      OPENOBSERVE_LOGS_URL: "https://oo.example.com/api/default/maomao/_json",
+      OPENOBSERVE_LOGS_USER: "ingest-user",
+    } as NodeJS.ProcessEnv);
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
+    const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect((init.headers as Record<string, string>).authorization).toBe(
+      `Basic ${Buffer.from("ingest-user:").toString("base64")}`,
     );
   });
 

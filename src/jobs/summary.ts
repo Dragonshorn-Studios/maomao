@@ -92,6 +92,12 @@ export interface JobSummaryPayload {
    * its usage yet. Consumers should treat false as "minimum, not total".
    */
   usage_complete: boolean;
+  /**
+   * 1 for the first run; incremented per retryFailedReviewers. A retried job
+   * legitimately emits one line per attempt — dedup on (job_id, attempt), not
+   * job_id alone, or retries look like double-counted spend.
+   */
+  attempt: number;
 }
 
 export interface JobSummaryOptions {
@@ -127,6 +133,7 @@ export function buildJobSummary(job: JobRow, runs: ReviewerRunRow[], opts?: JobS
     head_sha: job.head_sha,
     finished_at: job.finished_at,
     usage_complete: opts?.partialUsage === true ? false : reported.every((v) => v == null || v === 1),
+    attempt: (job.retry_count ?? 0) + 1,
   };
 }
 
