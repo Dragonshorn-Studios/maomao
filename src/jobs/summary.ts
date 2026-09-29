@@ -85,12 +85,30 @@ export interface JobSummaryPayload {
   cost_usd: number | null;
   head_sha: string;
   finished_at: string | null;
+  /**
+   * Same convention as the UI's usage completeness: false when the line is a
+   * floor — either a reported stage flagged its usage incomplete, or the job
+   * was staled/cancelled while still running and the run may not have unwound
+   * its usage yet. Consumers should treat false as "minimum, not total".
+   */
+  usage_complete: boolean;
 }
 
-export function buildJobSummary(job: JobRow, runs: ReviewerRunRow[]): JobSummaryPayload {
+export interface JobSummaryOptions {
+  /** The job was claimed-and-running when it went terminal — usage fields are a snapshot, not a final tally. */
+  partialUsage?: boolean;
+}
+
+export function buildJobSummary(job: JobRow, runs: ReviewerRunRow[], opts?: JobSummaryOptions): JobSummaryPayload {
   const spend = jobSpend(job, runs);
   const started = Date.parse(job.started_at ?? job.created_at);
   const finished = Date.parse(job.finished_at ?? "");
+  const reported = [
+    job.aggregator_usage_complete,
+    job.routing_usage_complete,
+    job.internal_escalation_usage_complete,
+    ...runs.map((run) => run.usage_complete),
+  ];
   return {
     event: "maomao.job_summary",
     job_id: job.id,
@@ -108,6 +126,7 @@ export function buildJobSummary(job: JobRow, runs: ReviewerRunRow[]): JobSummary
     cost_usd: spend.costUsd,
     head_sha: job.head_sha,
     finished_at: job.finished_at,
+    usage_complete: opts?.partialUsage === true ? false : reported.every((v) => v == null || v === 1),
   };
 }
 
@@ -118,6 +137,35 @@ export function setJobSummarySink(sink: (line: string) => void): (line: string) 
   const previous = stdoutSink;
   stdoutSink = sink;
   return previous;
+}
+
+// Ingest POSTs are serialized so a bulk terminal sweep (e.g. the global-pause
+// cancel flipping hundreds of jobs at once) cannot fan out one unbounded
+// socket per job — at most one request is in flight at a time.
+let postChain: Promise<void> = Promise.resolve();
+
+function queueIngestPost(url: string, headers: Record<string, string>, line: string, jobId: number): void {
+  postChain = postChain.then(async () => {
+    try {
+      const response = await fetch(url, {
+        method: "POST",
+        headers,
+        body: line,
+        // Bounded so a hung ingest endpoint cannot linger forever; there is no
+        // retry — the stdout line above remains the durable copy.
+        signal: AbortSignal.timeout(10_000),
+      });
+      if (!response.ok) {
+        console.error(`job-summary: OpenObserve POST for job ${jobId} returned ${response.status}`);
+      }
+    } catch (error) {
+      // URL parse/construction errors echo the request URL verbatim — strip it
+      // so credentials embedded in OPENOBSERVE_LOGS_URL never reach stderr.
+      const raw = error instanceof Error ? error.message : String(error);
+      const safe = raw.split(url).join("<openobserve-url>");
+      console.error(`job-summary: OpenObserve POST failed for job ${jobId}: ${safe}`);
+    }
+  });
 }
 
 function ingestHeaders(env: NodeJS.ProcessEnv): Record<string, string> {
@@ -142,32 +190,16 @@ export function emitJobSummary(
   store: Pick<JobStore, "getJob" | "listReviewerRuns">,
   jobId: number,
   env: NodeJS.ProcessEnv = process.env,
+  opts?: JobSummaryOptions,
 ): void {
   try {
     const job = store.getJob(jobId);
     if (!job) return;
-    const line = JSON.stringify(buildJobSummary(job, store.listReviewerRuns(jobId)));
+    const line = JSON.stringify(buildJobSummary(job, store.listReviewerRuns(jobId), opts));
     stdoutSink(line);
     const url = env.OPENOBSERVE_LOGS_URL?.trim();
     if (!url) return;
-    // Bounded so a hung ingest endpoint cannot linger forever; there is no
-    // retry — the stdout line above remains the durable copy.
-    void fetch(url, {
-      method: "POST",
-      headers: ingestHeaders(env),
-      body: line,
-      signal: AbortSignal.timeout(10_000),
-    })
-      .then((response) => {
-        if (!response.ok) {
-          console.error(`job-summary: OpenObserve POST for job ${jobId} returned ${response.status}`);
-        }
-      })
-      .catch((error: unknown) => {
-        console.error(
-          `job-summary: OpenObserve POST failed for job ${jobId}: ${error instanceof Error ? error.message : String(error)}`,
-        );
-      });
+    queueIngestPost(url, ingestHeaders(env), line, jobId);
   } catch (error) {
     console.error(
       `job-summary: emission failed for job ${jobId}: ${error instanceof Error ? error.message : String(error)}`,

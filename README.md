@@ -326,7 +326,7 @@ Maomao records OpenCode `step_finish` usage across every unique agent step (incl
 
 ## Job summaries and OpenObserve
 
-When a job reaches a terminal state (`completed`, `failed`, `stale`, `cancelled`), Maomao writes **one structured JSON line to stdout** — picked up by Docker/Coolify log drivers — with usage metadata only: `job_id`, `job_type`, `repo`, `pr`, `provider`, `state`, `duration_ms`, `prompt_tokens`/`completion_tokens`/`total_tokens`, `cost_usd`, `head_sha`, and `finished_at`. The payload never contains secrets, webhook URLs, diffs, or review bodies.
+When a job reaches a terminal state (`completed`, `failed`, `stale`, `cancelled`), Maomao writes **one structured JSON line to stdout** — picked up by Docker/Coolify log drivers — with usage metadata only: `job_id`, `job_type`, `repo`, `pr`, `provider`, `state`, `duration_ms`, `prompt_tokens`/`completion_tokens`/`total_tokens`, `cost_usd`, `head_sha`, `finished_at`, and `usage_complete` (false when the job was staled/cancelled mid-run or a stage flagged incomplete usage — treat figures as a minimum, not a total). The payload never contains secrets, webhook URLs, diffs, or review bodies.
 
 The same line can also be POSTed directly to an OpenObserve ingest endpoint:
 

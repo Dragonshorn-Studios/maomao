@@ -60,6 +60,7 @@ afterEach(() => {
   lines.length = 0;
   setJobSummarySink((line) => process.stdout.write(`${line}\n`));
   vi.unstubAllGlobals();
+  vi.unstubAllEnvs();
   vi.restoreAllMocks();
 });
 
@@ -90,6 +91,18 @@ describe("jobSpend", () => {
   it("reports null cost when nothing was measured", () => {
     const spend = jobSpend(null, []);
     expect(spend).toEqual({ promptTokens: 0, completionTokens: 0, totalTokens: 0, costUsd: null });
+  });
+
+  it("sums component tokens when a stage's total is unset", () => {
+    const store = makeStore();
+    const jobId = seedJob(store);
+    store.patchJob(jobId, {
+      routing_prompt_tokens: 4,
+      routing_completion_tokens: 6,
+      routing_total_tokens: null,
+    });
+    const spend = jobSpend(store.getJob(jobId), []);
+    expect(spend.totalTokens).toBe(10);
   });
 });
 
@@ -127,8 +140,18 @@ describe("buildJobSummary", () => {
         "cost_usd",
         "head_sha",
         "finished_at",
+        "usage_complete",
       ].sort(),
     );
+    expect(payload.usage_complete).toBe(true);
+  });
+
+  it("marks usage_complete false when a stage reports incomplete usage", () => {
+    const store = makeStore();
+    const jobId = seedJob(store);
+    store.patchJob(jobId, { aggregator_usage_complete: 0 });
+    const payload = buildJobSummary(store.getJob(jobId)!, []);
+    expect(payload.usage_complete).toBe(false);
   });
 
   it("emits pr null for jobs without a pull request", () => {
@@ -183,16 +206,75 @@ describe("emitJobSummary", () => {
     expect(payloadLines().map((p) => `${p.job_id}:${p.state}`)).toEqual([`${queued}:stale`]);
   });
 
+  it("emits once for a completed job relabeled stale by a later push", () => {
+    setJobSummarySink(capture);
+    const store = makeStore();
+    const done = seedJob(store, 4, "oldsha");
+    store.setJobState(done, "completed");
+    seedJob(store, 4, "newsha"); // head-move sweep relabels completed -> stale
+    expect(store.getJob(done)!.state).toBe("stale");
+    expect(payloadLines().map((p) => `${p.job_id}:${p.state}`)).toEqual([`${done}:completed`]);
+  });
+
+  it("does not re-emit for already-terminal jobs relabeled by staleOpenStackJobs", () => {
+    setJobSummarySink(capture);
+    const store = makeStore();
+    const done = seedStackJob(store, "vec1");
+    store.setJobState(done, "completed");
+    const staled = store.staleOpenStackJobs("acme/widgets", "u1", "stack:u1@vec2");
+    expect(staled).toEqual([done]);
+    expect(payloadLines().map((p) => `${p.job_id}:${p.state}`)).toEqual([`${done}:completed`]);
+  });
+
+  it("marks usage incomplete when a live job is cancelled, complete for a queued one", () => {
+    setJobSummarySink(capture);
+    const store = makeStore();
+    const live = seedJob(store, 4, "sha1");
+    store.setJobState(live, "routing");
+    const queued = seedJob(store, 5, "sha2");
+    store.cancelJobs({ repoFullName: "acme/widgets", prNumber: 4 }, "manual_cancel", null);
+    store.cancelJobs({ repoFullName: "acme/widgets", prNumber: 5 }, "manual_cancel", null);
+    expect(payloadLines()).toEqual([
+      expect.objectContaining({ job_id: live, state: "cancelled", usage_complete: false }),
+      expect.objectContaining({ job_id: queued, state: "cancelled", usage_complete: true }),
+    ]);
+  });
+
+  it("measures duration_ms from created_at for jobs that never started", () => {
+    setJobSummarySink(capture);
+    const store = makeStore();
+    const jobId = seedJob(store);
+    store.cancelJobs({ jobId }, "manual_cancel", null);
+    const job = store.getJob(jobId)!;
+    expect(job.started_at).toBeNull();
+    expect(payloadLines()[0].duration_ms).toBe(
+      Date.parse(job.finished_at!) - Date.parse(job.created_at),
+    );
+  });
+
+  it("a throwing sink does not break the job transition", () => {
+    const err = vi.spyOn(console, "error").mockImplementation(() => {});
+    setJobSummarySink(() => {
+      throw new Error("stdout exploded");
+    });
+    const store = makeStore();
+    const jobId = seedJob(store);
+    expect(() => store.setJobState(jobId, "completed")).not.toThrow();
+    expect(store.getJob(jobId)!.state).toBe("completed");
+    expect(err).toHaveBeenCalled();
+  });
+
   it("POSTs the payload to OPENOBSERVE_LOGS_URL when set", async () => {
     const fetchMock = vi.fn().mockResolvedValue({ ok: true, status: 200 });
     vi.stubGlobal("fetch", fetchMock);
+    setJobSummarySink(capture);
     const store = makeStore();
     const jobId = seedJob(store);
     emitJobSummary(store, jobId, {
       OPENOBSERVE_LOGS_URL: "https://oo.example.com/api/default/maomao/_json",
       OPENOBSERVE_LOGS_TOKEN: "secret-token",
     } as NodeJS.ProcessEnv);
-    expect(fetchMock).toHaveBeenCalledTimes(1);
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
     const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
     expect(url).toBe("https://oo.example.com/api/default/maomao/_json");
     expect(init.method).toBe("POST");
@@ -202,9 +284,90 @@ describe("emitJobSummary", () => {
     expect(JSON.stringify(body)).not.toContain("secret-token");
   });
 
-  it("uses Basic auth when OPENOBSERVE_LOGS_USER is set", () => {
+  it("prefers TOKEN over user/password and sends no auth header when neither is set", async () => {
     const fetchMock = vi.fn().mockResolvedValue({ ok: true, status: 200 });
     vi.stubGlobal("fetch", fetchMock);
+    setJobSummarySink(capture);
+    const store = makeStore();
+    const url = "https://oo.example.com/api/default/maomao/_json";
+    emitJobSummary(store, seedJob(store, 4), {
+      OPENOBSERVE_LOGS_URL: url,
+      OPENOBSERVE_LOGS_TOKEN: "tok",
+      OPENOBSERVE_LOGS_USER: "u",
+      OPENOBSERVE_LOGS_PASSWORD: "p",
+    } as NodeJS.ProcessEnv);
+    emitJobSummary(store, seedJob(store, 5), { OPENOBSERVE_LOGS_URL: url } as NodeJS.ProcessEnv);
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
+    const headers = (call: number) =>
+      (fetchMock.mock.calls[call][1] as RequestInit).headers as Record<string, string>;
+    expect(headers(0).authorization).toBe("Bearer tok");
+    expect(headers(1).authorization).toBeUndefined();
+  });
+
+  it("reads ingest config from process.env when driven through the store", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true, status: 200 });
+    vi.stubGlobal("fetch", fetchMock);
+    vi.stubEnv("OPENOBSERVE_LOGS_URL", "https://oo.example.com/api/default/maomao/_json");
+    setJobSummarySink(capture);
+    const store = makeStore();
+    const jobId = seedJob(store);
+    store.setJobState(jobId, "completed");
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
+    expect(fetchMock.mock.calls[0][0]).toBe("https://oo.example.com/api/default/maomao/_json");
+  });
+
+  it("serializes ingest POSTs to one in-flight request", async () => {
+    let resolveFirst!: (value: unknown) => void;
+    const gate = new Promise((resolve) => {
+      resolveFirst = resolve;
+    });
+    const fetchMock = vi
+      .fn()
+      .mockImplementationOnce(() => gate)
+      .mockResolvedValue({ ok: true, status: 200 });
+    vi.stubGlobal("fetch", fetchMock);
+    setJobSummarySink(capture);
+    const store = makeStore();
+    const env = { OPENOBSERVE_LOGS_URL: "https://oo.example.com/api/x/_json" } as NodeJS.ProcessEnv;
+    emitJobSummary(store, seedJob(store, 4), env);
+    emitJobSummary(store, seedJob(store, 5), env);
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
+    resolveFirst({ ok: true, status: 200 });
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
+  });
+
+  it("logs the status of a rejected-status ingest POST without throwing", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({ ok: false, status: 401 });
+    vi.stubGlobal("fetch", fetchMock);
+    const err = vi.spyOn(console, "error").mockImplementation(() => {});
+    const store = makeStore();
+    const jobId = seedJob(store);
+    emitJobSummary(store, jobId, {
+      OPENOBSERVE_LOGS_URL: "https://oo.example.com/api/x/_json",
+    } as NodeJS.ProcessEnv);
+    await vi.waitFor(() => expect(err).toHaveBeenCalledWith(expect.stringContaining("returned 401")));
+  });
+
+  it("redacts the ingest URL from logged fetch errors", async () => {
+    const badUrl = "https://user:pass@oo.example.com/api/x/_json";
+    const fetchMock = vi
+      .fn()
+      .mockRejectedValue(new Error(`Failed to parse URL from ${badUrl}`));
+    vi.stubGlobal("fetch", fetchMock);
+    const err = vi.spyOn(console, "error").mockImplementation(() => {});
+    const store = makeStore();
+    const jobId = seedJob(store);
+    emitJobSummary(store, jobId, { OPENOBSERVE_LOGS_URL: badUrl } as NodeJS.ProcessEnv);
+    await vi.waitFor(() => expect(err).toHaveBeenCalled());
+    const logged = err.mock.calls.flat().join(" ");
+    expect(logged).toContain("<openobserve-url>");
+    expect(logged).not.toContain("user:pass");
+  });
+
+  it("uses Basic auth when OPENOBSERVE_LOGS_USER is set", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true, status: 200 });
+    vi.stubGlobal("fetch", fetchMock);
+    setJobSummarySink(capture);
     const store = makeStore();
     const jobId = seedJob(store);
     emitJobSummary(store, jobId, {
@@ -212,6 +375,7 @@ describe("emitJobSummary", () => {
       OPENOBSERVE_LOGS_USER: "ingest-user",
       OPENOBSERVE_LOGS_PASSWORD: "ingest-pass",
     } as NodeJS.ProcessEnv);
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
     const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
     expect((init.headers as Record<string, string>).authorization).toBe(
       `Basic ${Buffer.from("ingest-user:ingest-pass").toString("base64")}`,
