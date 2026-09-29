@@ -78,6 +78,13 @@ export interface JobSummaryPayload {
   provider: string;
   provider_instance: string;
   state: JobState;
+  /**
+   * Claim-to-finish wall time (creation-to-finish if never claimed); null
+   * when either timestamp is missing. A retried job that terminates while
+   * still queued (started_at reset, never re-claimed) measures from the
+   * original created_at instead — consumers wanting per-attempt durations
+   * should expect that line to cover the whole job lifetime.
+   */
   duration_ms: number | null;
   prompt_tokens: number;
   completion_tokens: number;
@@ -151,7 +158,20 @@ export function setJobSummarySink(sink: (line: string) => void): (line: string) 
 // socket per job — at most one request is in flight at a time.
 let postChain: Promise<void> = Promise.resolve();
 
+// Depth cap: serialization bounds concurrency, not backlog — a bulk sweep
+// enqueueing hundreds of lines against an endpoint stalling near the 10s
+// timeout would otherwise delay delivery for tens of minutes. The stdout
+// line is the durable copy, so overflow drops and logs instead of growing
+// the queue without bound.
+const MAX_PENDING_INGEST_POSTS = 256;
+let pendingIngestPosts = 0;
+
 function queueIngestPost(url: string, headers: Record<string, string>, line: string, jobId: number): void {
+  if (pendingIngestPosts >= MAX_PENDING_INGEST_POSTS) {
+    console.error(`job-summary: dropping OpenObserve POST for job ${jobId}: ingest queue full`);
+    return;
+  }
+  pendingIngestPosts += 1;
   postChain = postChain.then(async () => {
     try {
       const response = await fetch(url, {
@@ -173,6 +193,8 @@ function queueIngestPost(url: string, headers: Record<string, string>, line: str
       const raw = error instanceof Error ? error.message : String(error);
       const safe = raw.split(url).join("<openobserve-url>");
       console.error(`job-summary: OpenObserve POST failed for job ${jobId}: ${safe}`);
+    } finally {
+      pendingIngestPosts -= 1;
     }
   });
 }

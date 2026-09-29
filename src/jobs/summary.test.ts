@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { openDb } from "../db.js";
-import { JobStore } from "./store.js";
+import { JobStore, type JobRow } from "./store.js";
 import {
   buildJobSummary,
   emitJobSummary,
@@ -107,6 +107,11 @@ describe("jobSpend", () => {
     expect(spend).toEqual({ promptTokens: 0, completionTokens: 0, totalTokens: 0, costUsd: null });
   });
 
+  it("reports a measured zero cost as 0, not null", () => {
+    const spend = jobSpend({ routing_cost: 0 } as JobRow, []);
+    expect(spend.costUsd).toBe(0);
+  });
+
   it("sums component tokens when a stage's total is unset", () => {
     const store = makeStore();
     const jobId = seedJob(store);
@@ -117,6 +122,29 @@ describe("jobSpend", () => {
     });
     const spend = jobSpend(store.getJob(jobId), []);
     expect(spend.totalTokens).toBe(10);
+  });
+
+  it("sums escalation stage and reviewer-run components when totals are unset", () => {
+    const store = makeStore();
+    const jobId = seedJob(store);
+    store.patchJob(jobId, {
+      internal_escalation_prompt_tokens: 3,
+      internal_escalation_completion_tokens: 4,
+      internal_escalation_total_tokens: null,
+    });
+    const run = store.listReviewerRuns(jobId)[0];
+    const spend = jobSpend(store.getJob(jobId), [
+      {
+        ...run,
+        prompt_tokens: 5,
+        completion_tokens: 6,
+        reasoning_tokens: 2,
+        cache_read_tokens: 1,
+        cache_write_tokens: 1,
+        total_tokens: null,
+      },
+    ]);
+    expect(spend.totalTokens).toBe(22);
   });
 
   it("sums aggregator components including reasoning and cache tokens", () => {
@@ -471,6 +499,20 @@ describe("emitJobSummary", () => {
     await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
   });
 
+  it("still delivers subsequent ingest POSTs after one rejection", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockRejectedValueOnce(new Error("connection refused"))
+      .mockResolvedValue({ ok: true, status: 200 });
+    vi.stubGlobal("fetch", fetchMock);
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    const store = makeStore();
+    const env = { OPENOBSERVE_LOGS_URL: "https://oo.example.com/api/x/_json" } as NodeJS.ProcessEnv;
+    emitJobSummary(store, seedJob(store, 4), env);
+    emitJobSummary(store, seedJob(store, 5), env);
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
+  });
+
   it("logs the status of a rejected-status ingest POST without throwing", async () => {
     const fetchMock = vi.fn().mockResolvedValue({ ok: false, status: 401 });
     vi.stubGlobal("fetch", fetchMock);
@@ -507,6 +549,21 @@ describe("emitJobSummary", () => {
     emitJobSummary(store, seedJob(store), { OPENOBSERVE_LOGS_URL: "   " } as NodeJS.ProcessEnv);
     expect(fetchMock).not.toHaveBeenCalled();
     expect(lines).toHaveLength(1);
+  });
+
+  it("sends no auth header for whitespace-only TOKEN and USER", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true, status: 200 });
+    vi.stubGlobal("fetch", fetchMock);
+    setJobSummarySink(capture);
+    const store = makeStore();
+    emitJobSummary(store, seedJob(store), {
+      OPENOBSERVE_LOGS_URL: "https://oo.example.com/api/x/_json",
+      OPENOBSERVE_LOGS_TOKEN: "   ",
+      OPENOBSERVE_LOGS_USER: " \t ",
+    } as NodeJS.ProcessEnv);
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
+    const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect((init.headers as Record<string, string>).authorization).toBeUndefined();
   });
 
   it("uses Basic auth when OPENOBSERVE_LOGS_USER is set", async () => {
