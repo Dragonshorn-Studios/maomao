@@ -1997,8 +1997,10 @@ describe("review job list filters, nested stack members, and reviewer board", ()
 
   it("lists reviewer runs on the board with the owning job and stack membership", () => {
     const { store, members } = stackFixture();
-    const rows = store.listReviewerRunBoard();
+    const board = store.listReviewerRunBoard();
     // Two member-job runs plus the stack's own cumulative run.
+    expect(board.total).toBe(3);
+    const rows = board.rows;
     expect(rows).toHaveLength(3);
     expect(rows.filter((row) => row.stack_job_id != null)).toHaveLength(2);
     const html = renderReviewerBoard(rows, {});
@@ -2007,5 +2009,28 @@ describe("review job list filters, nested stack members, and reviewer board", ()
     expect(html).toMatch(/member of stack \d+/);
     expect(html).toContain("verify-first");
     expect(members).toHaveLength(2);
+  });
+
+  it("filters the reviewer board by run state and pages", () => {
+    const { store } = stackFixture();
+    // Flip one member run to running so the state filter has something to find.
+    const memberJob = store.listJobs(10).find((job) => job.job_type === "pr_review")!;
+    store.patchReviewer(store.listReviewerRuns(memberJob.id)[0]!.id, { state: "running" });
+
+    const running = store.listReviewerRunBoard({ state: "running" });
+    expect(running.total).toBe(1);
+    expect(running.rows[0]?.state).toBe("running");
+    // Page 2 of page-size 2 holds the last row.
+    const paged = store.listReviewerRunBoard({ offset: 2, limit: 2 });
+    expect(paged.rows).toHaveLength(1);
+    expect(paged.total).toBe(3);
+
+    const html = renderReviewerBoard(running.rows, {
+      runFilters: { state: "running" },
+      runPagination: { page: 2, pageSize: 1, total: 2 },
+    });
+    expect(html).toContain('value="running" selected');
+    expect(html).toContain("/reviewers?page=1&amp;state=running");
+    expect(html).toContain("Page 2 / 2");
   });
 });

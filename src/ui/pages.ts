@@ -686,10 +686,19 @@ function renderMemberCard(job: JobRow, position: number): string {
 
 /** The /reviewers board: every specialist run with the review (or stack)
  * job that owns it, active runs first. */
+const RUN_STATE_FILTERS = [
+  { value: "queued", label: "Queued" },
+  { value: "running", label: "Running" },
+  { value: "done", label: "Done" },
+  { value: "failed", label: "Failed" },
+];
+
 export function renderReviewerBoard(
-  rows: ReturnType<JobStore["listReviewerRunBoard"]>,
+  rows: ReturnType<JobStore["listReviewerRunBoard"]>["rows"],
   options: PageOptions = {},
 ): string {
+  const stateFilter = options.runFilters?.state;
+  const pagination = options.runPagination;
   const items = rows
     .map((row) => {
       const state = runStateLabel(row.state);
@@ -699,28 +708,48 @@ export function renderReviewerBoard(
           : row.stack_job_id != null
             ? `job ${row.job_id} · member of stack ${row.stack_job_id}`
             : `job ${row.job_id}`;
-      return `<article class="card">
-        <header>
-          <span class="role">${roleGlyph(row.role)}<strong>${escapeHtml(row.role)}</strong></span>
-          ${renderState(row.state, state.text, state.hint, state.mark)}
-        </header>
-        <p><a href="/jobs/${row.job_id}">${forgeBadgeTitleHtml({ provider: row.forge_provider, provider_instance: row.provider_instance }, row.repo_full_name, row.pr_number)} · ${escapeHtml(row.pr_title || "(no title)")}</a></p>
-        <p class="muted">
-          ${escapeHtml(owner)}
-          · ${escapeHtml(row.job_type === "stack_review" ? "stack review" : row.review_mode === "verify" ? "verify-first" : "full review")}
-          · head <code class="sha">${escapeHtml(shortSha(row.head_sha, 10))}</code>
-          · ${escapeHtml(formatDuration(elapsedMs(row.started_at, row.finished_at)))}
-        </p>
-      </article>`;
+      return `<li class="run-row">
+        <span class="role">${roleGlyph(row.role)}<strong>${escapeHtml(row.role)}</strong></span>
+        <a class="run-title" href="/jobs/${row.job_id}">${forgeBadgeTitleHtml({ provider: row.forge_provider, provider_instance: row.provider_instance }, row.repo_full_name, row.pr_number)} · ${escapeHtml(row.pr_title || "(no title)")}</a>
+        <span class="muted run-owner">${escapeHtml(owner)}</span>
+        <span class="muted">${escapeHtml(row.job_type === "stack_review" ? "stack" : row.review_mode === "verify" ? "verify-first" : "full")}</span>
+        <code class="sha">${escapeHtml(shortSha(row.head_sha, 10))}</code>
+        <span class="muted run-elapsed">${escapeHtml(formatDuration(elapsedMs(row.started_at, row.finished_at)))}</span>
+        ${renderState(row.state, state.text, state.hint, state.mark)}
+      </li>`;
     })
     .join("");
+  const stateParam = stateFilter ? `&amp;state=${encodeURIComponent(stateFilter)}` : "";
+  const totalPages = pagination ? Math.max(1, Math.ceil(pagination.total / pagination.pageSize)) : 1;
+  const pagerNav =
+    pagination && totalPages > 1
+      ? `<nav class="pager" aria-label="Reviewer runs pages">${
+          pagination.page > 1
+            ? `<a href="/reviewers?page=${pagination.page - 1}${stateParam}">Newer runs</a>`
+            : `<span aria-hidden="true"></span>`
+        }<span class="muted">Page ${pagination.page} / ${totalPages} · ${pagination.total} runs</span>${
+          pagination.page < totalPages
+            ? `<a href="/reviewers?page=${pagination.page + 1}${stateParam}">Older runs</a>`
+            : `<span aria-hidden="true"></span>`
+        }</nav>`
+      : "";
   const body = `
     <h1>Reviewer runs</h1>
     <p class="lede">Every specialist run, newest first — active runs lead — with the review or stack job each belongs to.</p>
+    <form class="trigger job-filters" method="get" action="/reviewers">
+      <label>Status
+        <select name="state">
+          <option value=""${stateFilter ? "" : " selected"}>All statuses</option>
+          ${RUN_STATE_FILTERS.map((filter) => `<option value="${filter.value}"${stateFilter === filter.value ? " selected" : ""}>${filter.label}</option>`).join("")}
+        </select>
+      </label>
+      <button type="submit">Filter</button>
+      ${stateFilter ? `<a class="top-link" href="/reviewers">Clear filters</a>` : ""}
+    </form>
     ${
       items
-        ? `<div class="cards reviewer-board">${items}</div>`
-        : `<div class="empty" role="status"><p><strong>No reviewer runs yet.</strong></p><p class="muted">Runs appear here as soon as a review job picks specialists.</p></div>`
+        ? `<ol class="run-board">${items}</ol>${pagerNav}`
+        : `<div class="empty" role="status"><p><strong>No reviewer runs${stateFilter ? ` with status ${escapeHtml(stateFilter)}` : ""}.</strong></p><p class="muted">Runs appear here as soon as a review job picks specialists.</p></div>`
     }`;
   return layout("Maomao reviewers", body, options);
 }

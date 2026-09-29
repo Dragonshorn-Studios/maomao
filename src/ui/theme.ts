@@ -773,6 +773,48 @@ h1 a.pr-external { font-size: 0.72em; }
 .member-row .state { margin-left: auto; }
 .member-meta { font-size: 0.85em; }
 
+/* /reviewers board: dense one-line rows — role · PR title · owning job ·
+   mode · head · elapsed · state. */
+.run-board {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+}
+.run-row {
+  display: flex;
+  align-items: baseline;
+  gap: 0.6rem;
+  padding: 0.4rem 0.8rem;
+  font-size: 0.9rem;
+  min-width: 0;
+}
+.run-row + .run-row { border-top: 1px solid var(--line); }
+.run-row .role { white-space: nowrap; }
+.run-row .role svg { width: 0.9em; height: 0.9em; vertical-align: -0.1em; }
+.run-title {
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.run-row .run-owner,
+.run-row .run-elapsed,
+.run-row .sha { white-space: nowrap; }
+.run-row .state { margin-left: auto; white-space: nowrap; }
+.pager {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 1rem;
+  margin: 0.5rem 0.2rem;
+  font-size: 0.88rem;
+}
+
 /* Repo / job-type filter bar on the home job list; it reuses the .trigger
    card + button chrome, the select just needs field styling. */
 .job-filters { margin: 0.4rem 0 1rem; }

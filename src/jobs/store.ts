@@ -1273,39 +1273,12 @@ export class JobStore {
     return rows.map((row) => row.repo_full_name);
   }
 
-  /**
-   * Every reviewer run with the job that owns it — the /reviewers board.
-   * Active runs (queued/running) sort ahead of finished ones, newest first
-   * inside each group. `stack_job_id` links a member job's run to the
-   * stack_review it was launched from.
-   */
-  listReviewerRunBoard(limit = 200): Array<
-    ReviewerRunRow & {
-      job_state: JobState;
-      job_type: JobRow["job_type"];
-      forge_provider: string;
-      provider_instance: string;
-      repo_full_name: string;
-      pr_number: number;
-      pr_title: string;
-      head_sha: string;
-      review_mode: JobRow["review_mode"];
-      stack_job_id: number | null;
-    }
-  > {
-    const bounded = Math.min(Math.max(1, limit), 1000);
-    return this.db
-      .prepare(
-        `SELECT r.*, j.state AS job_state, j.job_type, j.provider AS forge_provider, j.provider_instance,
-                j.repo_full_name, j.pr_number, j.pr_title, j.head_sha, j.review_mode,
-                m.job_id AS stack_job_id
-         FROM reviewer_runs r
-         JOIN jobs j ON j.id = r.job_id
-         LEFT JOIN stack_run_members m ON m.member_job_id = j.id
-         ORDER BY CASE WHEN r.state IN ('queued', 'running') THEN 0 ELSE 1 END, r.id DESC
-         LIMIT ?`,
-      )
-      .all(bounded) as Array<
+  /** The /reviewers board: specialist runs joined to their owning job (and
+   * stack membership via `stack_job_id`), active runs first — newest inside
+   * each group — optionally filtered by run state. Paged by offset;
+   * `total` is the filtered row count for page links. */
+  listReviewerRunBoard(input?: { state?: ReviewerState; offset?: number; limit?: number }): {
+    rows: Array<
       ReviewerRunRow & {
         job_state: JobState;
         job_type: JobRow["job_type"];
@@ -1319,6 +1292,42 @@ export class JobStore {
         stack_job_id: number | null;
       }
     >;
+    total: number;
+  } {
+    const bounded = Math.min(Math.max(1, input?.limit ?? 50), 500);
+    const offset = Math.max(0, input?.offset ?? 0);
+    const where = input?.state ? `WHERE r.state = ?` : "";
+    const params = input?.state ? [input.state] : [];
+    const { total } = this.db
+      .prepare(`SELECT COUNT(*) AS total FROM reviewer_runs r ${where}`)
+      .get(...params) as { total: number };
+    const rows = this.db
+      .prepare(
+        `SELECT r.*, j.state AS job_state, j.job_type, j.provider AS forge_provider, j.provider_instance,
+                j.repo_full_name, j.pr_number, j.pr_title, j.head_sha, j.review_mode,
+                m.job_id AS stack_job_id
+         FROM reviewer_runs r
+         JOIN jobs j ON j.id = r.job_id
+         LEFT JOIN stack_run_members m ON m.member_job_id = j.id
+         ${where}
+         ORDER BY CASE WHEN r.state IN ('queued', 'running') THEN 0 ELSE 1 END, r.id DESC
+         LIMIT ? OFFSET ?`,
+      )
+      .all(...params, bounded, offset) as Array<
+      ReviewerRunRow & {
+        job_state: JobState;
+        job_type: JobRow["job_type"];
+        forge_provider: string;
+        provider_instance: string;
+        repo_full_name: string;
+        pr_number: number;
+        pr_title: string;
+        head_sha: string;
+        review_mode: JobRow["review_mode"];
+        stack_job_id: number | null;
+      }
+    >;
+    return { rows, total };
   }
 
   /**
