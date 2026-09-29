@@ -518,6 +518,182 @@ describe("webhook handling", () => {
     expect(memberWrite.dispatchJobId).toBe(jobId);
     expect(store.getJob(jobId!)?.manual_escalate_requested).toBe(1);
   });
+
+  it("runs @maomao review as an authorized full re-review at the current head", async () => {
+    const secret = "s3cret";
+    const config = loadConfig({
+      GITHUB_WEBHOOK_SECRET: secret,
+      GITHUB_APP_ID: "1",
+      GITHUB_APP_PRIVATE_KEY: "k",
+      REVIEWER_ROUTING: "fixed",
+      REVIEWER_ROLES: "correctness",
+      POISON_ALERT_POLICY: "manual",
+    });
+    const store = new JobStore(openDb(":memory:"));
+    // A completed verify-first pass holds the same-head dedup slot — the
+    // scenario the command exists to escape: it must retire the occupant
+    // and enqueue a fresh FULL review at the same SHA.
+    const prior = store.enqueue({
+      repoFullName: "acme/widgets",
+      repoOwner: "acme",
+      repoName: "widgets",
+      installationId: 42,
+      prNumber: 42,
+      prTitle: "Stack member",
+      prBody: "",
+      prHtmlUrl: "https://github.com/acme/widgets/pull/42",
+      prAuthor: "alice",
+      baseSha: "base42",
+      headSha: "head42",
+      baseRef: "main",
+      headRef: "feat-42",
+      reviewers: [],
+      reviewMode: "verify",
+    }).job;
+    store.setJobState(prior.id, "completed");
+
+    const { github, comments } = stackGithub({ pulls: { 42: resolvedStackPull(42) } });
+    const reviewBody = JSON.stringify(
+      commentPayload({ comment: { ...commentPayload().comment, body: "@maomao review" } }),
+    );
+    const result = await handleGithubWebhook({
+      config,
+      store,
+      github,
+      request: { event: "issue_comment", deliveryId: "r1", signature: sign(secret, reviewBody), rawBody: reviewBody },
+    });
+    expect(result.body.created).toBe(true);
+    const fresh = store.listJobs(10).find((job) => job.id !== prior.id);
+    expect(fresh).toBeTruthy();
+    expect(fresh!.review_mode).toBe("full");
+    expect(fresh!.head_sha).toBe("head42");
+    expect(fresh!.dedup_key).toBe("");
+    // The verify pass's slot was retired under a rekeyed dedup entry.
+    expect(store.getJob(prior.id)!.dedup_key).toBe(`rereview:${prior.id}`);
+    expect(comments.at(-1)?.body).toMatch(/full re-review/i);
+
+    // A redelivery of the same comment never enqueues (or replies) twice.
+    const dup = await handleGithubWebhook({
+      config,
+      store,
+      github,
+      request: { event: "issue_comment", deliveryId: "r1b", signature: sign(secret, reviewBody), rawBody: reviewBody },
+    });
+    expect(dup.body.duplicate).toBe(true);
+    expect(store.listJobs(10)).toHaveLength(2);
+  });
+
+  it("upgrades a queued verify-first job in place on @maomao review", async () => {
+    const secret = "s3cret";
+    const config = loadConfig({
+      GITHUB_WEBHOOK_SECRET: secret,
+      GITHUB_APP_ID: "1",
+      GITHUB_APP_PRIVATE_KEY: "k",
+      REVIEWER_ROUTING: "fixed",
+      REVIEWER_ROLES: "correctness",
+      POISON_ALERT_POLICY: "manual",
+    });
+    const store = new JobStore(openDb(":memory:"));
+    const queued = store.enqueue({
+      repoFullName: "acme/widgets",
+      repoOwner: "acme",
+      repoName: "widgets",
+      installationId: 42,
+      prNumber: 42,
+      prTitle: "Stack member",
+      prBody: "",
+      prHtmlUrl: "https://github.com/acme/widgets/pull/42",
+      prAuthor: "alice",
+      baseSha: "base42",
+      headSha: "head42",
+      baseRef: "main",
+      headRef: "feat-42",
+      reviewers: [],
+      reviewMode: "verify",
+    }).job;
+
+    const { github, comments } = stackGithub({ pulls: { 42: resolvedStackPull(42) } });
+    const body = JSON.stringify(
+      commentPayload({ comment: { ...commentPayload().comment, body: "@maomao re-review" } }),
+    );
+    const result = await handleGithubWebhook({
+      config,
+      store,
+      github,
+      request: { event: "issue_comment", deliveryId: "r2", signature: sign(secret, body), rawBody: body },
+    });
+    expect(result.body.jobId).toBe(queued.id);
+    expect(result.dispatchJobId).toBe(queued.id);
+    expect(store.getJob(queued.id)!.review_mode).toBe("full");
+    expect(store.listJobs(10)).toHaveLength(1);
+    expect(comments.at(-1)?.body).toMatch(/upgraded to a full/i);
+  });
+
+  it("reports an in-flight review and rejects unauthorized @maomao review", async () => {
+    const secret = "s3cret";
+    const config = loadConfig({
+      GITHUB_WEBHOOK_SECRET: secret,
+      GITHUB_APP_ID: "1",
+      GITHUB_APP_PRIVATE_KEY: "k",
+      REVIEWER_ROUTING: "fixed",
+      REVIEWER_ROLES: "correctness",
+      POISON_ALERT_POLICY: "manual",
+    });
+    const store = new JobStore(openDb(":memory:"));
+    const running = store.enqueue({
+      repoFullName: "acme/widgets",
+      repoOwner: "acme",
+      repoName: "widgets",
+      installationId: 42,
+      prNumber: 42,
+      prTitle: "Stack member",
+      prBody: "",
+      prHtmlUrl: "https://github.com/acme/widgets/pull/42",
+      prAuthor: "alice",
+      baseSha: "base42",
+      headSha: "head42",
+      baseRef: "main",
+      headRef: "feat-42",
+      reviewers: [],
+      reviewMode: "verify",
+    }).job;
+    store.setJobState(running.id, "reviewing");
+
+    const { github, comments } = stackGithub({ pulls: { 42: resolvedStackPull(42) } });
+    const body = JSON.stringify(
+      commentPayload({ comment: { ...commentPayload().comment, body: "@maomao review" } }),
+    );
+    const inFlight = await handleGithubWebhook({
+      config,
+      store,
+      github,
+      request: { event: "issue_comment", deliveryId: "r3", signature: sign(secret, body), rawBody: body },
+    });
+    expect(inFlight.body.jobId).toBe(running.id);
+    expect(inFlight.body.created).toBeUndefined();
+    expect(store.listJobs(10)).toHaveLength(1);
+    expect(comments.at(-1)?.body).toMatch(/already/i);
+
+    const deniedBody = JSON.stringify(
+      commentPayload({
+        comment: {
+          ...commentPayload().comment,
+          id: 9002,
+          body: "@maomao review",
+          user: { login: "mallory", type: "User" },
+          author_association: "NONE",
+        },
+      }),
+    );
+    const denied = await handleGithubWebhook({
+      config,
+      store,
+      github: stackGithub({ permission: "none", pulls: { 42: resolvedStackPull(42) } }).github,
+      request: { event: "issue_comment", deliveryId: "r4", signature: sign(secret, deniedBody), rawBody: deniedBody },
+    });
+    expect(denied.body.reason).toMatch(/not authorized/i);
+    expect(store.listJobs(10)).toHaveLength(1);
+  });
 });
 
 function githubForCommands(overrides: {

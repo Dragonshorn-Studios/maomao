@@ -153,6 +153,16 @@ export function mentionsEscalateCommand(body: string, mentionName: string, comma
   return pattern.test(body);
 }
 
+/**
+ * "@<bot> review" / "@<bot> re-review": an explicit re-review request —
+ * the comment handler turns it into a fresh full specialist pass on the
+ * current head, never a verify-first run.
+ */
+export function mentionsReviewCommand(body: string, mentionName: string): boolean {
+  const mention = escapeRegExp(mentionName.replace(/^@/, ""));
+  return new RegExp(`(^|\\s)@${mention}\\s+(?:re-?)?review\\b`, "i").test(body);
+}
+
 function escapeRegExp(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }

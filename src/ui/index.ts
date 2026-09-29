@@ -3,6 +3,7 @@ export {
   renderHome,
   renderJob,
   renderLogin,
+  renderReviewerBoard,
   renderScanIssuePreviewPage,
   renderCancelConfirmPage,
   type CancelConfirmData,

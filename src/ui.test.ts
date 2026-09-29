@@ -4,7 +4,7 @@ import { seedDemoJobs } from "./demo/fixtures.js";
 import { JobStore } from "./jobs/store.js";
 import { THEME_CSS } from "./ui/theme.js";
 import { TYPEAHEAD_JS } from "./ui/typeahead.js";
-import { renderConfigAuditPage, renderConfigPage, renderDraftEditPage, renderHome, renderJob, renderLogin, renderProfilesPage, renderPromptConfigPage, renderScanConfirmPage, renderScanIssuePreviewPage, renderScanPage } from "./ui/pages.js";
+import { renderConfigAuditPage, renderConfigPage, renderDraftEditPage, renderHome, renderJob, renderLogin, renderProfilesPage, renderPromptConfigPage, renderReviewerBoard, renderScanConfirmPage, renderScanIssuePreviewPage, renderScanPage } from "./ui/pages.js";
 import { layout } from "./ui/layout.js";
 import { renderConnectionsPage } from "./ui/connections.js";
 import { renderHealthPage } from "./ui/health.js";
@@ -1918,5 +1918,94 @@ describe("model picker script", () => {
     docFire("click", { target: picker.querySelectorAll(".model-picker-option")[1] });
     expect(picker.classList.contains("is-custom")).toBe(false);
     expect(input.value).toBe("a/x");
+  });
+});
+
+describe("review job list filters, nested stack members, and reviewer board", () => {
+  function stackFixture() {
+    const store = new JobStore(openDb(":memory:"));
+    const stack = store.enqueue({
+      repoFullName: "acme/widgets",
+      repoOwner: "acme",
+      repoName: "widgets",
+      installationId: 9,
+      prNumber: 42,
+      prTitle: "top of stack",
+      prBody: "",
+      prHtmlUrl: "",
+      prAuthor: "alice",
+      baseSha: "b41",
+      headSha: "h42",
+      baseRef: "main",
+      headRef: "feat-b",
+      reviewers: [{ role: "stack_cumulative", title: "Stack cumulative" }],
+      jobType: "stack_review",
+      dedupKey: "stack:s1",
+    }).job;
+    store.insertStackMembers(stack.id, [
+      { position: 1, prNumber: 41, baseRef: "main", headRef: "feat-a", baseSha: "b41", headSha: "h41" },
+      { position: 2, prNumber: 42, baseRef: "feat-a", headRef: "feat-b", baseSha: "h41", headSha: "h42" },
+    ]);
+    const members = store.listStackMembers(stack.id);
+    for (const member of members) {
+      const memberJob = store.enqueue({
+        repoFullName: "acme/widgets",
+        repoOwner: "acme",
+        repoName: "widgets",
+        installationId: 9,
+        prNumber: member.pr_number,
+        prTitle: `member ${member.position}`,
+        prBody: "",
+        prHtmlUrl: "",
+        prAuthor: "alice",
+        baseSha: member.base_sha,
+        headSha: member.head_sha,
+        baseRef: member.base_ref,
+        headRef: member.head_ref,
+        reviewers: [{ role: "correctness", title: "Correctness" }],
+        reviewMode: member.position === 1 ? "verify" : "full",
+      }).job;
+      store.patchStackMember(member.id, { memberJobId: memberJob.id, state: "reviewing" });
+    }
+    return { store, stack, members };
+  }
+
+  it("nests member jobs as offset mini-cards under the stack card, not standalone", () => {
+    const { store, stack } = stackFixture();
+    const html = renderHome(store.listJobsPage({}).jobs, store);
+    expect(html).toContain('class="member-cards"');
+    expect(html.match(/member-card"/g)?.length).toBe(2);
+    expect(html).toContain("verify-first");
+    // Member cards link to their jobs; the main list does not repeat them.
+    const mainList = html.slice(0, html.indexOf('class="member-cards"'));
+    expect(mainList).not.toContain("member 1");
+    expect(html).toContain(`Stack · job ${stack.id}`);
+  });
+
+  it("renders the repo and job-type filter form on the home list", () => {
+    const { store } = stackFixture();
+    const html = renderHome(store.listJobsPage({}).jobs, store, {
+      jobFilters: { repos: ["acme/widgets", "acme/other"], repo: "acme/widgets", type: "stack_review" },
+    });
+    expect(html).toContain('class="trigger job-filters"');
+    expect(html).toContain('name="repo"');
+    expect(html).toContain('name="type"');
+    expect(html).toContain('value="acme/widgets" selected');
+    expect(html).toContain('value="stack_review" selected');
+    expect(html).toContain("Clear filters");
+  });
+
+  it("lists reviewer runs on the board with the owning job and stack membership", () => {
+    const { store, members } = stackFixture();
+    const rows = store.listReviewerRunBoard();
+    // Two member-job runs plus the stack's own cumulative run.
+    expect(rows).toHaveLength(3);
+    expect(rows.filter((row) => row.stack_job_id != null)).toHaveLength(2);
+    const html = renderReviewerBoard(rows, {});
+    expect(html).toContain("Reviewer runs");
+    expect(html).toContain("correctness");
+    expect(html).toMatch(/member of stack \d+/);
+    expect(html).toContain("verify-first");
+    expect(members).toHaveLength(2);
   });
 });

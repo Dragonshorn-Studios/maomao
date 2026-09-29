@@ -737,6 +737,32 @@ h1 a.pr-external { font-size: 0.72em; }
 }
 .stack-strip-count { color: var(--ink-muted); font-size: 0.8rem; white-space: nowrap; }
 
+/* Stack member jobs nest under their stack card on the home list — the
+   offset rail and reduced padding read as attached children, not peers. */
+.member-cards {
+  list-style: none;
+  margin: 0.45rem 0 0 1.4rem;
+  padding: 0 0 0.1rem 0.9rem;
+  border-left: 2px solid var(--line);
+  display: grid;
+  gap: 0.5rem;
+}
+.specimen.member-card { padding: 0.55rem 0.8rem 0.6rem; }
+.member-card .specimen-title { font-size: 0.92rem; }
+
+/* Repo / job-type filter bar on the home job list; it reuses the .trigger
+   card + button chrome, the select just needs field styling. */
+.job-filters { margin: 0.4rem 0 1rem; }
+.job-filters label { flex: 0 1 16rem; min-width: 11rem; }
+.job-filters select {
+  width: 100%;
+  margin-top: 0.3rem;
+  padding: 0.45rem 0.5rem;
+  background: var(--paper);
+  color: var(--ink);
+  border: 1px solid var(--line-strong);
+}
+
 .meta-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(14rem, 1fr));
