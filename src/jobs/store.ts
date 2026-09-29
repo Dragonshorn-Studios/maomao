@@ -1443,39 +1443,48 @@ export class JobStore {
   }
 
   setJobState(id: number, state: JobState, extra: Partial<JobRow> = {}): void {
-    const job = this.getJob(id);
-    if (!job) return;
-    // `stale` and `cancelled` are one-way terminal states: a late pipeline
-    // failure (or a racing transition) must not resurrect or relabel them.
-    // Same-state patches still apply — patchJob relies on this.
-    if ((job.state === "stale" || job.state === "cancelled") && state !== job.state) {
-      // This runs inside error-handling paths; its own failure must not escape.
-      try {
-        this.log(id, `Ignored state transition ${job.state} -> ${state} on terminal job`, "warn");
-      } catch (error) {
-        console.error(`store: could not log refused transition for job ${id}: ${error instanceof Error ? error.message : String(error)}`);
+    // Read + write in one transaction with a state-guarded UPDATE — the same
+    // pattern cancelJobs/staleOpenStackJobs use — so the terminal-emission
+    // pre-state stays accurate even if a second writer ever appears.
+    const job = this.db.transaction(() => {
+      const current = this.getJob(id);
+      if (!current) return undefined;
+      // `stale` and `cancelled` are one-way terminal states: a late pipeline
+      // failure (or a racing transition) must not resurrect or relabel them.
+      // Same-state patches still apply — patchJob relies on this.
+      if ((current.state === "stale" || current.state === "cancelled") && state !== current.state) {
+        // This runs inside error-handling paths; its own failure must not escape.
+        try {
+          this.log(id, `Ignored state transition ${current.state} -> ${state} on terminal job`, "warn");
+        } catch (error) {
+          console.error(`store: could not log refused transition for job ${id}: ${error instanceof Error ? error.message : String(error)}`);
+        }
+        return undefined;
       }
-      return;
-    }
-    const updatedAt = nowIso();
-    const startedAt = extra.started_at ?? job.started_at ?? (state !== "queued" ? updatedAt : null);
-    const finishedAt =
-      extra.finished_at ??
-      (TERMINAL_JOB_STATES.includes(state) ? (job.finished_at ?? updatedAt) : job.finished_at);
-    const fields: Record<string, unknown> = {
-      state,
-      started_at: startedAt,
-      finished_at: finishedAt,
-      updated_at: updatedAt,
-    };
-    for (const [key, value] of Object.entries(extra)) {
-      if (value === undefined) continue;
-      if (key === "started_at" || key === "finished_at" || key === "state") continue;
-      if (JOB_PATCH_KEYS.has(key)) fields[key] = value;
-    }
-    const assignments = Object.keys(fields).map((column) => `${column} = ?`);
-    const values = Object.keys(fields).map((column) => fields[column]);
-    this.db.prepare(`UPDATE jobs SET ${assignments.join(", ")} WHERE id = ?`).run(...values, id);
+      const updatedAt = nowIso();
+      const startedAt = extra.started_at ?? current.started_at ?? (state !== "queued" ? updatedAt : null);
+      const finishedAt =
+        extra.finished_at ??
+        (TERMINAL_JOB_STATES.includes(state) ? (current.finished_at ?? updatedAt) : current.finished_at);
+      const fields: Record<string, unknown> = {
+        state,
+        started_at: startedAt,
+        finished_at: finishedAt,
+        updated_at: updatedAt,
+      };
+      for (const [key, value] of Object.entries(extra)) {
+        if (value === undefined) continue;
+        if (key === "started_at" || key === "finished_at" || key === "state") continue;
+        if (JOB_PATCH_KEYS.has(key)) fields[key] = value;
+      }
+      const assignments = Object.keys(fields).map((column) => `${column} = ?`);
+      const values = Object.keys(fields).map((column) => fields[column]);
+      const { changes } = this.db
+        .prepare(`UPDATE jobs SET ${assignments.join(", ")} WHERE id = ? AND state = ?`)
+        .run(...values, id, current.state);
+      return changes === 1 ? current : undefined;
+    })();
+    if (!job) return;
     // Also settles delegated stack-member coverage: a covered member on a
     // finished run takes this job's outcome. No-ops for members of live
     // runs — the stack's own retry/reconcile logic owns those rows.

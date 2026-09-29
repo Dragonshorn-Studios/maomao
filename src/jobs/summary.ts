@@ -232,7 +232,15 @@ export function emitJobSummary(
     const job = store.getJob(jobId);
     if (!job) return;
     const line = JSON.stringify(buildJobSummary(job, store.listReviewerRuns(jobId), opts));
-    stdoutSink(line);
+    // The two channels are independent: a broken stdout sink must not
+    // suppress a configured ingest POST (and vice versa via the queue).
+    try {
+      stdoutSink(line);
+    } catch (error) {
+      console.error(
+        `job-summary: stdout write failed for job ${jobId}: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
     const url = env.OPENOBSERVE_LOGS_URL?.trim();
     if (!url) return;
     queueIngestPost(url, ingestHeaders(env), line, jobId);

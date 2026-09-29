@@ -235,6 +235,32 @@ describe("buildJobSummary", () => {
     expect(payload.usage_complete).toBe(false);
   });
 
+  it("emits pr null for negative and zero pull request numbers", () => {
+    const store = makeStore();
+    const jobId = seedJob(store);
+    const job = store.getJob(jobId)!;
+    expect(buildJobSummary({ ...job, pr_number: -1 }, []).pr).toBeNull();
+    expect(buildJobSummary({ ...job, pr_number: 0 }, []).pr).toBeNull();
+  });
+
+  it("clamps duration_ms to 0 when finished_at precedes started_at", () => {
+    const store = makeStore();
+    const jobId = seedJob(store);
+    const job = {
+      ...store.getJob(jobId)!,
+      started_at: "2026-01-02T00:00:00.000Z",
+      finished_at: "2026-01-01T00:00:00.000Z",
+    };
+    expect(buildJobSummary(job, []).duration_ms).toBe(0);
+  });
+
+  it("reports attempt 3 for a twice-retried job", () => {
+    const store = makeStore();
+    const jobId = seedJob(store);
+    const job = { ...store.getJob(jobId)!, retry_count: 2 };
+    expect(buildJobSummary(job, []).attempt).toBe(3);
+  });
+
   it("emits pr null for jobs without a pull request", () => {
     const store = makeStore();
     const jobId = seedJob(store, 0, "deadbeef02");
@@ -483,7 +509,17 @@ describe("emitJobSummary", () => {
     expect(lines).toHaveLength(0);
   });
 
-  it("a throwing sink does not break the job transition", () => {
+  it("setJobSummarySink returns the previous sink for restoration", () => {
+    const first = (line: string) => void line;
+    const previous = setJobSummarySink(first);
+    expect(setJobSummarySink(capture)).toBe(first);
+    expect(previous).toBeTypeOf("function");
+  });
+
+  it("a throwing sink does not break the job transition or the ingest POST", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true, status: 200 });
+    vi.stubGlobal("fetch", fetchMock);
+    vi.stubEnv("OPENOBSERVE_LOGS_URL", "https://oo.example.com/api/x/_json");
     const err = vi.spyOn(console, "error").mockImplementation(() => {});
     setJobSummarySink(() => {
       throw new Error("stdout exploded");
@@ -493,6 +529,8 @@ describe("emitJobSummary", () => {
     expect(() => store.setJobState(jobId, "completed")).not.toThrow();
     expect(store.getJob(jobId)!.state).toBe("completed");
     expect(err).toHaveBeenCalled();
+    // A dead stdout channel must not suppress the configured ingest POST.
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
   });
 
   it("POSTs the payload to OPENOBSERVE_LOGS_URL when set", async () => {
@@ -675,6 +713,20 @@ describe("emitJobSummary", () => {
     expect((init.headers as Record<string, string>).authorization).toBe(
       `Basic ${Buffer.from("ingest-user:ingest-pass").toString("base64")}`,
     );
+  });
+
+  it("sends no auth header when only OPENOBSERVE_LOGS_PASSWORD is set", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true, status: 200 });
+    vi.stubGlobal("fetch", fetchMock);
+    setJobSummarySink(capture);
+    const store = makeStore();
+    emitJobSummary(store, seedJob(store), {
+      OPENOBSERVE_LOGS_URL: "https://oo.example.com/api/x/_json",
+      OPENOBSERVE_LOGS_PASSWORD: "ingest-pass",
+    } as NodeJS.ProcessEnv);
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
+    const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect((init.headers as Record<string, string>).authorization).toBeUndefined();
   });
 
   it("sends Basic auth with an empty password when only USER is set", async () => {
