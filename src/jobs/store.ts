@@ -222,6 +222,11 @@ export interface StackMemberRow {
   state: string;
 }
 
+/** Member-rail resolution for delegated coverage: the covering job's outcome is the member's. */
+export function coveredMemberOutcome(jobState: string | undefined): "done" | "skipped" {
+  return jobState === "completed" ? "done" : "skipped";
+}
+
 export interface NewJobInput {
   repoFullName: string;
   repoOwner: string;
@@ -1031,7 +1036,7 @@ export class JobStore {
          WHERE member_job_id = ? AND state = 'reviewing'
            AND job_id IN (SELECT id FROM jobs WHERE state IN ('completed', 'failed', 'stale', 'cancelled'))`,
       )
-      .run(jobState === "completed" ? "done" : "skipped", jobId);
+      .run(coveredMemberOutcome(jobState), jobId);
   }
 
   /**

@@ -1,6 +1,6 @@
 import type { Config } from "../config.js";
 import type { JobStore, JobRow, ReviewerRunRow, NewJobInput, StackMemberRow } from "./store.js";
-import { retiredMemberDedupKey } from "./store.js";
+import { coveredMemberOutcome, retiredMemberDedupKey } from "./store.js";
 import type { GithubPort } from "../github/client.js";
 import type { ForgePort } from "../forge/port.js";
 import { ForgeRegistry } from "../forge/registry.js";
@@ -1055,7 +1055,7 @@ function skipUnreachedStackMembers(store: JobStore, jobId: number): void {
       store.patchStackMember(member.id, { state: "skipped" });
     } else if (member.state === "reviewing") {
       const memberJob = member.member_job_id != null ? store.getJob(member.member_job_id) : null;
-      store.patchStackMember(member.id, { state: memberJob?.state === "completed" ? "done" : "skipped" });
+      store.patchStackMember(member.id, { state: coveredMemberOutcome(memberJob?.state) });
     }
   }
 }
@@ -1456,29 +1456,41 @@ async function runStackJob(deps: PipelineDeps, forge: ForgeRegistry, jobId: numb
       cumulative = result;
     }
 
-    // Reconcile delegated coverage just before publishing (issue #136): a
-    // queued member job that already reached a terminal state resolves the
-    // member now — 'done' when it completed, 'skipped' + escalation when it
-    // died — while coverage still in flight stays 'reviewing' and is labelled
-    // as queued coverage rather than a review this run finished. Coverage
-    // that settles after this is picked up by store.resolveStackMemberCoverage.
+    // Reconcile delegated coverage (issue #136): a queued member job that
+    // already reached a terminal state resolves the member — 'done' when it
+    // completed, 'skipped' when it died — while coverage still in flight
+    // stays 'reviewing'. Runs once before publishing (the summary labels
+    // still-live coverage "coverage already queued" and carries dead
+    // coverage's escalation) and again at completion, closing the window in
+    // between. Coverage settling after the run ends is picked up by
+    // store.resolveStackMemberCoverage.
     const liveCoverage = new Set<number>();
-    for (const entry of memberJobs) {
-      if (!entry.covered) continue;
-      const coveredState = store.getJob(entry.jobId)?.state;
-      if (coveredState === "completed") {
-        store.patchStackMember(entry.member.id, { state: "done" });
-      } else if (coveredState === "failed" || coveredState === "stale" || coveredState === "cancelled") {
-        store.patchStackMember(entry.member.id, { state: "skipped" });
-        entry.coveredEnded = coveredState;
-        memberEscalations.push(
-          `#${entry.member.pr_number}'s queued coverage ended ${coveredState} (job ${entry.jobId}) — review this PR manually`,
-        );
-        store.log(jobId, `Stack member #${entry.member.pr_number}'s queued coverage (job ${entry.jobId}) ended ${coveredState}`, "warn");
-      } else {
-        liveCoverage.add(entry.jobId);
+    const reconcileCoverage = (): string[] => {
+      const dead: string[] = [];
+      for (const entry of memberJobs) {
+        if (!entry.covered || entry.coveredEnded) continue;
+        const coveredState = store.getJob(entry.jobId)?.state;
+        if (coveredState === "completed" || coveredState === "failed" || coveredState === "stale" || coveredState === "cancelled") {
+          store.patchStackMember(entry.member.id, { state: coveredMemberOutcome(coveredState) });
+          liveCoverage.delete(entry.jobId);
+          if (coveredState !== "completed") {
+            entry.coveredEnded = coveredState;
+            dead.push(
+              `#${entry.member.pr_number}'s queued coverage ended ${coveredState} (job ${entry.jobId}) — review this PR manually`,
+            );
+            store.log(
+              jobId,
+              `Stack member #${entry.member.pr_number}'s queued coverage (job ${entry.jobId}) ended ${coveredState}`,
+              "warn",
+            );
+          }
+        } else {
+          liveCoverage.add(entry.jobId);
+        }
       }
-    }
+      return dead;
+    };
+    memberEscalations.push(...reconcileCoverage());
 
     // Phase 5 — publish the stack summary and each cross-PR finding as issue
     // comments on the top PR, naming every PR and SHA involved.
@@ -1517,6 +1529,13 @@ async function runStackJob(deps: PipelineDeps, forge: ForgeRegistry, jobId: numb
         top.pr_number,
         `**Cross-PR finding (${finding.severity})** — ${finding.summary}\n\n${location}${finding.reason}\n\n_Stack "${stackId}" · members ${ordered}_`,
       );
+    }
+    // Coverage that settled between the publish-time reconcile and now
+    // resolves its member the same way — plus a follow-up comment so dead
+    // coverage still escalates to a human.
+    const lateCoverageDeaths = reconcileCoverage();
+    if (lateCoverageDeaths.length) {
+      await postStackComment(deps, job, top.pr_number, `**Needs human review** — ${lateCoverageDeaths.join("; ")}.`);
     }
     store.setJobState(jobId, "completed", { finished_at: nowIso() });
     store.log(
