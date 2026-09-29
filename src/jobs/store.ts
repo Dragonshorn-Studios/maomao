@@ -349,6 +349,7 @@ const TERMINAL_SKIP_REQUEUE: JobState[] = [
 const JOB_PATCH_KEYS = new Set<string>([
   "failure_reason",
   "review_event",
+  "review_mode",
   "review_event_reason",
   "aggregator_fallback",
   "workspace_path",
@@ -1073,6 +1074,24 @@ export class JobStore {
   }
 
   /**
+   * The job holding the shared '' dedup slot at this head — the row a
+   * same-head enqueue dedups onto, whatever its state or review_mode. The
+   * re-review command reads it to decide between upgrading a queued job,
+   * reporting an in-flight one, or retiring a terminal one for a fresh run.
+   */
+  reviewJobAtDedupSlot(
+    repoFullName: string,
+    prNumber: number,
+    headSha: string,
+    scope?: Partial<ForgeScope>,
+  ): JobRow | undefined {
+    const resolved = normalizeScope(scope);
+    return this.db
+      .prepare(`SELECT * FROM jobs WHERE ${NON_STACK_DEDUP_PREDICATE} LIMIT 1`)
+      .get(resolved.provider, resolved.instance, repoFullName, prNumber, headSha, "pr_review", "") as JobRow | undefined;
+  }
+
+  /**
    * A member job that reached a terminal state resolves delegated coverage on
    * finished stack runs (issue #136): 'reviewing' member rows on a dead stack
    * can only be queued-coverage delegations — the member job's outcome is
@@ -1214,7 +1233,7 @@ export class JobStore {
    * malformed values and re-renders the first page when a cursor yields
    * nothing).
    */
-  listJobsPage(input: { before?: number; after?: number; limit?: number; forge?: { provider: string; instance: string }; includeStale?: boolean }): {
+  listJobsPage(input: { before?: number; after?: number; limit?: number; forge?: { provider: string; instance: string }; includeStale?: boolean; repo?: string; jobType?: JobRow["job_type"] }): {
     jobs: JobRow[];
     hasOlder: boolean;
     hasNewer: boolean;
@@ -1226,6 +1245,14 @@ export class JobStore {
     if (input.forge) {
       whereParts.push("provider = ?", "provider_instance = ?");
       whereParams.push(input.forge.provider, input.forge.instance);
+    }
+    if (input.repo) {
+      whereParts.push("repo_full_name = ?");
+      whereParams.push(input.repo);
+    }
+    if (input.jobType) {
+      whereParts.push("job_type = ?");
+      whereParams.push(input.jobType);
     }
     // Superseded rows outnumber live ones on tip-thrashed stacks; the list
     // hides them unless the caller asks for the full history.
@@ -1282,6 +1309,108 @@ export class JobStore {
     return this.db
       .prepare(`SELECT DISTINCT provider, provider_instance AS instance FROM jobs ORDER BY provider, provider_instance`)
       .all() as Array<{ provider: string; instance: string }>;
+  }
+
+  /** Distinct repositories present in the jobs table, for the home filter. */
+  listRepoNames(): string[] {
+    const rows = this.db
+      .prepare(`SELECT DISTINCT repo_full_name FROM jobs ORDER BY repo_full_name`)
+      .all() as { repo_full_name: string }[];
+    return rows.map((row) => row.repo_full_name);
+  }
+
+  /**
+   * Every reviewer run with the job that owns it — the /reviewers board.
+   * Active runs (queued/running) sort ahead of finished ones, newest first
+   * inside each group. `stack_job_id` links a member job's run to the
+   * stack_review it was launched from.
+   */
+  listReviewerRunBoard(limit = 200): Array<
+    ReviewerRunRow & {
+      job_state: JobState;
+      job_type: JobRow["job_type"];
+      forge_provider: string;
+      provider_instance: string;
+      repo_full_name: string;
+      pr_number: number;
+      pr_title: string;
+      head_sha: string;
+      review_mode: JobRow["review_mode"];
+      stack_job_id: number | null;
+    }
+  > {
+    const bounded = Math.min(Math.max(1, limit), 1000);
+    return this.db
+      .prepare(
+        `SELECT r.*, j.state AS job_state, j.job_type, j.provider AS forge_provider, j.provider_instance,
+                j.repo_full_name, j.pr_number, j.pr_title, j.head_sha, j.review_mode,
+                m.job_id AS stack_job_id
+         FROM reviewer_runs r
+         JOIN jobs j ON j.id = r.job_id
+         LEFT JOIN stack_run_members m ON m.member_job_id = j.id
+         ORDER BY CASE WHEN r.state IN ('queued', 'running') THEN 0 ELSE 1 END, r.id DESC
+         LIMIT ?`,
+      )
+      .all(bounded) as Array<
+      ReviewerRunRow & {
+        job_state: JobState;
+        job_type: JobRow["job_type"];
+        forge_provider: string;
+        provider_instance: string;
+        repo_full_name: string;
+        pr_number: number;
+        pr_title: string;
+        head_sha: string;
+        review_mode: JobRow["review_mode"];
+        stack_job_id: number | null;
+      }
+    >;
+  }
+
+  /**
+   * Member-job linkage for the home list: which stack_review job launched
+   * each member job on the page, with its position, so member jobs nest
+   * under their stack card instead of listing standalone.
+   */
+  stackMembershipForJobs(memberJobIds: number[]): Map<number, { stackJobId: number; position: number; memberState: string }> {
+    const map = new Map<number, { stackJobId: number; position: number; memberState: string }>();
+    if (!memberJobIds.length) return map;
+    const placeholders = memberJobIds.map(() => "?").join(",");
+    const rows = this.db
+      .prepare(
+        `SELECT member_job_id, job_id AS stack_job_id, position, state FROM stack_run_members WHERE member_job_id IN (${placeholders})`,
+      )
+      .all(...memberJobIds) as { member_job_id: number; stack_job_id: number; position: number; state: string }[];
+    for (const row of rows) {
+      map.set(row.member_job_id, { stackJobId: row.stack_job_id, position: row.position, memberState: row.state });
+    }
+    return map;
+  }
+
+  /**
+   * Member jobs for stack cards on the home list — the full job rows so they
+   * can nest under the stack card even when a repo/type filter kept the
+   * member jobs themselves off the page.
+   */
+  memberJobsForStacks(stackJobIds: number[]): Map<number, { job: JobRow; position: number }[]> {
+    const map = new Map<number, { job: JobRow; position: number }[]>();
+    if (!stackJobIds.length) return map;
+    const placeholders = stackJobIds.map(() => "?").join(",");
+    const rows = this.db
+      .prepare(
+        `SELECT j.*, m.job_id AS stack_job_id, m.position
+         FROM stack_run_members m JOIN jobs j ON j.id = m.member_job_id
+         WHERE m.job_id IN (${placeholders}) AND m.member_job_id IS NOT NULL
+         ORDER BY m.job_id, m.position`,
+      )
+      .all(...stackJobIds) as (JobRow & { stack_job_id: number; position: number })[];
+    for (const row of rows) {
+      const { stack_job_id, position, ...job } = row;
+      const list = map.get(stack_job_id) ?? [];
+      list.push({ job, position });
+      map.set(stack_job_id, list);
+    }
+    return map;
   }
 
   listInterruptedJobs(): JobRow[] {

@@ -19,7 +19,7 @@ import {
   type OpenCodeRunResult,
 } from "../opencode/parse.js";
 import { buildAggregatorPrompt, buildBriefPrompt, buildReviewerPrompt, buildStackCumulativePrompt, KNOWN_REVIEWER_ROLES } from "../prompts.js";
-import { applyProfileToSpecs, reviewerSpecs } from "./enqueue.js";
+import { applyProfileToSpecs, enqueuePullJob, reviewerSpecs } from "./enqueue.js";
 import { jobSpend } from "./summary.js";
 import type { ProfileDefinition } from "../config-revisions.js";
 import {
@@ -1269,7 +1269,13 @@ async function runStackJob(deps: PipelineDeps, forge: ForgeRegistry, jobId: numb
           }
         }
         store.patchStackMember(member.id, { state: "reviewing" });
-        const enqueued = store.enqueue({
+        // Members route through enqueuePullJob like a standalone review:
+        // routed modes create zero runs so the router picks specialists,
+        // fixed mode preselects the configured set. Pre-seeding the full
+        // reviewer list here made every member read as "Preselected reviewer
+        // set" (source=fixed) and skip routing entirely. Verify-first members
+        // run no specialists at all.
+        const memberInput = {
           repoFullName: job.repo_full_name,
           repoOwner: job.repo_owner,
           repoName: job.repo_name,
@@ -1287,10 +1293,13 @@ async function runStackJob(deps: PipelineDeps, forge: ForgeRegistry, jobId: numb
           headRef: member.head_ref,
           webhookDeliveryId: job.webhook_delivery_id ?? undefined,
           webhookEvent: "stack_review",
-          reviewers: reviewMode === "verify" ? [] : reviewerSpecs(config),
-          jobType: "pr_review",
+          jobType: "pr_review" as const,
           reviewMode,
-        });
+        };
+        const enqueued =
+          reviewMode === "verify"
+            ? store.enqueue({ ...memberInput, reviewers: [] })
+            : enqueuePullJob(store, config, memberInput);
         memberJobId = enqueued.job.id;
         store.patchStackMember(member.id, { memberJobId, state: "reviewing" });
         if (enqueued.created) {

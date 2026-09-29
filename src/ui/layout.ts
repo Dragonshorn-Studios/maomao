@@ -32,6 +32,9 @@ export interface PageOptions {
   /** Superseded (stale) job visibility on the home page: `active` means the
    * list includes stale rows; `hidden` is the count filtered out otherwise. */
   superseded?: { active: boolean; hidden: number };
+  /** Repository + job-type selects on the home page: `repos` is the option
+   * list, `repo`/`type` the active filter values. */
+  jobFilters?: { repos: string[]; repo?: string; type?: string };
   /**
    * Operator chrome (connections, config, health, chat, forms). Dashboard and
    * job overview stay on the default surface so their controls are untouched.
@@ -177,6 +180,7 @@ function accountMenu(options: PageOptions): string {
       </summary>
       <nav class="account-menu-panel" aria-label="Operator">
         ${who}
+        <a href="/reviewers">Reviewers</a>
         <a href="/connections">Connections</a>
         <a href="/config#effective">Configuration</a>
         <a href="/health">Health</a>

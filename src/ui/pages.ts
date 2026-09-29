@@ -105,19 +105,50 @@ export function renderLogin(options: LoginOptions = {}): string {
   return layout("Maomao sign in", body, { live: false, accountMenu: false });
 }
 
+const JOB_TYPE_FILTERS: { value: JobRow["job_type"]; label: string }[] = [
+  { value: "pr_review", label: "PR reviews" },
+  { value: "stack_review", label: "Stack reviews" },
+  { value: "repo_brief", label: "Repo briefs" },
+  { value: "health_scan", label: "Health scans" },
+];
+
 export function renderHome(jobs: JobRow[], store: JobStore, options: PageOptions = {}): string {
   const empty = emptyQueueCopy();
   const stackSummaries = store.stackMemberSummaries(
     jobs.filter((job) => job.job_type === "stack_review").map((job) => job.id),
   );
+  // Stack member jobs nest under their stack card as smaller offset cards
+  // instead of listing standalone — fetched by stack id so a repo/type
+  // filter can't strip them away. A member job whose stack job is on
+  // another page stays in the main list so paging can never hide a job.
+  const pageIds = new Set(jobs.map((job) => job.id));
+  const membership = store.stackMembershipForJobs(jobs.map((job) => job.id));
+  const nestedIds = new Set<number>();
+  for (const job of jobs) {
+    const member = membership.get(job.id);
+    if (member && pageIds.has(member.stackJobId)) nestedIds.add(job.id);
+  }
+  const memberJobsByStack = store.memberJobsForStacks(
+    jobs.filter((job) => job.job_type === "stack_review").map((job) => job.id),
+  );
   const cards = jobs
+    .filter((job) => !nestedIds.has(job.id))
     .map((job) =>
-      renderQueueCard(job, jobMetrics(job, store), options.uiFlavor, options.csrfToken, stackSummaries.get(job.id)),
+      renderQueueCard(
+        job,
+        jobMetrics(job, store),
+        options.uiFlavor,
+        options.csrfToken,
+        stackSummaries.get(job.id),
+        memberJobsByStack.get(job.id),
+      ),
     )
     .join("");
   const paginationNav = renderJobsPagination(jobs, options.pagination, {
     forge: options.activeForge,
     superseded: options.superseded?.active === true,
+    repo: options.jobFilters?.repo,
+    jobType: options.jobFilters?.type,
   });
   const pancakeChip = pancakeChipFor(store, options.uiFlavor);
   // data-forge is scaffolding for future client-side filtering; nothing
@@ -144,10 +175,45 @@ export function renderHome(jobs: JobRow[], store: JobStore, options: PageOptions
       : "";
   const filterNav = [forgeNav, supersededChip].filter(Boolean).join("\n      ");
 
+  // Repo + job-type selects (server-side filters); hidden inputs keep the
+  // forge/superseded state across the GET submit.
+  const jobFilters = options.jobFilters;
+  const filterForm = jobFilters
+    ? `<form class="trigger job-filters" method="get" action="/">
+      ${options.activeForge ? `<input type="hidden" name="forge" value="${escapeHtml(options.activeForge)}"/>` : ""}
+      ${superseded?.active ? `<input type="hidden" name="superseded" value="1"/>` : ""}
+      <label>
+        Repository
+        <select name="repo">
+          <option value="">All repositories</option>
+          ${jobFilters.repos
+            .map(
+              (repo) =>
+                `<option value="${escapeHtml(repo)}"${jobFilters.repo === repo ? " selected" : ""}>${escapeHtml(repo)}</option>`,
+            )
+            .join("")}
+        </select>
+      </label>
+      <label>
+        Job type
+        <select name="type">
+          <option value="">All types</option>
+          ${JOB_TYPE_FILTERS.map(
+            (entry) =>
+              `<option value="${entry.value}"${jobFilters.type === entry.value ? " selected" : ""}>${escapeHtml(entry.label)}</option>`,
+          ).join("")}
+        </select>
+      </label>
+      <button type="submit">Filter</button>
+      ${jobFilters.repo || jobFilters.type ? `<a class="top-link" href="/${options.activeForge ? `?forge=${encodeURIComponent(options.activeForge)}` : ""}">Clear filters</a>` : ""}
+    </form>`
+    : "";
+
   const body = `
     <h1>Review jobs</h1>
     <p class="lede">Recent pull request reviews. Each job is anchored to an exact head SHA.${pancakeChip ? ` ${pancakeChip}` : ""}</p>
     ${filterNav ? `<div class="meta-row" role="navigation" aria-label="Filter jobs">${filterNav}</div>` : ""}
+    ${filterForm}
     ${options.notice ? `<p class="notice" role="status">${escapeHtml(options.notice)}</p>` : ""}
     ${options.error ? `<p class="error" role="alert">${escapeHtml(options.error)}</p>` : ""}
     <form class="trigger" method="post" action="/reviews">
@@ -193,24 +259,25 @@ function pancakeChipFor(store: JobStore, flavor?: UiFlavor): string {
 function renderJobsPagination(
   jobs: JobRow[],
   pagination?: { hasOlder: boolean; hasNewer: boolean },
-  filters?: { forge?: string; superseded?: boolean },
+  filters?: { forge?: string; superseded?: boolean; repo?: string; jobType?: string },
 ): string {
   const forgeParam = filters?.forge ? `&forge=${encodeURIComponent(filters.forge)}` : "";
   const supersededParam = filters?.superseded ? `&superseded=1` : "";
+  const repoParam = filters?.repo ? `&repo=${encodeURIComponent(filters.repo)}` : "";
+  const typeParam = filters?.jobType ? `&type=${encodeURIComponent(filters.jobType)}` : "";
+  const filterParams = `${forgeParam}${supersededParam}${repoParam}${typeParam}`;
   if (!pagination) return "";
   const oldest = jobs[jobs.length - 1];
   const newest = jobs[0];
   const nextLink =
     pagination.hasOlder && oldest
-      ? `<a rel="next" href="/?before=${oldest.id}${forgeParam}${supersededParam}">Older jobs</a>`
+      ? `<a rel="next" href="/?before=${oldest.id}${filterParams}">Older jobs</a>`
       : `<span class="muted" aria-disabled="true">Older jobs</span>`;
   const prevLink =
     pagination.hasNewer && newest
-      ? `<a rel="prev" href="/?after=${newest.id}${forgeParam}${supersededParam}">Newer jobs</a>`
+      ? `<a rel="prev" href="/?after=${newest.id}${filterParams}">Newer jobs</a>`
       : `<span class="muted" aria-disabled="true">Newer jobs</span>`;
-  const firstPageUrl = filters?.forge
-    ? `/?forge=${encodeURIComponent(filters.forge)}${supersededParam}`
-    : `/${supersededParam ? "?superseded=1" : ""}`;
+  const firstPageUrl = `/${filterParams ? `?${filterParams.slice(1)}` : ""}`;
   const olderNote = pagination.hasNewer
     ? `<p class="jobs-pagination-note" role="status">Viewing older jobs — <a href="${firstPageUrl}">newest reviews are on the first page</a>.</p>`
     : "";
@@ -548,6 +615,7 @@ function renderQueueCard(
   uiFlavor?: UiFlavor,
   csrfToken?: string,
   stackMembers?: StackMemberSummary[],
+  memberJobs?: { job: JobRow; position: number }[],
 ): string {
   const state = jobStateLabel(job.state);
   const elapsed = formatDuration(elapsedMs(job.started_at, job.finished_at) ?? elapsedMs(job.created_at));
@@ -585,7 +653,76 @@ function renderQueueCard(
       ${renderDiagnosis(metrics, job.aggregator_state)}
       ${renderSeverityChips(metrics.findings, !metrics.findingsConfirmed)}
     </article>
+    ${
+      memberJobs?.length
+        ? `<ol class="member-cards">${memberJobs.map((member) => renderMemberCard(member.job, member.position)).join("")}</ol>`
+        : ""
+    }
   </li>`;
+}
+
+/**
+ * The compact two-line row a stack member job renders as under its stack
+ * card: position + linked PR title + state on line one, head SHA, elapsed
+ * and the verify-first marker on line two.
+ */
+function renderMemberCard(job: JobRow, position: number): string {
+  const state = jobStateLabel(job.state);
+  const elapsed = formatDuration(elapsedMs(job.started_at, job.finished_at) ?? elapsedMs(job.created_at));
+  const isLive = LIVE_JOB_STATES.includes(job.state);
+  return `<li class="member-card${isLive ? " is-live" : ""}">
+    <div class="member-row">
+      <span class="member-pos">Member ${position} · job ${job.id}</span>
+      <a class="member-title" href="/jobs/${job.id}">${forgeBadgeTitleHtml(job, job.repo_full_name, job.pr_number)} · ${escapeHtml(job.pr_title || "(no title)")}</a>${prExternalLinkHtml(job)}
+      ${renderState(job.state, state.text, state.hint, state.mark)}
+    </div>
+    <div class="meta-row member-meta">
+      <span class="pair">SHA <strong><code class="sha">${escapeHtml(shortSha(job.head_sha, 10))}</code></strong></span>
+      <span class="pair">Elapsed <strong class="metric">${escapeHtml(elapsed)}</strong></span>
+      ${job.review_mode === "verify" ? `<span class="pair muted" title="Verify-first pass — specialists skipped">verify-first</span>` : ""}
+    </div>
+  </li>`;
+}
+
+/** The /reviewers board: every specialist run with the review (or stack)
+ * job that owns it, active runs first. */
+export function renderReviewerBoard(
+  rows: ReturnType<JobStore["listReviewerRunBoard"]>,
+  options: PageOptions = {},
+): string {
+  const items = rows
+    .map((row) => {
+      const state = runStateLabel(row.state);
+      const owner =
+        row.job_type === "stack_review"
+          ? `stack job ${row.job_id}`
+          : row.stack_job_id != null
+            ? `job ${row.job_id} · member of stack ${row.stack_job_id}`
+            : `job ${row.job_id}`;
+      return `<article class="card">
+        <header>
+          <span class="role">${roleGlyph(row.role)}<strong>${escapeHtml(row.role)}</strong></span>
+          ${renderState(row.state, state.text, state.hint, state.mark)}
+        </header>
+        <p><a href="/jobs/${row.job_id}">${forgeBadgeTitleHtml({ provider: row.forge_provider, provider_instance: row.provider_instance }, row.repo_full_name, row.pr_number)} · ${escapeHtml(row.pr_title || "(no title)")}</a></p>
+        <p class="muted">
+          ${escapeHtml(owner)}
+          · ${escapeHtml(row.job_type === "stack_review" ? "stack review" : row.review_mode === "verify" ? "verify-first" : "full review")}
+          · head <code class="sha">${escapeHtml(shortSha(row.head_sha, 10))}</code>
+          · ${escapeHtml(formatDuration(elapsedMs(row.started_at, row.finished_at)))}
+        </p>
+      </article>`;
+    })
+    .join("");
+  const body = `
+    <h1>Reviewer runs</h1>
+    <p class="lede">Every specialist run, newest first — active runs lead — with the review or stack job each belongs to.</p>
+    ${
+      items
+        ? `<div class="cards reviewer-board">${items}</div>`
+        : `<div class="empty" role="status"><p><strong>No reviewer runs yet.</strong></p><p class="muted">Runs appear here as soon as a review job picks specialists.</p></div>`
+    }`;
+  return layout("Maomao reviewers", body, options);
 }
 
 function renderRouting(job: JobRow): string {
