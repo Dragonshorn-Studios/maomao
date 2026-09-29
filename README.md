@@ -339,7 +339,7 @@ OPENOBSERVE_LOGS_USER=...               # Authorization: Basic (user:password)
 OPENOBSERVE_LOGS_PASSWORD=...
 ```
 
-Unset `OPENOBSERVE_LOGS_URL` means stdout-only; a failing or slow endpoint never affects jobs (the POST is fire-and-forget, errors are logged without credentials). In OpenObserve, filter a stream on e.g. `event='maomao.job_summary' AND job_type='pr_review'` or `repo='owner/name'` for per-repo dashboards.
+Unset `OPENOBSERVE_LOGS_URL` means stdout-only; a failing or slow endpoint never affects jobs (the POST is fire-and-forget, errors are logged without credentials). In OpenObserve, filter a stream on e.g. `event='maomao.job_summary' AND job_type='pr_review'` or `repo='owner/name'` for per-repo dashboards. One line is emitted **per terminal transition**: for per-job totals take the latest `attempt` line, which mirrors the UI's own rollup (a retry discards attempt-1 run/aggregation usage the same way the UI does); summing every attempt re-counts the `routing`/`internal_escalation` stages that retries don't reset.
 
 ## Run locally
 

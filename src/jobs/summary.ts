@@ -157,7 +157,9 @@ function queueIngestPost(url: string, headers: Record<string, string>, line: str
       const response = await fetch(url, {
         method: "POST",
         headers,
-        body: line,
+        // _json's documented contract is a JSON array of records — wrapping
+        // even for single-line posts so strict deployments don't reject it.
+        body: `[${line}]`,
         // Bounded so a hung ingest endpoint cannot linger forever; there is no
         // retry — the stdout line above remains the durable copy.
         signal: AbortSignal.timeout(10_000),
@@ -173,6 +175,11 @@ function queueIngestPost(url: string, headers: Record<string, string>, line: str
       console.error(`job-summary: OpenObserve POST failed for job ${jobId}: ${safe}`);
     }
   });
+}
+
+/** Test hook: resolves once every queued ingest POST has settled. */
+export function flushJobSummaryPosts(): Promise<void> {
+  return postChain;
 }
 
 function ingestHeaders(env: NodeJS.ProcessEnv): Record<string, string> {

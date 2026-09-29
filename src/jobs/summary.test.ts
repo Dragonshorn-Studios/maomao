@@ -1,7 +1,14 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { openDb } from "../db.js";
 import { JobStore } from "./store.js";
-import { buildJobSummary, emitJobSummary, jobSpend, setJobSummarySink, type JobSummaryPayload } from "./summary.js";
+import {
+  buildJobSummary,
+  emitJobSummary,
+  flushJobSummaryPosts,
+  jobSpend,
+  setJobSummarySink,
+  type JobSummaryPayload,
+} from "./summary.js";
 
 function makeStore() {
   return new JobStore(openDb(":memory:"));
@@ -56,9 +63,12 @@ function payloadLines(): JobSummaryPayload[] {
   return lines.map((line) => JSON.parse(line) as JobSummaryPayload);
 }
 
-afterEach(() => {
+afterEach(async () => {
   lines.length = 0;
   setJobSummarySink((line) => process.stdout.write(`${line}\n`));
+  // Drain the serialized ingest queue so a test's queued POST can't bleed
+  // fetch calls into the next test's stubs.
+  await flushJobSummaryPosts();
   vi.unstubAllGlobals();
   vi.unstubAllEnvs();
   vi.restoreAllMocks();
@@ -77,15 +87,19 @@ describe("jobSpend", () => {
       aggregator_completion_tokens: 4,
       aggregator_total_tokens: 20,
       aggregator_cost: 0.05,
+      internal_escalation_prompt_tokens: 2,
+      internal_escalation_completion_tokens: 1,
+      internal_escalation_total_tokens: 3,
+      internal_escalation_cost: 0.005,
     });
     const run = store.listReviewerRuns(jobId)[0];
     const spend = jobSpend(store.getJob(jobId), [
       { ...run, prompt_tokens: 7, completion_tokens: 3, total_tokens: 11, cost: 0.02 },
     ]);
-    expect(spend.promptTokens).toBe(20);
-    expect(spend.completionTokens).toBe(9);
-    expect(spend.totalTokens).toBe(36);
-    expect(spend.costUsd).toBeCloseTo(0.08);
+    expect(spend.promptTokens).toBe(22);
+    expect(spend.completionTokens).toBe(10);
+    expect(spend.totalTokens).toBe(39);
+    expect(spend.costUsd).toBeCloseTo(0.085);
   });
 
   it("reports null cost when nothing was measured", () => {
@@ -180,10 +194,14 @@ describe("buildJobSummary", () => {
     expect(payload.usage_complete).toBe(false);
   });
 
-  it("marks usage_complete false when a stage reports incomplete usage", () => {
+  it.each([
+    "aggregator_usage_complete",
+    "routing_usage_complete",
+    "internal_escalation_usage_complete",
+  ] as const)("marks usage_complete false when %s is 0", (column) => {
     const store = makeStore();
     const jobId = seedJob(store);
-    store.patchJob(jobId, { aggregator_usage_complete: 0 });
+    store.patchJob(jobId, { [column]: 0 });
     const payload = buildJobSummary(store.getJob(jobId)!, []);
     expect(payload.usage_complete).toBe(false);
   });
@@ -313,6 +331,43 @@ describe("emitJobSummary", () => {
     ]);
   });
 
+  it("emits partialUsage when the head-move sweep stales a live job", () => {
+    setJobSummarySink(capture);
+    const store = makeStore();
+    const live = seedJob(store, 4, "oldsha");
+    store.setJobState(live, "reviewing");
+    seedJob(store, 4, "newsha");
+    expect(store.getJob(live)!.state).toBe("stale");
+    expect(payloadLines()).toEqual([
+      expect.objectContaining({ job_id: live, state: "stale", usage_complete: false }),
+    ]);
+  });
+
+  it("emits partialUsage when staleOpenStackJobs sweeps a live job", () => {
+    setJobSummarySink(capture);
+    const store = makeStore();
+    const live = seedStackJob(store, "vec1");
+    store.setJobState(live, "reviewing");
+    const staled = store.staleOpenStackJobs("acme/widgets", "u1", "stack:u1@vec2");
+    expect(staled).toEqual([live]);
+    expect(payloadLines()).toEqual([
+      expect.objectContaining({ job_id: live, state: "stale", usage_complete: false }),
+    ]);
+  });
+
+  it("emits for a type-wide (global pause) cancel across repos", () => {
+    setJobSummarySink(capture);
+    const store = makeStore();
+    const first = seedJob(store, 4, "sha1");
+    const second = seedJob(store, 5, "sha2");
+    const cancelled = store.cancelJobs({ jobType: "pr_review" }, "reviews_paused", null);
+    expect(cancelled).toEqual([first, second]);
+    expect(payloadLines()).toEqual([
+      expect.objectContaining({ job_id: first, state: "cancelled", usage_complete: true }),
+      expect.objectContaining({ job_id: second, state: "cancelled", usage_complete: true }),
+    ]);
+  });
+
   it("marks usage incomplete on a direct live->stale transition", () => {
     setJobSummarySink(capture);
     const store = makeStore();
@@ -358,8 +413,9 @@ describe("emitJobSummary", () => {
     expect(url).toBe("https://oo.example.com/api/default/maomao/_json");
     expect(init.method).toBe("POST");
     expect((init.headers as Record<string, string>).authorization).toBe("Bearer secret-token");
-    const body = JSON.parse(init.body as string) as Record<string, unknown>;
-    expect(body.event).toBe("maomao.job_summary");
+    // _json's documented contract is a JSON array of records.
+    const body = JSON.parse(init.body as string) as Record<string, unknown>[];
+    expect(body[0].event).toBe("maomao.job_summary");
     expect(JSON.stringify(body)).not.toContain("secret-token");
   });
 
