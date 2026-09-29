@@ -1,5 +1,6 @@
 import type { Config } from "../config.js";
-import type { JobStore, JobRow, ReviewerRunRow, NewJobInput } from "./store.js";
+import type { JobStore, JobRow, ReviewerRunRow, NewJobInput, StackMemberRow } from "./store.js";
+import { retiredMemberDedupKey } from "./store.js";
 import type { GithubPort } from "../github/client.js";
 import type { ForgePort } from "../forge/port.js";
 import { ForgeRegistry } from "../forge/registry.js";
@@ -50,7 +51,7 @@ import type { ReconciliationSnapshot } from "../findings/types.js";
 import { currentFindingsForRisk } from "../findings/types.js";
 import { mapLimit, nowIso, sleep, truncate } from "../util.js";
 import { authorizationLogLine, authorizeGithubTarget, logAuthorizationRejection } from "../github/authorize.js";
-import { scanRoutingSignals, relevantDiffHunks } from "../routing/signals.js";
+import { parseUnifiedDiff, scanRoutingSignals, relevantDiffHunks } from "../routing/signals.js";
 import {
   diagnosisFallback,
   deterministicDecision,
@@ -425,86 +426,99 @@ async function runJob(deps: PipelineDeps, forge: ForgeRegistry, jobId: number, s
     const profileBudget = createProfileBudget(profileDefinition);
     const snapshot = await reconcileAndRoute(deps, provider, job, workspace.repoDir, workspace.dir, diff, signal, profileBudget);
     throwIfStale(store, jobId, signal);
-    await routeSpecialists(deps, job, diff, workspace.repoDir, [workspace.diffPath, workspace.metaPath], signal, profileBudget);
-    const routed = store.getJob(jobId);
-    const currentFindings = currentFindingsForRisk(snapshot.items);
-    store.patchJob(jobId, {
-      risk_profile: routed?.routing_profile ?? null,
-      risk_reason: routed?.routing_reason ?? null,
-    });
-    store.log(
-      jobId,
-      `Risk route: ${routed?.routing_profile ?? "diagnosis"} — ${routed?.routing_reason ?? ""}; current findings=${currentFindings.length} (resolved/dismissed excluded)`,
-    );
-    throwIfStale(store, jobId, signal);
 
-    store.setJobState(jobId, "reviewing");
-    const runs = store.listReviewerRuns(jobId).filter((run) => run.state !== "done");
-    await runProfileReviewers(
-      deps,
-      job,
-      runs,
-      workspace.repoDir,
-      [workspace.diffPath, workspace.metaPath],
-      signal,
-      profileBudget,
-      reviewerTimeouts,
-      snapshot.humanOverrides,
-    );
-    throwIfStale(store, jobId, signal);
-
-    const completedRuns = store.listReviewerRuns(jobId);
-    const parsedReviewers: ReviewerResult[] = [];
-    for (const run of completedRuns) {
-      if (run.state === "done" && run.normalized_json) {
-        parsedReviewers.push(JSON.parse(run.normalized_json) as ReviewerResult);
-      }
-    }
-    if (parsedReviewers.length === 0) {
-      // Degrade cannot rescue zero output: with no reviewer results there is nothing
-      // to publish, so this path still fails — but with an explicit budget reason.
-      const over = profileBudget.check();
-      if (over) throw new Error(`profile budget exceeded — ${over}`);
-      throw new Error("all specialist reviewers failed or produced invalid JSON");
-    }
-
-    let aggregated = await runBudgetedAggregation(
-      deps,
-      job,
-      parsedReviewers,
-      workspace.repoDir,
-      [workspace.diffPath],
-      signal,
-      profileBudget,
-      snapshot.humanOverrides,
-    );
-    throwIfStale(store, jobId, signal);
-
-    const afterReviewers = store.getJob(jobId);
-    if (afterReviewers && shouldRunInternal(config.poisonAlert.policy, config.poisonAlert.internal.enabled, afterReviewers.routing_profile ?? "")) {
-      const internalOver = profileBudget.check();
-      if (internalOver) {
-        if (profileBudget.behavior === "fail") throw new Error(`profile budget exceeded — ${internalOver}`);
-        patchBudgetWarning(store, jobId, internalOver);
-        store.patchJob(jobId, {
-          internal_escalation_state: "skipped",
-          internal_escalation_reason: `profile budget exceeded — ${internalOver}`,
-        });
-        store.log(jobId, `Internal poison-alert pass skipped: ${internalOver}`, "warn");
-      } else {
-        aggregated = await runInternalEscalation(deps, afterReviewers, aggregated, diff, workspace.repoDir, signal, profileBudget);
-      }
+    // Verify-first (issue #123): the reconciler already re-checked every open
+    // finding against this head, so a verify-mode job publishes that result
+    // directly — no router call, no specialist fan-out, no aggregation.
+    let aggregated: AggregatorResult;
+    let reviewerCount = 0;
+    if (job.review_mode === "verify") {
+      aggregated = verifyOnlyAggregate(job, snapshot);
+      store.patchJob(jobId, { aggregator_normalized: JSON.stringify(aggregated, null, 2) });
+      store.log(jobId, `Verify-first pass: ${aggregated.summary}`);
+    } else {
+      await routeSpecialists(deps, job, diff, workspace.repoDir, [workspace.diffPath, workspace.metaPath], signal, profileBudget);
+      const routed = store.getJob(jobId);
+      const currentFindings = currentFindingsForRisk(snapshot.items);
+      store.patchJob(jobId, {
+        risk_profile: routed?.routing_profile ?? null,
+        risk_reason: routed?.routing_reason ?? null,
+      });
+      store.log(
+        jobId,
+        `Risk route: ${routed?.routing_profile ?? "diagnosis"} — ${routed?.routing_reason ?? ""}; current findings=${currentFindings.length} (resolved/dismissed excluded)`,
+      );
       throwIfStale(store, jobId, signal);
-    }
 
-    aggregated = {
-      ...aggregated,
-      findings: assignFindingIds(aggregated.findings),
-    };
-    store.patchJob(jobId, { aggregator_normalized: JSON.stringify(aggregated, null, 2) });
+      store.setJobState(jobId, "reviewing");
+      const runs = store.listReviewerRuns(jobId).filter((run) => run.state !== "done");
+      await runProfileReviewers(
+        deps,
+        job,
+        runs,
+        workspace.repoDir,
+        [workspace.diffPath, workspace.metaPath],
+        signal,
+        profileBudget,
+        reviewerTimeouts,
+        snapshot.humanOverrides,
+      );
+      throwIfStale(store, jobId, signal);
+
+      const completedRuns = store.listReviewerRuns(jobId);
+      const parsedReviewers: ReviewerResult[] = [];
+      for (const run of completedRuns) {
+        if (run.state === "done" && run.normalized_json) {
+          parsedReviewers.push(JSON.parse(run.normalized_json) as ReviewerResult);
+        }
+      }
+      if (parsedReviewers.length === 0) {
+        // Degrade cannot rescue zero output: with no reviewer results there is nothing
+        // to publish, so this path still fails — but with an explicit budget reason.
+        const over = profileBudget.check();
+        if (over) throw new Error(`profile budget exceeded — ${over}`);
+        throw new Error("all specialist reviewers failed or produced invalid JSON");
+      }
+      reviewerCount = parsedReviewers.length;
+
+      aggregated = await runBudgetedAggregation(
+        deps,
+        job,
+        parsedReviewers,
+        workspace.repoDir,
+        [workspace.diffPath],
+        signal,
+        profileBudget,
+        snapshot.humanOverrides,
+      );
+      throwIfStale(store, jobId, signal);
+
+      const afterReviewers = store.getJob(jobId);
+      if (afterReviewers && shouldRunInternal(config.poisonAlert.policy, config.poisonAlert.internal.enabled, afterReviewers.routing_profile ?? "")) {
+        const internalOver = profileBudget.check();
+        if (internalOver) {
+          if (profileBudget.behavior === "fail") throw new Error(`profile budget exceeded — ${internalOver}`);
+          patchBudgetWarning(store, jobId, internalOver);
+          store.patchJob(jobId, {
+            internal_escalation_state: "skipped",
+            internal_escalation_reason: `profile budget exceeded — ${internalOver}`,
+          });
+          store.log(jobId, `Internal poison-alert pass skipped: ${internalOver}`, "warn");
+        } else {
+          aggregated = await runInternalEscalation(deps, afterReviewers, aggregated, diff, workspace.repoDir, signal, profileBudget);
+        }
+        throwIfStale(store, jobId, signal);
+      }
+
+      aggregated = {
+        ...aggregated,
+        findings: assignFindingIds(aggregated.findings),
+      };
+      store.patchJob(jobId, { aggregator_normalized: JSON.stringify(aggregated, null, 2) });
+    }
 
     store.setJobState(jobId, "publishing", { aggregator_state: "done" });
-    const posted = await publishReview(deps, provider, job, aggregated, parsedReviewers.length, snapshot, diff, signal);
+    const posted = await publishReview(deps, provider, job, aggregated, reviewerCount, snapshot, diff, signal);
     const afterPublish = store.getJob(jobId) ?? job;
     if (posted) {
       store.patchJob(jobId, { github_review_id: posted.id, github_review_url: posted.url });
@@ -1004,11 +1018,135 @@ async function runBriefJob(deps: PipelineDeps, forge: ForgeRegistry, jobId: numb
 // re-checks every head and — only when nothing moved — runs one cumulative
 // OpenCode pass for cross-PR breakage and posts the stack summary plus
 // cross-PR findings on the top PR.
+//
+// Member retries (issue #123): a member review that ends stale/failed is
+// re-pinned and retried in place instead of killing the whole run, so one
+// moving PR can no longer strand later members QUEUED forever. Retries are
+// bounded per member per run; an exhausted member is escalated in the stack
+// summary while the rest of the stack proceeds.
+const STACK_MEMBER_MAX_RETRIES = 2;
+
+/**
+ * Stack envelope (issue #123): a stack bigger than this only gets the normal
+ * mode at the bottom and the tip — middle members are downgraded to
+ * verify-only when they have a prior pass to check, or skipped outright
+ * (skipped-budget) when they do not.
+ */
+const STACK_MAX_MEMBERS = 10;
+
+/**
+ * Whole-run token ceiling summed across member jobs (routing + specialist
+ * runs + aggregation + escalations). Once recorded spend passes it, the same
+ * middle-member downgrade applies and the cumulative pass is skipped; the
+ * bottom and tip members always keep their normal mode.
+ */
+const STACK_TOKEN_CAP = 400_000;
+
+/**
+ * Members the run never finished must not render QUEUED/REVIEWING forever on
+ * the member rail. A member left 'reviewing' whose member job already
+ * completed (the run died between the review finishing and the rail update)
+ * is marked 'done' — the review is live — while everything else ends
+ * 'skipped'.
+ */
+function skipUnreachedStackMembers(store: JobStore, jobId: number): void {
+  for (const member of store.listStackMembers(jobId)) {
+    if (member.state === "queued") {
+      store.patchStackMember(member.id, { state: "skipped" });
+    } else if (member.state === "reviewing") {
+      const memberJob = member.member_job_id != null ? store.getJob(member.member_job_id) : null;
+      store.patchStackMember(member.id, { state: memberJob?.state === "completed" ? "done" : "skipped" });
+    }
+  }
+}
+
+/**
+ * Verify-first (issue #123): once a member has a completed review on an
+ * earlier head, a moved head only re-checks its open findings. Hard-risk
+ * diffs (auth/secrets/billing/migrations/deploy) always get the full
+ * specialist pipeline; a first pass has nothing to verify and runs full.
+ *
+ * A `budgeted` middle member (over the member cap or the token ceiling)
+ * never gets specialists at all: verify when there is a prior pass to
+ * re-check, otherwise skip — a first pass has nothing a verify can check.
+ */
+async function stackMemberReviewMode(
+  deps: PipelineDeps,
+  provider: ForgePort,
+  job: JobRow,
+  member: StackMemberRow,
+  info: { title: string; body: string },
+  budgeted: boolean,
+): Promise<"full" | "verify" | "skip"> {
+  const prior = deps.store.latestCompletedReviewAtOtherHead(
+    job.repo_full_name,
+    member.pr_number,
+    member.head_sha,
+    scopeOf(job),
+  );
+  if (budgeted) return prior ? "verify" : "skip";
+  if (!prior) return "full";
+  const diff = await provider.getChangeDiff({ ...forgeTargetOf(job), changeNumber: member.pr_number }, deps.config.maxDiffBytes);
+  const signals = scanRoutingSignals({ diff, title: info.title, body: info.body });
+  if (signals.hardRiskFamilies.length > 0) {
+    deps.store.log(
+      job.id,
+      `Stack member #${member.pr_number}: hard-risk diff families (${signals.hardRiskFamilies.join(", ")}) — full specialist re-run`,
+    );
+    return "full";
+  }
+  deps.store.log(
+    job.id,
+    `Stack member #${member.pr_number}: verify-first pass (prior completed review job ${prior.id} @ ${prior.head_sha.slice(0, 8)})`,
+  );
+  return "verify";
+}
+
+/**
+ * Changed paths shared by two or more members — the only situation where a
+ * cross-PR breakage pass can find anything. Disjoint diffs cannot interact,
+ * so the expensive cumulative run is skipped for them.
+ */
+function stackSharedPaths(members: StackMemberRow[], diffs: Map<number, string>): string[] {
+  const seen = new Map<string, number>();
+  for (const member of members) {
+    for (const file of parseUnifiedDiff(diffs.get(member.pr_number) ?? "")) {
+      const first = seen.get(file.path);
+      if (first === undefined) seen.set(file.path, member.pr_number);
+      else if (first !== member.pr_number) seen.set(file.path, -1);
+    }
+  }
+  return [...seen.entries()].filter(([, pr]) => pr === -1).map(([path]) => path).sort();
+}
+
+/** Recorded model spend of one member job: routing, specialists, aggregation, escalations. */
+function memberJobSpend(store: JobStore, jobId: number): { cost: number; tokens: number } {
+  const job = store.getJob(jobId);
+  let cost = 0;
+  let tokens = 0;
+  if (job) {
+    cost += (job.routing_cost ?? 0) + (job.aggregator_cost ?? 0) + (job.internal_escalation_cost ?? 0);
+    tokens += (job.routing_total_tokens ?? 0) + (job.aggregator_total_tokens ?? 0) + (job.internal_escalation_total_tokens ?? 0);
+  }
+  for (const run of store.listReviewerRuns(jobId)) {
+    cost += run.cost ?? 0;
+    tokens +=
+      run.total_tokens ??
+      (run.prompt_tokens ?? 0) +
+        (run.completion_tokens ?? 0) +
+        (run.reasoning_tokens ?? 0) +
+        (run.cache_read_tokens ?? 0) +
+        (run.cache_write_tokens ?? 0);
+  }
+  return { cost, tokens };
+}
+
 async function runStackJob(deps: PipelineDeps, forge: ForgeRegistry, jobId: number, signal: AbortSignal): Promise<void> {
   const { store, config } = deps;
   const job = store.getJob(jobId);
   if (!job) return;
   if (["stale", "cancelled"].includes(job.state)) {
+    skipUnreachedStackMembers(store, jobId);
     store.log(jobId, `Skipped run: job is ${job.state}`, "warn");
     return;
   }
@@ -1064,52 +1202,150 @@ async function runStackJob(deps: PipelineDeps, forge: ForgeRegistry, jobId: numb
 
     // Phase 2 — member reviews in dependency order. Each runs as a standard
     // pr_review job so the existing budget, concurrency, dedup, and publish
-    // paths apply unchanged; a matching completed job is reused as-is.
+    // paths apply unchanged; a matching completed job is reused as-is. A
+    // member that ends stale/failed is re-pinned and retried in place
+    // (bounded by STACK_MEMBER_MAX_RETRIES); one that still cannot complete
+    // is escalated in the stack summary while later members proceed.
+    // Verify-first (issue #123): a member that already has a completed
+    // review on an earlier head re-checks its open findings instead of
+    // burning the full specialist set again, unless the diff trips the
+    // router's hard-risk families.
     store.setJobState(jobId, "reviewing");
     const memberJobs: { member: (typeof members)[number]; jobId: number }[] = [];
-    for (const member of members) {
-      throwIfStale(store, jobId, signal);
-      store.patchStackMember(member.id, { state: "reviewing" });
+    const memberEscalations: string[] = [];
+    const memberSkips: string[] = [];
+    let stackTokens = 0;
+    for (let index = 0; index < members.length; index++) {
+      const member = members[index]!;
       const info = meta.get(member.pr_number)!;
-      const enqueued = store.enqueue({
-        repoFullName: job.repo_full_name,
-        repoOwner: job.repo_owner,
-        repoName: job.repo_name,
-        installationId: job.installation_id,
-        githubAccountId: job.github_account_id ?? undefined,
-        githubRepositoryId: job.github_repository_id ?? undefined,
-        prNumber: member.pr_number,
-        prTitle: info.title,
-        prBody: info.body,
-        prHtmlUrl: info.htmlUrl,
-        prAuthor: info.author,
-        baseSha: member.base_sha,
-        headSha: member.head_sha,
-        baseRef: member.base_ref,
-        headRef: member.head_ref,
-        webhookDeliveryId: job.webhook_delivery_id ?? undefined,
-        webhookEvent: "stack_review",
-        reviewers: reviewerSpecs(config),
-        jobType: "pr_review",
-      });
-      const memberJobId = enqueued.job.id;
-      memberJobs.push({ member, jobId: memberJobId });
-      store.patchStackMember(member.id, { memberJobId, state: "reviewing" });
-      if (enqueued.created) {
-        store.log(jobId, `Reviewing stack member #${member.pr_number} as job ${memberJobId}`);
-        await runJob(deps, forge, memberJobId, signal);
-      } else {
+      // Envelope: the bottom and the tip always keep their normal mode. A
+      // middle member in an oversized stack — or after recorded member spend
+      // crosses STACK_TOKEN_CAP — is downgraded: verify when it has a prior
+      // pass to re-check, skipped-budget when it does not.
+      const edgeMember = index === 0 || index === members.length - 1;
+      const budgeted = !edgeMember && (members.length > STACK_MAX_MEMBERS || stackTokens > STACK_TOKEN_CAP);
+      const reviewMode = await stackMemberReviewMode(deps, provider, job, member, info, budgeted);
+      if (reviewMode === "skip") {
+        const reason =
+          members.length > STACK_MAX_MEMBERS
+            ? `stack has ${members.length} members (max ${STACK_MAX_MEMBERS})`
+            : `stack token cap ${STACK_TOKEN_CAP} exceeded`;
+        store.patchStackMember(member.id, { state: "skipped" });
+        memberSkips.push(`#${member.pr_number}`);
+        store.log(jobId, `Stack member #${member.pr_number} skipped-budget: ${reason}`, "warn");
+        continue;
+      }
+      let memberJobId: number | null = null;
+      let outcome = "missing";
+      let attempt = 0;
+      for (; attempt <= STACK_MEMBER_MAX_RETRIES; attempt++) {
+        throwIfStale(store, jobId, signal);
+        if (attempt > 0) {
+          // Re-resolve the head before retrying: a stale member usually means
+          // it moved. A moved head keeps the shared dedup key so the retry
+          // joins (or reuses) whichever job superseded the last attempt.
+          const previousHead = member.head_sha;
+          const change = await provider.getChange(memberTarget(member.pr_number));
+          if (change.headSha !== member.head_sha || change.baseSha !== member.base_sha) {
+            store.patchStackMember(member.id, { baseSha: change.baseSha, headSha: change.headSha });
+            member.base_sha = change.baseSha;
+            member.head_sha = change.headSha;
+            store.log(
+              jobId,
+              `Re-pinned #${member.pr_number} at ${change.headSha.slice(0, 8)} (base ${change.baseSha.slice(0, 8)}) for retry`,
+            );
+          }
+          // Dedup matches on head_sha alone: whenever this retry lands at the
+          // previous attempt's head — fully unchanged coordinates or a
+          // base-only move — it would dedup onto the previous terminal row
+          // and consume the attempt doing zero work. That row is terminal
+          // now, so move its dedup key aside and let the fresh row claim the
+          // shared slot, keeping webhook dedup and supersession coverage.
+          if (memberJobId != null && change.headSha === previousHead) {
+            const retired = store.retireJobDedupKey(memberJobId, retiredMemberDedupKey(jobId, member.pr_number, attempt));
+            if (!retired) {
+              store.log(jobId, `Could not retire dedup key on job ${memberJobId} for #${member.pr_number} retry`, "warn");
+            }
+          }
+        }
+        store.patchStackMember(member.id, { state: "reviewing" });
+        const enqueued = store.enqueue({
+          repoFullName: job.repo_full_name,
+          repoOwner: job.repo_owner,
+          repoName: job.repo_name,
+          installationId: job.installation_id,
+          githubAccountId: job.github_account_id ?? undefined,
+          githubRepositoryId: job.github_repository_id ?? undefined,
+          prNumber: member.pr_number,
+          prTitle: info.title,
+          prBody: info.body,
+          prHtmlUrl: info.htmlUrl,
+          prAuthor: info.author,
+          baseSha: member.base_sha,
+          headSha: member.head_sha,
+          baseRef: member.base_ref,
+          headRef: member.head_ref,
+          webhookDeliveryId: job.webhook_delivery_id ?? undefined,
+          webhookEvent: "stack_review",
+          reviewers: reviewMode === "verify" ? [] : reviewerSpecs(config),
+          jobType: "pr_review",
+          reviewMode,
+        });
+        memberJobId = enqueued.job.id;
+        store.patchStackMember(member.id, { memberJobId, state: "reviewing" });
+        if (enqueued.created) {
+          store.log(jobId, `Reviewing stack member #${member.pr_number} as job ${memberJobId}`);
+          await runJob(deps, forge, memberJobId, signal);
+        } else {
+          store.log(
+            jobId,
+            `Stack member #${member.pr_number} reuses existing job ${memberJobId} (${enqueued.job.state})`,
+          );
+        }
+        outcome = await waitForJob(deps.store, memberJobId, jobId, signal);
+        if (outcome === "completed") {
+          // A completed review only counts while it still describes the live
+          // head: finishing at a since-moved SHA is re-pinned and retried
+          // like a staled member rather than carried into the summary.
+          const change = await provider.getChange(memberTarget(member.pr_number));
+          if (change.headSha === member.head_sha) break;
+          outcome = "stale";
+          store.log(
+            jobId,
+            `Stack member #${member.pr_number} completed at ${member.head_sha.slice(0, 8)} but head moved to ${change.headSha.slice(0, 8)}; re-pinning`,
+            "warn",
+          );
+        }
+        // A cancelled member was stopped on purpose (operator or pause) —
+        // record it and move on rather than resurrecting cancelled work.
+        if (outcome === "cancelled") break;
+        if (attempt < STACK_MEMBER_MAX_RETRIES) {
+          store.log(
+            jobId,
+            `Stack member #${member.pr_number} review ended ${outcome} (job ${memberJobId}); retry ${attempt + 1}/${STACK_MEMBER_MAX_RETRIES}`,
+            "warn",
+          );
+        }
+      }
+      if (outcome !== "completed") {
+        // Cancelled means someone stopped it on purpose; 'skipped' renders
+        // that honestly on the member rail while the escalation still says
+        // exactly which outcome ended it.
+        store.patchStackMember(member.id, { state: outcome === "cancelled" ? "skipped" : "failed" });
+        const attempts = Math.min(attempt + 1, STACK_MEMBER_MAX_RETRIES + 1);
+        memberEscalations.push(
+          `#${member.pr_number} ended ${outcome}${memberJobId ? ` (job ${memberJobId})` : ""} after ${attempts} attempt(s) — review this PR manually`,
+        );
         store.log(
           jobId,
-          `Stack member #${member.pr_number} reuses existing job ${memberJobId} (${enqueued.job.state})`,
+          `Stack member #${member.pr_number} review did not complete after ${attempts} attempt(s): ${outcome}`,
+          "warn",
         );
-      }
-      const outcome = await waitForJob(deps.store, memberJobId, jobId, signal);
-      if (outcome !== "completed") {
-        store.patchStackMember(member.id, { state: "failed" });
-        throw new Error(`stack member #${member.pr_number} review ended ${outcome} (job ${memberJobId})`);
+        continue;
       }
       store.patchStackMember(member.id, { state: "done" });
+      memberJobs.push({ member, jobId: memberJobId! });
+      stackTokens += memberJobSpend(store, memberJobId!).tokens;
     }
 
     // Phase 3 — re-check every head before anything stack-level is published.
@@ -1132,34 +1368,63 @@ async function runStackJob(deps: PipelineDeps, forge: ForgeRegistry, jobId: numb
     }
 
     // Phase 4 — cumulative pass over the stack tip plus every member diff.
+    // Two gates keep it cheap: it only runs when members share changed paths
+    // (disjoint diffs cannot interact), and never after the stack token
+    // ceiling already tripped inside the member loop.
     const cumulativeRun = store.listReviewerRuns(jobId).find((entry) => entry.role === "stack_cumulative");
-    const clone = await provider.cloneSpec(memberTarget(members[members.length - 1]!.pr_number), {
-      anonymous: job.installation_id === 0,
-    });
     const top = members[members.length - 1]!;
-    const workspace = await deps.checkout.prepare({
-      jobId,
-      cloneUrl: clone.cloneUrl,
-      gitAuthArgs: clone.gitAuthArgs,
-      remoteRef: clone.remoteRef,
-      secrets: [...clone.secrets, ...globalSecrets(config)],
-      baseSha: top.head_sha,
-      headSha: top.head_sha,
-      signal,
-      fetchDiff: async () => diffs.get(top.pr_number) ?? "",
-      metadata: {
-        repo: job.repo_full_name,
-        pr: top.pr_number,
-        title: job.pr_title,
+    const sharedPaths = stackSharedPaths(members, diffs);
+    const overBudget = stackTokens > STACK_TOKEN_CAP;
+    let cumulative: ReviewerResult;
+    let cumulativeNote = "";
+    if (sharedPaths.length === 0 || overBudget) {
+      cumulative = { schema_version: 1, reviewer: "stack_cumulative", verdict: "clean", summary: "", findings: [] };
+      cumulativeNote = overBudget
+        ? `Cross-PR pass skipped — stack token cap ${STACK_TOKEN_CAP} exceeded (${stackTokens} tokens recorded across member reviews).`
+        : "Cross-PR pass skipped — member diffs share no changed paths.";
+      if (cumulativeRun) {
+        store.patchReviewer(cumulativeRun.id, {
+          state: "done",
+          normalized_json: JSON.stringify({ ...cumulative, summary: cumulativeNote }, null, 2),
+          finished_at: nowIso(),
+          duration_ms: 0,
+          validation_error: null,
+        });
+      }
+      store.log(jobId, `Stack cumulative pass skipped: ${overBudget ? "stack token cap exceeded" : "member diffs share no changed paths"}`);
+    } else {
+      store.log(
+        jobId,
+        `Stack cumulative pass covering ${sharedPaths.length} shared path(s): ${sharedPaths.slice(0, 5).join(", ")}${sharedPaths.length > 5 ? "…" : ""}`,
+      );
+      const clone = await provider.cloneSpec(memberTarget(top.pr_number), {
+        anonymous: job.installation_id === 0,
+      });
+      const workspace = await deps.checkout.prepare({
+        jobId,
+        cloneUrl: clone.cloneUrl,
+        gitAuthArgs: clone.gitAuthArgs,
+        remoteRef: clone.remoteRef,
+        secrets: [...clone.secrets, ...globalSecrets(config)],
         baseSha: top.head_sha,
         headSha: top.head_sha,
-      },
-    });
-    store.patchJob(jobId, { workspace_path: workspace.dir });
-    throwIfStale(store, jobId, signal);
-    const cumulative = await runStackCumulativeRun(deps, job, cumulativeRun, workspace.repoDir, stackId, members, diffs, meta, signal);
-    if (!cumulative) {
-      throw new Error("stack cumulative pass failed");
+        signal,
+        fetchDiff: async () => diffs.get(top.pr_number) ?? "",
+        metadata: {
+          repo: job.repo_full_name,
+          pr: top.pr_number,
+          title: job.pr_title,
+          baseSha: top.head_sha,
+          headSha: top.head_sha,
+        },
+      });
+      store.patchJob(jobId, { workspace_path: workspace.dir });
+      throwIfStale(store, jobId, signal);
+      const result = await runStackCumulativeRun(deps, job, cumulativeRun, workspace.repoDir, stackId, members, diffs, meta, signal);
+      if (!result) {
+        throw new Error("stack cumulative pass failed");
+      }
+      cumulative = result;
     }
 
     // Phase 5 — publish the stack summary and each cross-PR finding as issue
@@ -1170,8 +1435,23 @@ async function runStackJob(deps: PipelineDeps, forge: ForgeRegistry, jobId: numb
       .join(" → ");
     const summaryBody =
       `**Stack review "${stackId}"** — reviewed ${members.length} pull request(s) in order: ${ordered}.\n\n` +
-      `Member reviews: ${memberJobs.map((entry) => `#${entry.member.pr_number} (job ${entry.jobId})`).join(", ")}.\n\n` +
-      (cumulative.summary ? `${cumulative.summary}\n\n` : "") +
+      `Member reviews: ${
+        memberJobs
+          .map((entry) => {
+            const mode = store.getJob(entry.jobId)?.review_mode;
+            return `#${entry.member.pr_number} (job ${entry.jobId}${mode === "verify" ? ", verify" : ""})`;
+          })
+          .join(", ") || "none"
+      }.\n\n` +
+      (memberEscalations.length ? `**Needs human review** — ${memberEscalations.join("; ")}.\n\n` : "") +
+      (members.length > STACK_MAX_MEMBERS || overBudget
+        ? `**Stack budget** — ${
+            members.length > STACK_MAX_MEMBERS
+              ? `stack has ${members.length} members (max ${STACK_MAX_MEMBERS})`
+              : `member reviews recorded ${stackTokens} tokens (cap ${STACK_TOKEN_CAP})`
+          }; middle members run verify-only.${memberSkips.length ? ` Skipped-budget (no prior pass to verify): ${memberSkips.join(", ")}.` : ""}\n\n`
+        : "") +
+      (cumulativeNote ? `${cumulativeNote}\n\n` : cumulative.summary ? `${cumulative.summary}\n\n` : "") +
       `Cross-PR findings: ${cumulative.findings.length}.`;
     await postStackComment(deps, job, top.pr_number, summaryBody);
     for (const finding of cumulative.findings) {
@@ -1189,6 +1469,7 @@ async function runStackJob(deps: PipelineDeps, forge: ForgeRegistry, jobId: numb
       `Stack review completed: ${members.length} member(s), ${cumulative.findings.length} cross-PR finding(s)`,
     );
   } catch (error) {
+    skipUnreachedStackMembers(store, jobId);
     if (store.isStale(jobId) || signal.aborted) {
       const cancelled = store.getJob(jobId)?.state === "cancelled";
       store.log(jobId, cancelled ? "Stack review cancelled" : "Stack review aborted or marked stale", "warn");
@@ -1610,6 +1891,34 @@ async function routeSpecialists(
       (runRoles !== decision.reviewers.join(", ") ? ` → profile ${decision.profile} list runs ${runRoles}` : "") +
       ` reason=${decision.reason}`,
   );
+}
+
+/**
+ * Compact aggregate for a verify-mode job (issue #123): the reconciler's
+ * classifications are the whole result — no new findings are produced, and
+ * `findingsForPublish` still re-publishes "moved" items inline from the
+ * snapshot. The verdict is "clean" only when nothing open survived.
+ */
+function verifyOnlyAggregate(job: JobRow, snapshot: ReconciliationSnapshot): AggregatorResult {
+  let resolved = 0;
+  let moved = 0;
+  let stillOpen = 0;
+  let checked = 0;
+  for (const item of snapshot.items) {
+    if (item.status === "dismissed") continue;
+    checked += 1;
+    if (item.status === "resolved") resolved += 1;
+    else if (item.status === "moved") moved += 1;
+    else stillOpen += 1;
+  }
+  return {
+    schema_version: 1,
+    verdict: stillOpen + moved > 0 ? "comment" : "clean",
+    summary:
+      `Verify-first pass at ${job.head_sha.slice(0, 8)}: re-checked ${checked} open finding(s) — ` +
+      `${resolved} resolved, ${moved} moved, ${stillOpen} still open. Specialist review skipped; request a full review to re-scan.`,
+    findings: [],
+  };
 }
 
 async function reconcileAndRoute(

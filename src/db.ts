@@ -122,6 +122,7 @@ function migrate(db: SqliteDb): void {
       poison_alert_policy TEXT,
       manual_escalate_requested INTEGER NOT NULL DEFAULT 0,
       job_type TEXT NOT NULL DEFAULT 'pr_review',
+      review_mode TEXT NOT NULL DEFAULT 'full',
       brief_json TEXT,
       dedup_key TEXT NOT NULL DEFAULT '',
       UNIQUE (provider, provider_instance, repo_full_name, pr_number, head_sha, job_type, dedup_key)
@@ -567,6 +568,7 @@ function migrate(db: SqliteDb): void {
       ["manual_escalate_requested", "INTEGER NOT NULL DEFAULT 0"],
       ["profile_revision_id", "INTEGER"],
       ["job_type", "TEXT NOT NULL DEFAULT 'pr_review'"],
+      ["review_mode", "TEXT NOT NULL DEFAULT 'full'"],
       ["scan_branch", "TEXT"],
       ["dedup_key", "TEXT NOT NULL DEFAULT ''"],
     ];
