@@ -456,6 +456,9 @@ export class JobStore {
     // change supersedes it.
     const dedupKey = jobType === "repo_brief" ? randomUUID() : (input.dedupKey ?? "");
 
+    // BEGIN IMMEDIATE for every emission-path write transaction: take the
+    // write lock up front so a hypothetical second writer gets busy_timeout
+    // instead of a deferred-read SQLITE_BUSY_SNAPSHOT mid-sweep.
     const result = this.db.transaction(() => {
       // Briefs are pinned to an immutable SHA, so a newer SHA can never stale
       // one — and marking an in-flight brief stale would abort it mid-run.
@@ -596,7 +599,7 @@ export class JobStore {
       const job = this.getJob(jobId);
       if (!job) throw new Error("failed to load inserted job");
       return { job, created: true, staleJobIds };
-    })();
+    }).immediate();
 
     publish({ type: "jobs" });
     for (const id of staleJobIds) {
@@ -1024,7 +1027,7 @@ export class JobStore {
       );
       // Only rows the guarded UPDATE actually transitioned get aborted/emitted.
       return stale.filter((row) => staledIds.has(row.id));
-    })();
+    }).immediate();
     const ids = rows.map((r) => r.id);
     for (const row of rows) {
       // Already-terminal rows are only relabeled — emitting them again would
@@ -1505,7 +1508,7 @@ export class JobStore {
         .prepare(`UPDATE jobs SET ${assignments.join(", ")} WHERE id = ? AND state = ?`)
         .run(...values, id, current.state);
       return changes === 1 ? { pre: current, target: targetState } : undefined;
-    })();
+    }).immediate();
     if (!transition) return;
     // Also settles delegated stack-member coverage: a covered member on a
     // finished run takes this job's outcome. No-ops for members of live
@@ -1610,7 +1613,7 @@ export class JobStore {
         )
         .all(reason, actor, now, now, ...whereValues) as { id: number }[];
       return { preStates: snapshot, rows: updated };
-    })();
+    }).immediate();
     for (const row of rows) this.resolveStackMemberCoverage(row.id, "cancelled");
     for (const row of rows) {
       const preState = preStates.get(row.id);
@@ -1726,7 +1729,7 @@ export class JobStore {
          WHERE id = ? AND state = 'failed'`,
       );
       for (const run of targets) resetCount += reset.run(run.id).changes;
-    })();
+    }).immediate();
     if (!guardPassed) return { ok: false, error: "job state changed — retry aborted" };
 
     this.log(

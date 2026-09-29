@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { openDb } from "../db.js";
 import { JobStore, type JobRow } from "./store.js";
 import {
@@ -44,7 +44,8 @@ function seedJob(
 }
 
 function seedStackJob(store: JobStore, vector: string) {
-  return store.enqueue({
+  return store
+    .enqueue({
     repoFullName: "acme/widgets",
     repoOwner: "acme",
     repoName: "widgets",
@@ -58,10 +59,11 @@ function seedStackJob(store: JobStore, vector: string) {
     headSha: "cafebabe",
     baseRef: "main",
     headRef: "feat",
-    reviewers: [{ role: "stack_cumulative", title: "Stack cumulative" }],
-    jobType: "stack_review",
-    dedupKey: `stack:u1@${vector}`,
-  }).job.id;
+      reviewers: [{ role: "stack_cumulative", title: "Stack cumulative" }],
+      jobType: "stack_review",
+      dedupKey: `stack:u1@${vector}`,
+    })
+    .job.id;
 }
 
 const lines: string[] = [];
@@ -72,6 +74,12 @@ const capture = (line: string) => {
 function payloadLines(): JobSummaryPayload[] {
   return lines.map((line) => JSON.parse(line) as JobSummaryPayload);
 }
+
+beforeEach(() => {
+  // Keep the ambient environment out of store-driven emits: a developer or
+  // CI box with OPENOBSERVE_LOGS_URL exported must not produce real POSTs.
+  vi.stubEnv("OPENOBSERVE_LOGS_URL", "");
+});
 
 afterEach(async () => {
   lines.length = 0;
@@ -110,6 +118,28 @@ describe("jobSpend", () => {
     expect(spend.completionTokens).toBe(10);
     expect(spend.totalTokens).toBe(39);
     expect(spend.costUsd).toBeCloseTo(0.085);
+  });
+
+  it("maps exact numeric spend values into the payload", () => {
+    const store = makeStore();
+    const jobId = seedJob(store);
+    store.patchJob(jobId, {
+      routing_prompt_tokens: 3,
+      routing_completion_tokens: 2,
+      routing_total_tokens: 5,
+      routing_cost: 0.01,
+      aggregator_prompt_tokens: 7,
+      aggregator_completion_tokens: 5,
+      aggregator_total_tokens: 12,
+      aggregator_cost: 0.02,
+    });
+    const run = store.listReviewerRuns(jobId)[0];
+    store.patchReviewer(run.id, { prompt_tokens: 10, completion_tokens: 4, total_tokens: 14, cost: 0.03 });
+    const payload = buildJobSummary(store.getJob(jobId)!, store.listReviewerRuns(jobId));
+    expect(payload.prompt_tokens).toBe(20);
+    expect(payload.completion_tokens).toBe(11);
+    expect(payload.total_tokens).toBe(31);
+    expect(payload.cost_usd).toBeCloseTo(0.06);
   });
 
   it("reports null cost when nothing was measured", () => {
@@ -655,6 +685,60 @@ describe("emitJobSummary", () => {
     expect(lines).toHaveLength(0);
   });
 
+  it("skips a stack-sweep-selected job a concurrent writer cancelled before the guarded UPDATE", () => {
+    setJobSummarySink(capture);
+    const db = openDb(":memory:");
+    const store = new JobStore(db, [], { emitJobSummaries: true });
+    const victim = seedStackJob(store, "vec1");
+    store.setJobState(victim, "reviewing"); // live state so the stack sweep selects it
+    lines.length = 0;
+    const origPrepare = db.prepare.bind(db);
+    vi.spyOn(db, "prepare").mockImplementation(((sql: string) => {
+      if (sql.includes("SET state = 'stale'") && sql.includes("state IN (")) {
+        origPrepare("UPDATE jobs SET state = 'cancelled' WHERE id = ?").run(victim);
+      }
+      return origPrepare(sql);
+    }) as typeof db.prepare);
+    const result = store.enqueue({
+      repoFullName: "acme/widgets",
+      repoOwner: "acme",
+      repoName: "widgets",
+      installationId: 9,
+      prNumber: 43,
+      prTitle: "t",
+      prBody: "",
+      prHtmlUrl: "",
+      prAuthor: "dev",
+      baseSha: "base",
+      headSha: "cafebabe",
+      baseRef: "main",
+      headRef: "feat",
+      reviewers: [{ role: "stack_cumulative", title: "Stack cumulative" }],
+      jobType: "stack_review",
+      dedupKey: "stack:u1@vec1",
+    });
+    expect(result.staleJobIds).toEqual([]);
+    expect(store.getJob(victim)!.state).toBe("cancelled");
+    expect(lines).toHaveLength(0);
+  });
+
+  it("skips a cancelJobs-selected job a concurrent writer finished before the guarded UPDATE", () => {
+    setJobSummarySink(capture);
+    const db = openDb(":memory:");
+    const store = new JobStore(db, [], { emitJobSummaries: true });
+    const victim = seedJob(store, 4, "sha1");
+    const origPrepare = db.prepare.bind(db);
+    vi.spyOn(db, "prepare").mockImplementation(((sql: string) => {
+      if (sql.includes("SET state = 'cancelled'") && sql.includes("RETURNING id")) {
+        origPrepare("UPDATE jobs SET state = 'completed' WHERE id = ?").run(victim);
+      }
+      return origPrepare(sql);
+    }) as typeof db.prepare);
+    expect(store.cancelJobs({ jobId: victim }, "manual_cancel", null)).toEqual([]);
+    expect(store.getJob(victim)!.state).toBe("completed");
+    expect(lines).toHaveLength(0);
+  });
+
   it("emits usage_complete:true for a live job completing normally", () => {
     setJobSummarySink(capture);
     const store = makeStore();
@@ -850,6 +934,33 @@ describe("emitJobSummary", () => {
     const warnings = err.mock.calls.filter((call) => String(call[0]).includes("cleartext"));
     expect(warnings).toHaveLength(1);
     expect(JSON.stringify(err.mock.calls)).not.toContain("secret-token");
+  });
+
+  it("does not warn for an http ingest URL without credentials", async () => {
+    const err = vi.spyOn(console, "error").mockImplementation(() => {});
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true, status: 200 });
+    vi.stubGlobal("fetch", fetchMock);
+    setJobSummarySink(capture);
+    const store = makeStore();
+    emitJobSummary(store, seedJob(store), {
+      OPENOBSERVE_LOGS_URL: "http://oo-no-creds.internal/api/default/maomao/_json",
+    } as NodeJS.ProcessEnv);
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
+    expect(err.mock.calls.filter((call) => String(call[0]).includes("cleartext"))).toHaveLength(0);
+  });
+
+  it("redacts the configured URL from error logs even when it is unparseable", async () => {
+    const err = vi.spyOn(console, "error").mockImplementation(() => {});
+    const fetchMock = vi.fn().mockRejectedValue(new Error("could not reach not-a-valid-url%%% endpoint"));
+    vi.stubGlobal("fetch", fetchMock);
+    setJobSummarySink(capture);
+    const store = makeStore();
+    const jobId = seedJob(store);
+    emitJobSummary(store, jobId, { OPENOBSERVE_LOGS_URL: "not-a-valid-url%%%" } as NodeJS.ProcessEnv);
+    await flushJobSummaryPosts();
+    const logged = err.mock.calls.map((call) => String(call[0])).join("\n");
+    expect(logged).not.toContain("not-a-valid-url%%%");
+    expect(logged).toContain("<openobserve-url>");
   });
 
   it("redacts normalized URL forms and embedded userinfo from ingest error logs", async () => {
