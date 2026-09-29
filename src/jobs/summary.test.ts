@@ -11,7 +11,8 @@ import {
 } from "./summary.js";
 
 function makeStore() {
-  return new JobStore(openDb(":memory:"));
+  // Emission is opt-in in production (src/index.ts); these tests exercise it.
+  return new JobStore(openDb(":memory:"), [], { emitJobSummaries: true });
 }
 
 function seedJob(
@@ -320,7 +321,9 @@ describe("emitJobSummary", () => {
     const queued = seedStackJob(store, "vec1");
     const staled = store.staleOpenStackJobs("acme/widgets", "u1", "stack:u1@vec2");
     expect(staled).toEqual([queued]);
-    expect(payloadLines().map((p) => `${p.job_id}:${p.state}`)).toEqual([`${queued}:stale`]);
+    expect(payloadLines()).toEqual([
+      expect.objectContaining({ job_id: queued, state: "stale", usage_complete: true }),
+    ]);
   });
 
   it("emits once for a failed job relabeled stale by a later push", () => {
@@ -423,6 +426,24 @@ describe("emitJobSummary", () => {
     expect(payloadLines().map((p) => [p.state, p.attempt, p.usage_complete])).toEqual([
       ["failed", 1, true],
       ["stale", 2, true],
+    ]);
+  });
+
+  it("emits attempt 3 after two store-level retries", () => {
+    setJobSummarySink(capture);
+    const store = makeStore();
+    const jobId = seedJob(store);
+    for (let i = 0; i < 2; i++) {
+      const run = store.listReviewerRuns(jobId)[0];
+      store.patchReviewer(run.id, { state: "failed" });
+      store.setJobState(jobId, "failed");
+      expect(store.retryFailedReviewers(jobId).ok).toBe(true);
+    }
+    store.setJobState(jobId, "completed");
+    expect(payloadLines().map((p) => [p.state, p.attempt])).toEqual([
+      ["failed", 1],
+      ["failed", 2],
+      ["completed", 3],
     ]);
   });
 
@@ -558,12 +579,79 @@ describe("emitJobSummary", () => {
     ]);
   });
 
-  it("emits nothing when the store is constructed with emitJobSummaries: false", () => {
+  it("emits nothing on any terminal path when emitJobSummaries is off", () => {
     setJobSummarySink(capture);
+    // emitJobSummaries defaults off; the explicit false pins the flag itself.
     const store = new JobStore(openDb(":memory:"), [], { emitJobSummaries: false });
-    const jobId = seedJob(store);
-    store.setJobState(jobId, "completed");
+    const jobId = seedJob(store, 4, "sha-a");
+    store.setJobState(jobId, "failed"); // setJobState path
+    const queued = seedJob(store, 8, "sha-1");
+    seedJob(store, 8, "sha-2"); // enqueue head-move sweep
+    expect(store.getJob(queued)!.state).toBe("stale");
+    const stackId = seedStackJob(store, "vec1");
+    expect(store.staleOpenStackJobs("acme/widgets", "u1", "stack:u1@vec2")).toEqual([stackId]); // stack sweep
+    store.cancelJobs({ jobId }, "manual_cancel", null); // cancelJobs path (already-terminal -> relabel)
     expect(lines).toHaveLength(0);
+  });
+
+  it("skips emission when setJobState's guarded update loses a concurrent state change", () => {
+    setJobSummarySink(capture);
+    const db = openDb(":memory:");
+    const store = new JobStore(db, [], { emitJobSummaries: true });
+    const jobId = seedJob(store);
+    store.setJobState(jobId, "failed");
+    lines.length = 0;
+    // A second writer cancelling between the pre-state read and the guarded
+    // UPDATE: the UPDATE lands 0 rows, so no emit/publish/coverage follow-up.
+    const origPrepare = db.prepare.bind(db);
+    vi.spyOn(db, "prepare").mockImplementation(((sql: string) => {
+      if (sql.includes("UPDATE jobs SET") && sql.includes("WHERE id = ? AND state = ?")) {
+        origPrepare("UPDATE jobs SET state = 'cancelled' WHERE id = ?").run(jobId);
+      }
+      return origPrepare(sql);
+    }) as typeof db.prepare);
+    store.setJobState(jobId, "completed");
+    expect(store.getJob(jobId)!.state).toBe("cancelled");
+    expect(lines).toHaveLength(0);
+  });
+
+  it("aborts the retry with no run resets when the job state changed mid-transaction", () => {
+    const db = openDb(":memory:");
+    const store = new JobStore(db, [], { emitJobSummaries: true });
+    const jobId = seedJob(store);
+    const run = store.listReviewerRuns(jobId)[0];
+    store.patchReviewer(run.id, { state: "failed" });
+    store.setJobState(jobId, "failed");
+    const origPrepare = db.prepare.bind(db);
+    vi.spyOn(db, "prepare").mockImplementation(((sql: string) => {
+      if (sql.includes("retry_count = retry_count + 1")) {
+        origPrepare("UPDATE jobs SET state = 'cancelled' WHERE id = ?").run(jobId);
+      }
+      return origPrepare(sql);
+    }) as typeof db.prepare);
+    expect(store.retryFailedReviewers(jobId)).toEqual({ ok: false, error: "job state changed — retry aborted" });
+    expect(store.getJob(jobId)!.state).toBe("cancelled");
+    expect(store.listReviewerRuns(jobId)[0].state).toBe("failed");
+  });
+
+  it("skips run resets whose 'failed' state was lost mid-transaction and reports the real count", () => {
+    const db = openDb(":memory:");
+    const store = new JobStore(db, [], { emitJobSummaries: true });
+    const jobId = seedJob(store);
+    const run = store.listReviewerRuns(jobId)[0];
+    store.patchReviewer(run.id, { state: "failed" });
+    store.setJobState(jobId, "failed");
+    const origPrepare = db.prepare.bind(db);
+    vi.spyOn(db, "prepare").mockImplementation(((sql: string) => {
+      if (sql.includes("UPDATE reviewer_runs SET") && sql.includes("state = 'failed'")) {
+        origPrepare("UPDATE reviewer_runs SET state = 'done' WHERE id = ?").run(run.id);
+      }
+      return origPrepare(sql);
+    }) as typeof db.prepare);
+    expect(store.retryFailedReviewers(jobId)).toEqual({ ok: true, reset: 0 });
+    expect(store.getJob(jobId)!.state).toBe("queued");
+    expect(store.getJob(jobId)!.retry_count).toBe(1);
+    expect(store.listReviewerRuns(jobId)[0].state).toBe("done");
   });
 
   it("logs and returns when the store read throws", () => {

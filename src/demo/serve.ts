@@ -25,9 +25,9 @@ const config = loadConfig({
 });
 
 const db = openDb(config.databasePath);
-// Fixture transitions must not emit job-summary lines or OpenObserve POSTs —
-// the demo is a UI-only preview and would pollute the real telemetry stream.
-const store = new JobStore(db, [], { emitJobSummaries: false });
+// Job-summary emission is opt-in; the demo never enables it — fixture
+// transitions must not reach the real telemetry stream.
+const store = new JobStore(db);
 if (process.env.MAOMAO_DEMO_EMPTY !== "1") {
   seedDemoJobs(store);
 }

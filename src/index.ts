@@ -45,7 +45,7 @@ assertRuntimeConfig(config, {
   gitlabConnections: countConnections(db, "gitlab"),
   gitlabBootstrap: Boolean(config.gitlabBootstrap),
 });
-const store = new JobStore(db, config.modelCatalog);
+const store = new JobStore(db, config.modelCatalog, { emitJobSummaries: true });
 // A crash mid-creation can leave pending scan-issue claims (issue_number 0);
 // no loop is in flight at boot, so anything left over is orphaned.
 const orphanedClaims = store.clearOrphanedScanIssueClaims();
