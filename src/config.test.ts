@@ -109,6 +109,12 @@ describe("loadConfig", () => {
     expect(config.opencode.maxRetries).toBe(5);
   });
 
+  it("clamps STACK_TOKEN_CAP at 0 (disabled) and falls back to 10M when unparsable (issue #136)", () => {
+    expect(loadConfig({ STACK_TOKEN_CAP: "0" }).stackTokenCap).toBe(0);
+    expect(loadConfig({ STACK_TOKEN_CAP: "-5" }).stackTokenCap).toBe(0);
+    expect(loadConfig({ STACK_TOKEN_CAP: "abc" }).stackTokenCap).toBe(10_000_000);
+  });
+
   it("parses maintainer override logins case-insensitively", () => {
     const config = loadConfig({ MAOMAO_OVERRIDE_AUTHORS: "Szefowo, octocat" });
     expect(config.overrideAuthors).toEqual(["szefowo", "octocat"]);

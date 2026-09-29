@@ -470,6 +470,7 @@ export class JobStore {
           )
           .all(createdAt, createdAt, scope.provider, scope.instance, input.repoFullName, input.prNumber, input.headSha, jobType, dedupKey) as { id: number }[];
         staleJobIds.push(...stale.map((row) => row.id));
+        for (const row of stale) this.resolveStackMemberCoverage(row.id, "stale");
       }
 
       const existing = this.db
@@ -1016,6 +1017,24 @@ export class JobStore {
   }
 
   /**
+   * A member job that reached a terminal state resolves delegated coverage on
+   * finished stack runs (issue #136): 'reviewing' member rows on a dead stack
+   * can only be queued-coverage delegations — the member job's outcome is
+   * theirs ('done' when it completed, 'skipped' otherwise). Members of live
+   * runs are untouched; the run's own retry/reconcile logic owns them.
+   */
+  resolveStackMemberCoverage(jobId: number, jobState: JobState): void {
+    if (jobState !== "completed" && jobState !== "failed" && jobState !== "stale" && jobState !== "cancelled") return;
+    this.db
+      .prepare(
+        `UPDATE stack_run_members SET state = ?
+         WHERE member_job_id = ? AND state = 'reviewing'
+           AND job_id IN (SELECT id FROM jobs WHERE state IN ('completed', 'failed', 'stale', 'cancelled'))`,
+      )
+      .run(jobState === "completed" ? "done" : "skipped", jobId);
+  }
+
+  /**
    * Re-pin a still-queued stack_review job after a mid/tip push that kept the
    * membership: the row's top/bottom SHAs and the member snapshot move to the
    * new heads in place — no new stack-job row (issue #131). Returns false when
@@ -1250,6 +1269,7 @@ export class JobStore {
     const assignments = Object.keys(fields).map((column) => `${column} = ?`);
     const values = Object.keys(fields).map((column) => fields[column]);
     this.db.prepare(`UPDATE jobs SET ${assignments.join(", ")} WHERE id = ?`).run(...values, id);
+    this.resolveStackMemberCoverage(id, state);
     publish({ type: "job", jobId: id });
     publish({ type: "jobs" });
   }
@@ -1315,6 +1335,7 @@ export class JobStore {
          RETURNING id`,
       )
       .all(...values) as { id: number }[];
+    for (const row of rows) this.resolveStackMemberCoverage(row.id, "cancelled");
     return rows.map((row) => row.id);
   }
 

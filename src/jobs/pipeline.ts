@@ -1211,7 +1211,7 @@ async function runStackJob(deps: PipelineDeps, forge: ForgeRegistry, jobId: numb
     // burning the full specialist set again, unless the diff trips the
     // router's hard-risk families.
     store.setJobState(jobId, "reviewing");
-    const memberJobs: { member: (typeof members)[number]; jobId: number }[] = [];
+    const memberJobs: { member: (typeof members)[number]; jobId: number; covered?: boolean; coveredEnded?: string }[] = [];
     const memberEscalations: string[] = [];
     const memberSkips: string[] = [];
     let stackTokens = 0;
@@ -1354,7 +1354,7 @@ async function runStackJob(deps: PipelineDeps, forge: ForgeRegistry, jobId: numb
         }
       }
       if (covered) {
-        memberJobs.push({ member, jobId: memberJobId! });
+        memberJobs.push({ member, jobId: memberJobId!, covered: true });
         continue;
       }
       if (outcome !== "completed") {
@@ -1456,6 +1456,30 @@ async function runStackJob(deps: PipelineDeps, forge: ForgeRegistry, jobId: numb
       cumulative = result;
     }
 
+    // Reconcile delegated coverage just before publishing (issue #136): a
+    // queued member job that already reached a terminal state resolves the
+    // member now — 'done' when it completed, 'skipped' + escalation when it
+    // died — while coverage still in flight stays 'reviewing' and is labelled
+    // as queued coverage rather than a review this run finished. Coverage
+    // that settles after this is picked up by store.resolveStackMemberCoverage.
+    const liveCoverage = new Set<number>();
+    for (const entry of memberJobs) {
+      if (!entry.covered) continue;
+      const coveredState = store.getJob(entry.jobId)?.state;
+      if (coveredState === "completed") {
+        store.patchStackMember(entry.member.id, { state: "done" });
+      } else if (coveredState === "failed" || coveredState === "stale" || coveredState === "cancelled") {
+        store.patchStackMember(entry.member.id, { state: "skipped" });
+        entry.coveredEnded = coveredState;
+        memberEscalations.push(
+          `#${entry.member.pr_number}'s queued coverage ended ${coveredState} (job ${entry.jobId}) — review this PR manually`,
+        );
+        store.log(jobId, `Stack member #${entry.member.pr_number}'s queued coverage (job ${entry.jobId}) ended ${coveredState}`, "warn");
+      } else {
+        liveCoverage.add(entry.jobId);
+      }
+    }
+
     // Phase 5 — publish the stack summary and each cross-PR finding as issue
     // comments on the top PR, naming every PR and SHA involved.
     store.setJobState(jobId, "publishing");
@@ -1466,9 +1490,11 @@ async function runStackJob(deps: PipelineDeps, forge: ForgeRegistry, jobId: numb
       `**Stack review "${stackId}"** — reviewed ${members.length} pull request(s) in order: ${ordered}.\n\n` +
       `Member reviews: ${
         memberJobs
+          .filter((entry) => !entry.coveredEnded)
           .map((entry) => {
             const mode = store.getJob(entry.jobId)?.review_mode;
-            return `#${entry.member.pr_number} (job ${entry.jobId}${mode === "verify" ? ", verify" : ""})`;
+            const tag = mode === "verify" ? ", verify" : liveCoverage.has(entry.jobId) ? ", coverage already queued" : "";
+            return `#${entry.member.pr_number} (job ${entry.jobId}${tag})`;
           })
           .join(", ") || "none"
       }.\n\n` +

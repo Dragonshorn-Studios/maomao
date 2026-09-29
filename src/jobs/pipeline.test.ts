@@ -146,11 +146,17 @@ describe("JobStore enqueue", () => {
     expect(store.completedReviewAtHead("acme/widgets", 3, "aaa")).toBeUndefined();
     store.setJobState(queued.job.id, "completed", { finished_at: new Date().toISOString() });
     expect(store.completedReviewAtHead("acme/widgets", 3, "aaa")?.id).toBe(queued.job.id);
-    // Other heads and other forge scopes do not match.
+    // The match means exactly what enqueue dedups onto at the same coords.
+    expect(store.enqueue({ ...base, headSha: "aaa", jobType: "pr_review" }).job.id).toBe(queued.job.id);
+    expect(store.enqueue({ ...base, headSha: "aaa", jobType: "pr_review" }).created).toBe(false);
+    // Other heads, other forge scopes, and other job types do not match.
     expect(store.completedReviewAtHead("acme/widgets", 3, "bbb")).toBeUndefined();
     expect(
       store.completedReviewAtHead("acme/widgets", 3, "aaa", { provider: "gitlab", instance: "gitlab.com" }),
     ).toBeUndefined();
+    const scan = store.enqueue({ ...base, headSha: "ccc", jobType: "health_scan" });
+    store.setJobState(scan.job.id, "completed", { finished_at: new Date().toISOString() });
+    expect(store.completedReviewAtHead("acme/widgets", 3, "ccc")).toBeUndefined();
     // A row whose dedup key was retired no longer occupies the member slot.
     store.retireJobDedupKey(queued.job.id, "stack-member-retired:test");
     expect(store.completedReviewAtHead("acme/widgets", 3, "aaa")).toBeUndefined();
@@ -6071,7 +6077,7 @@ describe("stack reviews (issue #99)", () => {
     const cumulative = store.listReviewerRuns(stack.job.id).find((r) => r.role === "stack_cumulative");
     expect(cumulative?.state).toBe("done");
     expect(issueComments[0]?.body).toContain("Stack budget");
-    expect(issueComments[0]?.body).toContain("Cross-PR pass skipped — stack token cap");
+    expect(issueComments[0]?.body).toContain("Cross-PR pass skipped — stack token cap 400000");
   });
 
   it("reuses a completed same-head middle member for free past the token cap (issue #136)", async () => {
@@ -6241,7 +6247,13 @@ describe("stack reviews (issue #99)", () => {
     expect(jobs42.map((j) => j.id)).toEqual([queued.id]);
     const logs = store.listLogs(stack.job.id).map((l) => l.message).join("\n");
     expect(logs).toContain(`covered by queued job ${queued.id}`);
-    expect(issueComments[0]?.body).toContain(`#42 (job ${queued.id})`);
+    // Published as queued coverage, not as a review this run finished.
+    expect(issueComments[0]?.body).toContain(`#42 (job ${queued.id}, coverage already queued)`);
+
+    // When the covering job later settles, the member rail follows: the
+    // stack is finished, so its 'reviewing' member takes the job's outcome.
+    store.setJobState(queued.id, "completed", { finished_at: new Date().toISOString() });
+    expect(store.listStackMembers(stack.job.id).map((m) => m.state)).toEqual(["done", "done", "done"]);
   });
 
   it("reuses a completed same-head middle member for free past the member cap (issue #136)", async () => {
