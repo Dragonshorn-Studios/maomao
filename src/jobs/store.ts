@@ -313,6 +313,10 @@ const ACTIVE_JOB_STATES: readonly JobState[] = ["queued", ...LIVE_JOB_STATES];
 // and cancellation all scope to exactly these states.
 const ACTIVE_STATES_SQL = ACTIVE_JOB_STATES.map((state) => `'${state}'`).join(", ");
 
+// Claimed-to-be-running states only (no 'queued'): the stack enqueue stales an
+// in-flight run on the same membership key so its abort propagates (issue #131).
+const LIVE_STATES_SQL = LIVE_JOB_STATES.map((state) => `'${state}'`).join(", ");
+
 const TERMINAL_SKIP_REQUEUE: JobState[] = [
   "completed",
   "publishing",
@@ -418,8 +422,9 @@ export class JobStore {
     const jobType = input.jobType ?? "pr_review";
     // Repo briefs are per-request jobs: a fresh nonce keeps every confirmed
     // brief distinct, and identical repeats are served by repo_brief_cache.
-    // Stack reviews key dedup on `stack:<id>` so a retrigger after heads moved
-    // supersedes the earlier run while identical triggers dedup onto it.
+    // Stack reviews dedup on a membership key `stack:<id>@<prs>` (issue #131):
+    // a push with unchanged membership lands on the same job, a membership
+    // change supersedes it.
     const dedupKey = jobType === "repo_brief" ? randomUUID() : (input.dedupKey ?? "");
 
     const result = this.db.transaction(() => {
@@ -427,7 +432,34 @@ export class JobStore {
       // one — and marking an in-flight brief stale would abort it mid-run.
       // dedup_key joins the stale scope so two stacks sharing a top PR never
       // abort each other ('' preserves the pr_review/scan behavior).
-      if (jobType !== "repo_brief") {
+      if (jobType === "stack_review") {
+        // Stack-job identity is membership, not the SHA vector (issue #131):
+        // a mid/tip push lands on the same dedup key, so an in-flight run on
+        // that key is staled here for the caller to abort — its replacement
+        // is the INSERT below. Queued rows survive for the dedup hit (they
+        // are re-pinned in place), terminal rows stay untouched as history.
+        const stale = this.db
+          .prepare(
+            `UPDATE jobs
+             SET state = 'stale', updated_at = ?, finished_at = COALESCE(finished_at, ?)
+             WHERE provider = ? AND provider_instance = ? AND repo_full_name = ?
+               AND job_type = 'stack_review' AND dedup_key = ? AND state IN (${LIVE_STATES_SQL})
+             RETURNING id`,
+          )
+          .all(createdAt, createdAt, scope.provider, scope.instance, input.repoFullName, dedupKey) as { id: number }[];
+        staleJobIds.push(...stale.map((row) => row.id));
+        // Dead same-key rows at this head would collide with the recheck row
+        // on the jobs UNIQUE — move their dedup key aside (the
+        // `stack-retired:` namespace never claims stack identity back).
+        this.db
+          .prepare(
+            `UPDATE jobs SET dedup_key = 'stack-retired:' || id, updated_at = ?
+             WHERE provider = ? AND provider_instance = ? AND repo_full_name = ?
+               AND job_type = 'stack_review' AND dedup_key = ? AND head_sha = ?
+               AND state NOT IN (${ACTIVE_STATES_SQL})`,
+          )
+          .run(nowIso(), scope.provider, scope.instance, input.repoFullName, dedupKey, input.headSha);
+      } else if (jobType !== "repo_brief") {
         const stale = this.db
           .prepare(
             `UPDATE jobs
@@ -442,9 +474,18 @@ export class JobStore {
 
       const existing = this.db
         .prepare(
-          `SELECT * FROM jobs WHERE provider = ? AND provider_instance = ? AND repo_full_name = ? AND pr_number = ? AND head_sha = ? AND job_type = ? AND dedup_key = ?`,
+          jobType === "stack_review"
+            ? // Membership key + queued state: only a still-waiting job dedups —
+              // anything else gets a fresh row on the same key.
+              `SELECT * FROM jobs WHERE provider = ? AND provider_instance = ? AND repo_full_name = ?
+               AND job_type = 'stack_review' AND dedup_key = ? AND state = 'queued'`
+            : `SELECT * FROM jobs WHERE provider = ? AND provider_instance = ? AND repo_full_name = ? AND pr_number = ? AND head_sha = ? AND job_type = ? AND dedup_key = ?`,
         )
-        .get(scope.provider, scope.instance, input.repoFullName, input.prNumber, input.headSha, jobType, dedupKey) as JobRow | undefined;
+        .get(
+          ...(jobType === "stack_review"
+            ? [scope.provider, scope.instance, input.repoFullName, dedupKey]
+            : [scope.provider, scope.instance, input.repoFullName, input.prNumber, input.headSha, jobType, dedupKey]),
+        ) as JobRow | undefined;
 
       if (existing) {
         const skippedReason = skipReason(existing);
@@ -947,6 +988,29 @@ export class JobStore {
          LIMIT 1`,
       )
       .get(resolved.provider, resolved.instance, repoFullName, prNumber, headSha) as JobRow | undefined;
+  }
+
+  /**
+   * Re-pin a still-queued stack_review job after a mid/tip push that kept the
+   * membership: the row's top/bottom SHAs and the member snapshot move to the
+   * new heads in place — no new stack-job row (issue #131). Returns false when
+   * the job was claimed in the meantime, leaving the run's own Phase-1 re-pin
+   * to pick the heads up.
+   */
+  repinQueuedStackJob(
+    jobId: number,
+    head: { baseSha: string; headSha: string; baseRef: string; headRef: string },
+    members: { position: number; prNumber: number; baseRef: string; headRef: string; baseSha: string; headSha: string }[],
+  ): boolean {
+    return this.db.transaction(() => {
+      const updated = this.db
+        .prepare(`UPDATE jobs SET base_sha = ?, head_sha = ?, base_ref = ?, head_ref = ?, updated_at = ? WHERE id = ? AND state = 'queued'`)
+        .run(head.baseSha, head.headSha, head.baseRef, head.headRef, nowIso(), jobId);
+      if (updated.changes === 0) return false;
+      this.db.prepare(`DELETE FROM stack_run_members WHERE job_id = ?`).run(jobId);
+      this.insertStackMembers(jobId, members);
+      return true;
+    })();
   }
 
   /** Ordered SHA vector snapshot for a stack_review job (issue #99). */
