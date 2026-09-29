@@ -30,6 +30,13 @@ export class RepoRateLimiter {
     return this.windowed(key, windowMs).length < limit;
   }
 
+  /** True when `key` has at least one hit inside the current window. Used for
+   * marker budgets ("already charged this window") rather than numeric caps. */
+  hasHitInWindow(key: string, windowMs: number): boolean {
+    if (!key) return false;
+    return this.windowed(key, windowMs).length > 0;
+  }
+
   /** Record an accepted event. No-op when limiting is disabled. */
   record(repositoryId: number, limit: number, windowMs: number): void {
     if (!this.enabled(limit, windowMs) || !Number.isSafeInteger(repositoryId) || repositoryId <= 0) {

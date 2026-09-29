@@ -740,25 +740,52 @@ async function runStackEnqueue(
   pulls: ResolvedPull[],
   via: "top" | "end",
 ): Promise<WebhookHandleResult> {
+  // Automatic stack triggers share the quiet deny path with pr_review: a
+  // spend-control refusal claims the delivery and logs, but leaves no PR
+  // comment — tip thrash must not flood the thread (issue #130). Manual
+  // comment commands still get the actionable reply.
+  const quietDeny = (message: string): void => {
+    console.warn(
+      `stack: skipped automatic "${stackId}" trigger in ${ctx.repoFullName} — ${message} ` +
+        `(delivery ${ctx.input.request.deliveryId || "unknown"})`,
+    );
+  };
   // A stack run is reviews: the global pause blocks it like any other
   // enqueue. Checked after validation so the reply is still a useful error.
   if (ctx.input.store.getGlobalPause()) {
-    await stackReply(ctx, `Could not run stack "${stackId}": reviews are paused globally — resume on /pause.`);
+    if (ctx.enforceSpendControls) {
+      quietDeny("reviews paused globally");
+    } else {
+      await stackReply(ctx, `Could not run stack "${stackId}": reviews are paused globally — resume on /pause.`);
+    }
     return ctx.finish(`${via}-paused`, { ok: true, command: via, stackId, enqueued: false, error: "reviews paused globally" });
   }
   const rateOn = repoRateLimitActive(ctx.input.config.repoRateLimitPerWindow, ctx.input.config.repoRateWindowMs);
+  // Stack-aware budget (issue #130): the first created job of a stack in a
+  // window records the repo hit AND a per-stack marker; later re-triggers of
+  // the same stack in that window only supersede, so they charge 0 and skip
+  // the cap check entirely — tip thrash never burns N slots.
+  const stackBudgetKey =
+    ctx.githubRepositoryId != null ? `stack:${ctx.githubRepositoryId}:${stackId}` : "";
+  const stackAlreadyCharged =
+    rateOn &&
+    stackBudgetKey !== "" &&
+    ctx.input.rateLimiter != null &&
+    ctx.input.rateLimiter.hasHitInWindow(stackBudgetKey, ctx.input.config.repoRateWindowMs);
   if (ctx.enforceSpendControls) {
     const repoPause = ctx.input.store.getActivePause(ctx.repoFullName);
     if (repoPause) {
-      await stackReply(ctx, `Could not run stack "${stackId}": reviews for ${ctx.repoFullName} are paused until ${repoPause.expires_at}.`);
+      quietDeny(`reviews paused until ${repoPause.expires_at}`);
       return ctx.finish(`${via}-paused`, { ok: true, command: via, stackId, enqueued: false, error: `paused until ${repoPause.expires_at}` });
     }
     if (rateOn && ctx.githubRepositoryId == null) {
-      await stackReply(ctx, `Could not run stack "${stackId}": the webhook payload is missing the repository id needed for rate limiting.`);
+      quietDeny("missing repository id for rate limiting");
+      logAuthorizationRejection({ installationId: ctx.installationId, reason: "missing repository id" });
       return ctx.finish(`${via}-rate-limited`, { ok: true, command: via, stackId, enqueued: false, error: "missing repository id" });
     }
     if (
       rateOn &&
+      !stackAlreadyCharged &&
       ctx.githubRepositoryId != null &&
       ctx.input.rateLimiter &&
       !ctx.input.rateLimiter.wouldAllow(
@@ -767,7 +794,8 @@ async function runStackEnqueue(
         ctx.input.config.repoRateWindowMs,
       )
     ) {
-      await stackReply(ctx, `Could not run stack "${stackId}": ${ctx.repoFullName} is rate limited — retry once the window resets.`);
+      quietDeny("rate limited");
+      logRateLimited({ installationId: ctx.installationId, repositoryId: ctx.githubRepositoryId });
       return ctx.finish(`${via}-rate-limited`, { ok: true, command: via, stackId, enqueued: false, error: "rate limited" });
     }
   }
@@ -836,12 +864,15 @@ async function runStackEnqueue(
       expectedCount: members.length,
     })),
   );
-  if (enqueue.created && ctx.enforceSpendControls && rateOn && ctx.githubRepositoryId != null && ctx.input.rateLimiter) {
+  if (enqueue.created && ctx.enforceSpendControls && rateOn && ctx.githubRepositoryId != null && ctx.input.rateLimiter && !stackAlreadyCharged) {
     ctx.input.rateLimiter.record(
       ctx.githubRepositoryId,
       ctx.input.config.repoRateLimitPerWindow,
       ctx.input.config.repoRateWindowMs,
     );
+    // Marker hit under a separate key: it never joins the repo's numeric
+    // window, it only proves this stack already paid this window.
+    ctx.input.rateLimiter.recordKey(stackBudgetKey, 1, ctx.input.config.repoRateWindowMs);
   }
   if (enqueue.created) {
     ctx.input.store.insertStackMembers(enqueue.job.id, members);

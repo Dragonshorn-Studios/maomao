@@ -1944,9 +1944,10 @@ describe("stack commands (issue #99)", () => {
       github: pausedGithub,
       request: { event: "pull_request", deliveryId: "m10", signature: sign(secret, pausedBody), rawBody: pausedBody },
     });
-    // The pause still blocks both the stack trigger and the fall-through review.
+    // The pause still blocks both the stack trigger and the fall-through
+    // review — quietly: automatic denies claim+log, no PR comment (#130).
     expect(pausedResult.body.created).not.toBe(true);
-    expect(pausedComments[0]?.body).toMatch(/paused until/);
+    expect(pausedComments).toHaveLength(0);
     expect(pausedStore.listJobs(10)).toHaveLength(0);
 
     // Rate limit: burn the single slot on an unmarked PR, then the end marker
@@ -1977,10 +1978,68 @@ describe("stack commands (issue #99)", () => {
       request: { event: "pull_request", deliveryId: "m12", signature: sign(secret, limitedBody), rawBody: limitedBody },
     });
     // Rate limit still blocks: stack trigger errors and the fall-through
-    // review hits the same limiter in the normal path.
+    // review hits the same limiter in the normal path — both quietly (#130).
     expect(limitedResult.body.created).not.toBe(true);
-    expect(limitedComments[0]?.body).toMatch(/rate limited/);
+    expect(limitedComments).toHaveLength(0);
     expect(limitedStore.listJobs(10).filter((j) => j.job_type === "stack_review")).toHaveLength(0);
+  });
+
+  it("charges a stack once per window — same-stack re-triggers supersede for free", async () => {
+    const secret = "s3cret";
+    const config = stackConfig(secret, { REPO_RATE_LIMIT_PER_WINDOW: "1", REPO_RATE_WINDOW_MS: "60000" });
+    const store = new JobStore(openDb(":memory:"));
+    store.upsertStackStart({ repoFullName: "acme/widgets", stackId: "u1", prNumber: 41, actor: "alice" });
+    store.upsertStackStart({ repoFullName: "acme/widgets", stackId: "u2", prNumber: 41, actor: "alice" });
+    const limiter = new RepoRateLimiter();
+    const { github, comments } = stackGithub({ openPulls: chainPulls() });
+    const send = async (rawBody: string, deliveryId: string) =>
+      handleGithubWebhook({
+        config,
+        store,
+        github,
+        rateLimiter: limiter,
+        request: { event: "pull_request", deliveryId, signature: sign(secret, rawBody), rawBody },
+      });
+
+    // First stack enqueue charges the repo slot once.
+    const endBody = markedPr("<!-- end of stack u1 -->", {
+      number: 43,
+      base: { sha: "h42", ref: "feat-b" },
+      head: { sha: "h43", ref: "feat-c" },
+    });
+    await send(endBody, "m40");
+    expect(store.listJobs(10).filter((j) => j.job_type === "stack_review")).toHaveLength(1);
+
+    // The slot is spent: an unmarked PR is rate limited now.
+    const burn = JSON.stringify(prPayload());
+    const burned = await send(burn, "m41");
+    expect(burned.body).toEqual({ ok: true, ignored: true, reason: "rate limited" });
+
+    // A mid push re-triggers the same stack: membership unchanged, the
+    // supersede is free despite the full window — and stays comment-quiet.
+    const push = JSON.stringify({
+      ...JSON.parse(markedPr("<!-- start of stack u1 -->", { number: 41, base: { sha: "m0", ref: "main" }, head: { sha: "h41b", ref: "feat-a" } })),
+      action: "synchronize",
+    });
+    const retrigger = await send(push, "m42");
+    expect(retrigger.body.enqueued).toBe(true);
+    const stackJobs = store.listJobs(10).filter((j) => j.job_type === "stack_review");
+    expect(stackJobs).toHaveLength(2);
+    expect(comments.every((c) => !/rate limited/.test(c.body))).toBe(true);
+
+    // A different stack has no paid marker in the window and is still denied.
+    const otherStack = markedPr("<!-- end of stack u2 -->", {
+      number: 43,
+      base: { sha: "h42", ref: "feat-b" },
+      head: { sha: "h43b", ref: "feat-c" },
+    });
+    await send(otherStack, "m43");
+    expect(
+      store
+        .listJobs(10)
+        .filter((j) => j.job_type === "stack_review" && j.dedup_key.startsWith("stack:u2")),
+    ).toHaveLength(0);
+    expect(comments.every((c) => !/rate limited/.test(c.body))).toBe(true);
   });
 
   it("records a 'issue X of Y' declaration from the PR body and suppresses the review", async () => {
