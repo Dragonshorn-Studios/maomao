@@ -991,13 +991,13 @@ export class JobStore {
   }
 
   /**
-   * A pr_review at exactly `headSha` that a stack member enqueue would reuse
-   * for free (issue #136): dedup coordinates match the shared '' slot, and
-   * the row is completed or still live — awaiting it adds no spend to this
-   * run's envelope. Terminal rows (failed/stale/cancelled) don't qualify:
-   * the member loop would retire the key and burn a fresh attempt.
+   * A completed pr_review at exactly `headSha` on the shared '' dedup slot —
+   * the only same-head row a stack member can reuse for free (issue #136):
+   * awaiting it is instant and adds no spend to this run's envelope. Queued
+   * or in-flight rows don't qualify — waiting on them is not free (a queued
+   * row may never start while the stack holds the only queue worker).
    */
-  reusableReviewAtHead(
+  completedReviewAtHead(
     repoFullName: string,
     prNumber: number,
     headSha: string,
@@ -1009,7 +1009,7 @@ export class JobStore {
         `SELECT * FROM jobs
          WHERE provider = ? AND provider_instance = ? AND repo_full_name = ? AND pr_number = ?
            AND job_type = 'pr_review' AND head_sha = ? AND dedup_key = ''
-           AND state NOT IN ('failed', 'stale', 'cancelled')
+           AND state = 'completed'
          LIMIT 1`,
       )
       .get(resolved.provider, resolved.instance, repoFullName, prNumber, headSha) as JobRow | undefined;

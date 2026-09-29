@@ -6048,6 +6048,53 @@ describe("stack reviews (issue #99)", () => {
     expect(logs).toMatch(/Stack member #43 skipped-budget: stack token cap 400000 exceeded/);
   });
 
+  it("does not treat a queued same-head member review as free reuse (issue #136)", async () => {
+    const config = stackConfig({ STACK_TOKEN_CAP: "400000" });
+    const store = new JobStore(openDb(":memory:"));
+    // A merely-queued review for #42 at the pinned head can never start
+    // while the stack occupies the only worker — awaiting it would deadlock,
+    // so it does not count as free reuse.
+    const queued = store.enqueue({
+      repoFullName: "acme/widgets",
+      repoOwner: "acme",
+      repoName: "widgets",
+      installationId: 9,
+      prNumber: 42,
+      prTitle: "PR 42",
+      prBody: "",
+      prHtmlUrl: "",
+      prAuthor: "alice",
+      baseSha: "b42",
+      headSha: "h42",
+      baseRef: "main",
+      headRef: "feat-b",
+      reviewers: [],
+      jobType: "pr_review",
+    });
+    const stack = enqueueStackJobN(store, 3);
+    const fatOpencode: OpenCodePort = {
+      async run(input) {
+        const result = await stackOpencode.run(input);
+        return { ...result, usage: { promptTokens: 500_000, completionTokens: 1 } };
+      },
+    };
+    const github = {
+      ...githubPort(),
+      getPull: async (_i: number, _o: string, _r: string, n: number) => anyPull(n, `h${n}`),
+      createCommentReview: async () => ({ id: "9", url: "u" }),
+      createIssueComment: async () => ({ id: "1", url: "u" }),
+    } as unknown as GithubPort;
+    const pipeline = createPipeline({ config, store, github, checkout: await fixtureCheckout(), opencode: fatOpencode });
+    await pipeline.run(stack.job.id);
+
+    expect(store.getJob(stack.job.id)?.state).toBe("completed");
+    const members = store.listStackMembers(stack.job.id);
+    // #41's spend crossed the cap → #42 is skipped-budget (verify has no
+    // prior pass either) — the stack never waits on the still-queued job.
+    expect(members.map((m) => m.state)).toEqual(["done", "skipped", "done"]);
+    expect(store.getJob(queued.job.id)?.state).toBe("queued");
+  });
+
   it("gates a middle member by this run's spend once it crosses the token cap (issue #136)", async () => {
     const config = stackConfig({ STACK_TOKEN_CAP: "400000" });
     const store = new JobStore(openDb(":memory:"));

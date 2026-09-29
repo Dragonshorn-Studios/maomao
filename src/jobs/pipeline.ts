@@ -1036,9 +1036,9 @@ const STACK_MAX_MEMBERS = 10;
 
 // The second envelope limit is the whole-run token ceiling summed across
 // member jobs (routing + specialist runs + aggregation + escalations). Only
-// spend this run itself enqueued counts (issue #136): reusing a completed or
-// in-flight same-head member review is free. Once the run's recorded spend
-// passes `config.stackTokenCap` (env STACK_TOKEN_CAP, default 10M) the same
+// spend this run itself enqueued counts (issue #136): reusing a completed
+// same-head member review is free. Once the run's recorded spend passes
+// `config.stackTokenCap` (env STACK_TOKEN_CAP, default 10M) the same
 // middle-member downgrade applies and the cumulative pass is skipped; the
 // bottom and tip members always keep their normal mode.
 
@@ -1222,13 +1222,13 @@ async function runStackJob(deps: PipelineDeps, forge: ForgeRegistry, jobId: numb
       // middle member in an oversized stack — or after this run's recorded
       // member spend crosses the token cap — is downgraded: verify when it
       // has a prior pass to re-check, skipped-budget when it does not. A
-      // member whose review is already complete or in flight at this exact
-      // head is reused for free (issue #136), so the envelope never
-      // downgrades it.
+      // member whose review already completed at this exact head is reused
+      // for free (issue #136), so the envelope never downgrades it. Only
+      // 'completed' counts — awaiting a queued/in-flight row is not free.
       const edgeMember = index === 0 || index === members.length - 1;
       const freeReuse =
         !edgeMember &&
-        store.reusableReviewAtHead(job.repo_full_name, member.pr_number, member.head_sha, scopeOf(job)) != null;
+        store.completedReviewAtHead(job.repo_full_name, member.pr_number, member.head_sha, scopeOf(job)) != null;
       const budgeted =
         !edgeMember && !freeReuse && (members.length > STACK_MAX_MEMBERS || stackTokens > config.stackTokenCap);
       const reviewMode = await stackMemberReviewMode(deps, provider, job, member, info, budgeted);
