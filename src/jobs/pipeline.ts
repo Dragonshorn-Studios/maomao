@@ -1038,9 +1038,9 @@ const STACK_MAX_MEMBERS = 10;
 // member jobs (routing + specialist runs + aggregation + escalations). Only
 // spend this run itself enqueued counts (issue #136): reusing a completed
 // same-head member review is free. Once the run's recorded spend passes
-// `config.stackTokenCap` (env STACK_TOKEN_CAP, default 10M) the same
-// middle-member downgrade applies and the cumulative pass is skipped; the
-// bottom and tip members always keep their normal mode.
+// `config.stackTokenCap` (env STACK_TOKEN_CAP, default 10M, 0 disables) the
+// same middle-member downgrade applies and the cumulative pass is skipped;
+// the bottom and tip members always keep their normal mode.
 
 /**
  * Members the run never finished must not render QUEUED/REVIEWING forever on
@@ -1230,7 +1230,9 @@ async function runStackJob(deps: PipelineDeps, forge: ForgeRegistry, jobId: numb
         !edgeMember &&
         store.completedReviewAtHead(job.repo_full_name, member.pr_number, member.head_sha, scopeOf(job)) != null;
       const budgeted =
-        !edgeMember && !freeReuse && (members.length > STACK_MAX_MEMBERS || stackTokens > config.stackTokenCap);
+        !edgeMember &&
+        !freeReuse &&
+        (members.length > STACK_MAX_MEMBERS || (config.stackTokenCap > 0 && stackTokens > config.stackTokenCap));
       const reviewMode = await stackMemberReviewMode(deps, provider, job, member, info, budgeted);
       if (reviewMode === "skip") {
         const reason =
@@ -1244,6 +1246,7 @@ async function runStackJob(deps: PipelineDeps, forge: ForgeRegistry, jobId: numb
       }
       let memberJobId: number | null = null;
       let outcome = "missing";
+      let covered = false;
       let attempt = 0;
       for (; attempt <= STACK_MEMBER_MAX_RETRIES; attempt++) {
         throwIfStale(store, jobId, signal);
@@ -1303,18 +1306,28 @@ async function runStackJob(deps: PipelineDeps, forge: ForgeRegistry, jobId: numb
         if (enqueued.created) {
           store.log(jobId, `Reviewing stack member #${member.pr_number} as job ${memberJobId}`);
           await runJob(deps, forge, memberJobId, signal);
+          outcome = await waitForJob(deps.store, memberJobId, jobId, signal);
+          // Run envelope (issue #136): only spend this run itself enqueued
+          // counts — a reused job's recorded tokens belong to the run that
+          // spent them. Counted once the attempt reaches a terminal state.
+          stackTokens += memberJobSpend(store, memberJobId).tokens;
+        } else if (enqueued.job.state === "queued") {
+          // Coverage already in flight: a queued member job can never start
+          // while this run holds the only queue worker, so awaiting it would
+          // deadlock the run. Leave the member 'reviewing' — the queued job
+          // publishes itself when a worker frees (issue #136).
+          store.log(
+            jobId,
+            `Stack member #${member.pr_number} covered by queued job ${memberJobId} — continuing without waiting`,
+          );
+          covered = true;
+          break;
         } else {
           store.log(
             jobId,
             `Stack member #${member.pr_number} reuses existing job ${memberJobId} (${enqueued.job.state})`,
           );
-        }
-        outcome = await waitForJob(deps.store, memberJobId, jobId, signal);
-        if (enqueued.created) {
-          // Run envelope (issue #136): only spend this run itself enqueued
-          // counts — a reused job's recorded tokens belong to the run that
-          // spent them. Counted once the attempt reaches a terminal state.
-          stackTokens += memberJobSpend(store, enqueued.job.id).tokens;
+          outcome = await waitForJob(deps.store, memberJobId, jobId, signal);
         }
         if (outcome === "completed") {
           // A completed review only counts while it still describes the live
@@ -1339,6 +1352,10 @@ async function runStackJob(deps: PipelineDeps, forge: ForgeRegistry, jobId: numb
             "warn",
           );
         }
+      }
+      if (covered) {
+        memberJobs.push({ member, jobId: memberJobId! });
+        continue;
       }
       if (outcome !== "completed") {
         // Cancelled means someone stopped it on purpose; 'skipped' renders
@@ -1386,7 +1403,7 @@ async function runStackJob(deps: PipelineDeps, forge: ForgeRegistry, jobId: numb
     const cumulativeRun = store.listReviewerRuns(jobId).find((entry) => entry.role === "stack_cumulative");
     const top = members[members.length - 1]!;
     const sharedPaths = stackSharedPaths(members, diffs);
-    const overBudget = stackTokens > config.stackTokenCap;
+    const overBudget = config.stackTokenCap > 0 && stackTokens > config.stackTokenCap;
     let cumulative: ReviewerResult;
     let cumulativeNote = "";
     if (sharedPaths.length === 0 || overBudget) {

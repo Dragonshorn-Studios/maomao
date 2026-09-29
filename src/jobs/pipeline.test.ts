@@ -123,6 +123,38 @@ describe("JobStore enqueue", () => {
     expect(store.getJob(brief.job.id)?.state).toBe("queued"); // a brief is immutable history, never staled
     expect(store.getJob(scan.job.id)?.state).toBe("queued"); // scan untouched by brief enqueues
   });
+
+  it("completedReviewAtHead only matches a completed member slot at the exact head (issue #136)", () => {
+    const store = new JobStore(openDb(":memory:"));
+    const base = {
+      repoFullName: "acme/widgets",
+      repoOwner: "acme",
+      repoName: "widgets",
+      installationId: 1,
+      prNumber: 3,
+      prTitle: "t",
+      prBody: "",
+      prHtmlUrl: "",
+      prAuthor: "a",
+      baseSha: "b",
+      baseRef: "main",
+      headRef: "f",
+      reviewers: [],
+    };
+    const queued = store.enqueue({ ...base, headSha: "aaa", jobType: "pr_review" });
+    // A queued row at the head is not free reuse — awaiting it can deadlock.
+    expect(store.completedReviewAtHead("acme/widgets", 3, "aaa")).toBeUndefined();
+    store.setJobState(queued.job.id, "completed", { finished_at: new Date().toISOString() });
+    expect(store.completedReviewAtHead("acme/widgets", 3, "aaa")?.id).toBe(queued.job.id);
+    // Other heads and other forge scopes do not match.
+    expect(store.completedReviewAtHead("acme/widgets", 3, "bbb")).toBeUndefined();
+    expect(
+      store.completedReviewAtHead("acme/widgets", 3, "aaa", { provider: "gitlab", instance: "gitlab.com" }),
+    ).toBeUndefined();
+    // A row whose dedup key was retired no longer occupies the member slot.
+    store.retireJobDedupKey(queued.job.id, "stack-member-retired:test");
+    expect(store.completedReviewAtHead("acme/widgets", 3, "aaa")).toBeUndefined();
+  });
 });
 
 describe("pipeline", () => {
@@ -5776,6 +5808,44 @@ describe("stack reviews (issue #99)", () => {
     return created.job;
   }
 
+  function queuedReview(store: JobStore, prNumber: number, headSha: string) {
+    return store.enqueue({
+      repoFullName: "acme/widgets",
+      repoOwner: "acme",
+      repoName: "widgets",
+      installationId: 9,
+      prNumber,
+      prTitle: `PR ${prNumber}`,
+      prBody: "",
+      prHtmlUrl: "",
+      prAuthor: "alice",
+      baseSha: `b${prNumber}`,
+      headSha,
+      baseRef: "main",
+      headRef: "feat",
+      reviewers: [],
+      jobType: "pr_review",
+    }).job;
+  }
+
+  // Mirrors memberJobSpend in pipeline.ts: routing + aggregation + escalation
+  // job totals plus every reviewer run's recorded tokens.
+  function memberSpend(store: JobStore, jobId: number) {
+    const job = store.getJob(jobId)!;
+    let tokens =
+      (job.routing_total_tokens ?? 0) + (job.aggregator_total_tokens ?? 0) + (job.internal_escalation_total_tokens ?? 0);
+    for (const run of store.listReviewerRuns(jobId)) {
+      tokens +=
+        run.total_tokens ??
+        (run.prompt_tokens ?? 0) +
+          (run.completion_tokens ?? 0) +
+          (run.reasoning_tokens ?? 0) +
+          (run.cache_read_tokens ?? 0) +
+          (run.cache_write_tokens ?? 0);
+    }
+    return tokens;
+  }
+
   it("reuses the completed member review when the head is unchanged (issue #123)", async () => {
     const config = stackConfig();
     const store = new JobStore(openDb(":memory:"));
@@ -6054,23 +6124,7 @@ describe("stack reviews (issue #99)", () => {
     // A merely-queued review for #42 at the pinned head can never start
     // while the stack occupies the only worker — awaiting it would deadlock,
     // so it does not count as free reuse.
-    const queued = store.enqueue({
-      repoFullName: "acme/widgets",
-      repoOwner: "acme",
-      repoName: "widgets",
-      installationId: 9,
-      prNumber: 42,
-      prTitle: "PR 42",
-      prBody: "",
-      prHtmlUrl: "",
-      prAuthor: "alice",
-      baseSha: "b42",
-      headSha: "h42",
-      baseRef: "main",
-      headRef: "feat-b",
-      reviewers: [],
-      jobType: "pr_review",
-    });
+    const queued = queuedReview(store, 42, "h42");
     const stack = enqueueStackJobN(store, 3);
     const fatOpencode: OpenCodePort = {
       async run(input) {
@@ -6092,7 +6146,7 @@ describe("stack reviews (issue #99)", () => {
     // #41's spend crossed the cap → #42 is skipped-budget (verify has no
     // prior pass either) — the stack never waits on the still-queued job.
     expect(members.map((m) => m.state)).toEqual(["done", "skipped", "done"]);
-    expect(store.getJob(queued.job.id)?.state).toBe("queued");
+    expect(store.getJob(queued.id)?.state).toBe("queued");
   });
 
   it("gates a middle member by this run's spend once it crosses the token cap (issue #136)", async () => {
@@ -6155,6 +6209,157 @@ describe("stack reviews (issue #99)", () => {
     expect(members.map((m) => m.state)).toEqual(["done", "done", "done"]);
     const job42 = store.listJobs(30).find((j) => j.job_type === "pr_review" && j.pr_number === 42 && j.id !== prior.id);
     expect(job42?.review_mode).toBe("verify");
+  });
+
+  it("keeps a member covered by a queued same-head job instead of awaiting it (issue #136)", async () => {
+    const config = stackConfig();
+    const store = new JobStore(openDb(":memory:"));
+    // A queued review for #42 at the pinned head can never start while this
+    // run holds the only worker — awaiting it would deadlock. The member
+    // dedups onto it and stays 'reviewing', covered by the queued job.
+    const queued = queuedReview(store, 42, "h42");
+    const stack = enqueueStackJobN(store, 3);
+    const issueComments: { pullNumber: number; body: string }[] = [];
+    const github = {
+      ...githubPort(),
+      getPull: async (_i: number, _o: string, _r: string, n: number) => anyPull(n, `h${n}`),
+      createCommentReview: async () => ({ id: "9", url: "u" }),
+      createIssueComment: async (input: { pullNumber: number; body: string }) => {
+        issueComments.push({ pullNumber: input.pullNumber, body: input.body });
+        return { id: "1", url: "u" };
+      },
+    } as unknown as GithubPort;
+    const pipeline = createPipeline({ config, store, github, checkout: await fixtureCheckout(), opencode: stackOpencode });
+    await pipeline.run(stack.job.id);
+
+    expect(store.getJob(stack.job.id)?.state).toBe("completed");
+    const members = store.listStackMembers(stack.job.id);
+    expect(members.map((m) => m.state)).toEqual(["done", "reviewing", "done"]);
+    expect(members[1]!.member_job_id).toBe(queued.id);
+    expect(store.getJob(queued.id)?.state).toBe("queued");
+    const jobs42 = store.listJobs(30).filter((j) => j.job_type === "pr_review" && j.pr_number === 42);
+    expect(jobs42.map((j) => j.id)).toEqual([queued.id]);
+    const logs = store.listLogs(stack.job.id).map((l) => l.message).join("\n");
+    expect(logs).toContain(`covered by queued job ${queued.id}`);
+    expect(issueComments[0]?.body).toContain(`#42 (job ${queued.id})`);
+  });
+
+  it("reuses a completed same-head middle member for free past the member cap (issue #136)", async () => {
+    const config = stackConfig();
+    const store = new JobStore(openDb(":memory:"));
+    // #44 already has a completed review at its pinned head: reusing it is
+    // free, so the member-count envelope must not downgrade it.
+    const prior = completedReview(store, 44, "h44");
+    const stack = enqueueStackJobN(store, 11);
+    const issueComments: { pullNumber: number; body: string }[] = [];
+    const github = {
+      ...githubPort(),
+      getPull: async (_i: number, _o: string, _r: string, n: number) => anyPull(n, `h${n}`),
+      createCommentReview: async () => ({ id: "9", url: "u" }),
+      createIssueComment: async (input: { pullNumber: number; body: string }) => {
+        issueComments.push({ pullNumber: input.pullNumber, body: input.body });
+        return { id: "1", url: "u" };
+      },
+    } as unknown as GithubPort;
+    const pipeline = createPipeline({ config, store, github, checkout: await fixtureCheckout(), opencode: stackOpencode });
+    await pipeline.run(stack.job.id);
+
+    expect(store.getJob(stack.job.id)?.state).toBe("completed");
+    const members = store.listStackMembers(stack.job.id);
+    const byPr = new Map(members.map((m) => [m.pr_number, m]));
+    expect(byPr.get(41)?.state).toBe("done");
+    expect(byPr.get(44)?.state).toBe("done");
+    expect(byPr.get(44)?.member_job_id).toBe(prior.id);
+    expect(byPr.get(51)?.state).toBe("done");
+    expect(
+      members
+        .filter((m) => m.state === "skipped")
+        .map((m) => m.pr_number)
+        .sort((a, b) => a - b),
+    ).toEqual([42, 43, 45, 46, 47, 48, 49, 50]);
+    const freshJobs = store.listJobs(50).filter((j) => j.job_type === "pr_review" && j.id !== prior.id);
+    expect(freshJobs.map((j) => j.pr_number).sort((a, b) => a - b)).toEqual([41, 51]);
+  });
+
+  it("counts every member attempt's spend in the run envelope (issue #136)", async () => {
+    // No in-job reviewer retries: one unparseable specialist call fails the
+    // member job outright, so the stack-level retry creates a second row.
+    const config = stackConfig({ STACK_TOKEN_CAP: "400000", OPENCODE_MAX_RETRIES: "0" });
+    const store = new JobStore(openDb(":memory:"));
+    const stack = enqueueStackJob(store);
+    const issueComments: { pullNumber: number; body: string }[] = [];
+    let failedOnce = false;
+    const flakyOpencode: OpenCodePort = {
+      async run(input) {
+        // #41's first attempt dies on unparseable specialist output; its
+        // recorded spend still belongs to this run's envelope.
+        if (!failedOnce && /Role id:/.test(input.prompt) && input.prompt.includes("PR: #41")) {
+          failedOnce = true;
+          return { stdout: "not json", stderr: "", exitCode: 0, text: "not json", usage: { promptTokens: 500_000, completionTokens: 1 } };
+        }
+        const result = await stackOpencode.run(input);
+        return { ...result, usage: { promptTokens: 500_000, completionTokens: 1 } };
+      },
+    };
+    const github = {
+      ...githubPort(),
+      getPull: async (_i: number, _o: string, _r: string, n: number) => resolvedPull(n, `h${n}`),
+      createCommentReview: async () => ({ id: "9", url: "u" }),
+      createIssueComment: async (input: { pullNumber: number; body: string }) => {
+        issueComments.push({ pullNumber: input.pullNumber, body: input.body });
+        return { id: "1", url: "u" };
+      },
+    } as unknown as GithubPort;
+    const pipeline = createPipeline({ config, store, github, checkout: await fixtureCheckout(), opencode: flakyOpencode });
+    await pipeline.run(stack.job.id);
+
+    expect(store.getJob(stack.job.id)?.state).toBe("completed");
+    const members = store.listStackMembers(stack.job.id);
+    expect(members.map((m) => m.state)).toEqual(["done", "done"]);
+    const jobs41 = store.listJobs(30).filter((j) => j.job_type === "pr_review" && j.pr_number === 41);
+    expect(jobs41.map((j) => j.state).sort()).toEqual(["completed", "failed"]);
+    // The envelope sums #41's failed first attempt AND its successful retry
+    // plus #42 — exactly what this run itself enqueued.
+    const memberJobs = store.listJobs(30).filter((j) => j.job_type === "pr_review");
+    const expected = memberJobs.reduce((total, j) => total + memberSpend(store, j.id), 0);
+    const recorded = Number(issueComments[0]!.body.match(/recorded (\d+) tokens/)?.[1] ?? -1);
+    expect(recorded).toBe(expected);
+    const failedAttempt = jobs41.find((j) => j.state === "failed")!;
+    expect(memberSpend(store, failedAttempt.id)).toBeGreaterThan(0);
+  });
+
+  it("treats STACK_TOKEN_CAP=0 as no ceiling (issue #136)", async () => {
+    const config = stackConfig({ STACK_TOKEN_CAP: "0" });
+    const store = new JobStore(openDb(":memory:"));
+    const stack = enqueueStackJobN(store, 3);
+    const issueComments: { pullNumber: number; body: string }[] = [];
+    let cumulativeCalls = 0;
+    const fatOpencode: OpenCodePort = {
+      async run(input) {
+        if (/stack reviewer/i.test(input.prompt)) cumulativeCalls += 1;
+        const result = await stackOpencode.run(input);
+        return { ...result, usage: { promptTokens: 500_000, completionTokens: 1 } };
+      },
+    };
+    const github = {
+      ...githubPort(),
+      getPull: async (_i: number, _o: string, _r: string, n: number) => anyPull(n, `h${n}`),
+      createCommentReview: async () => ({ id: "9", url: "u" }),
+      createIssueComment: async (input: { pullNumber: number; body: string }) => {
+        issueComments.push({ pullNumber: input.pullNumber, body: input.body });
+        return { id: "1", url: "u" };
+      },
+    } as unknown as GithubPort;
+    const pipeline = createPipeline({ config, store, github, checkout: await fixtureCheckout(), opencode: fatOpencode });
+    await pipeline.run(stack.job.id);
+
+    expect(store.getJob(stack.job.id)?.state).toBe("completed");
+    // Cap disabled: the middle member still runs full and the cumulative pass
+    // still happens despite recorded spend dwarfing any cap.
+    expect(store.listStackMembers(stack.job.id).map((m) => m.state)).toEqual(["done", "done", "done"]);
+    expect(cumulativeCalls).toBe(1);
+    expect(issueComments[0]?.body ?? "").not.toContain("stack token cap");
+    expect(issueComments[0]?.body ?? "").not.toContain("Skipped-budget");
   });
 
   it("marks a member whose review ended cancelled as skipped and still escalates (issue #123)", async () => {

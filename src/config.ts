@@ -139,9 +139,9 @@ export interface Config {
   repoRateWindowMs: number;
   /**
    * Whole-run token ceiling for a stack review's member jobs (issue #136).
-   * Only spend the run itself enqueued counts — reusing a completed or
-   * in-flight same-head member review is free. Bottom and tip members are
-   * exempt; middle members downgrade to verify/skipped-budget past it.
+   * Only spend the run itself enqueued counts — reusing a completed
+   * same-head member review is free. Bottom and tip members are exempt;
+   * middle members downgrade to verify/skipped-budget past it. `0` disables.
    */
   stackTokenCap: number;
   /** Key sealing forge connection tokens at rest. Absent until a forge connection needs one. */
