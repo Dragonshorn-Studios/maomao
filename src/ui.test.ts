@@ -2012,7 +2012,7 @@ describe("review job list filters, nested stack members, and reviewer board", ()
   });
 
   it("filters the reviewer board by run state and pages", () => {
-    const { store } = stackFixture();
+    const { store, stack } = stackFixture();
     // Flip one member run to running so the state filter has something to find.
     const memberJob = store.listJobs(10).find((job) => job.job_type === "pr_review")!;
     store.patchReviewer(store.listReviewerRuns(memberJob.id)[0]!.id, { state: "running" });
@@ -2024,6 +2024,22 @@ describe("review job list filters, nested stack members, and reviewer board", ()
     const paged = store.listReviewerRunBoard({ offset: 2, limit: 2 });
     expect(paged.rows).toHaveLength(1);
     expect(paged.total).toBe(3);
+    // Filter + offset together exercises the params ordering in the SQL.
+    const queuedSecond = store.listReviewerRunBoard({ state: "queued", offset: 1, limit: 1 });
+    expect(queuedSecond.rows).toHaveLength(1);
+    expect(queuedSecond.total).toBe(2);
+    // Limit clamps to [1, 500].
+    expect(store.listReviewerRunBoard({ limit: 0 }).rows).toHaveLength(1);
+    expect(store.listReviewerRunBoard({ limit: 999 }).rows).toHaveLength(3);
+    // A member job linked from two stack rows stays a single board row.
+    store.insertStackMembers(stack.id, [
+      { position: 3, prNumber: 43, baseRef: "feat-b", headRef: "feat-c", baseSha: "h42", headSha: "h43" },
+    ]);
+    const newMember = store.listStackMembers(stack.id).find((member) => member.position === 3)!;
+    store.patchStackMember(newMember.id, { memberJobId: memberJob.id });
+    const dup = store.listReviewerRunBoard({ limit: 10 });
+    expect(dup.rows.filter((row) => row.job_id === memberJob.id)).toHaveLength(1);
+    expect(dup.rows).toHaveLength(dup.total);
 
     const html = renderReviewerBoard(running.rows, {
       runFilters: { state: "running" },
@@ -2042,5 +2058,9 @@ describe("review job list filters, nested stack members, and reviewer board", ()
 
     const empty = renderReviewerBoard([], { runFilters: { state: "failed" } });
     expect(empty).toContain("No reviewer runs with status failed");
+
+    const outOfRange = renderReviewerBoard([], { runPagination: { page: 5, pageSize: 50, total: 60 } });
+    expect(outOfRange).toContain("beyond the last page");
+    expect(outOfRange).toContain("/reviewers?page=2");
   });
 });

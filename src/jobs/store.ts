@@ -1305,10 +1305,10 @@ export class JobStore {
       .prepare(
         `SELECT r.*, j.state AS job_state, j.job_type, j.provider AS forge_provider, j.provider_instance,
                 j.repo_full_name, j.pr_number, j.pr_title, j.head_sha, j.review_mode,
-                m.job_id AS stack_job_id
+                (SELECT m.job_id FROM stack_run_members m WHERE m.member_job_id = j.id
+                 ORDER BY m.id DESC LIMIT 1) AS stack_job_id
          FROM reviewer_runs r
          JOIN jobs j ON j.id = r.job_id
-         LEFT JOIN stack_run_members m ON m.member_job_id = j.id
          ${where}
          ORDER BY CASE WHEN r.state IN ('queued', 'running') THEN 0 ELSE 1 END, r.id DESC
          LIMIT ? OFFSET ?`,

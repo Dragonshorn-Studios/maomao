@@ -583,24 +583,29 @@ describe("manual review trigger", () => {
 
   it("filters and paginates the /reviewers board", async () => {
     const { app, store } = testApp();
-    const created = store.enqueue({
-      repoFullName: "acme/widgets",
-      repoOwner: "acme",
-      repoName: "widgets",
-      installationId: 1,
-      prNumber: 8,
-      prTitle: "Hello",
-      prBody: "",
-      prHtmlUrl: "https://example.test",
-      prAuthor: "dev",
-      baseSha: "b",
-      headSha: "h",
-      baseRef: "main",
-      headRef: "f",
-      reviewers: [{ role: "correctness", title: "Correctness" }],
-    });
+    const enqueueReview = (prNumber: number, roles: string[]) =>
+      store.enqueue({
+        repoFullName: "acme/widgets",
+        repoOwner: "acme",
+        repoName: "widgets",
+        installationId: 1,
+        prNumber,
+        prTitle: "Hello",
+        prBody: "",
+        prHtmlUrl: "https://example.test",
+        prAuthor: "dev",
+        baseSha: "b",
+        headSha: "h",
+        baseRef: "main",
+        headRef: "f",
+        reviewers: roles.map((role) => ({ role, title: role })),
+      });
+    const created = enqueueReview(8, ["correctness"]);
     const run = store.listReviewerRuns(created.job.id)[0]!;
     store.patchReviewer(run.id, { state: "running" });
+    // 54 more queued runs so the board spans two 50-per-page pages.
+    const roles = ["correctness", "security", "tests", "architecture", "api", "maintainer"];
+    for (let i = 0; i < 9; i += 1) enqueueReview(9 + i, roles);
 
     const running = await app.request("/reviewers?state=running");
     expect(running.status).toBe(200);
@@ -619,17 +624,31 @@ describe("manual review trigger", () => {
     expect(bogusHtml).toContain('value="" selected');
     expect(bogusHtml).toContain("run-row");
 
-    // Non-numeric, non-finite, and clamped page values degrade to page 1.
+    const first = await app.request("/reviewers");
+    expect(first.status).toBe(200);
+    expect(await first.text()).toContain("Page 1 / 2");
+    const second = await app.request("/reviewers?page=2");
+    expect(second.status).toBe(200);
+    expect(await second.text()).toContain("Page 2 / 2");
+
+    // Non-numeric, non-finite, and non-positive page values land on page 1.
     for (const bad of ["0", "-3", "abc", "Infinity", "1e999"]) {
       const res = await app.request(`/reviewers?page=${bad}`);
       expect(res.status).toBe(200);
-      expect(await res.text()).toContain("run-row");
+      expect(await res.text()).toContain("Page 1 / 2");
     }
 
-    // A page beyond the total renders the empty state instead of a 500.
+    // A page beyond the total says so instead of claiming no runs exist.
     const beyond = await app.request("/reviewers?page=999");
     expect(beyond.status).toBe(200);
-    expect(await beyond.text()).toContain("No reviewer runs");
+    const beyondHtml = await beyond.text();
+    expect(beyondHtml).toContain("beyond the last page");
+    expect(beyondHtml).toContain("/reviewers?page=2");
+
+    // Huge finite pages clamp instead of overflowing the SQLite offset bind.
+    const huge = await app.request("/reviewers?page=180143985094820");
+    expect(huge.status).toBe(200);
+    expect(await huge.text()).toContain("beyond the last page");
   });
 
   it("respects REVIEW_DRAFTS for manual triggers", async () => {

@@ -749,7 +749,9 @@ export function renderReviewerBoard(
     ${
       items
         ? `<ol class="run-board">${items}</ol>${pagerNav}`
-        : `<div class="empty" role="status"><p><strong>No reviewer runs${stateFilter ? ` with status ${escapeHtml(stateFilter)}` : ""}.</strong></p><p class="muted">Runs appear here as soon as a review job picks specialists.</p></div>`
+        : pagination && pagination.total > 0
+          ? `<div class="empty" role="status"><p><strong>Page ${pagination.page} is beyond the last page (${totalPages}).</strong></p><p class="muted">${pagination.total} runs${stateFilter ? ` with status ${escapeHtml(stateFilter)}` : ""} — <a href="/reviewers?page=${totalPages}${stateParam}">back to page ${totalPages}</a>.</p></div>`
+          : `<div class="empty" role="status"><p><strong>No reviewer runs${stateFilter ? ` with status ${escapeHtml(stateFilter)}` : ""}.</strong></p><p class="muted">Runs appear here as soon as a review job picks specialists.</p></div>`
     }`;
   return layout("Maomao reviewers", body, options);
 }
