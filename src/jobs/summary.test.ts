@@ -14,12 +14,20 @@ function makeStore() {
   return new JobStore(openDb(":memory:"));
 }
 
-function seedJob(store: JobStore, prNumber = 4, headSha = "cafebabe", repoFullName = "acme/widgets") {
+function seedJob(
+  store: JobStore,
+  prNumber = 4,
+  headSha = "cafebabe",
+  repoFullName = "acme/widgets",
+  forge?: { provider: string; instance: string },
+) {
   const [repoOwner, repoName] = repoFullName.split("/") as [string, string];
   return store.enqueue({
     repoFullName,
     repoOwner,
     repoName,
+    provider: forge?.provider,
+    providerInstance: forge?.instance,
     installationId: 9,
     prNumber,
     prTitle: "t",
@@ -392,6 +400,21 @@ describe("emitJobSummary", () => {
     );
   });
 
+  it("emits attempt 2 when a retried job is staled by a later push", () => {
+    setJobSummarySink(capture);
+    const store = makeStore();
+    const jobId = seedJob(store, 4, "oldsha");
+    const run = store.listReviewerRuns(jobId)[0];
+    store.patchReviewer(run.id, { state: "failed" });
+    store.setJobState(jobId, "failed");
+    expect(store.retryFailedReviewers(jobId).ok).toBe(true);
+    seedJob(store, 4, "newsha"); // head-move sweep stales the re-queued job
+    expect(payloadLines().map((p) => [p.state, p.attempt, p.usage_complete])).toEqual([
+      ["failed", 1, true],
+      ["stale", 2, true],
+    ]);
+  });
+
   it("emits one line per attempt with an incrementing discriminator on retry", () => {
     setJobSummarySink(capture);
     const store = makeStore();
@@ -460,6 +483,28 @@ describe("emitJobSummary", () => {
     expect(store.getJob(other)!.state).toBe("queued");
   });
 
+  it("emits one line for a cancel inside a non-default forge scope", () => {
+    setJobSummarySink(capture);
+    const store = makeStore();
+    const jobId = seedJob(store, 4, "sha1", "acme/widgets", {
+      provider: "gitlab",
+      instance: "gitlab.example.com",
+    });
+    const cancelled = store.cancelJobs(
+      {
+        repoFullName: "acme/widgets",
+        jobType: "pr_review",
+        scope: { provider: "gitlab", instance: "gitlab.example.com" },
+      },
+      "manual_cancel",
+      null,
+    );
+    expect(cancelled).toEqual([jobId]);
+    expect(payloadLines()).toEqual([
+      expect.objectContaining({ job_id: jobId, state: "cancelled", provider: "gitlab" }),
+    ]);
+  });
+
   it("emits for a type-wide (global pause) cancel across repos", () => {
     setJobSummarySink(capture);
     const store = makeStore();
@@ -502,6 +547,26 @@ describe("emitJobSummary", () => {
     ]);
   });
 
+  it("emits nothing when the store is constructed with emitJobSummaries: false", () => {
+    setJobSummarySink(capture);
+    const store = new JobStore(openDb(":memory:"), [], { emitJobSummaries: false });
+    const jobId = seedJob(store);
+    store.setJobState(jobId, "completed");
+    expect(lines).toHaveLength(0);
+  });
+
+  it("logs and returns when the store read throws", () => {
+    const err = vi.spyOn(console, "error").mockImplementation(() => {});
+    const broken = {
+      getJob: () => {
+        throw new Error("db dead");
+      },
+      listReviewerRuns: () => [],
+    };
+    expect(() => emitJobSummary(broken as never, 1, {} as NodeJS.ProcessEnv)).not.toThrow();
+    expect(err).toHaveBeenCalledWith(expect.stringContaining("emission failed"));
+  });
+
   it("no-ops for a missing job id", () => {
     setJobSummarySink(capture);
     const store = makeStore();
@@ -534,6 +599,7 @@ describe("emitJobSummary", () => {
   });
 
   it("POSTs the payload to OPENOBSERVE_LOGS_URL when set", async () => {
+    const timeoutSpy = vi.spyOn(AbortSignal, "timeout");
     const fetchMock = vi.fn().mockResolvedValue({ ok: true, status: 200 });
     vi.stubGlobal("fetch", fetchMock);
     setJobSummarySink(capture);
@@ -544,12 +610,14 @@ describe("emitJobSummary", () => {
       OPENOBSERVE_LOGS_TOKEN: "secret-token",
     } as NodeJS.ProcessEnv);
     await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
+    expect(timeoutSpy).toHaveBeenCalledWith(10_000);
     const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
     expect(url).toBe("https://oo.example.com/api/default/maomao/_json");
     expect(init.method).toBe("POST");
     // Bounded delivery — a hung endpoint can't linger past the timeout.
     expect(init.signal).toBeInstanceOf(AbortSignal);
     expect((init.headers as Record<string, string>).authorization).toBe("Bearer secret-token");
+    expect((init.headers as Record<string, string>)["content-type"]).toBe("application/json");
     // _json's documented contract is a JSON array of records.
     const body = JSON.parse(init.body as string) as Record<string, unknown>[];
     expect(body[0].event).toBe("maomao.job_summary");

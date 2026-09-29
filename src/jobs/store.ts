@@ -427,6 +427,11 @@ export class JobStore {
   constructor(
     private readonly db: SqliteDb,
     modelCatalog: string[] = [],
+    /**
+     * emitJobSummaries: set false for synthetic/fixture stores (the demo UI)
+     * so seeded terminal transitions never reach the real telemetry stream.
+     */
+    private readonly opts: { emitJobSummaries?: boolean } = {},
   ) {
     this.configs = new ReviewConfigStore(db, modelCatalog);
     this.prompts = new PromptRevisionStore(db);
@@ -1505,6 +1510,7 @@ export class JobStore {
    * or ingest endpoint must not break job bookkeeping.
    */
   private emitTerminalSummary(jobId: number, opts?: { partialUsage?: boolean }): void {
+    if (this.opts.emitJobSummaries === false) return;
     emitJobSummary(this, jobId, process.env, opts);
   }
 
