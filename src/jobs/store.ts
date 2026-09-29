@@ -8,6 +8,7 @@ import type { FindingRow, FindingStatus } from "../findings/types.js";
 import { nowIso } from "../util.js";
 import { stackDedupPrefix } from "../stacks/commands.js";
 import { publish } from "../events.js";
+import { emitJobSummary } from "./summary.js";
 import { ReviewConfigStore } from "../config-revisions.js";
 import { PromptRevisionStore } from "../prompt-revisions.js";
 
@@ -560,7 +561,10 @@ export class JobStore {
     })();
 
     publish({ type: "jobs" });
-    for (const id of staleJobIds) publish({ type: "job", jobId: id });
+    for (const id of staleJobIds) {
+      publish({ type: "job", jobId: id });
+      this.emitTerminalSummary(id);
+    }
     if (result.job) publish({ type: "job", jobId: result.job.id });
     return result;
   }
@@ -964,7 +968,9 @@ export class JobStore {
         `${stackDedupPrefix(escapeLike(stackId))}@%`,
         exceptDedupKey,
       ) as { id: number }[];
-    return rows.map((r) => r.id);
+    const ids = rows.map((r) => r.id);
+    for (const id of ids) this.emitTerminalSummary(id);
+    return ids;
   }
 
   /** A stack counts as resolved once any stack_review job exists for it —
@@ -1300,8 +1306,20 @@ export class JobStore {
     // finished run takes this job's outcome. No-ops for members of live
     // runs — the stack's own retry/reconcile logic owns those rows.
     this.resolveStackMemberCoverage(id, state);
+    if (TERMINAL_JOB_STATES.includes(state) && !TERMINAL_JOB_STATES.includes(job.state)) {
+      this.emitTerminalSummary(id);
+    }
     publish({ type: "job", jobId: id });
     publish({ type: "jobs" });
+  }
+
+  /**
+   * One structured stdout line (+ optional OpenObserve POST) per job landing
+   * in a terminal state (issue #139). Emission never throws — a broken sink
+   * or ingest endpoint must not break job bookkeeping.
+   */
+  private emitTerminalSummary(jobId: number): void {
+    emitJobSummary(this, jobId);
   }
 
   patchJob(id: number, extra: Partial<JobRow>): void {
@@ -1366,6 +1384,7 @@ export class JobStore {
       )
       .all(...values) as { id: number }[];
     for (const row of rows) this.resolveStackMemberCoverage(row.id, "cancelled");
+    for (const row of rows) this.emitTerminalSummary(row.id);
     return rows.map((row) => row.id);
   }
 

@@ -324,6 +324,23 @@ Mention/command dispatch uses a GitHub issue comment and needs **Issues: Write**
 
 Maomao records OpenCode `step_finish` usage across every unique agent step (including tool-call steps). Token totals include input, output, reasoning, and cache read/write when the CLI reports them. **These figures are provider/OpenCode-reported usage, not an independently calculated invoice.** If the JSON stream ends without a matching `step_finish` (see [opencode#26855](https://github.com/anomalyco/opencode/issues/26855)), the UI marks usage incomplete and treats the stored numbers as a minimum.
 
+## Job summaries and OpenObserve
+
+When a job reaches a terminal state (`completed`, `failed`, `stale`, `cancelled`), Maomao writes **one structured JSON line to stdout** — picked up by Docker/Coolify log drivers — with usage metadata only: `job_id`, `job_type`, `repo`, `pr`, `provider`, `state`, `duration_ms`, `prompt_tokens`/`completion_tokens`/`total_tokens`, `cost_usd`, `head_sha`, and `finished_at`. The payload never contains secrets, webhook URLs, diffs, or review bodies.
+
+The same line can also be POSTed directly to an OpenObserve ingest endpoint:
+
+```bash
+OPENOBSERVE_LOGS_URL=https://oo.example.com/api/default/maomao/_json
+# optional auth — never logged:
+OPENOBSERVE_LOGS_TOKEN=...              # Authorization: Bearer
+# or:
+OPENOBSERVE_LOGS_USER=...               # Authorization: Basic (user:password)
+OPENOBSERVE_LOGS_PASSWORD=...
+```
+
+Unset `OPENOBSERVE_LOGS_URL` means stdout-only; a failing or slow endpoint never affects jobs (the POST is fire-and-forget, errors are logged without credentials). In OpenObserve, filter a stream on e.g. `event='maomao.job_summary' AND job_type='pr_review'` or `repo='owner/name'` for per-repo dashboards.
+
 ## Run locally
 
 ```bash
