@@ -2027,10 +2027,20 @@ describe("review job list filters, nested stack members, and reviewer board", ()
 
     const html = renderReviewerBoard(running.rows, {
       runFilters: { state: "running" },
-      runPagination: { page: 2, pageSize: 1, total: 2 },
+      runPagination: { page: 2, pageSize: 1, total: 3 },
     });
     expect(html).toContain('value="running" selected');
     expect(html).toContain("/reviewers?page=1&amp;state=running");
-    expect(html).toContain("Page 2 / 2");
+    expect(html).toContain("/reviewers?page=3&amp;state=running");
+    expect(html).toContain("Page 2 / 3");
+
+    const unfiltered = renderReviewerBoard(running.rows, {
+      runPagination: { page: 1, pageSize: 1, total: 3 },
+    });
+    expect(unfiltered).toContain("/reviewers?page=2\"");
+    expect(unfiltered).not.toContain("state=");
+
+    const empty = renderReviewerBoard([], { runFilters: { state: "failed" } });
+    expect(empty).toContain("No reviewer runs with status failed");
   });
 });

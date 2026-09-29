@@ -581,6 +581,57 @@ describe("manual review trigger", () => {
     expect(store.getReviewerRun(run.id)?.state).toBe("queued");
   });
 
+  it("filters and paginates the /reviewers board", async () => {
+    const { app, store } = testApp();
+    const created = store.enqueue({
+      repoFullName: "acme/widgets",
+      repoOwner: "acme",
+      repoName: "widgets",
+      installationId: 1,
+      prNumber: 8,
+      prTitle: "Hello",
+      prBody: "",
+      prHtmlUrl: "https://example.test",
+      prAuthor: "dev",
+      baseSha: "b",
+      headSha: "h",
+      baseRef: "main",
+      headRef: "f",
+      reviewers: [{ role: "correctness", title: "Correctness" }],
+    });
+    const run = store.listReviewerRuns(created.job.id)[0]!;
+    store.patchReviewer(run.id, { state: "running" });
+
+    const running = await app.request("/reviewers?state=running");
+    expect(running.status).toBe(200);
+    const runningHtml = await running.text();
+    expect(runningHtml).toContain('value="running" selected');
+    expect(runningHtml).toContain("run-row");
+
+    const missing = await app.request("/reviewers?state=failed");
+    expect(missing.status).toBe(200);
+    expect(await missing.text()).toContain("No reviewer runs with status failed");
+
+    // Unknown states degrade to the unfiltered board.
+    const bogus = await app.request("/reviewers?state=bogus");
+    expect(bogus.status).toBe(200);
+    const bogusHtml = await bogus.text();
+    expect(bogusHtml).toContain('value="" selected');
+    expect(bogusHtml).toContain("run-row");
+
+    // Non-numeric, non-finite, and clamped page values degrade to page 1.
+    for (const bad of ["0", "-3", "abc", "Infinity", "1e999"]) {
+      const res = await app.request(`/reviewers?page=${bad}`);
+      expect(res.status).toBe(200);
+      expect(await res.text()).toContain("run-row");
+    }
+
+    // A page beyond the total renders the empty state instead of a 500.
+    const beyond = await app.request("/reviewers?page=999");
+    expect(beyond.status).toBe(200);
+    expect(await beyond.text()).toContain("No reviewer runs");
+  });
+
   it("respects REVIEW_DRAFTS for manual triggers", async () => {
     const { app, enqueued } = testApp({}, mockGithub(fakePull({ draft: true })));
     const res = await app.request("/reviews", {

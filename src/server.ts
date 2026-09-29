@@ -858,7 +858,8 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
       ? (rawState as (typeof RUN_STATES)[number])
       : undefined;
     const pageSize = 50;
-    const page = Math.max(1, Math.floor(Number(c.req.query("page"))) || 1);
+    const rawPage = Math.floor(Number(c.req.query("page")));
+    const page = Number.isFinite(rawPage) && rawPage >= 1 ? rawPage : 1;
     const board = ctx.store.listReviewerRunBoard({ state, offset: (page - 1) * pageSize, limit: pageSize });
     return c.html(
       renderReviewerBoard(board.rows, {
