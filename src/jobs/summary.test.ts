@@ -426,6 +426,24 @@ describe("emitJobSummary", () => {
     ]);
   });
 
+  it("marks usage incomplete on a direct live->cancelled transition", () => {
+    setJobSummarySink(capture);
+    const store = makeStore();
+    const jobId = seedJob(store);
+    store.setJobState(jobId, "reviewing");
+    store.setJobState(jobId, "cancelled");
+    expect(payloadLines()).toEqual([
+      expect.objectContaining({ job_id: jobId, state: "cancelled", usage_complete: false }),
+    ]);
+  });
+
+  it("defaults attempt to 1 for a job row with no retry_count", () => {
+    const store = makeStore();
+    const jobId = seedJob(store);
+    const legacy = { ...store.getJob(jobId)!, retry_count: null as unknown as number };
+    expect(buildJobSummary(legacy, []).attempt).toBe(1);
+  });
+
   it("marks usage incomplete on a direct live->stale transition", () => {
     setJobSummarySink(capture);
     const store = makeStore();

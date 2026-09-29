@@ -1506,12 +1506,13 @@ export class JobStore {
   }
 
   /**
-   * Atomically moves every matching non-terminal job to `cancelled` in a
-   * single UPDATE (implicit transaction) and returns the ids that actually
-   * transitioned. Idempotent by construction: terminal jobs (completed,
-   * failed, stale, already cancelled) never match, so a duplicate merge
-   * webhook is a no-op. The where-union makes an unfiltered database-wide
-   * cancellation unrepresentable.
+   * Moves every matching non-terminal job to `cancelled` and returns the ids
+   * that actually transitioned: a SELECT snapshots pre-transition states for
+   * the terminal-summary emission, then a guarded UPDATE (still matching on
+   * active states) performs the transition. Idempotent by construction:
+   * terminal jobs (completed, failed, stale, already cancelled) never match,
+   * so a duplicate merge webhook is a no-op. The where-union makes an
+   * unfiltered database-wide cancellation unrepresentable.
    */
   cancelJobs(
     where:
