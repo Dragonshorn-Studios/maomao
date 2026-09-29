@@ -1034,13 +1034,13 @@ const STACK_MEMBER_MAX_RETRIES = 2;
  */
 const STACK_MAX_MEMBERS = 10;
 
-/**
- * Whole-run token ceiling summed across member jobs (routing + specialist
- * runs + aggregation + escalations). Once recorded spend passes it, the same
- * middle-member downgrade applies and the cumulative pass is skipped; the
- * bottom and tip members always keep their normal mode.
- */
-const STACK_TOKEN_CAP = 400_000;
+// The second envelope limit is the whole-run token ceiling summed across
+// member jobs (routing + specialist runs + aggregation + escalations). Only
+// spend this run itself enqueued counts (issue #136): reusing a completed or
+// in-flight same-head member review is free. Once the run's recorded spend
+// passes `config.stackTokenCap` (env STACK_TOKEN_CAP, default 10M) the same
+// middle-member downgrade applies and the cumulative pass is skipped; the
+// bottom and tip members always keep their normal mode.
 
 /**
  * Members the run never finished must not render QUEUED/REVIEWING forever on
@@ -1219,17 +1219,24 @@ async function runStackJob(deps: PipelineDeps, forge: ForgeRegistry, jobId: numb
       const member = members[index]!;
       const info = meta.get(member.pr_number)!;
       // Envelope: the bottom and the tip always keep their normal mode. A
-      // middle member in an oversized stack — or after recorded member spend
-      // crosses STACK_TOKEN_CAP — is downgraded: verify when it has a prior
-      // pass to re-check, skipped-budget when it does not.
+      // middle member in an oversized stack — or after this run's recorded
+      // member spend crosses the token cap — is downgraded: verify when it
+      // has a prior pass to re-check, skipped-budget when it does not. A
+      // member whose review is already complete or in flight at this exact
+      // head is reused for free (issue #136), so the envelope never
+      // downgrades it.
       const edgeMember = index === 0 || index === members.length - 1;
-      const budgeted = !edgeMember && (members.length > STACK_MAX_MEMBERS || stackTokens > STACK_TOKEN_CAP);
+      const freeReuse =
+        !edgeMember &&
+        store.reusableReviewAtHead(job.repo_full_name, member.pr_number, member.head_sha, scopeOf(job)) != null;
+      const budgeted =
+        !edgeMember && !freeReuse && (members.length > STACK_MAX_MEMBERS || stackTokens > config.stackTokenCap);
       const reviewMode = await stackMemberReviewMode(deps, provider, job, member, info, budgeted);
       if (reviewMode === "skip") {
         const reason =
           members.length > STACK_MAX_MEMBERS
             ? `stack has ${members.length} members (max ${STACK_MAX_MEMBERS})`
-            : `stack token cap ${STACK_TOKEN_CAP} exceeded`;
+            : `stack token cap ${config.stackTokenCap} exceeded`;
         store.patchStackMember(member.id, { state: "skipped" });
         memberSkips.push(`#${member.pr_number}`);
         store.log(jobId, `Stack member #${member.pr_number} skipped-budget: ${reason}`, "warn");
@@ -1303,6 +1310,12 @@ async function runStackJob(deps: PipelineDeps, forge: ForgeRegistry, jobId: numb
           );
         }
         outcome = await waitForJob(deps.store, memberJobId, jobId, signal);
+        if (enqueued.created) {
+          // Run envelope (issue #136): only spend this run itself enqueued
+          // counts — a reused job's recorded tokens belong to the run that
+          // spent them. Counted once the attempt reaches a terminal state.
+          stackTokens += memberJobSpend(store, enqueued.job.id).tokens;
+        }
         if (outcome === "completed") {
           // A completed review only counts while it still describes the live
           // head: finishing at a since-moved SHA is re-pinned and retried
@@ -1345,7 +1358,6 @@ async function runStackJob(deps: PipelineDeps, forge: ForgeRegistry, jobId: numb
       }
       store.patchStackMember(member.id, { state: "done" });
       memberJobs.push({ member, jobId: memberJobId! });
-      stackTokens += memberJobSpend(store, memberJobId!).tokens;
     }
 
     // Phase 3 — re-check every head before anything stack-level is published.
@@ -1374,13 +1386,13 @@ async function runStackJob(deps: PipelineDeps, forge: ForgeRegistry, jobId: numb
     const cumulativeRun = store.listReviewerRuns(jobId).find((entry) => entry.role === "stack_cumulative");
     const top = members[members.length - 1]!;
     const sharedPaths = stackSharedPaths(members, diffs);
-    const overBudget = stackTokens > STACK_TOKEN_CAP;
+    const overBudget = stackTokens > config.stackTokenCap;
     let cumulative: ReviewerResult;
     let cumulativeNote = "";
     if (sharedPaths.length === 0 || overBudget) {
       cumulative = { schema_version: 1, reviewer: "stack_cumulative", verdict: "clean", summary: "", findings: [] };
       cumulativeNote = overBudget
-        ? `Cross-PR pass skipped — stack token cap ${STACK_TOKEN_CAP} exceeded (${stackTokens} tokens recorded across member reviews).`
+        ? `Cross-PR pass skipped — stack token cap ${config.stackTokenCap} exceeded (${stackTokens} tokens recorded across member reviews).`
         : "Cross-PR pass skipped — member diffs share no changed paths.";
       if (cumulativeRun) {
         store.patchReviewer(cumulativeRun.id, {
@@ -1448,7 +1460,7 @@ async function runStackJob(deps: PipelineDeps, forge: ForgeRegistry, jobId: numb
         ? `**Stack budget** — ${
             members.length > STACK_MAX_MEMBERS
               ? `stack has ${members.length} members (max ${STACK_MAX_MEMBERS})`
-              : `member reviews recorded ${stackTokens} tokens (cap ${STACK_TOKEN_CAP})`
+              : `member reviews recorded ${stackTokens} tokens (cap ${config.stackTokenCap})`
           }; middle members run verify-only.${memberSkips.length ? ` Skipped-budget (no prior pass to verify): ${memberSkips.join(", ")}.` : ""}\n\n`
         : "") +
       (cumulativeNote ? `${cumulativeNote}\n\n` : cumulative.summary ? `${cumulative.summary}\n\n` : "") +

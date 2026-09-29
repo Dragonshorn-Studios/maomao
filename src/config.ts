@@ -137,6 +137,13 @@ export interface Config {
   /** Max created jobs per repository id inside `repoRateWindowMs` (per process). `0` disables. */
   repoRateLimitPerWindow: number;
   repoRateWindowMs: number;
+  /**
+   * Whole-run token ceiling for a stack review's member jobs (issue #136).
+   * Only spend the run itself enqueued counts — reusing a completed or
+   * in-flight same-head member review is free. Bottom and tip members are
+   * exempt; middle members downgrade to verify/skipped-budget past it.
+   */
+  stackTokenCap: number;
   /** Key sealing forge connection tokens at rest. Absent until a forge connection needs one. */
   forgeKey?: Buffer;
   /** MVP bootstrap: seed one GitLab connection from env at boot (all three required). */
@@ -337,6 +344,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     maxDiffBytes: clamp(parseInteger(env.MAX_DIFF_BYTES, 1_048_576), 0, 50 * 1024 * 1024),
     repoRateLimitPerWindow: Math.max(0, parseInteger(env.REPO_RATE_LIMIT_PER_WINDOW, 6)),
     repoRateWindowMs: Math.max(0, parseInteger(env.REPO_RATE_WINDOW_MS, 60 * 60 * 1000)),
+    stackTokenCap: Math.max(0, parseInteger(env.STACK_TOKEN_CAP, 10_000_000)),
     forgeKey: loadForgeKey(env),
     gitlabBootstrap: parseGitLabBootstrap(env),
     chat: {

@@ -5413,7 +5413,7 @@ describe("non-github health scans", () => {
 });
 
 describe("stack reviews (issue #99)", () => {
-  function stackConfig() {
+  function stackConfig(extra: NodeJS.ProcessEnv = {}) {
     return loadConfig({
       REVIEWER_ROLES: "correctness",
       OPENCODE_REVIEWER_MODEL: "test/model",
@@ -5422,6 +5422,7 @@ describe("stack reviews (issue #99)", () => {
       GITHUB_APP_ID: "1",
       GITHUB_WEBHOOK_SECRET: "s",
       GITHUB_APP_PRIVATE_KEY: "k",
+      ...extra,
     });
   }
 
@@ -5969,7 +5970,7 @@ describe("stack reviews (issue #99)", () => {
   });
 
   it("skips the cumulative pass once member spend exceeds the stack token cap (issue #123)", async () => {
-    const config = stackConfig();
+    const config = stackConfig({ STACK_TOKEN_CAP: "400000" });
     const store = new JobStore(openDb(":memory:"));
     const stack = enqueueStackJob(store);
     const issueComments: { pullNumber: number; body: string }[] = [];
@@ -6001,6 +6002,112 @@ describe("stack reviews (issue #99)", () => {
     expect(cumulative?.state).toBe("done");
     expect(issueComments[0]?.body).toContain("Stack budget");
     expect(issueComments[0]?.body).toContain("Cross-PR pass skipped — stack token cap");
+  });
+
+  it("reuses a completed same-head middle member for free past the token cap (issue #136)", async () => {
+    const config = stackConfig({ STACK_TOKEN_CAP: "400000" });
+    const store = new JobStore(openDb(":memory:"));
+    // #42's completed same-head review is free to reuse: it must not be
+    // skipped-budget, and its (deliberately huge) recorded spend must not
+    // land in this run's envelope.
+    const prior = completedReview(store, 42, "h42");
+    store.patchJob(prior.id, { routing_total_tokens: 9_000_000 });
+    const stack = enqueueStackJobN(store, 4);
+    const issueComments: { pullNumber: number; body: string }[] = [];
+    const fatOpencode: OpenCodePort = {
+      async run(input) {
+        const result = await stackOpencode.run(input);
+        return { ...result, usage: { promptTokens: 500_000, completionTokens: 1 } };
+      },
+    };
+    const github = {
+      ...githubPort(),
+      getPull: async (_i: number, _o: string, _r: string, n: number) => anyPull(n, `h${n}`),
+      createCommentReview: async () => ({ id: "9", url: "u" }),
+      createIssueComment: async (input: { pullNumber: number; body: string }) => {
+        issueComments.push({ pullNumber: input.pullNumber, body: input.body });
+        return { id: "1", url: "u" };
+      },
+    } as unknown as GithubPort;
+    const pipeline = createPipeline({ config, store, github, checkout: await fixtureCheckout(), opencode: fatOpencode });
+    await pipeline.run(stack.job.id);
+
+    expect(store.getJob(stack.job.id)?.state).toBe("completed");
+    const members = store.listStackMembers(stack.job.id);
+    // Bottom ran full (crossing the cap), #42 reused its completed review
+    // for free, #43 had nothing to reuse or verify → skipped-budget, tip ran.
+    expect(members.map((m) => m.state)).toEqual(["done", "done", "skipped", "done"]);
+    expect(members[1]!.member_job_id).toBe(prior.id);
+    const freshJobs = store.listJobs(30).filter((j) => j.job_type === "pr_review" && j.id !== prior.id);
+    expect(freshJobs.map((j) => j.pr_number).sort()).toEqual([41, 44]);
+    // The reused job's historical tokens never entered the run envelope.
+    const recorded = Number(issueComments[0]!.body.match(/recorded (\d+) tokens/)?.[1] ?? -1);
+    expect(recorded).toBeGreaterThan(0);
+    expect(recorded).toBeLessThan(9_000_000);
+    const logs = store.listLogs(stack.job.id).map((l) => l.message).join("\n");
+    expect(logs).toMatch(/Stack member #43 skipped-budget: stack token cap 400000 exceeded/);
+  });
+
+  it("gates a middle member by this run's spend once it crosses the token cap (issue #136)", async () => {
+    const config = stackConfig({ STACK_TOKEN_CAP: "400000" });
+    const store = new JobStore(openDb(":memory:"));
+    const stack = enqueueStackJobN(store, 3);
+    const issueComments: { pullNumber: number; body: string }[] = [];
+    const fatOpencode: OpenCodePort = {
+      async run(input) {
+        const result = await stackOpencode.run(input);
+        return { ...result, usage: { promptTokens: 500_000, completionTokens: 1 } };
+      },
+    };
+    const github = {
+      ...githubPort(),
+      getPull: async (_i: number, _o: string, _r: string, n: number) => anyPull(n, `h${n}`),
+      createCommentReview: async () => ({ id: "9", url: "u" }),
+      createIssueComment: async (input: { pullNumber: number; body: string }) => {
+        issueComments.push({ pullNumber: input.pullNumber, body: input.body });
+        return { id: "1", url: "u" };
+      },
+    } as unknown as GithubPort;
+    const pipeline = createPipeline({ config, store, github, checkout: await fixtureCheckout(), opencode: fatOpencode });
+    await pipeline.run(stack.job.id);
+
+    expect(store.getJob(stack.job.id)?.state).toBe("completed");
+    const members = store.listStackMembers(stack.job.id);
+    // #41 (bottom) ran full and its spend crossed the cap → #42 (middle, no
+    // prior pass) is skipped-budget; #43 (tip) still ran full.
+    expect(members.map((m) => m.state)).toEqual(["done", "skipped", "done"]);
+    const prJobs = store.listJobs(30).filter((j) => j.job_type === "pr_review");
+    expect(prJobs.map((j) => j.pr_number).sort()).toEqual([41, 43]);
+    const logs = store.listLogs(stack.job.id).map((l) => l.message).join("\n");
+    expect(logs).toMatch(/Stack member #42 skipped-budget: stack token cap 400000 exceeded/);
+    expect(issueComments[0]?.body).toContain("Skipped-budget");
+  });
+
+  it("verifies rather than skips a middle member with a prior pass under the token cap (issue #136)", async () => {
+    const config = stackConfig({ STACK_TOKEN_CAP: "400000" });
+    const store = new JobStore(openDb(":memory:"));
+    const prior = completedReview(store, 42, "h42-old");
+    const stack = enqueueStackJobN(store, 3);
+    const fatOpencode: OpenCodePort = {
+      async run(input) {
+        const result = await stackOpencode.run(input);
+        return { ...result, usage: { promptTokens: 500_000, completionTokens: 1 } };
+      },
+    };
+    const github = {
+      ...githubPort(),
+      getPull: async (_i: number, _o: string, _r: string, n: number) => anyPull(n, `h${n}`),
+      createCommentReview: async () => ({ id: "9", url: "u" }),
+      createIssueComment: async () => ({ id: "1", url: "u" }),
+    } as unknown as GithubPort;
+    const pipeline = createPipeline({ config, store, github, checkout: await fixtureCheckout(), opencode: fatOpencode });
+    await pipeline.run(stack.job.id);
+
+    expect(store.getJob(stack.job.id)?.state).toBe("completed");
+    const members = store.listStackMembers(stack.job.id);
+    expect(members.map((m) => m.state)).toEqual(["done", "done", "done"]);
+    const job42 = store.listJobs(30).find((j) => j.job_type === "pr_review" && j.pr_number === 42 && j.id !== prior.id);
+    expect(job42?.review_mode).toBe("verify");
   });
 
   it("marks a member whose review ended cancelled as skipped and still escalates (issue #123)", async () => {

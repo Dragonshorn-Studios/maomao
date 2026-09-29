@@ -991,6 +991,31 @@ export class JobStore {
   }
 
   /**
+   * A pr_review at exactly `headSha` that a stack member enqueue would reuse
+   * for free (issue #136): dedup coordinates match the shared '' slot, and
+   * the row is completed or still live — awaiting it adds no spend to this
+   * run's envelope. Terminal rows (failed/stale/cancelled) don't qualify:
+   * the member loop would retire the key and burn a fresh attempt.
+   */
+  reusableReviewAtHead(
+    repoFullName: string,
+    prNumber: number,
+    headSha: string,
+    scope?: Partial<ForgeScope>,
+  ): JobRow | undefined {
+    const resolved = normalizeScope(scope);
+    return this.db
+      .prepare(
+        `SELECT * FROM jobs
+         WHERE provider = ? AND provider_instance = ? AND repo_full_name = ? AND pr_number = ?
+           AND job_type = 'pr_review' AND head_sha = ? AND dedup_key = ''
+           AND state NOT IN ('failed', 'stale', 'cancelled')
+         LIMIT 1`,
+      )
+      .get(resolved.provider, resolved.instance, repoFullName, prNumber, headSha) as JobRow | undefined;
+  }
+
+  /**
    * Re-pin a still-queued stack_review job after a mid/tip push that kept the
    * membership: the row's top/bottom SHAs and the member snapshot move to the
    * new heads in place — no new stack-job row (issue #131). Returns false when
