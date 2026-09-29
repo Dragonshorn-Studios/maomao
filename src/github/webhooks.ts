@@ -724,12 +724,13 @@ async function refreshStackComments(
   }
 }
 
-// The member SHA vector joins the stack id in the dedup key: an identical
-// re-trigger dedups, while a push to ANY member — not only the top —
-// supersedes the queued run and can never dedup onto a finished job.
-function stackDedupKey(stackId: string, members: { prNumber: number; headSha: string }[]): string {
-  const vector = members.map((m) => `${m.prNumber}:${m.headSha}`).join("/");
-  return `${stackDedupPrefix(stackId)}@${createHash("sha1").update(vector).digest("hex").slice(0, 12)}`;
+// Stack-job identity is membership (issue #131): stack_id + the ordered PR
+// set, not the member SHA vector. A mid/tip push lands on the same key and
+// rechecks the existing job, while a PR joining or leaving the stack yields
+// a new key whose job supersedes the old one.
+function stackDedupKey(stackId: string, members: { prNumber: number }[]): string {
+  const membership = members.map((m) => m.prNumber).join("/");
+  return `${stackDedupPrefix(stackId)}@${createHash("sha1").update(membership).digest("hex").slice(0, 12)}`;
 }
 
 // The enqueue tail shared by "top of stack" and "end of stack": pause
@@ -740,25 +741,52 @@ async function runStackEnqueue(
   pulls: ResolvedPull[],
   via: "top" | "end",
 ): Promise<WebhookHandleResult> {
+  // Automatic stack triggers share the quiet deny path with pr_review: a
+  // spend-control refusal claims the delivery and logs, but leaves no PR
+  // comment — tip thrash must not flood the thread (issue #130). Manual
+  // comment commands still get the actionable reply.
+  const quietDeny = (message: string): void => {
+    console.warn(
+      `stack: skipped automatic "${stackId}" trigger in ${ctx.repoFullName} — ${message} ` +
+        `(delivery ${ctx.input.request.deliveryId || "unknown"})`,
+    );
+  };
   // A stack run is reviews: the global pause blocks it like any other
   // enqueue. Checked after validation so the reply is still a useful error.
   if (ctx.input.store.getGlobalPause()) {
-    await stackReply(ctx, `Could not run stack "${stackId}": reviews are paused globally — resume on /pause.`);
+    if (ctx.enforceSpendControls) {
+      quietDeny("reviews paused globally");
+    } else {
+      await stackReply(ctx, `Could not run stack "${stackId}": reviews are paused globally — resume on /pause.`);
+    }
     return ctx.finish(`${via}-paused`, { ok: true, command: via, stackId, enqueued: false, error: "reviews paused globally" });
   }
   const rateOn = repoRateLimitActive(ctx.input.config.repoRateLimitPerWindow, ctx.input.config.repoRateWindowMs);
+  // Stack-aware budget (issue #130): the first created job of a stack in a
+  // window records the repo hit AND a per-stack marker; later re-triggers of
+  // the same stack in that window only supersede, so they charge 0 and skip
+  // the cap check entirely — tip thrash never burns N slots.
+  const stackBudgetKey =
+    ctx.githubRepositoryId != null ? `stack:${ctx.githubRepositoryId}:${stackId}` : "";
+  const stackAlreadyCharged =
+    rateOn &&
+    stackBudgetKey !== "" &&
+    ctx.input.rateLimiter != null &&
+    ctx.input.rateLimiter.hasHitInWindow(stackBudgetKey, ctx.input.config.repoRateWindowMs);
   if (ctx.enforceSpendControls) {
     const repoPause = ctx.input.store.getActivePause(ctx.repoFullName);
     if (repoPause) {
-      await stackReply(ctx, `Could not run stack "${stackId}": reviews for ${ctx.repoFullName} are paused until ${repoPause.expires_at}.`);
+      quietDeny(`reviews paused until ${repoPause.expires_at}`);
       return ctx.finish(`${via}-paused`, { ok: true, command: via, stackId, enqueued: false, error: `paused until ${repoPause.expires_at}` });
     }
     if (rateOn && ctx.githubRepositoryId == null) {
-      await stackReply(ctx, `Could not run stack "${stackId}": the webhook payload is missing the repository id needed for rate limiting.`);
+      quietDeny("missing repository id for rate limiting");
+      logAuthorizationRejection({ installationId: ctx.installationId, reason: "missing repository id" });
       return ctx.finish(`${via}-rate-limited`, { ok: true, command: via, stackId, enqueued: false, error: "missing repository id" });
     }
     if (
       rateOn &&
+      !stackAlreadyCharged &&
       ctx.githubRepositoryId != null &&
       ctx.input.rateLimiter &&
       !ctx.input.rateLimiter.wouldAllow(
@@ -767,7 +795,8 @@ async function runStackEnqueue(
         ctx.input.config.repoRateWindowMs,
       )
     ) {
-      await stackReply(ctx, `Could not run stack "${stackId}": ${ctx.repoFullName} is rate limited — retry once the window resets.`);
+      quietDeny("rate limited");
+      logRateLimited({ installationId: ctx.installationId, repositoryId: ctx.githubRepositoryId });
       return ctx.finish(`${via}-rate-limited`, { ok: true, command: via, stackId, enqueued: false, error: "rate limited" });
     }
   }
@@ -797,10 +826,12 @@ async function runStackEnqueue(
   const bottom = members[0]!;
   const topPull = pulls[pulls.length - 1]!;
   const dedupKey = stackDedupKey(stackId, members);
-  // The per-vector key never stale-matches superseded runs — mark open jobs
-  // for this stack stale before enqueueing, and fold the ids into the
-  // enqueue result so dispatchEnqueue aborts in-flight runs too (a member
-  // push must stop a running review from publishing pre-push SHAs).
+  // Membership change supersedes: every stack_review row for this stack on a
+  // *different* key goes stale before enqueueing, and the ids fold into the
+  // enqueue result so dispatchEnqueue aborts in-flight runs (a push must stop
+  // a running review from publishing pre-push SHAs). The same-key row is kept
+  // — enqueue() decides between re-pin (queued), abort+replace (in-flight),
+  // or a re-queued child row (terminal).
   const staleJobIds = ctx.input.store.staleOpenStackJobs(ctx.repoFullName, stackId, dedupKey);
   const enqueue = ctx.input.store.enqueue({
     repoFullName: ctx.repoFullName,
@@ -836,13 +867,17 @@ async function runStackEnqueue(
       expectedCount: members.length,
     })),
   );
-  if (enqueue.created && ctx.enforceSpendControls && rateOn && ctx.githubRepositoryId != null && ctx.input.rateLimiter) {
+  if (enqueue.created && ctx.enforceSpendControls && rateOn && ctx.githubRepositoryId != null && ctx.input.rateLimiter && !stackAlreadyCharged) {
     ctx.input.rateLimiter.record(
       ctx.githubRepositoryId,
       ctx.input.config.repoRateLimitPerWindow,
       ctx.input.config.repoRateWindowMs,
     );
+    // Marker hit under a separate key: it never joins the repo's numeric
+    // window, it only proves this stack already paid this window.
+    ctx.input.rateLimiter.recordKey(stackBudgetKey, 1, ctx.input.config.repoRateWindowMs);
   }
+  let rechecked = false;
   if (enqueue.created) {
     ctx.input.store.insertStackMembers(enqueue.job.id, members);
     ctx.input.store.log(
@@ -850,13 +885,42 @@ async function runStackEnqueue(
       `Stack "${stackId}" of ${members.length} triggered by ${ctx.actorLogin}: ` +
         members.map((m) => `#${m.prNumber}@${m.headSha.slice(0, 8)}`).join(" → "),
     );
+  } else {
+    // The membership key dedups only onto a still-queued job: a push that
+    // moved heads rechecks that same job — the member snapshot and the
+    // row's tip/base SHAs are re-pinned, no new stack-job row (issue #131).
+    const storedMembers = ctx.input.store.listStackMembers(enqueue.job.id);
+    rechecked =
+      enqueue.job.head_sha !== top.headSha ||
+      enqueue.job.base_sha !== bottom.baseSha ||
+      members.some(
+        (member, index) =>
+          storedMembers[index]?.pr_number !== member.prNumber ||
+          storedMembers[index]?.base_sha !== member.baseSha ||
+          storedMembers[index]?.head_sha !== member.headSha,
+      );
+    if (
+      rechecked &&
+      ctx.input.store.repinQueuedStackJob(
+        enqueue.job.id,
+        { baseSha: bottom.baseSha, headSha: top.headSha, baseRef: bottom.baseRef, headRef: top.headRef },
+        members,
+      )
+    ) {
+      ctx.input.store.log(
+        enqueue.job.id,
+        `Stack "${stackId}" rechecked after a member push — re-pinned ` +
+          members.map((m) => `#${m.prNumber}@${m.headSha.slice(0, 8)}`).join(" → "),
+      );
+    }
   }
   enqueue.staleJobIds.unshift(...staleJobIds);
-  const result = ctx.finish(enqueue.created ? `${via}-enqueued` : `${via}-deduped`, {
+  const result = ctx.finish(enqueue.created ? `${via}-enqueued` : rechecked ? `${via}-rechecked` : `${via}-deduped`, {
     ok: true,
     command: via,
     stackId,
     enqueued: enqueue.created,
+    rechecked,
     jobId: enqueue.job.id,
     staleJobIds: enqueue.staleJobIds,
   });

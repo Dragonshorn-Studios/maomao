@@ -4480,6 +4480,34 @@ describe("home queue pagination", () => {
     expect(html).toContain("Nothing is under examination");
     expect(html).toContain("aria-disabled=\"true\"");
   });
+
+  it("hides superseded jobs by default and toggles them back with ?superseded=1", async () => {
+    const { app, store } = seededApp(4);
+    const jobs = store.listJobsPage({ includeStale: true }).jobs;
+    const staleId = jobs[1]!.id;
+    const stalePr = jobs[1]!.pr_number;
+    store.setJobState(staleId, "stale");
+
+    const home = await app.request("/");
+    const homeHtml = await home.text();
+    expect(homeHtml).not.toContain(`job ${stalePr}<`);
+    expect(homeHtml).toContain("Show superseded (1)");
+    // Non-stale states stay visible — queued and completed cards are untouched.
+    for (const job of jobs.filter((j) => j.id !== staleId)) {
+      expect(homeHtml).toContain(`job ${job.pr_number}<`);
+    }
+
+    const withStale = await app.request("/?superseded=1");
+    const withStaleHtml = await withStale.text();
+    expect(withStaleHtml).toContain(`job ${stalePr}<`);
+    expect(withStaleHtml).toContain("Hide superseded");
+    expect(withStaleHtml).not.toContain("Show superseded");
+
+    // A superseded job's direct link still opens it regardless of the filter.
+    const detail = await app.request(`/jobs/${staleId}`);
+    expect(detail.status).toBe(200);
+    expect((await detail.text()).toLowerCase()).toContain("stale");
+  });
 });
 
 describe("home queue pagination review fixes", () => {

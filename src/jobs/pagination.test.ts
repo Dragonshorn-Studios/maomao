@@ -192,6 +192,33 @@ function seededStoreAppend(store: JobStore, count: number, firstPrNumber: number
     expect(page.hasOlder).toBe(false);
   });
 
+  it("hides stale jobs by default and restores them with includeStale", () => {
+    const store = seededStore(6);
+    const staleIds = store.listJobsPage({}).jobs.slice(1, 4).map((job) => job.id);
+    for (const id of staleIds) store.setJobState(id, "stale");
+
+    const filtered = store.listJobsPage({});
+    expect(filtered.jobs.map((job) => job.id)).not.toContain(staleIds[0]);
+    expect(filtered.jobs.every((job) => job.state !== "stale")).toBe(true);
+
+    const included = store.listJobsPage({ includeStale: true });
+    expect(included.jobs.map((job) => job.id)).toEqual(expect.arrayContaining(staleIds));
+    // Cursors ride the same filter: a stale boundary still pages correctly.
+    const belowStale = store.listJobsPage({ before: staleIds[0] });
+    expect(belowStale.jobs.every((job) => job.state !== "stale")).toBe(true);
+    const belowStaleIncluded = store.listJobsPage({ before: staleIds[0], includeStale: true });
+    expect(belowStaleIncluded.jobs.some((job) => job.state === "stale")).toBe(true);
+  });
+
+  it("counts superseded jobs with the same forge scope as the list", () => {
+    const store = seededStore(4);
+    const stale = store.listJobsPage({}).jobs.slice(0, 2);
+    for (const job of stale) store.setJobState(job.id, "stale");
+    expect(store.supersededJobCount()).toBe(2);
+    expect(store.supersededJobCount({ provider: "github", instance: "github.com" })).toBe(2);
+    expect(store.supersededJobCount({ provider: "gitlab", instance: "gitlab.com" })).toBe(0);
+  });
+
 describe("listWebhookDeliveries", () => {
   function seededDeliveries(count: number): JobStore {
     const store = new JobStore(openDb(":memory:"));

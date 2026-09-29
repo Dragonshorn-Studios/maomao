@@ -1944,9 +1944,10 @@ describe("stack commands (issue #99)", () => {
       github: pausedGithub,
       request: { event: "pull_request", deliveryId: "m10", signature: sign(secret, pausedBody), rawBody: pausedBody },
     });
-    // The pause still blocks both the stack trigger and the fall-through review.
+    // The pause still blocks both the stack trigger and the fall-through
+    // review — quietly: automatic denies claim+log, no PR comment (#130).
     expect(pausedResult.body.created).not.toBe(true);
-    expect(pausedComments[0]?.body).toMatch(/paused until/);
+    expect(pausedComments).toHaveLength(0);
     expect(pausedStore.listJobs(10)).toHaveLength(0);
 
     // Rate limit: burn the single slot on an unmarked PR, then the end marker
@@ -1977,10 +1978,70 @@ describe("stack commands (issue #99)", () => {
       request: { event: "pull_request", deliveryId: "m12", signature: sign(secret, limitedBody), rawBody: limitedBody },
     });
     // Rate limit still blocks: stack trigger errors and the fall-through
-    // review hits the same limiter in the normal path.
+    // review hits the same limiter in the normal path — both quietly (#130).
     expect(limitedResult.body.created).not.toBe(true);
-    expect(limitedComments[0]?.body).toMatch(/rate limited/);
+    expect(limitedComments).toHaveLength(0);
     expect(limitedStore.listJobs(10).filter((j) => j.job_type === "stack_review")).toHaveLength(0);
+  });
+
+  it("charges a stack once per window — same-stack re-triggers supersede for free", async () => {
+    const secret = "s3cret";
+    const config = stackConfig(secret, { REPO_RATE_LIMIT_PER_WINDOW: "1", REPO_RATE_WINDOW_MS: "60000" });
+    const store = new JobStore(openDb(":memory:"));
+    store.upsertStackStart({ repoFullName: "acme/widgets", stackId: "u1", prNumber: 41, actor: "alice" });
+    store.upsertStackStart({ repoFullName: "acme/widgets", stackId: "u2", prNumber: 41, actor: "alice" });
+    const limiter = new RepoRateLimiter();
+    const { github, comments } = stackGithub({ openPulls: chainPulls() });
+    const send = async (rawBody: string, deliveryId: string) =>
+      handleGithubWebhook({
+        config,
+        store,
+        github,
+        rateLimiter: limiter,
+        request: { event: "pull_request", deliveryId, signature: sign(secret, rawBody), rawBody },
+      });
+
+    // First stack enqueue charges the repo slot once.
+    const endBody = markedPr("<!-- end of stack u1 -->", {
+      number: 43,
+      base: { sha: "h42", ref: "feat-b" },
+      head: { sha: "h43", ref: "feat-c" },
+    });
+    await send(endBody, "m40");
+    expect(store.listJobs(10).filter((j) => j.job_type === "stack_review")).toHaveLength(1);
+
+    // The slot is spent: an unmarked PR is rate limited now.
+    const burn = JSON.stringify(prPayload());
+    const burned = await send(burn, "m41");
+    expect(burned.body).toEqual({ ok: true, ignored: true, reason: "rate limited" });
+
+    // A mid push re-triggers the same stack: membership unchanged, the
+    // recheck of the still-queued job is free despite the full window (#131
+    // re-pins in place — no new row, no stale) — and stays comment-quiet.
+    const push = JSON.stringify({
+      ...JSON.parse(markedPr("<!-- start of stack u1 -->", { number: 41, base: { sha: "m0", ref: "main" }, head: { sha: "h41b", ref: "feat-a" } })),
+      action: "synchronize",
+    });
+    const retrigger = await send(push, "m42");
+    expect(retrigger.body.rechecked).toBe(true);
+    const stackJobs = store.listJobs(10).filter((j) => j.job_type === "stack_review");
+    expect(stackJobs).toHaveLength(1);
+    expect(stackJobs[0]?.state).toBe("queued");
+    expect(comments.every((c) => !/rate limited/.test(c.body))).toBe(true);
+
+    // A different stack has no paid marker in the window and is still denied.
+    const otherStack = markedPr("<!-- end of stack u2 -->", {
+      number: 43,
+      base: { sha: "h42", ref: "feat-b" },
+      head: { sha: "h43b", ref: "feat-c" },
+    });
+    await send(otherStack, "m43");
+    expect(
+      store
+        .listJobs(10)
+        .filter((j) => j.job_type === "stack_review" && j.dedup_key.startsWith("stack:u2")),
+    ).toHaveLength(0);
+    expect(comments.every((c) => !/rate limited/.test(c.body))).toBe(true);
   });
 
   it("records a 'issue X of Y' declaration from the PR body and suppresses the review", async () => {
@@ -2089,8 +2150,9 @@ describe("stack commands (issue #99)", () => {
     const firstJob = store.listJobs(10).find((j) => j.job_type === "stack_review");
     expect(firstJob).toBeDefined();
 
-    // A synchronize on the marked base PR re-resolves the chain and enqueues
-    // a fresh cumulative review instead of being silently suppressed.
+    // A synchronize on the marked base PR re-resolves the chain and rechecks
+    // the still-queued stack job in place (issue #131) — re-pinned to the new
+    // head, no fresh row, no stale.
     const basePush = JSON.stringify({
       ...JSON.parse(markedPr("<!-- start of stack u1 -->", { number: 41, base: { sha: "m0", ref: "main" }, head: { sha: "h41b", ref: "feat-a" } })),
       action: "synchronize",
@@ -2101,12 +2163,11 @@ describe("stack commands (issue #99)", () => {
       github,
       request: { event: "pull_request", deliveryId: "m25", signature: sign(secret, basePush), rawBody: basePush },
     });
-    expect(resumed.body.enqueued).toBe(true);
-    expect(store.listJobs(10).filter((j) => j.job_type === "stack_review")).toHaveLength(2);
-    // The moved member head supersedes the first queued run — two queued
-    // cumulative reviews for one stack would be double spend.
-    expect(store.getJob(firstJob!.id)?.state).toBe("stale");
-    expect(store.getJob(firstJob!.id)?.finished_at).toBeTruthy();
+    expect(resumed.body.rechecked).toBe(true);
+    expect(resumed.body.enqueued).toBe(false);
+    expect(store.listJobs(10).filter((j) => j.job_type === "stack_review")).toHaveLength(1);
+    expect(store.getJob(firstJob!.id)?.state).toBe("queued");
+    expect(store.listStackMembers(firstJob!.id).find((m) => m.pr_number === 41)?.head_sha).toBe("h41b");
     // The base PR's marker keeps the resolved member list — the pending
     // placeholder is never reposted.
     const baseComments = comments.filter((c) => c.pullNumber === 41 && c.body.includes("maomao-stack:u1"));
@@ -2588,6 +2649,134 @@ describe("stack commands (issue #99)", () => {
     expect(secondResult.body.enqueued).toBe(true);
     expect(store.getJob(firstJob)?.state).toBe("stale");
     expect(secondResult.enqueue?.staleJobIds).toContain(firstJob);
+    // The replacement keeps the same membership key (issue #131).
+    expect(store.getJob(secondResult.enqueue!.job.id)?.dedup_key).toBe(store.getJob(firstJob)?.dedup_key);
+  });
+
+  it("rechecks the same queued stack job on a mid/tip push — re-pin, no new row", async () => {
+    const secret = "s3cret";
+    const config = stackConfig(secret);
+    const store = new JobStore(openDb(":memory:"));
+    store.upsertStackStart({ repoFullName: "acme/widgets", stackId: "u1", prNumber: 41, actor: "alice" });
+    const pulls = chainPulls();
+    const { github } = stackGithub({ openPulls: pulls });
+    const first = stackCommentOn(43, "end of stack u1", 9020);
+    const firstResult = await handleGithubWebhook({
+      config,
+      store,
+      github,
+      request: { event: "issue_comment", deliveryId: "g20", signature: sign(secret, first), rawBody: first },
+    });
+    const jobId = firstResult.enqueue!.job.id;
+    const key = store.getJob(jobId)?.dedup_key;
+
+    // Tip push while the job is still queued: same membership → recheck in
+    // place — members re-pinned to the new heads, no new row, no stale.
+    pulls[2]!.headSha = "h43b";
+    const second = stackCommentOn(43, "end of stack u1", 9021);
+    const secondResult = await handleGithubWebhook({
+      config,
+      store,
+      github,
+      request: { event: "issue_comment", deliveryId: "g21", signature: sign(secret, second), rawBody: second },
+    });
+    expect(secondResult.body.rechecked).toBe(true);
+    expect(secondResult.body.enqueued).toBe(false);
+    const job = store.getJob(jobId);
+    expect(job?.state).toBe("queued");
+    expect(job?.head_sha).toBe("h43b");
+    expect(job?.dedup_key).toBe(key);
+    expect(store.listJobs(10).filter((j) => j.job_type === "stack_review")).toHaveLength(1);
+    expect(store.listStackMembers(jobId).map((m) => m.head_sha)).toEqual(["h41", "h42", "h43b"]);
+
+    // An identical re-trigger (no head move) dedups without churning pins.
+    const third = stackCommentOn(43, "end of stack u1", 9022);
+    const thirdResult = await handleGithubWebhook({
+      config,
+      store,
+      github,
+      request: { event: "issue_comment", deliveryId: "g22", signature: sign(secret, third), rawBody: third },
+    });
+    expect(thirdResult.body.rechecked).toBe(false);
+    expect(store.listJobs(10).filter((j) => j.job_type === "stack_review")).toHaveLength(1);
+  });
+
+  it("supersedes the stack job when membership changes — a PR leaving yields a new key", async () => {
+    const secret = "s3cret";
+    const config = stackConfig(secret);
+    const store = new JobStore(openDb(":memory:"));
+    store.upsertStackStart({ repoFullName: "acme/widgets", stackId: "u1", prNumber: 41, actor: "alice" });
+    const pulls = chainPulls();
+    const { github } = stackGithub({ openPulls: pulls });
+    const first = stackCommentOn(43, "end of stack u1", 9030);
+    const firstResult = await handleGithubWebhook({
+      config,
+      store,
+      github,
+      request: { event: "issue_comment", deliveryId: "g23", signature: sign(secret, first), rawBody: first },
+    });
+    const firstJob = firstResult.enqueue!.job.id;
+    const firstKey = store.getJob(firstJob)?.dedup_key;
+
+    // #42 leaves the stack (closed/retargeted): the re-resolved chain is
+    // 41→43 — a new membership — so the old job supersedes and a fresh row
+    // takes its place.
+    pulls.splice(1, 1);
+    pulls[1]!.baseRef = "feat-a";
+    pulls[1]!.baseSha = "h41";
+    const second = stackCommentOn(43, "end of stack u1", 9031);
+    const secondResult = await handleGithubWebhook({
+      config,
+      store,
+      github,
+      request: { event: "issue_comment", deliveryId: "g24", signature: sign(secret, second), rawBody: second },
+    });
+    expect(secondResult.body.enqueued).toBe(true);
+    const secondJob = store.getJob(secondResult.enqueue!.job.id);
+    expect(store.getJob(firstJob)?.state).toBe("stale");
+    expect(secondJob?.state).toBe("queued");
+    expect(secondJob?.dedup_key).not.toBe(firstKey);
+    expect(store.listStackMembers(secondJob!.id).map((m) => m.pr_number)).toEqual([41, 43]);
+  });
+
+  it("re-queues a child row on the same key when a completed stack job is re-triggered", async () => {
+    const secret = "s3cret";
+    const config = stackConfig(secret);
+    const store = new JobStore(openDb(":memory:"));
+    store.upsertStackStart({ repoFullName: "acme/widgets", stackId: "u1", prNumber: 41, actor: "alice" });
+    const pulls = chainPulls();
+    const { github } = stackGithub({ openPulls: pulls });
+    const first = stackCommentOn(43, "end of stack u1", 9040);
+    const firstResult = await handleGithubWebhook({
+      config,
+      store,
+      github,
+      request: { event: "issue_comment", deliveryId: "g25", signature: sign(secret, first), rawBody: first },
+    });
+    const firstJob = firstResult.enqueue!.job.id;
+    store.setJobState(firstJob, "completed");
+    const firstKey = store.getJob(firstJob)?.dedup_key;
+    const firstHead = store.getJob(firstJob)?.head_sha;
+
+    // Mid push after completion: the completed card is history — a fresh
+    // child row on the same membership key runs the recheck; the completed
+    // row's SHA history is not rewritten.
+    pulls[1]!.headSha = "h42b";
+    const second = stackCommentOn(43, "end of stack u1", 9041);
+    const secondResult = await handleGithubWebhook({
+      config,
+      store,
+      github,
+      request: { event: "issue_comment", deliveryId: "g26", signature: sign(secret, second), rawBody: second },
+    });
+    expect(secondResult.body.enqueued).toBe(true);
+    const original = store.getJob(firstJob);
+    expect(original?.state).toBe("completed");
+    expect(original?.head_sha).toBe(firstHead);
+    const child = store.getJob(secondResult.enqueue!.job.id);
+    expect(child?.state).toBe("queued");
+    expect(child?.dedup_key).toBe(firstKey);
+    expect(store.listJobs(10).filter((j) => j.job_type === "stack_review")).toHaveLength(2);
   });
 
   it("falls through to the normal review when a member-push resume fails after the top merged", async () => {

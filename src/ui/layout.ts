@@ -29,6 +29,9 @@ export interface PageOptions {
   forgeScopes?: Array<{ provider: string; instance: string }>;
   /** The active `provider:instance` filter key on the home page. */
   activeForge?: string;
+  /** Superseded (stale) job visibility on the home page: `active` means the
+   * list includes stale rows; `hidden` is the count filtered out otherwise. */
+  superseded?: { active: boolean; hidden: number };
   /**
    * Operator chrome (connections, config, health, chat, forms). Dashboard and
    * job overview stay on the default surface so their controls are untouched.

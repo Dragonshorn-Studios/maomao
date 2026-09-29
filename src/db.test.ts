@@ -492,7 +492,8 @@ describe("repo pauses and stack state (issue #99)", () => {
     expect(members[0]?.state).toBe("reviewing");
     expect(members[1]?.head_sha).toBe("h2");
 
-    // Same stack re-triggered on the same vector dedups; a different top SHA stales it.
+    // Membership-keyed identity (issue #131): a same-key re-trigger dedups
+    // onto the still-queued job at ANY head — the caller re-pins instead.
     const dup = store.enqueue({
       repoFullName: "acme/widgets", repoOwner: "acme", repoName: "widgets", installationId: 42,
       prNumber: 42, prTitle: "top", prBody: "", prHtmlUrl: "u", prAuthor: "alice",
@@ -506,7 +507,34 @@ describe("repo pauses and stack state (issue #99)", () => {
       baseSha: "b", headSha: "h9", baseRef: "main", headRef: "feat",
       reviewers: [], jobType: "stack_review", dedupKey: "stack:s1",
     });
-    expect(moved.created).toBe(true);
-    expect(moved.staleJobIds).toEqual([job.job.id]);
+    expect(moved.created).toBe(false);
+    expect(moved.job.id).toBe(job.job.id);
+
+    // Once the job is in flight, the same key stales it for abort and mints
+    // the replacement row on the shared key.
+    store.setJobState(job.job.id, "reviewing");
+    const live = store.enqueue({
+      repoFullName: "acme/widgets", repoOwner: "acme", repoName: "widgets", installationId: 42,
+      prNumber: 42, prTitle: "top", prBody: "", prHtmlUrl: "u", prAuthor: "alice",
+      baseSha: "b", headSha: "h9", baseRef: "main", headRef: "feat",
+      reviewers: [], jobType: "stack_review", dedupKey: "stack:s1",
+    });
+    expect(live.created).toBe(true);
+    expect(live.staleJobIds).toEqual([job.job.id]);
+    expect(store.getJob(job.job.id)?.state).toBe("stale");
+
+    // A terminal row keeps its state as history; a re-trigger at the same
+    // head mints a child on the same key after moving the dead key aside.
+    store.setJobState(live.job.id, "completed");
+    const child = store.enqueue({
+      repoFullName: "acme/widgets", repoOwner: "acme", repoName: "widgets", installationId: 42,
+      prNumber: 42, prTitle: "top", prBody: "", prHtmlUrl: "u", prAuthor: "alice",
+      baseSha: "b", headSha: "h9", baseRef: "main", headRef: "feat",
+      reviewers: [], jobType: "stack_review", dedupKey: "stack:s1",
+    });
+    expect(child.created).toBe(true);
+    expect(child.job.dedup_key).toBe("stack:s1");
+    expect(store.getJob(live.job.id)?.state).toBe("completed");
+    expect(store.getJob(live.job.id)?.dedup_key).toBe(`stack-retired:${live.job.id}`);
   });
 });
