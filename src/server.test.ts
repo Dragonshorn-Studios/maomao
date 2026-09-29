@@ -616,6 +616,16 @@ describe("manual review trigger", () => {
     const missing = await app.request("/reviewers?state=failed");
     expect(missing.status).toBe(200);
     expect(await missing.text()).toContain("No reviewer runs with status failed");
+    const done = await app.request("/reviewers?state=done");
+    expect(done.status).toBe(200);
+    expect(await done.text()).toContain("No reviewer runs with status done");
+
+    // State and page combine: 54 queued runs still span two pages when filtered.
+    const queuedPage2 = await app.request("/reviewers?state=queued&page=2");
+    expect(queuedPage2.status).toBe(200);
+    const queuedPage2Html = await queuedPage2.text();
+    expect(queuedPage2Html).toContain("Page 2 / 2");
+    expect(queuedPage2Html).toContain('value="queued" selected');
 
     // Unknown states degrade to the unfiltered board.
     const bogus = await app.request("/reviewers?state=bogus");

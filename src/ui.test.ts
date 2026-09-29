@@ -2012,7 +2012,7 @@ describe("review job list filters, nested stack members, and reviewer board", ()
   });
 
   it("filters the reviewer board by run state and pages", () => {
-    const { store, stack } = stackFixture();
+    const { store } = stackFixture();
     // Flip one member run to running so the state filter has something to find.
     const memberJob = store.listJobs(10).find((job) => job.job_type === "pr_review")!;
     store.patchReviewer(store.listReviewerRuns(memberJob.id)[0]!.id, { state: "running" });
@@ -2031,14 +2031,34 @@ describe("review job list filters, nested stack members, and reviewer board", ()
     // Limit clamps to [1, 500].
     expect(store.listReviewerRunBoard({ limit: 0 }).rows).toHaveLength(1);
     expect(store.listReviewerRunBoard({ limit: 999 }).rows).toHaveLength(3);
-    // A member job linked from two stack rows stays a single board row.
-    store.insertStackMembers(stack.id, [
-      { position: 3, prNumber: 43, baseRef: "feat-b", headRef: "feat-c", baseSha: "h42", headSha: "h43" },
+    // A member job linked from two stack rows stays a single board row,
+    // attributed to the newest stack membership.
+    const stack2 = store.enqueue({
+      repoFullName: "acme/widgets",
+      repoOwner: "acme",
+      repoName: "widgets",
+      installationId: 9,
+      prNumber: 45,
+      prTitle: "second stack",
+      prBody: "",
+      prHtmlUrl: "",
+      prAuthor: "alice",
+      baseSha: "b45",
+      headSha: "h45",
+      baseRef: "main",
+      headRef: "feat-c",
+      reviewers: [{ role: "stack_cumulative", title: "Stack cumulative" }],
+      jobType: "stack_review",
+      dedupKey: "stack:s2",
+    }).job;
+    store.insertStackMembers(stack2.id, [
+      { position: 1, prNumber: 42, baseRef: "feat-a", headRef: "feat-b", baseSha: "h41", headSha: "h42" },
     ]);
-    const newMember = store.listStackMembers(stack.id).find((member) => member.position === 3)!;
+    const newMember = store.listStackMembers(stack2.id)[0]!;
     store.patchStackMember(newMember.id, { memberJobId: memberJob.id });
     const dup = store.listReviewerRunBoard({ limit: 10 });
     expect(dup.rows.filter((row) => row.job_id === memberJob.id)).toHaveLength(1);
+    expect(dup.rows.find((row) => row.job_id === memberJob.id)?.stack_job_id).toBe(stack2.id);
     expect(dup.rows).toHaveLength(dup.total);
 
     const html = renderReviewerBoard(running.rows, {
@@ -2062,5 +2082,12 @@ describe("review job list filters, nested stack members, and reviewer board", ()
     const outOfRange = renderReviewerBoard([], { runPagination: { page: 5, pageSize: 50, total: 60 } });
     expect(outOfRange).toContain("beyond the last page");
     expect(outOfRange).toContain("/reviewers?page=2");
+
+    // Exact page-size multiple: the last page gets no Older link.
+    const exactLast = renderReviewerBoard(running.rows, {
+      runPagination: { page: 2, pageSize: 50, total: 100 },
+    });
+    expect(exactLast).toContain("Page 2 / 2");
+    expect(exactLast).not.toContain("Older runs");
   });
 });
