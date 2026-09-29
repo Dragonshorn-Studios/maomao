@@ -14,11 +14,12 @@ function makeStore() {
   return new JobStore(openDb(":memory:"));
 }
 
-function seedJob(store: JobStore, prNumber = 4, headSha = "cafebabe") {
+function seedJob(store: JobStore, prNumber = 4, headSha = "cafebabe", repoFullName = "acme/widgets") {
+  const [repoOwner, repoName] = repoFullName.split("/") as [string, string];
   return store.enqueue({
-    repoFullName: "acme/widgets",
-    repoOwner: "acme",
-    repoName: "widgets",
+    repoFullName,
+    repoOwner,
+    repoName,
     installationId: 9,
     prNumber,
     prTitle: "t",
@@ -277,13 +278,25 @@ describe("emitJobSummary", () => {
     const store = makeStore();
     const stalePr = seedJob(store, 4, "oldsha");
     seedJob(store, 4, "newsha"); // head-move sweep stales the older job
-    expect(payloadLines().map((p) => `${p.job_id}:${p.state}`)).toEqual([`${stalePr}:stale`]);
+    expect(payloadLines()).toEqual([
+      expect.objectContaining({ job_id: stalePr, state: "stale", usage_complete: true }),
+    ]);
 
     lines.length = 0;
     const queued = seedStackJob(store, "vec1");
     const staled = store.staleOpenStackJobs("acme/widgets", "u1", "stack:u1@vec2");
     expect(staled).toEqual([queued]);
     expect(payloadLines().map((p) => `${p.job_id}:${p.state}`)).toEqual([`${queued}:stale`]);
+  });
+
+  it("emits once for a failed job relabeled stale by a later push", () => {
+    setJobSummarySink(capture);
+    const store = makeStore();
+    const failed = seedJob(store, 4, "oldsha");
+    store.setJobState(failed, "failed");
+    seedJob(store, 4, "newsha"); // head-move sweep relabels failed -> stale
+    expect(store.getJob(failed)!.state).toBe("stale");
+    expect(payloadLines().map((p) => `${p.job_id}:${p.state}`)).toEqual([`${failed}:failed`]);
   });
 
   it("emits once for a completed job relabeled stale by a later push", () => {
@@ -383,6 +396,23 @@ describe("emitJobSummary", () => {
     ]);
   });
 
+  it("emits only for the cancelled repo's jobs on a repo-scoped type cancel", () => {
+    setJobSummarySink(capture);
+    const store = makeStore();
+    const mine = seedJob(store, 4, "sha1");
+    const other = seedJob(store, 4, "sha2", "acme/other");
+    const cancelled = store.cancelJobs(
+      { repoFullName: "acme/widgets", jobType: "pr_review" },
+      "repo_paused",
+      null,
+    );
+    expect(cancelled).toEqual([mine]);
+    expect(payloadLines()).toEqual([
+      expect.objectContaining({ job_id: mine, state: "cancelled", usage_complete: true }),
+    ]);
+    expect(store.getJob(other)!.state).toBe("queued");
+  });
+
   it("emits for a type-wide (global pause) cancel across repos", () => {
     setJobSummarySink(capture);
     const store = makeStore();
@@ -440,6 +470,8 @@ describe("emitJobSummary", () => {
     const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
     expect(url).toBe("https://oo.example.com/api/default/maomao/_json");
     expect(init.method).toBe("POST");
+    // Bounded delivery — a hung endpoint can't linger past the timeout.
+    expect(init.signal).toBeInstanceOf(AbortSignal);
     expect((init.headers as Record<string, string>).authorization).toBe("Bearer secret-token");
     // _json's documented contract is a JSON array of records.
     const body = JSON.parse(init.body as string) as Record<string, unknown>[];
@@ -511,6 +543,28 @@ describe("emitJobSummary", () => {
     emitJobSummary(store, seedJob(store, 4), env);
     emitJobSummary(store, seedJob(store, 5), env);
     await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
+  });
+
+  it("drops and logs past the ingest queue depth cap, then resumes once drained", async () => {
+    let resolveFirst!: (value: unknown) => void;
+    const gate = new Promise((resolve) => {
+      resolveFirst = resolve;
+    });
+    const fetchMock = vi
+      .fn()
+      .mockImplementationOnce(() => gate)
+      .mockResolvedValue({ ok: true, status: 200 });
+    vi.stubGlobal("fetch", fetchMock);
+    const err = vi.spyOn(console, "error").mockImplementation(() => {});
+    const store = makeStore();
+    const env = { OPENOBSERVE_LOGS_URL: "https://oo.example.com/api/x/_json" } as NodeJS.ProcessEnv;
+    for (let i = 0; i < 300; i++) emitJobSummary(store, seedJob(store, i + 1), env);
+    expect(err).toHaveBeenCalledWith(expect.stringContaining("ingest queue full"));
+    resolveFirst({ ok: true, status: 200 });
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(256));
+    // Once the backlog drains, delivery resumes — the cap didn't wedge the chain.
+    emitJobSummary(store, seedJob(store, 999), env);
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(257));
   });
 
   it("logs the status of a rejected-status ingest POST without throwing", async () => {
