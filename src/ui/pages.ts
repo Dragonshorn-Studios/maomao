@@ -662,27 +662,25 @@ function renderQueueCard(
 }
 
 /**
- * The small offset card a stack member job renders as under its stack card:
- * position, linked PR title, state, head SHA, elapsed, and the verify-first
- * marker — the review-set membership is what the strip already encodes.
+ * The compact two-line row a stack member job renders as under its stack
+ * card: position + linked PR title + state on line one, head SHA, elapsed
+ * and the verify-first marker on line two.
  */
 function renderMemberCard(job: JobRow, position: number): string {
   const state = jobStateLabel(job.state);
   const elapsed = formatDuration(elapsedMs(job.started_at, job.finished_at) ?? elapsedMs(job.created_at));
   const isLive = LIVE_JOB_STATES.includes(job.state);
-  return `<li>
-    <article class="specimen member-card${isLive ? " is-live" : ""}">
-      <div class="specimen-head">
-        <span class="specimen-id">Member ${position} · job ${job.id}</span>
-        ${renderState(job.state, state.text, state.hint, state.mark)}
-      </div>
-      <p class="specimen-title"><a href="/jobs/${job.id}">${forgeBadgeTitleHtml(job, job.repo_full_name, job.pr_number)} · ${escapeHtml(job.pr_title || "(no title)")}</a>${prExternalLinkHtml(job)}</p>
-      <div class="meta-row">
-        <span class="pair">SHA <strong><code class="sha">${escapeHtml(shortSha(job.head_sha, 10))}</code></strong></span>
-        <span class="pair">Elapsed <strong class="metric">${escapeHtml(elapsed)}</strong></span>
-        ${job.review_mode === "verify" ? `<span class="pair muted" title="Verify-first pass — specialists skipped">verify-first</span>` : ""}
-      </div>
-    </article>
+  return `<li class="member-card${isLive ? " is-live" : ""}">
+    <div class="member-row">
+      <span class="member-pos">Member ${position} · job ${job.id}</span>
+      <a class="member-title" href="/jobs/${job.id}">${forgeBadgeTitleHtml(job, job.repo_full_name, job.pr_number)} · ${escapeHtml(job.pr_title || "(no title)")}</a>${prExternalLinkHtml(job)}
+      ${renderState(job.state, state.text, state.hint, state.mark)}
+    </div>
+    <div class="meta-row member-meta">
+      <span class="pair">SHA <strong><code class="sha">${escapeHtml(shortSha(job.head_sha, 10))}</code></strong></span>
+      <span class="pair">Elapsed <strong class="metric">${escapeHtml(elapsed)}</strong></span>
+      ${job.review_mode === "verify" ? `<span class="pair muted" title="Verify-first pass — specialists skipped">verify-first</span>` : ""}
+    </div>
   </li>`;
 }
 

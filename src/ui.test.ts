@@ -1974,7 +1974,7 @@ describe("review job list filters, nested stack members, and reviewer board", ()
     const { store, stack } = stackFixture();
     const html = renderHome(store.listJobsPage({}).jobs, store);
     expect(html).toContain('class="member-cards"');
-    expect(html.match(/member-card"/g)?.length).toBe(2);
+    expect(html.match(/class="member-card[ "]/g)?.length).toBe(2);
     expect(html).toContain("verify-first");
     // Member cards link to their jobs; the main list does not repeat them.
     const mainList = html.slice(0, html.indexOf('class="member-cards"'));
