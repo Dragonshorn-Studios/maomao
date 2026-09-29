@@ -1033,7 +1033,7 @@ export class JobStore {
    * malformed values and re-renders the first page when a cursor yields
    * nothing).
    */
-  listJobsPage(input: { before?: number; after?: number; limit?: number; forge?: { provider: string; instance: string } }): {
+  listJobsPage(input: { before?: number; after?: number; limit?: number; forge?: { provider: string; instance: string }; includeStale?: boolean }): {
     jobs: JobRow[];
     hasOlder: boolean;
     hasNewer: boolean;
@@ -1045,6 +1045,11 @@ export class JobStore {
     if (input.forge) {
       whereParts.push("provider = ?", "provider_instance = ?");
       whereParams.push(input.forge.provider, input.forge.instance);
+    }
+    // Superseded rows outnumber live ones on tip-thrashed stacks; the list
+    // hides them unless the caller asks for the full history.
+    if (!input.includeStale) {
+      whereParts.push("state != 'stale'");
     }
     const whereSql = whereParts.length > 0 ? `WHERE ${whereParts.join(" AND ")}` : "";
     // Cursor filters must ride the same WHERE as the page itself.
@@ -1080,6 +1085,15 @@ export class JobStore {
       .all(...whereParams, limit + 1) as JobRow[];
     const jobs = probed.slice(0, limit);
     return { jobs, hasOlder: probed.length > limit, hasNewer: false };
+  }
+
+  /** Stale rows hidden by the default list view, scoped like `listJobsPage`. */
+  supersededJobCount(forge?: { provider: string; instance: string }): number {
+    const where = forge ? `AND provider = ? AND provider_instance = ?` : "";
+    const row = this.db
+      .prepare(`SELECT COUNT(*) AS count FROM jobs WHERE state = 'stale' ${where}`)
+      .get(...(forge ? [forge.provider, forge.instance] : [])) as { count: number };
+    return row.count;
   }
 
   /** Distinct forge scopes present in the jobs table, for dashboard filters. */

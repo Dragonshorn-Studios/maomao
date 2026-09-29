@@ -115,7 +115,10 @@ export function renderHome(jobs: JobRow[], store: JobStore, options: PageOptions
       renderQueueCard(job, jobMetrics(job, store), options.uiFlavor, options.csrfToken, stackSummaries.get(job.id)),
     )
     .join("");
-  const paginationNav = renderJobsPagination(jobs, options.pagination, options.activeForge);
+  const paginationNav = renderJobsPagination(jobs, options.pagination, {
+    forge: options.activeForge,
+    superseded: options.superseded?.active === true,
+  });
   const pancakeChip = pancakeChipFor(store, options.uiFlavor);
   // data-forge is scaffolding for future client-side filtering; nothing
   // consumes it yet. An explicit All chip clears the active filter.
@@ -130,11 +133,21 @@ export function renderHome(jobs: JobRow[], store: JobStore, options: PageOptions
     })
     .join("\n      ");
   const forgeNav = options.forgeScopes && options.forgeScopes.length > 1 ? `${allChip}${forgeChips}` : "";
+  // Superseded rows are filtered server-side; the chip toggles the full
+  // history back on and reports how many cards the default view hides.
+  const superseded = options.superseded;
+  const forgeQuery = options.activeForge ? `&forge=${encodeURIComponent(options.activeForge)}` : "";
+  const supersededChip = superseded?.active
+    ? `<a class="top-link" href="/?${forgeQuery ? forgeQuery.slice(1) : ""}" aria-current="true">Hide superseded</a>`
+    : superseded && superseded.hidden > 0
+      ? `<a class="top-link" href="/?superseded=1${forgeQuery}">Show superseded (${superseded.hidden})</a>`
+      : "";
+  const filterNav = [forgeNav, supersededChip].filter(Boolean).join("\n      ");
 
   const body = `
     <h1>Review jobs</h1>
     <p class="lede">Recent pull request reviews. Each job is anchored to an exact head SHA.${pancakeChip ? ` ${pancakeChip}` : ""}</p>
-    ${forgeNav ? `<div class="meta-row" role="navigation" aria-label="Filter by forge">${forgeNav}</div>` : ""}
+    ${filterNav ? `<div class="meta-row" role="navigation" aria-label="Filter jobs">${filterNav}</div>` : ""}
     ${options.notice ? `<p class="notice" role="status">${escapeHtml(options.notice)}</p>` : ""}
     ${options.error ? `<p class="error" role="alert">${escapeHtml(options.error)}</p>` : ""}
     <form class="trigger" method="post" action="/reviews">
@@ -180,22 +193,26 @@ function pancakeChipFor(store: JobStore, flavor?: UiFlavor): string {
 function renderJobsPagination(
   jobs: JobRow[],
   pagination?: { hasOlder: boolean; hasNewer: boolean },
-  forgeKey?: string,
+  filters?: { forge?: string; superseded?: boolean },
 ): string {
-  const forgeParam = forgeKey ? `&forge=${encodeURIComponent(forgeKey)}` : "";
+  const forgeParam = filters?.forge ? `&forge=${encodeURIComponent(filters.forge)}` : "";
+  const supersededParam = filters?.superseded ? `&superseded=1` : "";
   if (!pagination) return "";
   const oldest = jobs[jobs.length - 1];
   const newest = jobs[0];
   const nextLink =
     pagination.hasOlder && oldest
-      ? `<a rel="next" href="/?before=${oldest.id}${forgeParam}">Older jobs</a>`
+      ? `<a rel="next" href="/?before=${oldest.id}${forgeParam}${supersededParam}">Older jobs</a>`
       : `<span class="muted" aria-disabled="true">Older jobs</span>`;
   const prevLink =
     pagination.hasNewer && newest
-      ? `<a rel="prev" href="/?after=${newest.id}${forgeParam}">Newer jobs</a>`
+      ? `<a rel="prev" href="/?after=${newest.id}${forgeParam}${supersededParam}">Newer jobs</a>`
       : `<span class="muted" aria-disabled="true">Newer jobs</span>`;
+  const firstPageUrl = filters?.forge
+    ? `/?forge=${encodeURIComponent(filters.forge)}${supersededParam}`
+    : `/${supersededParam ? "?superseded=1" : ""}`;
   const olderNote = pagination.hasNewer
-    ? `<p class="jobs-pagination-note" role="status">Viewing older jobs — <a href="${forgeKey ? `/?forge=${encodeURIComponent(forgeKey)}` : "/"}">newest reviews are on the first page</a>.</p>`
+    ? `<p class="jobs-pagination-note" role="status">Viewing older jobs — <a href="${firstPageUrl}">newest reviews are on the first page</a>.</p>`
     : "";
   return `<nav class="jobs-pagination" aria-label="Review jobs pages">
       ${olderNote}

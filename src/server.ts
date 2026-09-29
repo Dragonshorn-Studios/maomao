@@ -802,7 +802,10 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
       requested && scopes.length > 1
         ? scopes.find((scope) => `${scope.provider}:${scope.instance}` === requested)
         : undefined;
-    let page = ctx.store.listJobsPage({ ...cursor, forge });
+    // `?superseded=1` includes stale (superseded) rows; the default view hides
+    // them so tip-thrashed stacks show one card, not a wall of history.
+    const showSuperseded = c.req.query("superseded") === "1";
+    let page = ctx.store.listJobsPage({ ...cursor, forge, includeStale: showSuperseded });
     // Only out-of-range cursors empty the page: after at/past the newest id,
     // or before at/below the oldest id. (A before cursor past the newest id
     // never gets here empty — the store's id< query already returns the
@@ -810,7 +813,7 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
     // first page and say why instead of a dead end.
     let staleCursorNotice: string | undefined;
     if (page.jobs.length === 0) {
-      page = ctx.store.listJobsPage({ forge });
+      page = ctx.store.listJobsPage({ forge, includeStale: showSuperseded });
       if (page.jobs.length > 0 && (cursor.before != null || cursor.after != null)) {
         staleCursorNotice = forge
           ? "That page no longer exists — showing the newest matching jobs instead."
@@ -827,6 +830,9 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
         pagination: { hasOlder: page.hasOlder, hasNewer: page.hasNewer },
         forgeScopes: scopes.length > 1 ? scopes : undefined,
         activeForge: forge ? `${forge.provider}:${forge.instance}` : undefined,
+        superseded: showSuperseded
+          ? { active: true, hidden: 0 }
+          : { active: false, hidden: ctx.store.supersededJobCount(forge) },
       }),
     );
   });
