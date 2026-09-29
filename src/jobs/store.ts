@@ -472,16 +472,18 @@ export class JobStore {
                AND job_type = 'stack_review' AND dedup_key = ? AND state IN (${LIVE_STATES_SQL})`,
           )
           .all(scope.provider, scope.instance, input.repoFullName, dedupKey) as { id: number; state: JobState }[];
-        if (stale.length) {
-          this.db
-            .prepare(
-              `UPDATE jobs
-               SET state = 'stale', updated_at = ?, finished_at = COALESCE(finished_at, ?)
-               WHERE id IN (${stale.map(() => "?").join(", ")})`,
-            )
-            .run(createdAt, createdAt, ...stale.map((row) => row.id));
-        }
-        staleJobIds.push(...stale.map((row) => row.id));
+        const staled = stale.length
+          ? (this.db
+              .prepare(
+                `UPDATE jobs
+                 SET state = 'stale', updated_at = ?, finished_at = COALESCE(finished_at, ?)
+                 WHERE id IN (${stale.map(() => "?").join(", ")}) AND state IN (${LIVE_STATES_SQL})
+                 RETURNING id`,
+              )
+              .all(createdAt, createdAt, ...stale.map((row) => row.id)) as { id: number }[])
+          : [];
+        // Only rows the guarded UPDATE actually transitioned get aborted/emitted.
+        staleJobIds.push(...staled.map((row) => row.id));
         for (const row of stale) stalePreStates.set(row.id, row.state);
         // Dead same-key rows at this head would collide with the recheck row
         // on the jobs UNIQUE — move their dedup key aside (the
@@ -502,18 +504,22 @@ export class JobStore {
                AND job_type = ? AND dedup_key = ? AND state NOT IN ('stale', 'cancelled')`,
           )
           .all(scope.provider, scope.instance, input.repoFullName, input.prNumber, input.headSha, jobType, dedupKey) as { id: number; state: JobState }[];
-        if (stale.length) {
-          this.db
-            .prepare(
-              `UPDATE jobs
-               SET state = 'stale', updated_at = ?, finished_at = COALESCE(finished_at, ?)
-               WHERE id IN (${stale.map(() => "?").join(", ")})`,
+        const staledIds = stale.length
+          ? new Set(
+              (this.db
+                .prepare(
+                  `UPDATE jobs
+                   SET state = 'stale', updated_at = ?, finished_at = COALESCE(finished_at, ?)
+                   WHERE id IN (${stale.map(() => "?").join(", ")}) AND state NOT IN ('stale', 'cancelled')
+                   RETURNING id`,
+                )
+                .all(createdAt, createdAt, ...stale.map((row) => row.id)) as { id: number }[]).map((row) => row.id),
             )
-            .run(createdAt, createdAt, ...stale.map((row) => row.id));
-        }
-        staleJobIds.push(...stale.map((row) => row.id));
+          : new Set<number>();
+        // Only rows the guarded UPDATE actually transitioned get aborted/emitted.
+        staleJobIds.push(...staledIds);
         for (const row of stale) {
-          this.resolveStackMemberCoverage(row.id, "stale");
+          if (staledIds.has(row.id)) this.resolveStackMemberCoverage(row.id, "stale");
           stalePreStates.set(row.id, row.state);
         }
       }
@@ -1003,15 +1009,19 @@ export class JobStore {
           `${stackDedupPrefix(escapeLike(stackId))}@%`,
           exceptDedupKey,
         ) as { id: number; state: JobState }[];
-      if (stale.length) {
-        this.db
-          .prepare(
-            `UPDATE jobs SET state = 'stale', updated_at = ?, finished_at = COALESCE(finished_at, ?)
-             WHERE id IN (${stale.map(() => "?").join(", ")})`,
-          )
-          .run(now, now, ...stale.map((row) => row.id));
-      }
-      return stale;
+      const staledIds = new Set(
+        stale.length
+          ? (this.db
+              .prepare(
+                `UPDATE jobs SET state = 'stale', updated_at = ?, finished_at = COALESCE(finished_at, ?)
+                 WHERE id IN (${stale.map(() => "?").join(", ")}) AND state NOT IN ('stale', 'cancelled')
+                 RETURNING id`,
+              )
+              .all(now, now, ...stale.map((row) => row.id)) as { id: number }[]).map((row) => row.id)
+          : [],
+      );
+      // Only rows the guarded UPDATE actually transitioned get aborted/emitted.
+      return stale.filter((row) => staledIds.has(row.id));
     })();
     const ids = rows.map((r) => r.id);
     for (const row of rows) {
@@ -1668,19 +1678,13 @@ export class JobStore {
     if (targets.length === 0) return { ok: false, error: "no failed reviewers to retry" };
 
     const updatedAt = nowIso();
+    // Guarded writes inside the transaction — same pattern as setJobState/
+    // cancelJobs: the requeue (and each run reset) only lands if the row is
+    // still in the state the pre-checks validated.
+    let guardPassed = true;
+    let resetCount = 0;
     this.db.transaction(() => {
-      const reset = this.db.prepare(
-        `UPDATE reviewer_runs SET
-           state = 'queued', attempt = 0, validation_error = NULL, raw_output = NULL,
-           normalized_json = NULL, stdout = NULL, stderr = NULL, exit_code = NULL,
-           started_at = NULL, finished_at = NULL, duration_ms = NULL,
-           prompt_tokens = NULL, completion_tokens = NULL, cost = NULL,
-           reasoning_tokens = NULL, cache_read_tokens = NULL, cache_write_tokens = NULL,
-           total_tokens = NULL, usage_complete = NULL, usage_warning = NULL
-         WHERE id = ?`,
-      );
-      for (const run of targets) reset.run(run.id);
-      this.db
+      const { changes } = this.db
         .prepare(
           `UPDATE jobs SET
              state = 'queued', failure_reason = NULL, started_at = NULL, finished_at = NULL,
@@ -1692,10 +1696,26 @@ export class JobStore {
              aggregator_cache_write_tokens = NULL, aggregator_total_tokens = NULL,
              aggregator_usage_complete = NULL, aggregator_usage_warning = NULL,
              updated_at = ?
-           WHERE id = ?`,
+           WHERE id = ? AND state = ?`,
         )
-        .run(updatedAt, jobId);
+        .run(updatedAt, jobId, job.state);
+      if (changes === 0) {
+        guardPassed = false;
+        return;
+      }
+      const reset = this.db.prepare(
+        `UPDATE reviewer_runs SET
+           state = 'queued', attempt = 0, validation_error = NULL, raw_output = NULL,
+           normalized_json = NULL, stdout = NULL, stderr = NULL, exit_code = NULL,
+           started_at = NULL, finished_at = NULL, duration_ms = NULL,
+           prompt_tokens = NULL, completion_tokens = NULL, cost = NULL,
+           reasoning_tokens = NULL, cache_read_tokens = NULL, cache_write_tokens = NULL,
+           total_tokens = NULL, usage_complete = NULL, usage_warning = NULL
+         WHERE id = ? AND state = 'failed'`,
+      );
+      for (const run of targets) resetCount += reset.run(run.id).changes;
     })();
+    if (!guardPassed) return { ok: false, error: "job state changed — retry aborted" };
 
     this.log(
       jobId,
@@ -1705,7 +1725,7 @@ export class JobStore {
     );
     publish({ type: "job", jobId });
     publish({ type: "jobs" });
-    return { ok: true, reset: targets.length };
+    return { ok: true, reset: resetCount };
   }
 
   patchReviewer(id: number, extra: Partial<ReviewerRunRow>): void {

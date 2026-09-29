@@ -388,6 +388,17 @@ describe("emitJobSummary", () => {
     expect(buildJobSummary(job, []).duration_ms).toBeNull();
   });
 
+  it("reports ~0 duration for a queued job failed via setJobState (started_at stamped at the transition)", () => {
+    setJobSummarySink(capture);
+    const store = makeStore();
+    const jobId = seedJob(store);
+    // setJobState stamps started_at = updated_at on any queued->non-queued
+    // move, so this path measures claim-to-finish, not creation-to-finish —
+    // the created_at fallback only applies to the raw-UPDATE cancel paths.
+    store.setJobState(jobId, "failed");
+    expect(payloadLines().map((p) => [p.state, p.duration_ms])).toEqual([["failed", 0]]);
+  });
+
   it("measures duration_ms from created_at for jobs that never started", () => {
     setJobSummarySink(capture);
     const store = makeStore();
@@ -565,6 +576,15 @@ describe("emitJobSummary", () => {
     };
     expect(() => emitJobSummary(broken as never, 1, {} as NodeJS.ProcessEnv)).not.toThrow();
     expect(err).toHaveBeenCalledWith(expect.stringContaining("emission failed"));
+    err.mockClear();
+    const halfBroken = {
+      getJob: () => ({ id: 1 }),
+      listReviewerRuns: () => {
+        throw new Error("runs query dead");
+      },
+    };
+    expect(() => emitJobSummary(halfBroken as never, 1, {} as NodeJS.ProcessEnv)).not.toThrow();
+    expect(err).toHaveBeenCalledWith(expect.stringContaining("emission failed"));
   });
 
   it("no-ops for a missing job id", () => {
@@ -618,8 +638,9 @@ describe("emitJobSummary", () => {
     expect(init.signal).toBeInstanceOf(AbortSignal);
     expect((init.headers as Record<string, string>).authorization).toBe("Bearer secret-token");
     expect((init.headers as Record<string, string>)["content-type"]).toBe("application/json");
-    // _json's documented contract is a JSON array of records.
+    // _json's documented contract is a JSON array with exactly the one record.
     const body = JSON.parse(init.body as string) as Record<string, unknown>[];
+    expect(body).toHaveLength(1);
     expect(body[0].event).toBe("maomao.job_summary");
     expect(JSON.stringify(body)).not.toContain("secret-token");
   });

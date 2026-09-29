@@ -79,11 +79,16 @@ export interface JobSummaryPayload {
   provider_instance: string;
   state: JobState;
   /**
-   * Claim-to-finish wall time (creation-to-finish if never claimed); null
-   * when either timestamp is missing. A retried job that terminates while
-   * still queued (started_at reset, never re-claimed) measures from the
-   * original created_at instead — consumers wanting per-attempt durations
-   * should expect that line to cover the whole job lifetime.
+   * Wall time measured from started_at (creation-to-finish when started_at
+   * was never stamped); null when either timestamp is missing. Raw-UPDATE
+   * terminal paths — cancels and stale sweeps — leave started_at NULL, so
+   * a still-queued job cancelled/swept measures from created_at. The
+   * setJobState path instead stamps started_at at the transition itself,
+   * so a queued job failed through it reports ~0 — "never claimed" only
+   * covers the raw-UPDATE paths. A retried job that terminates while still
+   * queued measures from the original created_at — consumers wanting
+   * per-attempt durations should expect that line to cover the whole job
+   * lifetime.
    */
   duration_ms: number | null;
   prompt_tokens: number;
