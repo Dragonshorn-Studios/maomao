@@ -1459,17 +1459,22 @@ export class JobStore {
       .reverse() as JobLogRow[];
   }
 
-  setJobState(id: number, state: JobState, extra: Partial<JobRow> = {}): void {
+  setJobState(id: number, state: JobState, extra: Partial<JobRow> = {}, opts?: { keepCurrentState?: boolean }): void {
     // Read + write in one transaction with a state-guarded UPDATE — the same
     // pattern cancelJobs/staleOpenStackJobs use — so the terminal-emission
     // pre-state stays accurate even if a second writer ever appears.
-    const job = this.db.transaction(() => {
+    const transition = this.db.transaction(() => {
       const current = this.getJob(id);
       if (!current) return undefined;
+      // keepCurrentState (patchJob): the caller isn't requesting a transition,
+      // so the SET clause re-writes whatever the row says NOW — never a state
+      // the caller last saw outside the transaction, which under a second
+      // writer would revert a concurrent transition.
+      const targetState = opts?.keepCurrentState ? current.state : state;
       // `stale` and `cancelled` are one-way terminal states: a late pipeline
       // failure (or a racing transition) must not resurrect or relabel them.
       // Same-state patches still apply — patchJob relies on this.
-      if ((current.state === "stale" || current.state === "cancelled") && state !== current.state) {
+      if ((current.state === "stale" || current.state === "cancelled") && targetState !== current.state) {
         // This runs inside error-handling paths; its own failure must not escape.
         try {
           this.log(id, `Ignored state transition ${current.state} -> ${state} on terminal job`, "warn");
@@ -1479,12 +1484,12 @@ export class JobStore {
         return undefined;
       }
       const updatedAt = nowIso();
-      const startedAt = extra.started_at ?? current.started_at ?? (state !== "queued" ? updatedAt : null);
+      const startedAt = extra.started_at ?? current.started_at ?? (targetState !== "queued" ? updatedAt : null);
       const finishedAt =
         extra.finished_at ??
-        (TERMINAL_JOB_STATES.includes(state) ? (current.finished_at ?? updatedAt) : current.finished_at);
+        (TERMINAL_JOB_STATES.includes(targetState) ? (current.finished_at ?? updatedAt) : current.finished_at);
       const fields: Record<string, unknown> = {
-        state,
+        state: targetState,
         started_at: startedAt,
         finished_at: finishedAt,
         updated_at: updatedAt,
@@ -1499,17 +1504,19 @@ export class JobStore {
       const { changes } = this.db
         .prepare(`UPDATE jobs SET ${assignments.join(", ")} WHERE id = ? AND state = ?`)
         .run(...values, id, current.state);
-      return changes === 1 ? current : undefined;
+      return changes === 1 ? { pre: current, target: targetState } : undefined;
     })();
-    if (!job) return;
+    if (!transition) return;
     // Also settles delegated stack-member coverage: a covered member on a
     // finished run takes this job's outcome. No-ops for members of live
     // runs — the stack's own retry/reconcile logic owns those rows.
-    this.resolveStackMemberCoverage(id, state);
-    if (TERMINAL_JOB_STATES.includes(state) && !TERMINAL_JOB_STATES.includes(job.state)) {
+    this.resolveStackMemberCoverage(id, transition.target);
+    if (TERMINAL_JOB_STATES.includes(transition.target) && !TERMINAL_JOB_STATES.includes(transition.pre.state)) {
       // Stale/cancel of a claimed-running job snapshots usage mid-flight — the
       // run may not have unwound its usage yet, so the line is a floor.
-      const partialUsage = (state === "stale" || state === "cancelled") && LIVE_JOB_STATES.includes(job.state);
+      const partialUsage =
+        (transition.target === "stale" || transition.target === "cancelled") &&
+        LIVE_JOB_STATES.includes(transition.pre.state);
       this.emitTerminalSummary(id, { partialUsage });
     }
     publish({ type: "job", jobId: id });
@@ -1529,7 +1536,10 @@ export class JobStore {
   patchJob(id: number, extra: Partial<JobRow>): void {
     const job = this.getJob(id);
     if (!job) return;
-    this.setJobState(id, job.state, extra);
+    // Not a transition: keepCurrentState makes the guarded UPDATE re-write
+    // the state the row holds inside the transaction rather than echo the
+    // stale read above, which could revert a concurrent transition.
+    this.setJobState(id, job.state, extra, { keepCurrentState: true });
   }
 
   isStale(id: number): boolean {

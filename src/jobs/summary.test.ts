@@ -579,6 +579,20 @@ describe("emitJobSummary", () => {
     ]);
   });
 
+  it("emits nothing when the store is constructed with no opts (emission defaults off)", () => {
+    setJobSummarySink(capture);
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true, status: 200 });
+    vi.stubGlobal("fetch", fetchMock);
+    // The gate is opt-in: a bare JobStore (what tests/demo/harnesses build)
+    // must stay silent even with an ingest URL exported in the environment.
+    const store = new JobStore(openDb(":memory:"));
+    const jobId = seedJob(store);
+    vi.stubEnv("OPENOBSERVE_LOGS_URL", "https://oo.example.com/api/default/maomao/_json");
+    store.setJobState(jobId, "completed");
+    expect(lines).toHaveLength(0);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
   it("emits nothing on any terminal path when emitJobSummaries is off", () => {
     setJobSummarySink(capture);
     // emitJobSummaries defaults off; the explicit false pins the flag itself.
@@ -592,6 +606,28 @@ describe("emitJobSummary", () => {
     expect(store.staleOpenStackJobs("acme/widgets", "u1", "stack:u1@vec2")).toEqual([stackId]); // stack sweep
     store.cancelJobs({ jobId }, "manual_cancel", null); // cancelJobs path (already-terminal -> relabel)
     expect(lines).toHaveLength(0);
+  });
+
+  it("emits a complete-usage line when a queued job goes straight to stale via setJobState", () => {
+    setJobSummarySink(capture);
+    const store = makeStore();
+    const jobId = seedJob(store);
+    store.setJobState(jobId, "stale");
+    // queued is not a live state: nothing was mid-flight, so the line is a
+    // final tally (usage_complete), not a floor.
+    expect(payloadLines()).toEqual([
+      expect.objectContaining({ job_id: jobId, state: "stale", usage_complete: true }),
+    ]);
+  });
+
+  it("does not emit a second line when a terminal job is relabelled via setJobState", () => {
+    setJobSummarySink(capture);
+    const store = makeStore();
+    const jobId = seedJob(store);
+    store.setJobState(jobId, "completed");
+    store.setJobState(jobId, "failed"); // terminal -> terminal: no second line
+    expect(payloadLines().map((p) => p.state)).toEqual(["completed"]);
+    expect(store.getJob(jobId)!.state).toBe("failed");
   });
 
   it("skips emission when setJobState's guarded update loses a concurrent state change", () => {
@@ -613,6 +649,25 @@ describe("emitJobSummary", () => {
     store.setJobState(jobId, "completed");
     expect(store.getJob(jobId)!.state).toBe("cancelled");
     expect(lines).toHaveLength(0);
+  });
+
+  it("does not revert a concurrent transition when patchJob's pre-read state is stale", () => {
+    const db = openDb(":memory:");
+    const store = new JobStore(db, [], { emitJobSummaries: true });
+    const jobId = seedJob(store);
+    // A second writer cancels between patchJob's getJob and the transaction's
+    // own read: keepCurrentState must re-write 'cancelled', not the stale
+    // 'queued' the caller saw.
+    const origTx = db.transaction.bind(db);
+    const origPrepare = db.prepare.bind(db);
+    vi.spyOn(db, "transaction").mockImplementation(((fn: () => unknown) =>
+      origTx(() => {
+        origPrepare("UPDATE jobs SET state = 'cancelled' WHERE id = ?").run(jobId);
+        return fn();
+      })) as typeof db.transaction);
+    store.patchJob(jobId, { failure_reason: "race-probe" });
+    expect(store.getJob(jobId)!.state).toBe("cancelled");
+    expect(store.getJob(jobId)!.failure_reason).toBe("race-probe");
   });
 
   it("aborts the retry with no run resets when the job state changed mid-transaction", () => {
