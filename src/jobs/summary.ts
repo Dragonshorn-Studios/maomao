@@ -85,10 +85,10 @@ export interface JobSummaryPayload {
    * a still-queued job cancelled/swept measures from created_at. The
    * setJobState path instead stamps started_at at the transition itself,
    * so a queued job failed through it reports ~0 — "never claimed" only
-   * covers the raw-UPDATE paths. A retried job that terminates while still
-   * queued measures from the original created_at — consumers wanting
-   * per-attempt durations should expect that line to cover the whole job
-   * lifetime.
+   * covers the raw-UPDATE paths. Same for a retried job terminating while
+   * still queued: created_at-span on the raw-UPDATE paths (the retry nulled
+   * started_at and nothing re-stamps it), ~0 through setJobState — so a
+   * whole-lifetime duration is only guaranteed on the cancel/sweep lines.
    */
   duration_ms: number | null;
   prompt_tokens: number;
@@ -171,6 +171,28 @@ let postChain: Promise<void> = Promise.resolve();
 const MAX_PENDING_INGEST_POSTS = 256;
 let pendingIngestPosts = 0;
 
+// Warn once per distinct URL: ingest credentials over plain http travel in
+// cleartext — a scheme typo must not silently downgrade transport security.
+const insecureIngestWarned = new Set<string>();
+
+function redactIngestError(message: string, url: string): string {
+  let safe = message.split(url).join("<openobserve-url>");
+  try {
+    const parsed = new URL(url);
+    // Fetch errors can echo the normalized href (lowercased host, added
+    // trailing slash) rather than the verbatim configured string.
+    if (parsed.href !== url) safe = safe.split(parsed.href).join("<openobserve-url>");
+    if (parsed.username || parsed.password) {
+      // Userinfo embedded in the URL survives normalization — strip any
+      // //user:pass@ remnant wherever it appears in the message.
+      safe = safe.replace(/\/\/[^/\s]+@/g, "//<credentials>@");
+    }
+  } catch {
+    // Unparseable configured URL — the exact-string pass above is all we can do.
+  }
+  return safe;
+}
+
 function queueIngestPost(url: string, headers: Record<string, string>, line: string, jobId: number): void {
   if (pendingIngestPosts >= MAX_PENDING_INGEST_POSTS) {
     console.error(`job-summary: dropping OpenObserve POST for job ${jobId}: ingest queue full`);
@@ -193,11 +215,11 @@ function queueIngestPost(url: string, headers: Record<string, string>, line: str
         console.error(`job-summary: OpenObserve POST for job ${jobId} returned ${response.status}`);
       }
     } catch (error) {
-      // URL parse/construction errors echo the request URL verbatim — strip it
-      // so credentials embedded in OPENOBSERVE_LOGS_URL never reach stderr.
+      // URL parse/construction errors echo the request URL — strip it (and
+      // any normalized form/userinfo) so credentials embedded in
+      // OPENOBSERVE_LOGS_URL never reach stderr.
       const raw = error instanceof Error ? error.message : String(error);
-      const safe = raw.split(url).join("<openobserve-url>");
-      console.error(`job-summary: OpenObserve POST failed for job ${jobId}: ${safe}`);
+      console.error(`job-summary: OpenObserve POST failed for job ${jobId}: ${redactIngestError(raw, url)}`);
     } finally {
       pendingIngestPosts -= 1;
     }
@@ -248,7 +270,12 @@ export function emitJobSummary(
     }
     const url = env.OPENOBSERVE_LOGS_URL?.trim();
     if (!url) return;
-    queueIngestPost(url, ingestHeaders(env), line, jobId);
+    const headers = ingestHeaders(env);
+    if (headers.authorization && url.startsWith("http://") && !insecureIngestWarned.has(url)) {
+      insecureIngestWarned.add(url);
+      console.error("job-summary: OPENOBSERVE_LOGS_URL uses http — ingest credentials are sent in cleartext");
+    }
+    queueIngestPost(url, headers, line, jobId);
   } catch (error) {
     console.error(
       `job-summary: emission failed for job ${jobId}: ${error instanceof Error ? error.message : String(error)}`,

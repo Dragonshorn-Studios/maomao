@@ -604,7 +604,8 @@ describe("emitJobSummary", () => {
     expect(store.getJob(queued)!.state).toBe("stale");
     const stackId = seedStackJob(store, "vec1");
     expect(store.staleOpenStackJobs("acme/widgets", "u1", "stack:u1@vec2")).toEqual([stackId]); // stack sweep
-    store.cancelJobs({ jobId }, "manual_cancel", null); // cancelJobs path (already-terminal -> relabel)
+    const cancellable = seedJob(store, 9, "s9"); // cancelJobs path on a live-cancellable row
+    expect(store.cancelJobs({ jobId: cancellable }, "manual_cancel", null)).toEqual([cancellable]);
     expect(lines).toHaveLength(0);
   });
 
@@ -617,6 +618,51 @@ describe("emitJobSummary", () => {
     // final tally (usage_complete), not a floor.
     expect(payloadLines()).toEqual([
       expect.objectContaining({ job_id: jobId, state: "stale", usage_complete: true }),
+    ]);
+  });
+
+  it("skips a sweep-selected job a concurrent writer cancelled before the guarded UPDATE", () => {
+    setJobSummarySink(capture);
+    const db = openDb(":memory:");
+    const store = new JobStore(db, [], { emitJobSummaries: true });
+    const victim = seedJob(store, 4, "oldsha");
+    const origPrepare = db.prepare.bind(db);
+    vi.spyOn(db, "prepare").mockImplementation(((sql: string) => {
+      if (sql.includes("SET state = 'stale'") && sql.includes("RETURNING id")) {
+        origPrepare("UPDATE jobs SET state = 'cancelled' WHERE id = ?").run(victim);
+      }
+      return origPrepare(sql);
+    }) as typeof db.prepare);
+    seedJob(store, 4, "newsha"); // head-move sweep selects victim, UPDATE must skip it
+    expect(store.getJob(victim)!.state).toBe("cancelled");
+    expect(lines).toHaveLength(0);
+  });
+
+  it("staleOpenStackJobs skips a row a concurrent writer cancelled before the guarded UPDATE", () => {
+    setJobSummarySink(capture);
+    const db = openDb(":memory:");
+    const store = new JobStore(db, [], { emitJobSummaries: true });
+    const victim = seedStackJob(store, "vec1");
+    const origPrepare = db.prepare.bind(db);
+    vi.spyOn(db, "prepare").mockImplementation(((sql: string) => {
+      if (sql.includes("SET state = 'stale'") && sql.includes("RETURNING id")) {
+        origPrepare("UPDATE jobs SET state = 'cancelled' WHERE id = ?").run(victim);
+      }
+      return origPrepare(sql);
+    }) as typeof db.prepare);
+    expect(store.staleOpenStackJobs("acme/widgets", "u1", "stack:u1@vec2")).toEqual([]);
+    expect(store.getJob(victim)!.state).toBe("cancelled");
+    expect(lines).toHaveLength(0);
+  });
+
+  it("emits usage_complete:true for a live job completing normally", () => {
+    setJobSummarySink(capture);
+    const store = makeStore();
+    const jobId = seedJob(store);
+    store.setJobState(jobId, "reviewing");
+    store.setJobState(jobId, "completed");
+    expect(payloadLines()).toEqual([
+      expect.objectContaining({ job_id: jobId, state: "completed", usage_complete: true }),
     ]);
   });
 
@@ -786,6 +832,45 @@ describe("emitJobSummary", () => {
     expect(body).toHaveLength(1);
     expect(body[0].event).toBe("maomao.job_summary");
     expect(JSON.stringify(body)).not.toContain("secret-token");
+  });
+
+  it("warns once when ingest credentials would travel over plain http", async () => {
+    const err = vi.spyOn(console, "error").mockImplementation(() => {});
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true, status: 200 });
+    vi.stubGlobal("fetch", fetchMock);
+    setJobSummarySink(capture);
+    const store = makeStore();
+    const env = {
+      OPENOBSERVE_LOGS_URL: "http://oo-warn-check.internal/api/default/maomao/_json",
+      OPENOBSERVE_LOGS_TOKEN: "secret-token",
+    } as NodeJS.ProcessEnv;
+    emitJobSummary(store, seedJob(store, 4, "s1"), env);
+    emitJobSummary(store, seedJob(store, 5, "s2"), env);
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
+    const warnings = err.mock.calls.filter((call) => String(call[0]).includes("cleartext"));
+    expect(warnings).toHaveLength(1);
+    expect(JSON.stringify(err.mock.calls)).not.toContain("secret-token");
+  });
+
+  it("redacts normalized URL forms and embedded userinfo from ingest error logs", async () => {
+    const err = vi.spyOn(console, "error").mockImplementation(() => {});
+    const fetchMock = vi
+      .fn()
+      .mockRejectedValue(new Error("fetch failed: https://User:Pass@OO.example.com/x/_json"));
+    vi.stubGlobal("fetch", fetchMock);
+    setJobSummarySink(capture);
+    const store = makeStore();
+    const jobId = seedJob(store);
+    // The thrown error echoes a differently-cased (normalized-looking) URL —
+    // verbatim string redaction alone would leak the userinfo.
+    emitJobSummary(store, jobId, {
+      OPENOBSERVE_LOGS_URL: "https://User:Pass@OO.Example.com/x/_json",
+    } as NodeJS.ProcessEnv);
+    await flushJobSummaryPosts();
+    const logged = err.mock.calls.map((call) => String(call[0])).join("\n");
+    expect(logged).not.toContain("User");
+    expect(logged).not.toContain("Pass");
+    expect(logged).toContain("<credentials>@");
   });
 
   it("prefers TOKEN over user/password and sends no auth header when neither is set", async () => {
