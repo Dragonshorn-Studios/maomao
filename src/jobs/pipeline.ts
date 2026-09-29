@@ -1,4 +1,5 @@
 import type { Config } from "../config.js";
+import { TERMINAL_JOB_STATES } from "../config.js";
 import type { JobStore, JobRow, ReviewerRunRow, NewJobInput, StackMemberRow } from "./store.js";
 import { coveredMemberOutcome, retiredMemberDedupKey } from "./store.js";
 import type { GithubPort } from "../github/client.js";
@@ -1055,6 +1056,10 @@ function skipUnreachedStackMembers(store: JobStore, jobId: number): void {
       store.patchStackMember(member.id, { state: "skipped" });
     } else if (member.state === "reviewing") {
       const memberJob = member.member_job_id != null ? store.getJob(member.member_job_id) : null;
+      // A member job still in flight keeps the member 'reviewing': on a dead
+      // stack, resolveStackMemberCoverage settles it when that job ends, so
+      // the rail reflects the review the PR actually received (issue #136).
+      if (memberJob && !TERMINAL_JOB_STATES.includes(memberJob.state)) continue;
       store.patchStackMember(member.id, { state: coveredMemberOutcome(memberJob?.state) });
     }
   }
@@ -1464,28 +1469,26 @@ async function runStackJob(deps: PipelineDeps, forge: ForgeRegistry, jobId: numb
     // coverage's escalation) and again at completion, closing the window in
     // between. Coverage settling after the run ends is picked up by
     // store.resolveStackMemberCoverage.
-    const liveCoverage = new Set<number>();
     const reconcileCoverage = (): string[] => {
       const dead: string[] = [];
       for (const entry of memberJobs) {
         if (!entry.covered || entry.coveredEnded) continue;
         const coveredState = store.getJob(entry.jobId)?.state;
-        if (coveredState === "completed" || coveredState === "failed" || coveredState === "stale" || coveredState === "cancelled") {
-          store.patchStackMember(entry.member.id, { state: coveredMemberOutcome(coveredState) });
-          liveCoverage.delete(entry.jobId);
-          if (coveredState !== "completed") {
-            entry.coveredEnded = coveredState;
-            dead.push(
-              `#${entry.member.pr_number}'s queued coverage ended ${coveredState} (job ${entry.jobId}) — review this PR manually`,
-            );
-            store.log(
-              jobId,
-              `Stack member #${entry.member.pr_number}'s queued coverage (job ${entry.jobId}) ended ${coveredState}`,
-              "warn",
-            );
-          }
+        if (!coveredState || !TERMINAL_JOB_STATES.includes(coveredState)) continue;
+        store.patchStackMember(entry.member.id, { state: coveredMemberOutcome(coveredState) });
+        if (coveredState === "completed") {
+          // Settled as a review — stop tagging it as in-flight coverage.
+          entry.covered = false;
         } else {
-          liveCoverage.add(entry.jobId);
+          entry.coveredEnded = coveredState;
+          dead.push(
+            `#${entry.member.pr_number}'s queued coverage ended ${coveredState} (job ${entry.jobId}) — review this PR manually`,
+          );
+          store.log(
+            jobId,
+            `Stack member #${entry.member.pr_number}'s queued coverage (job ${entry.jobId}) ended ${coveredState}`,
+            "warn",
+          );
         }
       }
       return dead;
@@ -1505,7 +1508,7 @@ async function runStackJob(deps: PipelineDeps, forge: ForgeRegistry, jobId: numb
           .filter((entry) => !entry.coveredEnded)
           .map((entry) => {
             const mode = store.getJob(entry.jobId)?.review_mode;
-            const tag = mode === "verify" ? ", verify" : liveCoverage.has(entry.jobId) ? ", coverage already queued" : "";
+            const tag = mode === "verify" ? ", verify" : entry.covered ? ", coverage already queued" : "";
             return `#${entry.member.pr_number} (job ${entry.jobId}${tag})`;
           })
           .join(", ") || "none"

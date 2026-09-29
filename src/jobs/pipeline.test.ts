@@ -211,6 +211,22 @@ describe("JobStore enqueue", () => {
     store.setJobState(doneStack.id, "completed", { finished_at: new Date().toISOString() });
     store.setJobState(doneMemberJob.id, "completed", { finished_at: new Date().toISOString() });
     expect(store.listStackMembers(doneStack.id)[0]!.state).toBe("done");
+
+    // The raw-UPDATE paths settle coverage the same way: cancelJobs and the
+    // enqueue head-move stale sweep.
+    const cancelStack = stackJob("stack:cancel", 93);
+    const cancelMemberJob = store.enqueue({ ...base, prNumber: 6, headSha: "ddd", jobType: "pr_review" }).job;
+    coveredMember(cancelStack.id, cancelMemberJob.id, 6);
+    store.setJobState(cancelStack.id, "completed", { finished_at: new Date().toISOString() });
+    store.cancelJobs({ jobId: cancelMemberJob.id }, "pr_merged", null);
+    expect(store.listStackMembers(cancelStack.id)[0]!.state).toBe("skipped");
+
+    const staleStack = stackJob("stack:stale", 94);
+    const staleMemberJob = store.enqueue({ ...base, prNumber: 7, headSha: "eee", jobType: "pr_review" }).job;
+    coveredMember(staleStack.id, staleMemberJob.id, 7);
+    store.setJobState(staleStack.id, "completed", { finished_at: new Date().toISOString() });
+    store.enqueue({ ...base, prNumber: 7, headSha: "fff", jobType: "pr_review" }); // head move stales 'eee'
+    expect(store.listStackMembers(staleStack.id)[0]!.state).toBe("skipped");
   });
 });
 
@@ -6111,6 +6127,7 @@ describe("stack reviews (issue #99)", () => {
     const cumulative = store.listReviewerRuns(stack.job.id).find((r) => r.role === "stack_cumulative");
     expect(cumulative?.state).toBe("done");
     expect(issueComments[0]?.body).toContain("Stack budget");
+    expect(issueComments[0]?.body).toContain("(cap 400000)");
     expect(issueComments[0]?.body).toContain("Cross-PR pass skipped — stack token cap 400000");
   });
 
@@ -6379,6 +6396,102 @@ describe("stack reviews (issue #99)", () => {
     const summary = issueComments[0]?.body ?? "";
     expect(summary).toContain(`#42's queued coverage ended failed (job ${queued.id}) — review this PR manually`);
     expect(summary).not.toContain(`#42 (job ${queued.id}`);
+  });
+
+  it("escalates a covered member whose queued job goes stale during the run (issue #136)", async () => {
+    const config = stackConfig();
+    const store = new JobStore(openDb(":memory:"));
+    const queued = queuedReview(store, 42, "h42");
+    const stack = enqueueStackJobN(store, 3);
+    const issueComments: { pullNumber: number; body: string }[] = [];
+    let settled = false;
+    const github = {
+      ...githubPort(),
+      getPull: async (_i: number, _o: string, _r: string, n: number) => anyPull(n, `h${n}`),
+      getPullDiff: async (_i: number, _o: string, _r: string, n: number) => {
+        if (n === 42 && !settled) {
+          settled = true;
+          store.setJobState(queued.id, "stale", { finished_at: new Date().toISOString() });
+        }
+        return "diff --git a/example.ts b/example.ts\n";
+      },
+      createCommentReview: async () => ({ id: "9", url: "u" }),
+      createIssueComment: async (input: { pullNumber: number; body: string }) => {
+        issueComments.push({ pullNumber: input.pullNumber, body: input.body });
+        return { id: "1", url: "u" };
+      },
+    } as unknown as GithubPort;
+    const pipeline = createPipeline({ config, store, github, checkout: await fixtureCheckout(), opencode: stackOpencode });
+    await pipeline.run(stack.job.id);
+
+    expect(store.getJob(stack.job.id)?.state).toBe("completed");
+    expect(store.listStackMembers(stack.job.id).map((m) => m.state)).toEqual(["done", "skipped", "done"]);
+    expect(issueComments[0]?.body).toContain(`#42's queued coverage ended stale (job ${queued.id}) — review this PR manually`);
+  });
+
+  it("posts a follow-up escalation when coverage dies between publish and completion (issue #136)", async () => {
+    const config = stackConfig();
+    const store = new JobStore(openDb(":memory:"));
+    const queued = queuedReview(store, 42, "h42");
+    const stack = enqueueStackJobN(store, 3);
+    const issueComments: { pullNumber: number; body: string }[] = [];
+    let settled = false;
+    const github = {
+      ...githubPort(),
+      getPull: async (_i: number, _o: string, _r: string, n: number) => anyPull(n, `h${n}`),
+      createCommentReview: async () => ({ id: "9", url: "u" }),
+      createIssueComment: async (input: { pullNumber: number; body: string }) => {
+        issueComments.push({ pullNumber: input.pullNumber, body: input.body });
+        // Another worker kills the covering job right after the summary went
+        // out — the completion-time reconcile must still catch it.
+        if (issueComments.length === 1 && !settled) {
+          settled = true;
+          store.setJobState(queued.id, "failed", { finished_at: new Date().toISOString() });
+        }
+        return { id: "1", url: "u" };
+      },
+    } as unknown as GithubPort;
+    const pipeline = createPipeline({ config, store, github, checkout: await fixtureCheckout(), opencode: stackOpencode });
+    await pipeline.run(stack.job.id);
+
+    expect(store.getJob(stack.job.id)?.state).toBe("completed");
+    expect(store.listStackMembers(stack.job.id).map((m) => m.state)).toEqual(["done", "skipped", "done"]);
+    // The summary promised queued coverage; a follow-up comment carries the
+    // escalation (the cumulative pass may post finding comments in between).
+    expect(issueComments[0]?.body).toContain(`#42 (job ${queued.id}, coverage already queued)`);
+    const escalation = issueComments.find((c) => c.body.includes("queued coverage ended failed"));
+    expect(escalation?.body).toContain(`#42's queued coverage ended failed (job ${queued.id}) — review this PR manually`);
+  });
+
+  it("keeps a covered member reviewing through a failed run and settles it later (issue #136)", async () => {
+    const config = stackConfig({ OPENCODE_MAX_RETRIES: "0" });
+    const store = new JobStore(openDb(":memory:"));
+    const queued = queuedReview(store, 42, "h42");
+    const stack = enqueueStackJobN(store, 3);
+    const failCumulative: OpenCodePort = {
+      async run(input) {
+        // The stack-cumulative pass dies after every member ran.
+        if (input.prompt.includes("stack reviewer")) {
+          return { stdout: "", stderr: "", exitCode: 1, text: "", usage: {} };
+        }
+        return stackOpencode.run(input);
+      },
+    };
+    const github = {
+      ...githubPort(),
+      getPull: async (_i: number, _o: string, _r: string, n: number) => anyPull(n, `h${n}`),
+      createCommentReview: async () => ({ id: "9", url: "u" }),
+      createIssueComment: async () => ({ id: "1", url: "u" }),
+    } as unknown as GithubPort;
+    const pipeline = createPipeline({ config, store, github, checkout: await fixtureCheckout(), opencode: failCumulative });
+    await pipeline.run(stack.job.id);
+
+    expect(store.getJob(stack.job.id)?.state).toBe("failed");
+    // The covered member was never downgraded — its coverage was still live
+    // when the run died, so it keeps 'reviewing' until the job settles.
+    expect(store.listStackMembers(stack.job.id).map((m) => m.state)).toEqual(["done", "reviewing", "done"]);
+    store.setJobState(queued.id, "completed", { finished_at: new Date().toISOString() });
+    expect(store.listStackMembers(stack.job.id).map((m) => m.state)).toEqual(["done", "done", "done"]);
   });
 
   it("reuses a completed same-head middle member for free past the member cap (issue #136)", async () => {

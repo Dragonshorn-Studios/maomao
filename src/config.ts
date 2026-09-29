@@ -31,6 +31,9 @@ export type JobState =
 
 export type ReviewerState = "queued" | "running" | "done" | "failed";
 
+/** Terminal states: a job reaching one never transitions again. */
+export const TERMINAL_JOB_STATES: readonly JobState[] = ["completed", "failed", "stale", "cancelled"];
+
 /** States after a worker claimed the job: cancelling these discards partial work. */
 export const LIVE_JOB_STATES: readonly JobState[] = [
   "preparing",
