@@ -322,3 +322,43 @@ describe("listWebhookDeliveries", () => {
     expect(store.hasWebhookDelivery("old-2")).toBe(true);
   });
 });
+
+describe("listJobsPage repo and job-type filters", () => {
+  function filteredFixture() {
+    const store = new JobStore(openDb(":memory:"));
+    const enqueueOne = (repoFullName: string, prNumber: number, jobType?: "pr_review" | "stack_review") =>
+      store.enqueue({
+        repoFullName,
+        repoOwner: repoFullName.split("/")[0]!,
+        repoName: repoFullName.split("/")[1]!,
+        installationId: 1,
+        prNumber,
+        prTitle: `job ${prNumber}`,
+        prBody: "",
+        prHtmlUrl: "",
+        prAuthor: "dev",
+        baseSha: "b",
+        headSha: `sha-${repoFullName}-${prNumber}`,
+        baseRef: "main",
+        headRef: "f",
+        reviewers: [],
+        jobType,
+        dedupKey: jobType === "stack_review" ? `stack:${prNumber}` : undefined,
+      }).job;
+    enqueueOne("acme/widgets", 1);
+    enqueueOne("acme/widgets", 2, "stack_review");
+    enqueueOne("acme/other", 3);
+    return store;
+  }
+
+  it("filters by repo and job type", () => {
+    const store = filteredFixture();
+    const byRepo = store.listJobsPage({ repo: "acme/widgets" });
+    expect(byRepo.jobs.map((job) => job.pr_number).sort()).toEqual([1, 2]);
+    const byType = store.listJobsPage({ jobType: "stack_review" });
+    expect(byType.jobs).toHaveLength(1);
+    expect(byType.jobs[0]?.pr_number).toBe(2);
+    const combined = store.listJobsPage({ repo: "acme/other", jobType: "stack_review" });
+    expect(combined.jobs).toHaveLength(0);
+  });
+});

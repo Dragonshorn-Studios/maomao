@@ -7,6 +7,7 @@ import {
   escalationMarker,
   isBotActor,
   mentionsEscalateCommand,
+  mentionsReviewCommand,
   parseEscalationMarker,
   parseExternalTargetsJson,
   resolveMention,
@@ -96,6 +97,16 @@ describe("escalation marker and loop guards", () => {
     expect(mentionsEscalateCommand("hey @maomao escalate please", "maomao", "escalate")).toBe(true);
     expect(mentionsEscalateCommand("@maomao review", "maomao", "escalate")).toBe(false);
     expect(isBotActor({ login: "maomao[bot]", type: "Bot" })).toBe(true);
+  });
+
+  it("recognizes re-review commands without catching escalate", () => {
+    expect(mentionsReviewCommand("@maomao review", "maomao")).toBe(true);
+    expect(mentionsReviewCommand("please @maomao re-review this", "maomao")).toBe(true);
+    expect(mentionsReviewCommand("@maomao rereview", "maomao")).toBe(true);
+    expect(mentionsReviewCommand("@maomao escalate", "maomao")).toBe(false);
+    expect(mentionsReviewCommand("a reviewer commented", "maomao")).toBe(false);
+    expect(mentionsReviewCommand("@maomao reviewers", "maomao")).toBe(false);
+    expect(mentionsReviewCommand("@otherbot review", "maomao")).toBe(false);
   });
 
   it("is idempotent per provider, repo, PR, SHA, and policy", () => {

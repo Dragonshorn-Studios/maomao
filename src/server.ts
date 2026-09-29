@@ -50,6 +50,7 @@ import {
   renderProfileForm,
   renderHome,
   renderJob,
+  renderReviewerBoard,
   setGlobalPauseProvider,
   renderLogin,
   renderPromptConfigPage,
@@ -792,6 +793,7 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
     }
   });
 
+  const JOB_TYPE_VALUES = ["pr_review", "stack_review", "repo_brief", "health_scan"] as const;
   app.get("/", (c) => {
     const cursor = jobsPageCursor(c.req.query("before"), c.req.query("after"));
     // Forge filter: `?forge=provider:instance`, validated against the scopes
@@ -805,7 +807,16 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
     // `?superseded=1` includes stale (superseded) rows; the default view hides
     // them so tip-thrashed stacks show one card, not a wall of history.
     const showSuperseded = c.req.query("superseded") === "1";
-    let page = ctx.store.listJobsPage({ ...cursor, forge, includeStale: showSuperseded });
+    // `?repo=` / `?type=` — validated against what the jobs table actually
+    // holds so stale links degrade to the unfiltered view.
+    const repoNames = ctx.store.listRepoNames();
+    const requestedRepo = c.req.query("repo");
+    const repo = requestedRepo && repoNames.includes(requestedRepo) ? requestedRepo : undefined;
+    const requestedType = c.req.query("type");
+    const jobType = (JOB_TYPE_VALUES as readonly string[]).includes(requestedType ?? "")
+      ? (requestedType as (typeof JOB_TYPE_VALUES)[number])
+      : undefined;
+    let page = ctx.store.listJobsPage({ ...cursor, forge, includeStale: showSuperseded, repo, jobType });
     // Only out-of-range cursors empty the page: after at/past the newest id,
     // or before at/below the oldest id. (A before cursor past the newest id
     // never gets here empty — the store's id< query already returns the
@@ -813,7 +824,7 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
     // first page and say why instead of a dead end.
     let staleCursorNotice: string | undefined;
     if (page.jobs.length === 0) {
-      page = ctx.store.listJobsPage({ forge, includeStale: showSuperseded });
+      page = ctx.store.listJobsPage({ forge, includeStale: showSuperseded, repo, jobType });
       if (page.jobs.length > 0 && (cursor.before != null || cursor.after != null)) {
         staleCursorNotice = forge
           ? "That page no longer exists — showing the newest matching jobs instead."
@@ -833,6 +844,19 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
         superseded: showSuperseded
           ? { active: true, hidden: 0 }
           : { active: false, hidden: ctx.store.supersededJobCount(forge) },
+        jobFilters: { repos: repoNames, repo, type: jobType },
+      }),
+    );
+  });
+
+  // Specialist-run board: every reviewer run with the review or stack job it
+  // belongs to, active runs first.
+  app.get("/reviewers", (c) => {
+    return c.html(
+      renderReviewerBoard(ctx.store.listReviewerRunBoard(), {
+        ...pageOpts,
+        identity: c.get("identity"),
+        csrfToken: gateOn ? ensureCsrfToken(c, ctx.config.uiSessionSecret) : undefined,
       }),
     );
   });

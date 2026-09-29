@@ -1,5 +1,6 @@
 import { verify } from "@octokit/webhooks-methods";
 import type { Config, PullRequestAction } from "../config.js";
+import { TERMINAL_JOB_STATES } from "../config.js";
 import { canIssueOverride, parseOverrideCommand } from "../findings/commands.js";
 import {
   isMaomaoLogin,
@@ -25,6 +26,7 @@ import {
   commentLooksLikeMaomaoEscalation,
   isBotActor,
   mentionsEscalateCommand,
+  mentionsReviewCommand,
 } from "../routing/escalation.js";
 import { enqueueClaimResult, recordWebhookDelivery } from "../forge/deliveries.js";
 
@@ -522,6 +524,11 @@ async function handleIssueComment(input: {
   if (commentLooksLikeMaomaoEscalation(body)) {
     return { status: 202, body: { ok: true, ignored: true, reason: "ignored maomao marker comment" } };
   }
+  // "@<bot> review" — explicit re-review request: enqueues a fresh full
+  // specialist pass on the current head, never a verify-first run.
+  if (mentionsReviewCommand(body, input.config.poisonAlert.mentionName)) {
+    return handleReviewCommand(input, payload);
+  }
   if (!mentionsEscalateCommand(body, input.config.poisonAlert.mentionName, input.config.poisonAlert.escalateCommand)) {
     return { status: 202, body: { ok: true, ignored: true, reason: "not an escalate command" } };
   }
@@ -624,6 +631,162 @@ async function stackReply(ctx: StackCommandContext, text: string): Promise<void>
 // it can never break or fake markdown in the reply.
 function mdInline(text: string): string {
   return "`" + text.replace(/[\r\n]+/g, " ").replace(/`/g, "'") + "`";
+}
+
+/**
+ * "@<bot> review": an explicit operator re-review request. Unlike escalate
+ * (a flag on the latest job) this produces a fresh FULL pr_review at the
+ * current head: a queued verify-first job upgrades in place, a terminal job
+ * on the shared dedup slot (a completed verify pass, a prior review)
+ * rekeys aside so the new job claims it, and an in-flight review is
+ * reported rather than disturbed. Authorization mirrors the escalate
+ * command.
+ */
+async function handleReviewCommand(
+  input: {
+    config: Config;
+    store: JobStore;
+    request: WebhookRequest;
+    github?: GithubPort & Partial<ManualTriggerPort>;
+  },
+  payload: IssueCommentWebhookPayload,
+): Promise<WebhookHandleResult> {
+  const actor = payload.comment?.user ?? payload.sender;
+  const actorLogin = actor?.login;
+  const installationId = numericId(payload.installation?.id);
+  const repoOwner = payload.repository?.owner?.login;
+  const repoName = payload.repository?.name;
+  const repoFullName = payload.repository?.full_name;
+  const prNumber = payload.issue?.number;
+  const commentId = numericId(payload.comment?.id);
+  if (
+    !installationId ||
+    !repoOwner ||
+    !repoName ||
+    !repoFullName ||
+    !prNumber ||
+    !actorLogin ||
+    !input.github ||
+    typeof input.github.getPull !== "function"
+  ) {
+    return { status: 202, body: { ok: true, ignored: true, reason: "missing github context for re-review" } };
+  }
+
+  const finish = (result: string, body: Record<string, unknown>): WebhookHandleResult => {
+    input.store.claimWebhookDelivery(input.request.deliveryId, input.request.event, result);
+    if (commentId != null) input.store.claimReviewCommand(String(commentId), input.request.deliveryId, "review", result);
+    return {
+      status: 200,
+      body,
+      dispatchJobId: typeof body.dispatchJobId === "number" ? body.dispatchJobId : undefined,
+      enqueue: body.enqueue as WebhookHandleResult["enqueue"],
+    };
+  };
+
+  // Comment-level dedup: a retried delivery of the same comment must not
+  // enqueue (or reply) twice.
+  if (commentId != null && input.store.hasReviewCommand(String(commentId))) {
+    return finish("duplicate", { ok: true, duplicate: true, reason: "duplicate command comment" });
+  }
+
+  const reply = async (text: string): Promise<void> => {
+    try {
+      await input.github?.createIssueComment?.({
+        installationId,
+        owner: repoOwner,
+        repo: repoName,
+        pullNumber: prNumber,
+        body: text,
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      console.warn(`re-review reply failed for ${repoFullName}#${prNumber}: ${message}`);
+    }
+  };
+
+  const permission = await input.github.getCollaboratorPermission(installationId, repoOwner, repoName, actorLogin);
+  if (!canIssueOverride(permission, payload.comment?.author_association)) {
+    return finish("review-unauthorized", {
+      ok: true,
+      ignored: true,
+      reason: "actor is not authorized to request a re-review",
+      actor: actorLogin,
+      permission,
+    });
+  }
+
+  let pull: ResolvedPull;
+  try {
+    pull = await input.github.getPull(installationId, repoOwner, repoName, prNumber);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    await reply(`Could not re-review: this pull request does not resolve (${mdInline(message)}).`);
+    return finish("review-unresolved", { ok: false, error: `pull unresolved: ${message}` });
+  }
+
+  const auth = rejectUnauthorized(input.config, {
+    installationId: pull.installationId || installationId,
+    accountId: pull.accountId || numericId(payload.installation?.account?.id) || numericId(payload.repository?.owner?.id),
+    repositoryId: pull.repositoryId || numericId(payload.repository?.id),
+  });
+  if (!auth.ok) {
+    return finish("review-unauthorized-target", { ok: true, ignored: true, reason: auth.reason });
+  }
+  if (input.store.hasMergedPull(repoFullName, prNumber)) {
+    await reply("Not re-reviewing — this pull request is already merged.");
+    return finish("review-merged", { ok: true, ignored: true, reason: "pull request already merged" });
+  }
+  if (pull.draft && !input.config.reviewDrafts) {
+    await reply("Not re-reviewing — this pull request is a draft.");
+    return finish("review-draft", { ok: true, ignored: true, reason: "draft pull request" });
+  }
+
+  const occupant = input.store.reviewJobAtDedupSlot(repoFullName, prNumber, pull.headSha);
+  if (occupant && !TERMINAL_JOB_STATES.includes(occupant.state)) {
+    // A queued verify-first job holds the slot but has not run: upgrade it
+    // to a full pass instead of stalling on the dedup.
+    if (occupant.state === "queued" && occupant.review_mode === "verify") {
+      input.store.patchJob(occupant.id, { review_mode: "full" });
+      await reply(`Re-review requested — queued job ${occupant.id} upgraded to a full specialist review.`);
+      return finish("review-upgraded", { ok: true, jobId: occupant.id, dispatchJobId: occupant.id });
+    }
+    await reply(`A review is already ${occupant.state} at this head — job ${occupant.id}.`);
+    return finish("review-in-flight", { ok: true, jobId: occupant.id, reason: `job already ${occupant.state} for this SHA` });
+  }
+  if (occupant) {
+    const retired = input.store.retireJobDedupKey(occupant.id, `rereview:${occupant.id}`);
+    if (!retired) {
+      await reply(`Could not re-review — job ${occupant.id} still holds this head's review slot.`);
+      return finish("review-retire-failed", { ok: false, error: "could not retire dedup slot", jobId: occupant.id });
+    }
+  }
+
+  const enqueue = enqueuePullJob(input.store, input.config, {
+    repoFullName: pull.repoFullName,
+    repoOwner: pull.repoOwner,
+    repoName: pull.repoName,
+    installationId, // the webhook's installation — ResolvedPull leaves it 0
+    githubAccountId: pull.accountId || undefined,
+    githubRepositoryId: pull.repositoryId || undefined,
+    prNumber: pull.prNumber,
+    prTitle: pull.prTitle,
+    prBody: pull.prBody,
+    prHtmlUrl: pull.prHtmlUrl,
+    prAuthor: pull.prAuthor,
+    baseSha: pull.baseSha,
+    headSha: pull.headSha,
+    baseRef: pull.baseRef,
+    headRef: pull.headRef,
+    webhookDeliveryId: input.request.deliveryId,
+    webhookEvent: "issue_comment.review",
+    reviewMode: "full",
+  });
+  if (!enqueue.created) {
+    await reply(`Re-review not queued — ${mdInline(enqueue.skippedReason ?? "a job already exists for this head")}.`);
+    return finish("review-skipped", { ok: true, created: false, skippedReason: enqueue.skippedReason, jobId: enqueue.job.id });
+  }
+  await reply(`Queued a full re-review of ${mdInline(pull.headSha.slice(0, 8))} — job ${enqueue.job.id}.`);
+  return finish("review", { ok: true, created: true, jobId: enqueue.job.id, enqueue });
 }
 
 // Stack commands are privileged: allowlisted bot identities, or humans with

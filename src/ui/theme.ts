@@ -737,6 +737,55 @@ h1 a.pr-external { font-size: 0.72em; }
 }
 .stack-strip-count { color: var(--ink-muted); font-size: 0.8rem; white-space: nowrap; }
 
+/* Stack member jobs nest under their stack card on the home list — one
+   glued block (no gap, no rail), each member a compact two-line row. */
+.member-cards {
+  list-style: none;
+  margin: 0 0 0 1.2rem;
+  padding: 0;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-top: none;
+  border-radius: 0 0 var(--radius) var(--radius);
+}
+.member-card { padding: 0.35rem 0.7rem; font-size: 0.88rem; }
+.member-card + .member-card { border-top: 1px solid var(--line); }
+.member-card.is-live { box-shadow: inset 3px 0 0 var(--live); }
+.member-row {
+  display: flex;
+  align-items: baseline;
+  gap: 0.5rem;
+  min-width: 0;
+}
+.member-pos {
+  font-size: 0.68rem;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--ash);
+  white-space: nowrap;
+}
+.member-title {
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.member-row .state { margin-left: auto; }
+.member-meta { font-size: 0.85em; }
+
+/* Repo / job-type filter bar on the home job list; it reuses the .trigger
+   card + button chrome, the select just needs field styling. */
+.job-filters { margin: 0.4rem 0 1rem; }
+.job-filters label { flex: 0 1 16rem; min-width: 11rem; }
+.job-filters select {
+  width: 100%;
+  margin-top: 0.3rem;
+  padding: 0.45rem 0.5rem;
+  background: var(--paper);
+  color: var(--ink);
+  border: 1px solid var(--line-strong);
+}
+
 .meta-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(14rem, 1fr));

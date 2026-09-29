@@ -5692,6 +5692,58 @@ describe("stack reviews (issue #99)", () => {
     expect(cumulative?.state).toBe("done");
   });
 
+  it("routes member jobs through the router, not a preselected reviewer set", async () => {
+    // Regression: members were enqueued with the full configured reviewer
+    // list, so routeSpecialists recorded source=fixed ("Preselected reviewer
+    // set") and the router never ran — every member ran every specialist.
+    const config = stackConfig({ REVIEWER_ROUTING: "deterministic" });
+    const store = new JobStore(openDb(":memory:"));
+    const stack = enqueueStackJob(store);
+    const github = {
+      ...githubPort(),
+      getPull: async (_i: number, _o: string, _r: string, n: number) => resolvedPull(n, `h${n}`),
+      createCommentReview: async () => ({ id: "9", url: "u" }),
+      createIssueComment: async () => ({ id: "1", url: "u" }),
+    } as unknown as GithubPort;
+    const pipeline = createPipeline({ config, store, github, checkout: await fixtureCheckout(), opencode: stackOpencode });
+    await pipeline.run(stack.job.id);
+
+    const memberJobs = store.listJobs(20).filter((j) => j.job_type === "pr_review");
+    expect(memberJobs).toHaveLength(2);
+    for (const member of memberJobs) {
+      expect(member.review_mode).toBe("full");
+      expect(member.routing_source).not.toBe("fixed");
+      expect(member.routing_mode).toBe("deterministic");
+      expect(member.routing_reason ?? "").not.toMatch(/preselected/i);
+    }
+  });
+
+  it("gives fixed-mode members the configured reviewer set preselected", async () => {
+    // In fixed mode enqueuePullJob still pre-seeds the whole configured set —
+    // the member gets its specialists without waiting for the router.
+    const config = stackConfig({ REVIEWER_ROUTING: "fixed" });
+    const store = new JobStore(openDb(":memory:"));
+    const stack = enqueueStackJob(store);
+    const github = {
+      ...githubPort(),
+      getPull: async (_i: number, _o: string, _r: string, n: number) => resolvedPull(n, `h${n}`),
+      createCommentReview: async () => ({ id: "9", url: "u" }),
+      createIssueComment: async () => ({ id: "1", url: "u" }),
+    } as unknown as GithubPort;
+    const pipeline = createPipeline({ config, store, github, checkout: await fixtureCheckout(), opencode: stackOpencode });
+    await pipeline.run(stack.job.id);
+
+    const memberJobs = store.listJobs(20).filter((j) => j.job_type === "pr_review");
+    expect(memberJobs).toHaveLength(2);
+    for (const member of memberJobs) {
+      expect(member.review_mode).toBe("full");
+      expect(member.routing_source).toBe("fixed");
+      expect(member.routing_mode).toBe("fixed");
+      expect(member.routing_reason ?? "").toMatch(/fixed reviewer set/i);
+      expect(store.listReviewerRuns(member.id).map((run) => run.role)).toEqual(["correctness"]);
+    }
+  });
+
   it("marks the job stale and posts nothing when a member head moved before publish", async () => {
     const config = stackConfig();
     const store = new JobStore(openDb(":memory:"));
