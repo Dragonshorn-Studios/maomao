@@ -980,29 +980,34 @@ export class JobStore {
   staleOpenStackJobs(repoFullName: string, stackId: string, exceptDedupKey: string, provider?: string, providerInstance?: string): number[] {
     const scope = normalizeScope({ provider, instance: providerInstance });
     const now = nowIso();
-    const rows = this.db
-      .prepare(
-        `SELECT id, state FROM jobs
-         WHERE provider = ? AND provider_instance = ? AND repo_full_name = ? AND job_type = 'stack_review'
-           AND state NOT IN ('stale', 'cancelled')
-           AND (dedup_key = ? OR dedup_key LIKE ? ESCAPE '\\') AND dedup_key != ?`,
-      )
-      .all(
-        scope.provider,
-        scope.instance,
-        repoFullName,
-        stackDedupPrefix(stackId),
-        `${stackDedupPrefix(escapeLike(stackId))}@%`,
-        exceptDedupKey,
-      ) as { id: number; state: JobState }[];
-    if (rows.length) {
-      this.db
+    // Snapshot + transition in one transaction so the pre-state map stays
+    // accurate if the process model ever gains a second writer.
+    const rows = this.db.transaction(() => {
+      const stale = this.db
         .prepare(
-          `UPDATE jobs SET state = 'stale', updated_at = ?, finished_at = COALESCE(finished_at, ?)
-           WHERE id IN (${rows.map(() => "?").join(", ")})`,
+          `SELECT id, state FROM jobs
+           WHERE provider = ? AND provider_instance = ? AND repo_full_name = ? AND job_type = 'stack_review'
+             AND state NOT IN ('stale', 'cancelled')
+             AND (dedup_key = ? OR dedup_key LIKE ? ESCAPE '\\') AND dedup_key != ?`,
         )
-        .run(now, now, ...rows.map((row) => row.id));
-    }
+        .all(
+          scope.provider,
+          scope.instance,
+          repoFullName,
+          stackDedupPrefix(stackId),
+          `${stackDedupPrefix(escapeLike(stackId))}@%`,
+          exceptDedupKey,
+        ) as { id: number; state: JobState }[];
+      if (stale.length) {
+        this.db
+          .prepare(
+            `UPDATE jobs SET state = 'stale', updated_at = ?, finished_at = COALESCE(finished_at, ?)
+             WHERE id IN (${stale.map(() => "?").join(", ")})`,
+          )
+          .run(now, now, ...stale.map((row) => row.id));
+      }
+      return stale;
+    })();
     const ids = rows.map((r) => r.id);
     for (const row of rows) {
       // Already-terminal rows are only relabeled — emitting them again would
@@ -1547,23 +1552,28 @@ export class JobStore {
       clauses.push("repo_full_name = ?", "pr_number = ?");
       whereValues.push(where.repoFullName, where.prNumber);
     }
-    // Snapshot pre-transition state: cancel of a claimed-running job emits a
-    // summary whose usage figures may still grow as the run unwinds.
-    const preStates = new Map(
-      (this.db.prepare(`SELECT id, state FROM jobs WHERE ${clauses.join(" AND ")}`).all(...whereValues) as {
-        id: number;
-        state: JobState;
-      }[]).map((row) => [row.id, row.state]),
-    );
-    const rows = this.db
-      .prepare(
-        `UPDATE jobs
-         SET state = 'cancelled', cancelled_reason = ?, cancelled_by = ?,
-             finished_at = COALESCE(finished_at, ?), updated_at = ?
-         WHERE ${clauses.join(" AND ")}
-         RETURNING id`,
-      )
-      .all(reason, actor, now, now, ...whereValues) as { id: number }[];
+    // Snapshot pre-transition state in the same transaction as the UPDATE:
+    // cancel of a claimed-running job emits a summary whose usage figures may
+    // still grow as the run unwinds, and the pair must stay atomic if the
+    // process model ever gains a second writer.
+    const { preStates, rows } = this.db.transaction(() => {
+      const snapshot = new Map(
+        (this.db.prepare(`SELECT id, state FROM jobs WHERE ${clauses.join(" AND ")}`).all(...whereValues) as {
+          id: number;
+          state: JobState;
+        }[]).map((row) => [row.id, row.state]),
+      );
+      const updated = this.db
+        .prepare(
+          `UPDATE jobs
+           SET state = 'cancelled', cancelled_reason = ?, cancelled_by = ?,
+               finished_at = COALESCE(finished_at, ?), updated_at = ?
+           WHERE ${clauses.join(" AND ")}
+           RETURNING id`,
+        )
+        .all(reason, actor, now, now, ...whereValues) as { id: number }[];
+      return { preStates: snapshot, rows: updated };
+    })();
     for (const row of rows) this.resolveStackMemberCoverage(row.id, "cancelled");
     for (const row of rows) {
       const preState = preStates.get(row.id);

@@ -333,6 +333,27 @@ describe("emitJobSummary", () => {
     ]);
   });
 
+  it("does not re-emit when the same job is cancelled twice", () => {
+    setJobSummarySink(capture);
+    const store = makeStore();
+    const jobId = seedJob(store);
+    expect(store.cancelJobs({ jobId }, "manual_cancel", null)).toEqual([jobId]);
+    expect(store.cancelJobs({ jobId }, "manual_cancel", null)).toEqual([]);
+    expect(payloadLines()).toHaveLength(1);
+  });
+
+  it("reports null duration_ms when the start timestamp is unparseable", () => {
+    const store = makeStore();
+    const jobId = seedJob(store);
+    const job = {
+      ...store.getJob(jobId)!,
+      started_at: "not-a-date",
+      created_at: "also-not-a-date",
+      finished_at: "2026-01-01T00:00:00.000Z",
+    };
+    expect(buildJobSummary(job, []).duration_ms).toBeNull();
+  });
+
   it("measures duration_ms from created_at for jobs that never started", () => {
     setJobSummarySink(capture);
     const store = makeStore();
@@ -676,6 +697,7 @@ describe("emitJobSummary", () => {
     const fetchMock = vi.fn().mockRejectedValue(new Error("connection refused"));
     vi.stubGlobal("fetch", fetchMock);
     const err = vi.spyOn(console, "error").mockImplementation(() => {});
+    setJobSummarySink(capture);
     const store = makeStore();
     const jobId = seedJob(store);
     expect(() =>
@@ -686,6 +708,8 @@ describe("emitJobSummary", () => {
     ).not.toThrow();
     await vi.waitFor(() => expect(err).toHaveBeenCalled());
     expect(err.mock.calls.flat().join(" ")).not.toContain("secret-token");
+    // The stdout line is the durable copy — it exists even when ingest fails.
+    expect(lines).toHaveLength(1);
   });
 
   it("is stdout-only and never throws when OPENOBSERVE_LOGS_URL is unset", () => {
