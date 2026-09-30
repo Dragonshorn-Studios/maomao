@@ -2261,6 +2261,8 @@ describe("prompt configuration routes", () => {
     const session = cookieFrom(login);
     const promptsPage = await app.request("/config/prompts", { headers: { cookie: session } });
     const pageArtifacts = await csrfArtifacts(promptsPage);
+    expect(pageArtifacts.html).toContain("Composed built-in");
+    expect(pageArtifacts.html).toContain("Composed template");
 
     const denied = await app.request("/config/prompts/drafts", {
       method: "POST",
@@ -2282,6 +2284,9 @@ describe("prompt configuration routes", () => {
     const session = cookieFrom(callback);
     const promptsPage = await app.request("/config/prompts", { headers: { cookie: session } });
     const pageArtifacts = await csrfArtifacts(promptsPage);
+    expect(pageArtifacts.html).toContain("Composed built-in");
+    expect(pageArtifacts.html).toContain('data-stage="aggregator"');
+    expect(pageArtifacts.html).toContain("You are Maomao&#39;s aggregator");
 
     const created = await app.request("/config/prompts/drafts", {
       method: "POST",

@@ -12,7 +12,8 @@ import type { EffectiveConfigEntry } from "../config-effective.js";
 import type { Severity } from "../schema.js";
 import { parseBriefPayload, type BriefPayload } from "../jobs/brief.js";
 import { elapsedMs, escapeHtml, formatDuration, shortSha } from "../util.js";
-import { KNOWN_REVIEWER_ROLES, PIPELINE_PROMPT_STAGES, promptBodyFromRolePrompt } from "../prompts.js";
+import { KNOWN_REVIEWER_ROLES, composeReviewerPrompt, promptBodyFromRolePrompt } from "../prompts.js";
+import { composedPipelineStages } from "../prompt-previews.js";
 import {
   cancelledBannerCopy,
   diffUnavailableCopy,
@@ -1805,12 +1806,20 @@ export function roleFormValuesFromRole(role: CustomRoleRow): RoleFormValues {
   };
 }
 
+function readOnlyPromptDetails(summary: string, text: string, extraClass = ""): string {
+  return `<details${extraClass ? ` class="${escapeHtml(extraClass)}"` : ""}>
+      <summary>${escapeHtml(summary)}</summary>
+      <pre class="log-panel">${escapeHtml(text)}</pre>
+    </details>`;
+}
+
 function customRolesSection(data: PromptConfigPageData): string {
   const roles = data.customRoles ?? [];
   const csrf = csrfInput(data.csrfToken);
   const rows = roles
     .map(
-      (role) => `<p class="muted"><code>${escapeHtml(role.slug)}</code> — <strong>${escapeHtml(role.title)}</strong>${
+      (role) => `<article class="card prompt-role" data-custom-role="${escapeHtml(role.slug)}">
+        <p class="muted"><code>${escapeHtml(role.slug)}</code> — <strong>${escapeHtml(role.title)}</strong>${
         role.model ? ` (${escapeHtml(role.model)})` : ""
       }${role.description ? ` — ${escapeHtml(role.description)}` : ""}
         ${
@@ -1822,7 +1831,9 @@ function customRolesSection(data: PromptConfigPageData): string {
           <button type="submit" class="btn-secondary">Delete</button>
         </form>`
             : ""
-        }</p>`,
+        }</p>
+        ${readOnlyPromptDetails("Composed prompt", composeReviewerPrompt(role.prompt), "prompt-composed")}
+      </article>`,
     )
     .join("");
   const values = data.roleForm?.values;
@@ -2164,6 +2175,7 @@ function promptRevisionCard(revision: PromptRevisionView, data: PromptConfigPage
       <summary>Editable instructions</summary>
       <pre class="log-panel">${escapeHtml(revision.body)}</pre>
     </details>
+    ${readOnlyPromptDetails("Composed built-in", composeReviewerPrompt(revision.body), "prompt-composed")}
     ${revision.status === "draft" && data.canWrite ? `<details>
       <summary>Edit draft</summary>
       <form method="post" action="/config/prompts/drafts/${revision.id}" class="operator-form">
@@ -2230,6 +2242,7 @@ function promptRoleCard(
       <summary>${active ? "Current override" : "Built-in instructions"}</summary>
       <pre class="log-panel">${escapeHtml(currentBody)}</pre>
     </details>
+    ${readOnlyPromptDetails("Composed built-in", composeReviewerPrompt(currentBody), "prompt-composed")}
     ${disableOverride}
     ${overrideForm}
     ${
@@ -2307,19 +2320,22 @@ export function renderPromptConfigPage(data: PromptConfigPageData): string {
       return `<tr><td>${evaluation.id}</td><td>#${evaluation.prompt_revision_id}</td><td>#${evaluation.fixture_id}</td><td>${escapeHtml(evaluation.model)}</td><td>${escapeHtml(evaluation.status)}</td><td>${detail}</td></tr>`;
     })
     .join("");
-  const pipelineStages = PIPELINE_PROMPT_STAGES.map(
-    (stage) => `<li><article class="card prompt-role">
+  const pipelineStages = composedPipelineStages()
+    .map(
+      (stage) => `<li><article class="card prompt-role" data-stage="${escapeHtml(stage.id)}">
       <header class="prompt-role-head">
         <div><p class="label">${escapeHtml(stage.id)}</p><h3 class="specimen-title">${escapeHtml(stage.title)}</h3></div>
         <div class="connection-chips"><span class="state state-queued">Built-in runtime guardrail</span></div>
       </header>
       <p class="muted">${escapeHtml(stage.purpose)}</p>
+      ${readOnlyPromptDetails("Composed template", stage.text, "prompt-composed")}
     </article></li>`,
-  ).join("");
+    )
+    .join("");
   const body = `
     ${configSubNav("prompts")}
     <h1>Specialist prompts</h1>
-    <p class="lede">Each specialist ships with built-in instructions. Override a role when you need different focus; the live override is the active revision, drafts stay private until you activate them. Security guardrails are composed at runtime and are not editable. Evaluation never publishes to GitHub.</p>
+    <p class="lede">Each specialist ships with built-in instructions. Override a role when you need different focus; the live override is the active revision, drafts stay private until you activate them. Security guardrails are composed at runtime and are not editable — expand <strong>Composed built-in</strong> to read guardrails plus the current body. Evaluation never publishes to GitHub.</p>
     ${data.notice ? `<p class="notice" role="status">${escapeHtml(data.notice)}</p>` : ""}
     ${data.error ? `<p class="error" role="alert">${escapeHtml(data.error)}</p>` : ""}
     ${writeGate}
@@ -2327,7 +2343,7 @@ export function renderPromptConfigPage(data: PromptConfigPageData): string {
     <ul class="prompt-role-list">${roleCards}${unknown}</ul>
     ${customRolesSection(data)}
     <h2>Pipeline stage prompts</h2>
-    <p class="muted">These prompts are centralized built-in runtime guardrails. Their model and execution settings live in profiles/providers; their instruction text is not silently overridden by environment or role revisions.</p>
+    <p class="muted">These prompts are centralized built-in runtime templates. Expand a stage to read the full builder text with <code>{{placeholders}}</code> where a job would interpolate repository, diff, and evidence — not a live dump of a running review. Model and execution settings live in profiles/providers; instruction text is not silently overridden by environment or role revisions.</p>
     <ul class="prompt-role-list">${pipelineStages}</ul>
     <h2>Evaluation fixtures</h2>
     ${fixtureForm}

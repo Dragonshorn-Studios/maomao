@@ -1772,6 +1772,7 @@ body.operator main th {
 }
 .prompt-role h3 { margin: 0.15rem 0 0; }
 .prompt-preview { margin: 0.55rem 0 0.35rem; }
+.prompt-composed { margin: 0.35rem 0; }
 .config-actions {
   display: flex;
   flex-wrap: wrap;
