@@ -397,6 +397,43 @@ describe("emitJobSummary", () => {
     expect(payloadLines().map((p) => `${p.job_id}:${p.state}`)).toEqual([`${done}:completed`]);
   });
 
+  it("does not re-emit for a failed job relabeled stale by staleOpenStackJobs", () => {
+    setJobSummarySink(capture);
+    const store = makeStore();
+    const failed = seedStackJob(store, "vec1");
+    store.setJobState(failed, "failed");
+    const staled = store.staleOpenStackJobs("acme/widgets", "u1", "stack:u1@vec2");
+    expect(staled).toEqual([failed]);
+    expect(payloadLines().map((p) => `${p.job_id}:${p.state}`)).toEqual([`${failed}:failed`]);
+  });
+
+  it("emits nothing for a queued stack dedup-hit (sweep selects live rows only)", () => {
+    setJobSummarySink(capture);
+    const store = makeStore();
+    const first = seedStackJob(store, "vec1"); // stays queued
+    const result = store.enqueue({
+      repoFullName: "acme/widgets",
+      repoOwner: "acme",
+      repoName: "widgets",
+      installationId: 9,
+      prNumber: 43,
+      prTitle: "t",
+      prBody: "",
+      prHtmlUrl: "",
+      prAuthor: "dev",
+      baseSha: "base",
+      headSha: "cafebabe",
+      baseRef: "main",
+      headRef: "feat",
+      reviewers: [{ role: "stack_cumulative", title: "Stack cumulative" }],
+      jobType: "stack_review",
+      dedupKey: "stack:u1@vec1",
+    });
+    expect(result.created).toBe(false);
+    expect(result.job.id).toBe(first);
+    expect(lines).toHaveLength(0);
+  });
+
   it("marks usage incomplete when a live job is cancelled, complete for a queued one", () => {
     setJobSummarySink(capture);
     const store = makeStore();
@@ -985,6 +1022,25 @@ describe("emitJobSummary", () => {
     const logged = err.mock.calls.map((call) => String(call[0])).join("\n");
     expect(logged).not.toContain("not-a-valid-url%%%");
     expect(logged).toContain("<openobserve-url>");
+  });
+
+  it("redacts the normalized-href form of the ingest URL from error logs", async () => {
+    const err = vi.spyOn(console, "error").mockImplementation(() => {});
+    const fetchMock = vi
+      .fn()
+      .mockRejectedValue(new Error("fetch failed: https://oo.example.com/api/x/_json unreachable"));
+    vi.stubGlobal("fetch", fetchMock);
+    setJobSummarySink(capture);
+    const store = makeStore();
+    const jobId = seedJob(store);
+    // Uppercase host in config: the error echoes the normalized lowercase
+    // form, which the verbatim split can't catch — only the parsed-href
+    // pass redacts it (no userinfo involved).
+    emitJobSummary(store, jobId, { OPENOBSERVE_LOGS_URL: "https://OO.Example.com/api/x/_json" } as NodeJS.ProcessEnv);
+    await flushJobSummaryPosts();
+    const logged = err.mock.calls.map((call) => String(call[0])).join("\n");
+    expect(logged).not.toContain("oo.example.com");
+    expect(logged).not.toContain("OO.Example.com");
   });
 
   it("redacts normalized URL forms and embedded userinfo from ingest error logs", async () => {

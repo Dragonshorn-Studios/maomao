@@ -91,6 +91,7 @@ export interface Config {
   routing: RouterConfig;
   poisonAlert: PoisonAlertConfig;
   jobConcurrency: number;
+  jobSummaries: boolean;
   reviewDrafts: boolean;
   postEmptyReview: boolean;
   pullRequestActions: PullRequestAction[];
@@ -315,6 +316,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     routing: loadRouting(env),
     poisonAlert: loadPoisonAlert(env),
     jobConcurrency: Math.max(1, parseInteger(env.JOB_CONCURRENCY, 1)),
+    // Opt-out for the stdout/ingest terminal job-summary lines (issue #139).
+    jobSummaries: parseBoolean(env.JOB_SUMMARIES, true),
     reviewDrafts: parseBoolean(env.REVIEW_DRAFTS, false),
     postEmptyReview: parseBoolean(env.POST_EMPTY_REVIEW, false),
     pullRequestActions,
