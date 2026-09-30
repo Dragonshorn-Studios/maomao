@@ -310,6 +310,13 @@ export function effectiveConfigEntries(
   );
   row("Publishing", "Post empty reviews", "POST_EMPTY_REVIEW", boolLabel(config.postEmptyReview));
   row("Publishing", "Review drafts", "REVIEW_DRAFTS", boolLabel(config.reviewDrafts));
+  row("Telemetry", "Job summaries (stdout/OpenObserve)", "JOB_SUMMARIES", boolLabel(config.jobSummaries));
+  row(
+    "Telemetry",
+    "OpenObserve ingest URL",
+    "OPENOBSERVE_LOGS_URL",
+    envSet(env.OPENOBSERVE_LOGS_URL) ? "configured" : "not set",
+  );
   row("Publishing", "Max inline comments", "MAX_INLINE_COMMENTS", String(config.maxInlineComments));
   row(
     "Publishing",

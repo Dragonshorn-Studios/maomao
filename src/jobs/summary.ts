@@ -113,6 +113,12 @@ export interface JobSummaryPayload {
 }
 
 export interface JobSummaryOptions {
+  /**
+   * Post-write row snapshot captured inside the transition transaction.
+   * Skips the post-commit getJob re-read so the emitted line reflects the
+   * exact transition that fired it even if the row changes after commit.
+   */
+  job?: JobRow;
   /** The job was claimed-and-running when it went terminal — usage fields are a snapshot, not a final tally. */
   partialUsage?: boolean;
 }
@@ -223,7 +229,11 @@ function queueIngestPost(url: string, headers: Record<string, string>, line: str
     } finally {
       pendingIngestPosts -= 1;
     }
-  });
+    // Self-healing chain: a rejection escaping the task (e.g. console.error
+    // throwing inside the handler) must not leave postChain rejected —
+    // that would skip every later task while their counter increments
+    // still stand, silently wedging all future POSTs at the depth cap.
+  }).catch(() => {});
 }
 
 /** Test hook: resolves once every queued ingest POST has settled. */
@@ -256,7 +266,7 @@ export function emitJobSummary(
   opts?: JobSummaryOptions,
 ): void {
   try {
-    const job = store.getJob(jobId);
+    const job = opts?.job ?? store.getJob(jobId);
     if (!job) return;
     const line = JSON.stringify(buildJobSummary(job, store.listReviewerRuns(jobId), opts));
     // The two channels are independent: a broken stdout sink must not

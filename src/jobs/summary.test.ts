@@ -611,7 +611,12 @@ describe("emitJobSummary", () => {
     );
     expect(cancelled).toEqual([jobId]);
     expect(payloadLines()).toEqual([
-      expect.objectContaining({ job_id: jobId, state: "cancelled", provider: "gitlab" }),
+      expect.objectContaining({
+        job_id: jobId,
+        state: "cancelled",
+        provider: "gitlab",
+        provider_instance: "gitlab.example.com",
+      }),
     ]);
   });
 
@@ -1022,6 +1027,28 @@ describe("emitJobSummary", () => {
     const logged = err.mock.calls.map((call) => String(call[0])).join("\n");
     expect(logged).not.toContain("not-a-valid-url%%%");
     expect(logged).toContain("<openobserve-url>");
+  });
+
+  it("keeps posting after a rejection escapes the ingest chain's error handler", async () => {
+    // First console.error call (inside the chain task) throws — without the
+    // self-healing .catch the chain stays rejected and every later POST is
+    // skipped while its counter increment still stands.
+    const err = vi
+      .spyOn(console, "error")
+      .mockImplementationOnce(() => {
+        throw new Error("EPIPE");
+      })
+      .mockImplementation(() => {});
+    const fetchMock = vi.fn().mockRejectedValue(new Error("fetch failed"));
+    vi.stubGlobal("fetch", fetchMock);
+    setJobSummarySink(capture);
+    const store = makeStore();
+    const env = { OPENOBSERVE_LOGS_URL: "https://oo-wedge.internal/api/x/_json" } as NodeJS.ProcessEnv;
+    emitJobSummary(store, seedJob(store), env);
+    emitJobSummary(store, seedJob(store), env);
+    await flushJobSummaryPosts();
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    err.mockRestore();
   });
 
   it("redacts the normalized-href form of the ingest URL from error logs", async () => {

@@ -83,6 +83,13 @@ describe("loadConfig", () => {
     expect(config.stackTokenCap).toBe(10_000_000);
     expect(config.opencode.maxRetries).toBe(1);
     expect(config.issueCreationEnabled).toBe(false);
+    expect(config.jobSummaries).toBe(true);
+  });
+
+  it("enables terminal job summaries by default and honors JOB_SUMMARIES=false", () => {
+    expect(loadConfig({}).jobSummaries).toBe(true);
+    expect(loadConfig({ JOB_SUMMARIES: "false" }).jobSummaries).toBe(false);
+    expect(loadConfig({ JOB_SUMMARIES: "0" }).jobSummaries).toBe(false);
   });
 
   it("enables scan issue creation only when explicitly configured", () => {

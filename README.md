@@ -328,6 +328,8 @@ Maomao records OpenCode `step_finish` usage across every unique agent step (incl
 
 When a job reaches a terminal state (`completed`, `failed`, `stale`, `cancelled`), Maomao writes **one structured JSON line to stdout** — picked up by Docker/Coolify log drivers — with usage metadata only: `event` (always `maomao.job_summary` — the filter key for picking these lines out of the mixed stdout stream), `job_id`, `job_type`, `repo`, `pr`, `provider`, `provider_instance` (the forge host, e.g. `github.com` — needed for per-instance dashboards on multi-forge deployments), `state`, `duration_ms`, `prompt_tokens`/`completion_tokens`/`total_tokens`, `cost_usd`, `head_sha`, `finished_at`, `usage_complete` (false when the job was staled/cancelled mid-run or a stage flagged incomplete usage — treat figures as a minimum, not a total), and `attempt` (1 for the first run; a retried job emits one line per attempt — dedup on `(job_id, attempt)` so retries aren't double-counted). The payload never contains secrets, webhook URLs, diffs, or review bodies. The summary lines share stdout with maomao's plain-text logs — filter on `"event":"maomao.job_summary"` — and can be disabled entirely with `JOB_SUMMARIES=false`. Job JSON on `/api/jobs` also exposes the backing `retry_count` column that powers `attempt`.
 
+One caveat on final states: a terminal job can still be **relabeled** afterward (e.g. a `completed` job relabeled `stale` when a later push supersedes its head). Relabels never emit a second line — the stream's last line for that job can therefore lag the `jobs` table's final `state`. Reconcile against `jobs` (or `/api/jobs`) when exact end state matters.
+
 The same line can also be POSTed directly to an OpenObserve ingest endpoint:
 
 ```bash

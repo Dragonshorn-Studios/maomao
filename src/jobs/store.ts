@@ -8,7 +8,7 @@ import type { FindingRow, FindingStatus } from "../findings/types.js";
 import { nowIso } from "../util.js";
 import { stackDedupPrefix } from "../stacks/commands.js";
 import { publish } from "../events.js";
-import { emitJobSummary } from "./summary.js";
+import { emitJobSummary, type JobSummaryOptions } from "./summary.js";
 import { ReviewConfigStore } from "../config-revisions.js";
 import { PromptRevisionStore } from "../prompt-revisions.js";
 
@@ -446,10 +446,11 @@ export class JobStore {
   enqueue(input: NewJobInput & { profileRevisionId?: number }): EnqueueResult {
     const createdAt = nowIso();
     const staleJobIds: number[] = [];
-    // Pre-transition state per staled job: only rows that were live or queued
+    // Pre-transition rows per staled job: only rows that were live or queued
     // *transition* into 'stale' — already-terminal rows are only relabeled for
-    // history and must not emit a second job-summary line (issue #139).
-    const stalePreStates = new Map<number, JobState>();
+    // history and must not emit a second job-summary line (issue #139). The
+    // full row is kept so emission reports the in-transaction snapshot.
+    const staleRows = new Map<number, JobRow>();
     const scope = normalizeScope({ provider: input.provider, instance: input.providerInstance });
 
     const jobType = input.jobType ?? "pr_review";
@@ -476,11 +477,11 @@ export class JobStore {
         // are re-pinned in place), terminal rows stay untouched as history.
         const stale = this.db
           .prepare(
-            `SELECT id, state FROM jobs
+            `SELECT * FROM jobs
              WHERE provider = ? AND provider_instance = ? AND repo_full_name = ?
                AND job_type = 'stack_review' AND dedup_key = ? AND state IN (${LIVE_STATES_SQL})`,
           )
-          .all(scope.provider, scope.instance, input.repoFullName, dedupKey) as { id: number; state: JobState }[];
+          .all(scope.provider, scope.instance, input.repoFullName, dedupKey) as JobRow[];
         const staled = stale.length
           ? (this.db
               .prepare(
@@ -493,7 +494,7 @@ export class JobStore {
           : [];
         // Only rows the guarded UPDATE actually transitioned get aborted/emitted.
         staleJobIds.push(...staled.map((row) => row.id));
-        for (const row of stale) stalePreStates.set(row.id, row.state);
+        for (const row of stale) staleRows.set(row.id, row);
         // Dead same-key rows at this head would collide with the recheck row
         // on the jobs UNIQUE — move their dedup key aside (the
         // `stack-retired:` namespace never claims stack identity back).
@@ -508,11 +509,11 @@ export class JobStore {
       } else if (jobType !== "repo_brief") {
         const stale = this.db
           .prepare(
-            `SELECT id, state FROM jobs
+            `SELECT * FROM jobs
              WHERE provider = ? AND provider_instance = ? AND repo_full_name = ? AND pr_number = ? AND head_sha != ?
                AND job_type = ? AND dedup_key = ? AND state NOT IN ('stale', 'cancelled')`,
           )
-          .all(scope.provider, scope.instance, input.repoFullName, input.prNumber, input.headSha, jobType, dedupKey) as { id: number; state: JobState }[];
+          .all(scope.provider, scope.instance, input.repoFullName, input.prNumber, input.headSha, jobType, dedupKey) as JobRow[];
         const staledIds = stale.length
           ? new Set(
               (this.db
@@ -529,7 +530,7 @@ export class JobStore {
         staleJobIds.push(...staledIds);
         for (const row of stale) {
           if (staledIds.has(row.id)) this.resolveStackMemberCoverage(row.id, "stale");
-          stalePreStates.set(row.id, row.state);
+          staleRows.set(row.id, row);
         }
       }
 
@@ -608,11 +609,14 @@ export class JobStore {
     publish({ type: "jobs" });
     for (const id of staleJobIds) {
       publish({ type: "job", jobId: id });
-      const preState = stalePreStates.get(id);
-      if (preState && ACTIVE_JOB_STATES.includes(preState)) {
+      const pre = staleRows.get(id);
+      if (pre && ACTIVE_JOB_STATES.includes(pre.state)) {
         // A claimed-running job's usage snapshot can still grow while the
         // caller aborts it — flag the line as a floor, not a final tally.
-        this.emitTerminalSummary(id, { partialUsage: LIVE_JOB_STATES.includes(preState) });
+        this.emitTerminalSummary(id, {
+          partialUsage: LIVE_JOB_STATES.includes(pre.state),
+          job: { ...pre, state: "stale", finished_at: pre.finished_at ?? createdAt, updated_at: createdAt },
+        });
       }
     }
     if (result.job) publish({ type: "job", jobId: result.job.id });
@@ -1005,7 +1009,7 @@ export class JobStore {
     const rows = this.db.transaction(() => {
       const stale = this.db
         .prepare(
-          `SELECT id, state FROM jobs
+          `SELECT * FROM jobs
            WHERE provider = ? AND provider_instance = ? AND repo_full_name = ? AND job_type = 'stack_review'
              AND state NOT IN ('stale', 'cancelled')
              AND (dedup_key = ? OR dedup_key LIKE ? ESCAPE '\\') AND dedup_key != ?`,
@@ -1017,7 +1021,7 @@ export class JobStore {
           stackDedupPrefix(stackId),
           `${stackDedupPrefix(escapeLike(stackId))}@%`,
           exceptDedupKey,
-        ) as { id: number; state: JobState }[];
+        ) as JobRow[];
       const staledIds = new Set(
         stale.length
           ? (this.db
@@ -1037,7 +1041,10 @@ export class JobStore {
       // Already-terminal rows are only relabeled — emitting them again would
       // double-count spend on the dashboards this stream feeds.
       if (ACTIVE_JOB_STATES.includes(row.state)) {
-        this.emitTerminalSummary(row.id, { partialUsage: LIVE_JOB_STATES.includes(row.state) });
+        this.emitTerminalSummary(row.id, {
+          partialUsage: LIVE_JOB_STATES.includes(row.state),
+          job: { ...row, state: "stale", finished_at: row.finished_at ?? now, updated_at: now },
+        });
       }
     }
     return ids;
@@ -1511,7 +1518,11 @@ export class JobStore {
       const { changes } = this.db
         .prepare(`UPDATE jobs SET ${assignments.join(", ")} WHERE id = ? AND state = ?`)
         .run(...values, id, current.state);
-      return changes === 1 ? { pre: current, target: targetState } : undefined;
+      // `written` is the exact post-transition row: passing it to emission
+      // keeps the emitted line atomic with the transition instead of
+      // re-reading after commit (a re-entrant publish subscriber or a
+      // hypothetical second writer could mutate the row in between).
+      return changes === 1 ? { pre: current, target: targetState, written: { ...current, ...fields } as JobRow } : undefined;
     }).immediate();
     if (!transition) return;
     // Also settles delegated stack-member coverage: a covered member on a
@@ -1524,7 +1535,7 @@ export class JobStore {
       const partialUsage =
         (transition.target === "stale" || transition.target === "cancelled") &&
         LIVE_JOB_STATES.includes(transition.pre.state);
-      this.emitTerminalSummary(id, { partialUsage });
+      this.emitTerminalSummary(id, { partialUsage, job: transition.written });
     }
     publish({ type: "job", jobId: id });
     publish({ type: "jobs" });
@@ -1535,7 +1546,7 @@ export class JobStore {
    * in a terminal state (issue #139). Emission never throws — a broken sink
    * or ingest endpoint must not break job bookkeeping.
    */
-  private emitTerminalSummary(jobId: number, opts?: { partialUsage?: boolean }): void {
+  private emitTerminalSummary(jobId: number, opts?: JobSummaryOptions): void {
     if (this.opts.emitJobSummaries !== true) return;
     emitJobSummary(this, jobId, process.env, opts);
   }
@@ -1602,10 +1613,9 @@ export class JobStore {
     // process model ever gains a second writer.
     const { preStates, rows } = this.db.transaction(() => {
       const snapshot = new Map(
-        (this.db.prepare(`SELECT id, state FROM jobs WHERE ${clauses.join(" AND ")}`).all(...whereValues) as {
-          id: number;
-          state: JobState;
-        }[]).map((row) => [row.id, row.state]),
+        (this.db.prepare(`SELECT * FROM jobs WHERE ${clauses.join(" AND ")}`).all(...whereValues) as JobRow[]).map(
+          (row) => [row.id, row],
+        ),
       );
       const updated = this.db
         .prepare(
@@ -1620,8 +1630,20 @@ export class JobStore {
     }).immediate();
     for (const row of rows) this.resolveStackMemberCoverage(row.id, "cancelled");
     for (const row of rows) {
-      const preState = preStates.get(row.id);
-      this.emitTerminalSummary(row.id, { partialUsage: preState != null && LIVE_JOB_STATES.includes(preState) });
+      const pre = preStates.get(row.id);
+      this.emitTerminalSummary(row.id, {
+        partialUsage: pre != null && LIVE_JOB_STATES.includes(pre.state),
+        job: pre
+          ? {
+              ...pre,
+              state: "cancelled",
+              cancelled_reason: reason,
+              cancelled_by: actor,
+              finished_at: pre.finished_at ?? now,
+              updated_at: now,
+            }
+          : undefined,
+      });
     }
     return rows.map((row) => row.id);
   }
