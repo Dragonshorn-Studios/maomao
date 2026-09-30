@@ -321,6 +321,10 @@ const ACTIVE_JOB_STATES: readonly JobState[] = ["queued", ...LIVE_JOB_STATES];
 // and cancellation all scope to exactly these states.
 const ACTIVE_STATES_SQL = ACTIVE_JOB_STATES.map((state) => `'${state}'`).join(", ");
 
+// Sentinel thrown inside retryFailedReviewers' transaction to roll the whole
+// retry back when a reviewer-run guard misses mid-transaction.
+class RunGuardMiss extends Error {}
+
 // Claimed-to-be-running states only (no 'queued'): the stack enqueue stales an
 // in-flight run on the same membership key so its abort propagates (issue #131).
 const LIVE_STATES_SQL = LIVE_JOB_STATES.map((state) => `'${state}'`).join(", ");
@@ -1698,38 +1702,47 @@ export class JobStore {
     // still in the state the pre-checks validated.
     let guardPassed = true;
     let resetCount = 0;
-    this.db.transaction(() => {
-      const { changes } = this.db
-        .prepare(
-          `UPDATE jobs SET
-             state = 'queued', failure_reason = NULL, started_at = NULL, finished_at = NULL,
-             retry_count = retry_count + 1,
-             aggregator_state = 'queued', aggregator_started_at = NULL, aggregator_finished_at = NULL,
-             aggregator_raw = NULL, aggregator_normalized = NULL, aggregator_duration_ms = NULL,
-             aggregator_prompt_tokens = NULL, aggregator_completion_tokens = NULL, aggregator_cost = NULL,
-             aggregator_reasoning_tokens = NULL, aggregator_cache_read_tokens = NULL,
-             aggregator_cache_write_tokens = NULL, aggregator_total_tokens = NULL,
-             aggregator_usage_complete = NULL, aggregator_usage_warning = NULL,
-             updated_at = ?
-           WHERE id = ? AND state = ?`,
-        )
-        .run(updatedAt, jobId, job.state);
-      if (changes === 0) {
-        guardPassed = false;
-        return;
-      }
-      const reset = this.db.prepare(
-        `UPDATE reviewer_runs SET
-           state = 'queued', attempt = 0, validation_error = NULL, raw_output = NULL,
-           normalized_json = NULL, stdout = NULL, stderr = NULL, exit_code = NULL,
-           started_at = NULL, finished_at = NULL, duration_ms = NULL,
-           prompt_tokens = NULL, completion_tokens = NULL, cost = NULL,
-           reasoning_tokens = NULL, cache_read_tokens = NULL, cache_write_tokens = NULL,
-           total_tokens = NULL, usage_complete = NULL, usage_warning = NULL
-         WHERE id = ? AND state = 'failed'`,
-      );
-      for (const run of targets) resetCount += reset.run(run.id).changes;
-    }).immediate();
+    try {
+      this.db.transaction(() => {
+        const { changes } = this.db
+          .prepare(
+            `UPDATE jobs SET
+               state = 'queued', failure_reason = NULL, started_at = NULL, finished_at = NULL,
+               retry_count = retry_count + 1,
+               aggregator_state = 'queued', aggregator_started_at = NULL, aggregator_finished_at = NULL,
+               aggregator_raw = NULL, aggregator_normalized = NULL, aggregator_duration_ms = NULL,
+               aggregator_prompt_tokens = NULL, aggregator_completion_tokens = NULL, aggregator_cost = NULL,
+               aggregator_reasoning_tokens = NULL, aggregator_cache_read_tokens = NULL,
+               aggregator_cache_write_tokens = NULL, aggregator_total_tokens = NULL,
+               aggregator_usage_complete = NULL, aggregator_usage_warning = NULL,
+               updated_at = ?
+             WHERE id = ? AND state = ?`,
+          )
+          .run(updatedAt, jobId, job.state);
+        if (changes === 0) {
+          guardPassed = false;
+          return;
+        }
+        const reset = this.db.prepare(
+          `UPDATE reviewer_runs SET
+             state = 'queued', attempt = 0, validation_error = NULL, raw_output = NULL,
+             normalized_json = NULL, stdout = NULL, stderr = NULL, exit_code = NULL,
+             started_at = NULL, finished_at = NULL, duration_ms = NULL,
+             prompt_tokens = NULL, completion_tokens = NULL, cost = NULL,
+             reasoning_tokens = NULL, cache_read_tokens = NULL, cache_write_tokens = NULL,
+             total_tokens = NULL, usage_complete = NULL, usage_warning = NULL
+           WHERE id = ? AND state = 'failed'`,
+        );
+        for (const run of targets) resetCount += reset.run(run.id).changes;
+        // A mid-transaction run-guard miss must roll back the requeue too: a
+        // retried job whose failed runs kept stale state would aggregate
+        // stale output and emit a phantom attempt line.
+        if (resetCount !== targets.length) throw new RunGuardMiss();
+      }).immediate();
+    } catch (error) {
+      if (error instanceof RunGuardMiss) return { ok: false, error: "reviewer run state changed — retry aborted" };
+      throw error;
+    }
     if (!guardPassed) return { ok: false, error: "job state changed — retry aborted" };
 
     this.log(

@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { openDb } from "../db.js";
 import { JobStore, type JobRow } from "./store.js";
+import { jobMetricsFromRuns } from "../ui/metrics.js";
 import {
   buildJobSummary,
   emitJobSummary,
@@ -272,6 +273,16 @@ describe("buildJobSummary", () => {
     store.patchJob(jobId, { [column]: 0 });
     const payload = buildJobSummary(store.getJob(jobId)!, []);
     expect(payload.usage_complete).toBe(false);
+  });
+
+  it.each([0, 1, null] as const)("usage_complete mirrors the UI's jobMetricsFromRuns rollup (run flag %s)", (flag) => {
+    const store = makeStore();
+    const jobId = seedJob(store);
+    const run = store.listReviewerRuns(jobId)[0];
+    store.patchReviewer(run.id, { usage_complete: flag });
+    const job = store.getJob(jobId)!;
+    const runs = store.listReviewerRuns(jobId);
+    expect(buildJobSummary(job, runs).usage_complete).toBe(jobMetricsFromRuns(job, runs).usageComplete);
   });
 
   it("emits pr null for negative and zero pull request numbers", () => {
@@ -760,6 +771,18 @@ describe("emitJobSummary", () => {
     expect(store.getJob(jobId)!.state).toBe("failed");
   });
 
+  it("emits nothing when setJobState refuses a transition on a stale/cancelled job", () => {
+    setJobSummarySink(capture);
+    const store = makeStore();
+    const jobId = seedJob(store);
+    store.setJobState(jobId, "stale");
+    expect(payloadLines().map((p) => p.state)).toEqual(["stale"]);
+    lines.length = 0;
+    store.setJobState(jobId, "failed"); // refused: stale is one-way
+    expect(store.getJob(jobId)!.state).toBe("stale");
+    expect(lines).toHaveLength(0);
+  });
+
   it("skips emission when setJobState's guarded update loses a concurrent state change", () => {
     setJobSummarySink(capture);
     const db = openDb(":memory:");
@@ -819,7 +842,7 @@ describe("emitJobSummary", () => {
     expect(store.listReviewerRuns(jobId)[0].state).toBe("failed");
   });
 
-  it("skips run resets whose 'failed' state was lost mid-transaction and reports the real count", () => {
+  it("rolls back the whole retry when a run loses its 'failed' state mid-transaction", () => {
     const db = openDb(":memory:");
     const store = new JobStore(db, [], { emitJobSummaries: true });
     const jobId = seedJob(store);
@@ -833,10 +856,11 @@ describe("emitJobSummary", () => {
       }
       return origPrepare(sql);
     }) as typeof db.prepare);
-    expect(store.retryFailedReviewers(jobId)).toEqual({ ok: true, reset: 0 });
-    expect(store.getJob(jobId)!.state).toBe("queued");
-    expect(store.getJob(jobId)!.retry_count).toBe(1);
-    expect(store.listReviewerRuns(jobId)[0].state).toBe("done");
+    expect(store.retryFailedReviewers(jobId)).toEqual({ ok: false, error: "reviewer run state changed — retry aborted" });
+    expect(store.getJob(jobId)!.state).toBe("failed");
+    expect(store.getJob(jobId)!.retry_count).toBe(0);
+    // The sabotage write itself ran inside the transaction and rolls back too.
+    expect(store.listReviewerRuns(jobId)[0].state).toBe("failed");
   });
 
   it("logs and returns when the store read throws", () => {
