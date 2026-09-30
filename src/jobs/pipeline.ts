@@ -31,6 +31,7 @@ import { applyProfileToSpecs, enqueuePullJob, reviewerSpecs } from "./enqueue.js
 import type { ProfileDefinition } from "../config-revisions.js";
 import {
   fallbackAggregator,
+  capMissingTestSeverity,
   parseAggregatorResult,
   parseBriefResult,
   parseReviewerResult,
@@ -1673,11 +1674,12 @@ async function runStackCumulativeRun(
         signal,
       });
       const parsed = parseReviewerResult(result.text || result.stdout, "stack_cumulative");
+      const calibrated = { ...parsed, findings: capMissingTestSeverity(parsed.findings) };
       if (run) {
         deps.store.patchReviewer(run.id, {
           state: "done",
           raw_output: truncate(result.text || result.stdout, 200_000),
-          normalized_json: JSON.stringify(parsed, null, 2),
+          normalized_json: JSON.stringify(calibrated, null, 2),
           stdout: truncate(result.stdout, 80_000),
           stderr: truncate(result.stderr, 20_000),
           exit_code: result.exitCode,
@@ -1687,8 +1689,8 @@ async function runStackCumulativeRun(
           validation_error: null,
         });
       }
-      deps.store.log(job.id, `Stack cumulative done: ${parsed.findings.length} cross-PR finding(s)`, "info", run?.id);
-      return parsed;
+      deps.store.log(job.id, `Stack cumulative done: ${calibrated.findings.length} cross-PR finding(s)`, "info", run?.id);
+      return calibrated;
     } catch (error) {
       lastError = formatError(error);
       if (run) {
@@ -1861,7 +1863,7 @@ async function routeSpecialists(
     return {
       id,
       title: configured?.title ?? builtIn?.title ?? custom?.title ?? id,
-      description: custom?.description || undefined,
+      description: custom?.description ? custom.description.slice(0, 500) : undefined,
     };
   });
 

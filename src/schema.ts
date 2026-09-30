@@ -220,21 +220,44 @@ export function parseReviewerResult(
 }
 
 const ADVISORY_TEST_COVERAGE_RE =
-  /\b(untested|missing tests?|no tests?( coverage)?|test coverage|without (a )?tests?|add (a |an )?tests?|lacks? tests?)\b/i;
+  /\b(untested|missing tests?|no tests?( coverage)?|test coverage|coverage gap|uncovered (path|branch|case)|without (a )?tests?|add (a |an )?tests?|lacks? tests?)\b/i;
 
 function isMissingTestCoverageClaim(finding: {
   category?: string;
   summary: string;
   body?: string;
+  reason?: string;
+  reviewer?: string;
   reviewers_agreed?: string[];
 }): boolean {
   const category = (finding.category ?? "").toLowerCase();
-  const testOwned = category === "tests" || category.startsWith("test") || (finding.reviewers_agreed ?? []).includes("tests");
-  return testOwned && ADVISORY_TEST_COVERAGE_RE.test(`${finding.summary}\n${finding.body ?? ""}`);
+  const testOwned =
+    category === "tests" ||
+    category.startsWith("test") ||
+    finding.reviewer === "tests" ||
+    (finding.reviewers_agreed ?? []).includes("tests");
+  // A coverage-shaped summary is strong enough for stack_cumulative, whose
+  // schema requires category="cross_pr". Prose-only matches still require a
+  // tests-owned category/role so a real security defect that merely mentions
+  // missing regression coverage is not severity-capped.
+  return (
+    ADVISORY_TEST_COVERAGE_RE.test(finding.summary) ||
+    (testOwned && ADVISORY_TEST_COVERAGE_RE.test(`${finding.body ?? ""}\n${finding.reason ?? ""}`))
+  );
 }
 
 /** Deterministic backstop: missing coverage alone can never survive aggregation as high/blocker. */
-export function capMissingTestSeverity(findings: AggregatorFinding[]): AggregatorFinding[] {
+export function capMissingTestSeverity<
+  T extends {
+    severity: Severity;
+    category?: string;
+    summary: string;
+    body?: string;
+    reason?: string;
+    reviewer?: string;
+    reviewers_agreed?: string[];
+  },
+>(findings: T[]): T[] {
   return findings.map((finding) =>
     (finding.severity === "blocker" || finding.severity === "high") && isMissingTestCoverageClaim(finding)
       ? { ...finding, severity: "medium" }

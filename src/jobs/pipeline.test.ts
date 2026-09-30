@@ -5642,8 +5642,8 @@ describe("stack reviews (issue #99)", () => {
                 category: "cross_pr",
                 file: "example.ts",
                 line: 1,
-                summary: "#41 removes the helper #42 calls",
-                reason: "#42's diff still invokes the symbol deleted in #41",
+                summary: "Uncovered path when #41 changes the helper #42 calls",
+                reason: "The stack needs a regression test for the changed cross-PR contract",
               },
             ],
           })
@@ -5687,9 +5687,10 @@ describe("stack reviews (issue #99)", () => {
     expect(issueComments.every((c) => c.pullNumber === 42)).toBe(true);
     expect(issueComments[0]?.body).toContain('Stack review "s1"');
     expect(issueComments[0]?.body).toContain("#41@h41");
-    expect(issueComments.some((c) => /Cross-PR finding \(high\).*#41 removes the helper #42 calls/s.test(c.body))).toBe(true);
+    expect(issueComments.some((c) => /Cross-PR finding \(medium\).*Uncovered path when #41 changes the helper #42 calls/s.test(c.body))).toBe(true);
     const cumulative = store.listReviewerRuns(stack.job.id).find((r) => r.role === "stack_cumulative");
     expect(cumulative?.state).toBe("done");
+    expect(JSON.parse(cumulative?.normalized_json ?? "{}").findings[0]?.severity).toBe("medium");
   });
 
   it("routes member jobs through the router, not a preselected reviewer set", async () => {

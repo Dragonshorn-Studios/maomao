@@ -220,13 +220,22 @@ describe("advisory missing-test coalesce", () => {
           confidence: 0.9,
           category: "security",
           summary: "Authorization bypass is reachable",
-          body: "The changed guard permits anonymous writes.",
+          body: "The changed guard permits anonymous writes; regression coverage is also missing.",
           reviewers_agreed: ["security"],
+        },
+        {
+          severity: "blocker",
+          confidence: 0.9,
+          category: "cross_pr",
+          summary: "Uncovered path in the stack publish flow",
+          body: "Add a stack regression test.",
+          reviewers_agreed: ["stack_cumulative"],
         },
       ],
     }));
     expect(parsed.findings[0]?.severity).toBe("medium");
     expect(parsed.findings[1]?.severity).toBe("high");
+    expect(parsed.findings[2]?.severity).toBe("medium");
 
     const fallback = fallbackAggregator([{
       schema_version: 1,

@@ -200,4 +200,32 @@ describe("poison-alert policy", () => {
     expect(merged.findings).toHaveLength(0);
     expect(findingsMeetThreshold(withIds, "high")).toBe(true);
   });
+
+  it("caps missing-test severity from the poison-alert reconciliation path", () => {
+    const first = {
+      schema_version: 1 as const,
+      verdict: "clean" as const,
+      summary: "first",
+      findings: [],
+    };
+    const merged = mergeInternalEscalation(first, {
+      schema_version: 1,
+      confirmed: true,
+      alert_cleared: false,
+      summary: "lab",
+      findings: [
+        {
+          id: "F1",
+          severity: "blocker",
+          confidence: 0.9,
+          category: "tests",
+          summary: "Coverage gap in the publish path",
+          body: "Add a regression test.",
+          reviewers_agreed: ["tests"],
+        },
+      ],
+      rejected_finding_ids: [],
+    });
+    expect(merged.findings[0]?.severity).toBe("medium");
+  });
 });
