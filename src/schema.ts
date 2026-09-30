@@ -220,7 +220,7 @@ export function parseReviewerResult(
 }
 
 const ADVISORY_TEST_COVERAGE_RE =
-  /\b(untested|missing tests?|no tests?( coverage)?|test coverage|coverage gap|uncovered (path|branch|case)|without (a )?tests?|add (a |an )?tests?|lacks? tests?)\b/i;
+  /\b(untested|missing (tests?|regression coverage)|no (tests?( coverage)?|regression coverage)|test coverage|coverage gap|uncovered (path|branch|case)|not covered by (a )?tests?|without (a )?tests?|add (a |an )?tests?|needs? (a )?(regression )?tests?|lacks?( (of )?(test|regression) coverage| tests?))\b/i;
 
 function isMissingTestCoverageClaim(finding: {
   category?: string;

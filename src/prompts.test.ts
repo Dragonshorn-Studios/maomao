@@ -148,6 +148,8 @@ describe("default review prompts", () => {
     });
     expect(aggregator).toContain("UNTRUSTED USER TEXT");
     expect(aggregator).toContain(digest);
+    expect(aggregator).toContain("UNTRUSTED_GITHUB_DISCUSSION");
+    expect(aggregator).toContain("END_UNTRUSTED_GITHUB_DISCUSSION");
   });
 });
 

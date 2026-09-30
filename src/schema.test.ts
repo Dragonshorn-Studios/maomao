@@ -231,11 +231,20 @@ describe("advisory missing-test coalesce", () => {
           body: "Add a stack regression test.",
           reviewers_agreed: ["stack_cumulative"],
         },
+        {
+          severity: "high",
+          confidence: 0.9,
+          category: "cross_pr",
+          summary: "Publish handoff is not covered by tests",
+          body: "Add a stack regression test.",
+          reviewers_agreed: ["stack_cumulative"],
+        },
       ],
     }));
     expect(parsed.findings[0]?.severity).toBe("medium");
     expect(parsed.findings[1]?.severity).toBe("high");
     expect(parsed.findings[2]?.severity).toBe("medium");
+    expect(parsed.findings[3]?.severity).toBe("medium");
 
     const fallback = fallbackAggregator([{
       schema_version: 1,
