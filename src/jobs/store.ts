@@ -1518,11 +1518,21 @@ export class JobStore {
       const { changes } = this.db
         .prepare(`UPDATE jobs SET ${assignments.join(", ")} WHERE id = ? AND state = ?`)
         .run(...values, id, current.state);
+      if (changes === 0) {
+        // Same warn as the refused-transition path: a raced state change must
+        // be visible in the job log, not silently dropped.
+        try {
+          this.log(id, `Ignored state transition ${current.state} -> ${targetState}: job state changed concurrently`, "warn");
+        } catch (error) {
+          console.error(`store: could not log raced transition for job ${id}: ${error instanceof Error ? error.message : String(error)}`);
+        }
+        return undefined;
+      }
       // `written` is the exact post-transition row: passing it to emission
       // keeps the emitted line atomic with the transition instead of
       // re-reading after commit (a re-entrant publish subscriber or a
       // hypothetical second writer could mutate the row in between).
-      return changes === 1 ? { pre: current, target: targetState, written: { ...current, ...fields } as JobRow } : undefined;
+      return { pre: current, target: targetState, written: { ...current, ...fields } as JobRow };
     }).immediate();
     if (!transition) return;
     // Also settles delegated stack-member coverage: a covered member on a

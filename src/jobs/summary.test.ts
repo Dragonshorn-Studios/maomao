@@ -275,6 +275,16 @@ describe("buildJobSummary", () => {
     expect(payload.usage_complete).toBe(false);
   });
 
+  it("keeps usage_complete true when stages report complete usage (1)", () => {
+    const store = makeStore();
+    const jobId = seedJob(store);
+    store.patchJob(jobId, { routing_usage_complete: 1, aggregator_usage_complete: 1, internal_escalation_usage_complete: 1 });
+    const run = store.listReviewerRuns(jobId)[0];
+    store.patchReviewer(run.id, { usage_complete: 1 });
+    const payload = buildJobSummary(store.getJob(jobId)!, store.listReviewerRuns(jobId));
+    expect(payload.usage_complete).toBe(true);
+  });
+
   it.each([0, 1, null] as const)("usage_complete mirrors the UI's jobMetricsFromRuns rollup (run flag %s)", (flag) => {
     const store = makeStore();
     const jobId = seedJob(store);
@@ -446,6 +456,19 @@ describe("emitJobSummary", () => {
       expect.objectContaining({ job_id: live, state: "cancelled", usage_complete: false }),
       expect.objectContaining({ job_id: queued, state: "cancelled", usage_complete: true }),
     ]);
+  });
+
+  it("emits attempt 2 on a cancel of a requeued job", () => {
+    setJobSummarySink(capture);
+    const store = makeStore();
+    const jobId = seedJob(store);
+    const run = store.listReviewerRuns(jobId)[0];
+    store.patchReviewer(run.id, { state: "failed" });
+    store.setJobState(jobId, "failed");
+    lines.length = 0;
+    expect(store.retryFailedReviewers(jobId)).toEqual({ ok: true, reset: 1 });
+    store.cancelJobs({ jobId }, "manual_cancel", null);
+    expect(payloadLines().map((p) => [p.state, p.attempt])).toEqual([["cancelled", 2]]);
   });
 
   it("does not re-emit when the same job is cancelled twice", () => {
