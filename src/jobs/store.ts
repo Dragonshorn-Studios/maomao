@@ -533,6 +533,7 @@ export class JobStore {
           staleRows.set(row.id, row);
         }
       }
+      this.retireReviewerRuns(staleJobIds, "stale");
 
       const existing = this.db
         .prepare(
@@ -1034,7 +1035,9 @@ export class JobStore {
           : [],
       );
       // Only rows the guarded UPDATE actually transitioned get aborted/emitted.
-      return stale.filter((row) => staledIds.has(row.id));
+      const transitioned = stale.filter((row) => staledIds.has(row.id));
+      this.retireReviewerRuns(transitioned.map((row) => row.id), "stale");
+      return transitioned;
     }).immediate();
     const ids = rows.map((r) => r.id);
     for (const row of rows) {
@@ -1355,39 +1358,12 @@ export class JobStore {
     return rows.map((row) => row.repo_full_name);
   }
 
-  /**
-   * Every reviewer run with the job that owns it — the /reviewers board.
-   * Active runs (queued/running) sort ahead of finished ones, newest first
-   * inside each group. `stack_job_id` links a member job's run to the
-   * stack_review it was launched from.
-   */
-  listReviewerRunBoard(limit = 200): Array<
-    ReviewerRunRow & {
-      job_state: JobState;
-      job_type: JobRow["job_type"];
-      forge_provider: string;
-      provider_instance: string;
-      repo_full_name: string;
-      pr_number: number;
-      pr_title: string;
-      head_sha: string;
-      review_mode: JobRow["review_mode"];
-      stack_job_id: number | null;
-    }
-  > {
-    const bounded = Math.min(Math.max(1, limit), 1000);
-    return this.db
-      .prepare(
-        `SELECT r.*, j.state AS job_state, j.job_type, j.provider AS forge_provider, j.provider_instance,
-                j.repo_full_name, j.pr_number, j.pr_title, j.head_sha, j.review_mode,
-                m.job_id AS stack_job_id
-         FROM reviewer_runs r
-         JOIN jobs j ON j.id = r.job_id
-         LEFT JOIN stack_run_members m ON m.member_job_id = j.id
-         ORDER BY CASE WHEN r.state IN ('queued', 'running') THEN 0 ELSE 1 END, r.id DESC
-         LIMIT ?`,
-      )
-      .all(bounded) as Array<
+  /** The /reviewers board: specialist runs joined to their owning job (and
+   * stack membership via `stack_job_id`), active runs first — newest inside
+   * each group — optionally filtered by run state. Paged by offset;
+   * `total` is the filtered row count for page links. */
+  listReviewerRunBoard(input?: { state?: ReviewerState; offset?: number; limit?: number }): {
+    rows: Array<
       ReviewerRunRow & {
         job_state: JobState;
         job_type: JobRow["job_type"];
@@ -1401,6 +1377,42 @@ export class JobStore {
         stack_job_id: number | null;
       }
     >;
+    total: number;
+  } {
+    const bounded = Math.min(Math.max(1, input?.limit ?? 50), 500);
+    const offset = Math.max(0, input?.offset ?? 0);
+    const where = input?.state ? `WHERE r.state = ?` : "";
+    const params = input?.state ? [input.state] : [];
+    const { total } = this.db
+      .prepare(`SELECT COUNT(*) AS total FROM reviewer_runs r ${where}`)
+      .get(...params) as { total: number };
+    const rows = this.db
+      .prepare(
+        `SELECT r.*, j.state AS job_state, j.job_type, j.provider AS forge_provider, j.provider_instance,
+                j.repo_full_name, j.pr_number, j.pr_title, j.head_sha, j.review_mode,
+                (SELECT m.job_id FROM stack_run_members m WHERE m.member_job_id = j.id
+                 ORDER BY m.id DESC LIMIT 1) AS stack_job_id
+         FROM reviewer_runs r
+         JOIN jobs j ON j.id = r.job_id
+         ${where}
+         ORDER BY CASE WHEN r.state IN ('queued', 'running') THEN 0 ELSE 1 END, r.id DESC
+         LIMIT ? OFFSET ?`,
+      )
+      .all(...params, bounded, offset) as Array<
+      ReviewerRunRow & {
+        job_state: JobState;
+        job_type: JobRow["job_type"];
+        forge_provider: string;
+        provider_instance: string;
+        repo_full_name: string;
+        pr_number: number;
+        pr_title: string;
+        head_sha: string;
+        review_mode: JobRow["review_mode"];
+        stack_job_id: number | null;
+      }
+    >;
+    return { rows, total };
   }
 
   /**
@@ -1528,6 +1540,8 @@ export class JobStore {
         }
         return undefined;
       }
+      // Dead jobs retire their live runs so the /reviewers queue stays honest.
+      if (targetState === "stale" || targetState === "cancelled") this.retireReviewerRuns([id], targetState);
       // `written` is the exact post-transition row: passing it to emission
       // keeps the emitted line atomic with the transition instead of
       // re-reading after commit (a re-entrant publish subscriber or a
@@ -1579,7 +1593,8 @@ export class JobStore {
    * Moves every matching non-terminal job to `cancelled` and returns the ids
    * that actually transitioned: a SELECT snapshots pre-transition states for
    * the terminal-summary emission, then a guarded UPDATE (still matching on
-   * active states) performs the transition. Idempotent by construction:
+   * active states) performs the transition and retires their live reviewer
+   * runs to `cancelled` — all in one transaction. Idempotent by construction:
    * terminal jobs (completed, failed, stale, already cancelled) never match,
    * so a duplicate merge webhook is a no-op. The where-union makes an
    * unfiltered database-wide cancellation unrepresentable.
@@ -1636,6 +1651,7 @@ export class JobStore {
            RETURNING id`,
         )
         .all(reason, actor, now, now, ...whereValues) as { id: number }[];
+      this.retireReviewerRuns(updated.map((row) => row.id), "cancelled");
       return { preStates: snapshot, rows: updated };
     }).immediate();
     for (const row of rows) this.resolveStackMemberCoverage(row.id, "cancelled");
@@ -1788,9 +1804,31 @@ export class JobStore {
     return { ok: true, reset: resetCount };
   }
 
+  /** Moves queued/running specialist runs to the terminal `stale`/`cancelled`
+   * state of their owning job so a dead job's runs stop masquerading as
+   * queued work on the /reviewers board. Runs already done/failed keep their
+   * recorded outcome. */
+  retireReviewerRuns(jobIds: number[], state: "stale" | "cancelled"): number {
+    if (jobIds.length === 0) return 0;
+    const marks = jobIds.map(() => "?").join(",");
+    return this.db
+      .prepare(
+        `UPDATE reviewer_runs SET state = ?, finished_at = COALESCE(finished_at, ?)
+         WHERE job_id IN (${marks}) AND state IN ('queued', 'running')`,
+      )
+      .run(state, nowIso(), ...jobIds).changes;
+  }
+
   patchReviewer(id: number, extra: Partial<ReviewerRunRow>): void {
     const current = this.getReviewerRun(id);
     if (!current) return;
+    // `stale`/`cancelled` are one-way run states, mirroring the job rule: a
+    // late pipeline write must not resurrect a run retired with its job. The
+    // rest of the write still lands so a model call that finished after its
+    // job died keeps its recorded output and token/cost accounting.
+    if ((current.state === "stale" || current.state === "cancelled") && extra.state !== undefined && extra.state !== current.state) {
+      delete extra.state;
+    }
     const columns: string[] = [];
     const values: unknown[] = [];
     for (const [key, value] of Object.entries(extra)) {
@@ -1827,11 +1865,16 @@ export class JobStore {
   }
 
   ensureReviewerRuns(jobId: number, reviewers: { role: string; title: string; model?: string }[]): void {
+    // Runs created after the job died must inherit its terminal state — a
+    // 'queued' insert here would land on the board as work that can never run.
+    const job = this.getJob(jobId);
+    const state = job && (job.state === "stale" || job.state === "cancelled") ? job.state : "queued";
     const insert = this.db.prepare(
-      `INSERT OR IGNORE INTO reviewer_runs (job_id, role, title, model, state) VALUES (?, ?, ?, ?, 'queued')`,
+      `INSERT OR IGNORE INTO reviewer_runs (job_id, role, title, model, state, finished_at) VALUES (?, ?, ?, ?, ?, ?)`,
     );
+    const stamp = state === "queued" ? null : nowIso();
     for (const reviewer of reviewers) {
-      insert.run(jobId, reviewer.role, reviewer.title, reviewer.model ?? null);
+      insert.run(jobId, reviewer.role, reviewer.title, reviewer.model ?? null, state, stamp);
     }
     publish({ type: "job", jobId });
   }

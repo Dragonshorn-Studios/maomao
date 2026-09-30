@@ -850,13 +850,24 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
   });
 
   // Specialist-run board: every reviewer run with the review or stack job it
-  // belongs to, active runs first.
+  // belongs to, active runs first — status-filtered, 50 per page.
   app.get("/reviewers", (c) => {
+    const RUN_STATES = ["queued", "running", "done", "failed", "stale", "cancelled"] as const;
+    const rawState = c.req.query("state");
+    const state = RUN_STATES.includes(rawState as (typeof RUN_STATES)[number])
+      ? (rawState as (typeof RUN_STATES)[number])
+      : undefined;
+    const pageSize = 50;
+    const rawPage = Math.floor(Number(c.req.query("page")));
+    const page = Number.isSafeInteger(rawPage) && rawPage >= 1 ? Math.min(rawPage, 10_000) : 1;
+    const board = ctx.store.listReviewerRunBoard({ state, offset: (page - 1) * pageSize, limit: pageSize });
     return c.html(
-      renderReviewerBoard(ctx.store.listReviewerRunBoard(), {
+      renderReviewerBoard(board.rows, {
         ...pageOpts,
         identity: c.get("identity"),
         csrfToken: gateOn ? ensureCsrfToken(c, ctx.config.uiSessionSecret) : undefined,
+        runFilters: { state },
+        runPagination: { page, pageSize, total: board.total },
       }),
     );
   });

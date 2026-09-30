@@ -1997,8 +1997,10 @@ describe("review job list filters, nested stack members, and reviewer board", ()
 
   it("lists reviewer runs on the board with the owning job and stack membership", () => {
     const { store, members } = stackFixture();
-    const rows = store.listReviewerRunBoard();
+    const board = store.listReviewerRunBoard();
     // Two member-job runs plus the stack's own cumulative run.
+    expect(board.total).toBe(3);
+    const rows = board.rows;
     expect(rows).toHaveLength(3);
     expect(rows.filter((row) => row.stack_job_id != null)).toHaveLength(2);
     const html = renderReviewerBoard(rows, {});
@@ -2007,5 +2009,95 @@ describe("review job list filters, nested stack members, and reviewer board", ()
     expect(html).toMatch(/member of stack \d+/);
     expect(html).toContain("verify-first");
     expect(members).toHaveLength(2);
+  });
+
+  it("filters the reviewer board by run state and pages", () => {
+    const { store } = stackFixture();
+    // Flip one member run to running so the state filter has something to find.
+    const memberJob = store.listJobs(10).find((job) => job.job_type === "pr_review")!;
+    store.patchReviewer(store.listReviewerRuns(memberJob.id)[0]!.id, { state: "running" });
+
+    const running = store.listReviewerRunBoard({ state: "running" });
+    expect(running.total).toBe(1);
+    expect(running.rows[0]?.state).toBe("running");
+    // Page 2 of page-size 2 holds the last row.
+    const paged = store.listReviewerRunBoard({ offset: 2, limit: 2 });
+    expect(paged.rows).toHaveLength(1);
+    expect(paged.total).toBe(3);
+    // Filter + offset together exercises the params ordering in the SQL.
+    const queuedSecond = store.listReviewerRunBoard({ state: "queued", offset: 1, limit: 1 });
+    expect(queuedSecond.rows).toHaveLength(1);
+    expect(queuedSecond.total).toBe(2);
+    // Limit clamps to [1, 500].
+    expect(store.listReviewerRunBoard({ limit: 0 }).rows).toHaveLength(1);
+    expect(store.listReviewerRunBoard({ limit: 999 }).rows).toHaveLength(3);
+    // A member job linked from two stack rows stays a single board row,
+    // attributed to the newest stack membership.
+    const stack2 = store.enqueue({
+      repoFullName: "acme/widgets",
+      repoOwner: "acme",
+      repoName: "widgets",
+      installationId: 9,
+      prNumber: 45,
+      prTitle: "second stack",
+      prBody: "",
+      prHtmlUrl: "",
+      prAuthor: "alice",
+      baseSha: "b45",
+      headSha: "h45",
+      baseRef: "main",
+      headRef: "feat-c",
+      reviewers: [{ role: "stack_cumulative", title: "Stack cumulative" }],
+      jobType: "stack_review",
+      dedupKey: "stack:s2",
+    }).job;
+    store.insertStackMembers(stack2.id, [
+      { position: 1, prNumber: 42, baseRef: "feat-a", headRef: "feat-b", baseSha: "h41", headSha: "h42" },
+    ]);
+    const newMember = store.listStackMembers(stack2.id)[0]!;
+    store.patchStackMember(newMember.id, { memberJobId: memberJob.id });
+    const dup = store.listReviewerRunBoard({ limit: 10 });
+    expect(dup.rows.filter((row) => row.job_id === memberJob.id)).toHaveLength(1);
+    expect(dup.rows.find((row) => row.job_id === memberJob.id)?.stack_job_id).toBe(stack2.id);
+    expect(dup.rows).toHaveLength(dup.total);
+
+    const html = renderReviewerBoard(running.rows, {
+      runFilters: { state: "running" },
+      runPagination: { page: 2, pageSize: 1, total: 3 },
+    });
+    expect(html).toContain('value="running" selected');
+    expect(html).toContain("/reviewers?page=1&amp;state=running");
+    expect(html).toContain("/reviewers?page=3&amp;state=running");
+    expect(html).toContain("Page 2 / 3");
+
+    const unfiltered = renderReviewerBoard(running.rows, {
+      runPagination: { page: 1, pageSize: 1, total: 3 },
+    });
+    expect(unfiltered).toContain("/reviewers?page=2\"");
+    expect(unfiltered).not.toContain("state=");
+
+    const empty = renderReviewerBoard([], { runFilters: { state: "failed" } });
+    expect(empty).toContain("No reviewer runs with status failed");
+
+    const outOfRange = renderReviewerBoard([], { runPagination: { page: 5, pageSize: 50, total: 60 } });
+    expect(outOfRange).toContain("beyond the last page");
+    expect(outOfRange).toContain("/reviewers?page=2");
+
+    // Exact page-size multiple: the last page gets no Older link.
+    const exactLast = renderReviewerBoard(running.rows, {
+      runPagination: { page: 2, pageSize: 50, total: 100 },
+    });
+    expect(exactLast).toContain("Page 2 / 2");
+    expect(exactLast).not.toContain("Older runs");
+
+    // Terminal run states filter at the store level and show their labels.
+    store.setJobState(memberJob.id, "stale");
+    const stale = store.listReviewerRunBoard({ state: "stale" });
+    expect(stale.total).toBe(1);
+    expect(stale.rows[0]?.state).toBe("stale");
+    const staleHtml = renderReviewerBoard(stale.rows, { runFilters: { state: "stale" } });
+    expect(staleHtml).toContain('value="stale" selected');
+    expect(staleHtml).toContain(">Stale</option>");
+    expect(staleHtml).toContain(">Cancelled</option>");
   });
 });

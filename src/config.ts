@@ -29,7 +29,7 @@ export type JobState =
   | "stale"
   | "cancelled";
 
-export type ReviewerState = "queued" | "running" | "done" | "failed";
+export type ReviewerState = "queued" | "running" | "done" | "failed" | "stale" | "cancelled";
 
 /** Terminal states: a job reaching one never transitions again. */
 export const TERMINAL_JOB_STATES: readonly JobState[] = ["completed", "failed", "stale", "cancelled"];
