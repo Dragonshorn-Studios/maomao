@@ -564,23 +564,95 @@ describe("repo pauses and stack state (issue #99)", () => {
     expect(store.getJob(first.id)?.state).toBe("stale");
     expect(store.listReviewerRuns(first.id)[0]?.state).toBe("stale");
 
-    // Cancellation does the same.
+    // Cancellation does the same — including its one-way guard on late writes.
     expect(store.cancelJobs({ jobId: second.job.id }, "manual_cancel", null)).toEqual([second.job.id]);
-    expect(store.listReviewerRuns(second.job.id)[0]?.state).toBe("cancelled");
+    const secondRun = store.listReviewerRuns(second.job.id)[0]!;
+    expect(secondRun.state).toBe("cancelled");
+    store.patchReviewer(secondRun.id, { state: "done" });
+    expect(store.getReviewerRun(secondRun.id)?.state).toBe("cancelled");
 
     // setJobState-driven staleness (the pipeline's own path) too.
     const third = store.enqueue(jobInput(43, "h1")).job;
     store.setJobState(third.id, "stale");
     const thirdRun = store.listReviewerRuns(third.id)[0]!;
     expect(thirdRun.state).toBe("stale");
-    // Terminal run states are one-way: a late pipeline write cannot move them.
-    store.patchReviewer(thirdRun.id, { state: "done" });
-    expect(store.getReviewerRun(thirdRun.id)?.state).toBe("stale");
+    // Terminal run states are one-way: a late pipeline write cannot move them,
+    // but its non-state fields still land so a run that finished after its job
+    // died keeps its recorded output and token/cost accounting.
+    store.patchReviewer(thirdRun.id, { state: "done", cost: 0.5, total_tokens: 42 });
+    const thirdPatched = store.getReviewerRun(thirdRun.id)!;
+    expect(thirdPatched.state).toBe("stale");
+    expect(thirdPatched.cost).toBe(0.5);
+    expect(thirdPatched.total_tokens).toBe(42);
+
+    // Runs created after the job died (the pipeline can still be inside
+    // routeSpecialists when a push stales it) inherit the terminal state
+    // instead of reappearing as queued on the board.
+    store.ensureReviewerRuns(third.id, [{ role: "security", title: "Security" }]);
+    const lateRun = store.listReviewerRuns(third.id).find((r) => r.role === "security")!;
+    expect(lateRun.state).toBe("stale");
+    expect(lateRun.finished_at).toBeTruthy();
+
+    // The repo+PR-scoped cancel variant retires runs like the { jobId } one.
+    const fifth = store.enqueue(jobInput(45, "h1")).job;
+    expect(store.cancelJobs({ repoFullName: "acme/widgets", prNumber: 45 }, "manual_cancel", null)).toEqual([fifth.id]);
+    expect(store.listReviewerRuns(fifth.id)[0]?.state).toBe("cancelled");
 
     // Finished runs keep their recorded outcome when the job dies.
     const fourth = store.enqueue(jobInput(44, "h1")).job;
     store.patchReviewer(store.listReviewerRuns(fourth.id)[0]!.id, { state: "done" });
     store.cancelJobs({ jobId: fourth.id }, "manual_cancel", null);
     expect(store.listReviewerRuns(fourth.id)[0]?.state).toBe("done");
+  });
+
+  it("backfills orphaned live runs on dead jobs when the database opens", () => {
+    const dir = mkdtempSync(join(tmpdir(), "maomao-db-"));
+    const path = join(dir, "backfill.sqlite");
+    try {
+      const db = openDb(path);
+      const store = new JobStore(db);
+      const jobInput = (prNumber: number) => ({
+        repoFullName: "acme/widgets",
+        repoOwner: "acme",
+        repoName: "widgets",
+        installationId: 42,
+        prNumber,
+        prTitle: "t",
+        prBody: "",
+        prHtmlUrl: "u",
+        prAuthor: "alice",
+        baseSha: "b",
+        headSha: `h${prNumber}`,
+        baseRef: "main",
+        headRef: "feat",
+        reviewers: [{ role: "correctness", title: "Correctness" }],
+      });
+      const dead = store.enqueue(jobInput(1)).job;
+      const deadCancelled = store.enqueue(jobInput(2)).job;
+      const live = store.enqueue(jobInput(3)).job;
+      // Rewrite states directly, bypassing the runtime kill paths, so the rows
+      // look like a database written before terminal run states existed.
+      db.prepare("UPDATE jobs SET state = 'stale' WHERE id = ?").run(dead.id);
+      db.prepare("UPDATE jobs SET state = 'cancelled' WHERE id = ?").run(deadCancelled.id);
+      const insertRun = db.prepare("INSERT INTO reviewer_runs (job_id, role, title, state) VALUES (?, ?, ?, ?)");
+      insertRun.run(dead.id, "security", "Security", "queued");
+      insertRun.run(deadCancelled.id, "api", "API", "queued");
+      insertRun.run(dead.id, "tests", "Tests", "done");
+
+      const reopened = new JobStore(openDb(path));
+      const deadRuns = reopened.listReviewerRuns(dead.id);
+      const settled = deadRuns.find((r) => r.role === "security")!;
+      expect(settled.state).toBe("stale");
+      expect(settled.finished_at).toBeTruthy();
+      expect(deadRuns.find((r) => r.role === "correctness")?.state).toBe("stale");
+      // Done runs and live-job runs are untouched.
+      expect(deadRuns.find((r) => r.role === "tests")?.state).toBe("done");
+      const cancelledRuns = reopened.listReviewerRuns(deadCancelled.id);
+      expect(cancelledRuns).toHaveLength(2);
+      expect(cancelledRuns.every((r) => r.state === "cancelled")).toBe(true);
+      expect(reopened.listReviewerRuns(live.id).every((r) => r.state === "queued")).toBe(true);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });

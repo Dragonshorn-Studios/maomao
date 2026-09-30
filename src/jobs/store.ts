@@ -1459,9 +1459,9 @@ export class JobStore {
   }
 
   /**
-   * Atomically moves every matching non-terminal job to `cancelled` in a
-   * single UPDATE (implicit transaction) and returns the ids that actually
-   * transitioned. Idempotent by construction: terminal jobs (completed,
+   * Moves every matching non-terminal job to `cancelled` in a single UPDATE
+   * (implicit transaction) and returns the ids that actually transitioned,
+   * then retires their live reviewer runs to `cancelled` in a second UPDATE. Idempotent by construction: terminal jobs (completed,
    * failed, stale, already cancelled) never match, so a duplicate merge
    * webhook is a no-op. The where-union makes an unfiltered database-wide
    * cancellation unrepresentable.
@@ -1643,9 +1643,11 @@ export class JobStore {
     const current = this.getReviewerRun(id);
     if (!current) return;
     // `stale`/`cancelled` are one-way run states, mirroring the job rule: a
-    // late pipeline write must not resurrect a run retired with its job.
+    // late pipeline write must not resurrect a run retired with its job. The
+    // rest of the write still lands so a model call that finished after its
+    // job died keeps its recorded output and token/cost accounting.
     if ((current.state === "stale" || current.state === "cancelled") && extra.state !== undefined && extra.state !== current.state) {
-      return;
+      delete extra.state;
     }
     const columns: string[] = [];
     const values: unknown[] = [];
@@ -1683,11 +1685,16 @@ export class JobStore {
   }
 
   ensureReviewerRuns(jobId: number, reviewers: { role: string; title: string; model?: string }[]): void {
+    // Runs created after the job died must inherit its terminal state — a
+    // 'queued' insert here would land on the board as work that can never run.
+    const job = this.getJob(jobId);
+    const state = job && (job.state === "stale" || job.state === "cancelled") ? job.state : "queued";
     const insert = this.db.prepare(
-      `INSERT OR IGNORE INTO reviewer_runs (job_id, role, title, model, state) VALUES (?, ?, ?, ?, 'queued')`,
+      `INSERT OR IGNORE INTO reviewer_runs (job_id, role, title, model, state, finished_at) VALUES (?, ?, ?, ?, ?, ?)`,
     );
+    const stamp = state === "queued" ? null : nowIso();
     for (const reviewer of reviewers) {
-      insert.run(jobId, reviewer.role, reviewer.title, reviewer.model ?? null);
+      insert.run(jobId, reviewer.role, reviewer.title, reviewer.model ?? null, state, stamp);
     }
     publish({ type: "job", jobId });
   }
