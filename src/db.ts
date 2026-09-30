@@ -597,6 +597,17 @@ function migrate(db: SqliteDb): void {
       ["diff_note", "TEXT"],
     ];
     for (const [name, ddl] of findingColumns) ensureColumn(db, "findings", name, ddl);
+
+    // Backfill: runs predating reviewer-run terminal states stayed 'queued'
+    // on dead jobs forever — settle them to their job's outcome (idempotent).
+    db.exec(`
+    UPDATE reviewer_runs SET state = 'stale'
+    WHERE state IN ('queued', 'running')
+      AND job_id IN (SELECT id FROM jobs WHERE state = 'stale');
+    UPDATE reviewer_runs SET state = 'cancelled'
+    WHERE state IN ('queued', 'running')
+      AND job_id IN (SELECT id FROM jobs WHERE state = 'cancelled');
+  `);
   } finally {
     db.pragma("foreign_keys = ON");
     db.pragma("legacy_alter_table = OFF");

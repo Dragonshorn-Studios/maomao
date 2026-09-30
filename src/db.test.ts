@@ -537,4 +537,50 @@ describe("repo pauses and stack state (issue #99)", () => {
     expect(store.getJob(live.job.id)?.state).toBe("completed");
     expect(store.getJob(live.job.id)?.dedup_key).toBe(`stack-retired:${live.job.id}`);
   });
+
+  it("retires live reviewer runs to their job's stale/cancelled outcome", () => {
+    const store = new JobStore(openDb(":memory:"));
+    const jobInput = (prNumber: number, headSha: string) => ({
+      repoFullName: "acme/widgets",
+      repoOwner: "acme",
+      repoName: "widgets",
+      installationId: 42,
+      prNumber,
+      prTitle: "t",
+      prBody: "",
+      prHtmlUrl: "u",
+      prAuthor: "alice",
+      baseSha: "b",
+      headSha,
+      baseRef: "main",
+      headRef: "feat",
+      reviewers: [{ role: "correctness", title: "Correctness" }],
+    });
+
+    // The enqueue stale sweep retires the superseded job's runs.
+    const first = store.enqueue(jobInput(42, "h1")).job;
+    const second = store.enqueue(jobInput(42, "h2"));
+    expect(second.staleJobIds).toEqual([first.id]);
+    expect(store.getJob(first.id)?.state).toBe("stale");
+    expect(store.listReviewerRuns(first.id)[0]?.state).toBe("stale");
+
+    // Cancellation does the same.
+    expect(store.cancelJobs({ jobId: second.job.id }, "manual_cancel", null)).toEqual([second.job.id]);
+    expect(store.listReviewerRuns(second.job.id)[0]?.state).toBe("cancelled");
+
+    // setJobState-driven staleness (the pipeline's own path) too.
+    const third = store.enqueue(jobInput(43, "h1")).job;
+    store.setJobState(third.id, "stale");
+    const thirdRun = store.listReviewerRuns(third.id)[0]!;
+    expect(thirdRun.state).toBe("stale");
+    // Terminal run states are one-way: a late pipeline write cannot move them.
+    store.patchReviewer(thirdRun.id, { state: "done" });
+    expect(store.getReviewerRun(thirdRun.id)?.state).toBe("stale");
+
+    // Finished runs keep their recorded outcome when the job dies.
+    const fourth = store.enqueue(jobInput(44, "h1")).job;
+    store.patchReviewer(store.listReviewerRuns(fourth.id)[0]!.id, { state: "done" });
+    store.cancelJobs({ jobId: fourth.id }, "manual_cancel", null);
+    expect(store.listReviewerRuns(fourth.id)[0]?.state).toBe("done");
+  });
 });

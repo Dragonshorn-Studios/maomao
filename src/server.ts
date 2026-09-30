@@ -852,7 +852,7 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
   // Specialist-run board: every reviewer run with the review or stack job it
   // belongs to, active runs first — status-filtered, 50 per page.
   app.get("/reviewers", (c) => {
-    const RUN_STATES = ["queued", "running", "done", "failed"] as const;
+    const RUN_STATES = ["queued", "running", "done", "failed", "stale", "cancelled"] as const;
     const rawState = c.req.query("state");
     const state = RUN_STATES.includes(rawState as (typeof RUN_STATES)[number])
       ? (rawState as (typeof RUN_STATES)[number])

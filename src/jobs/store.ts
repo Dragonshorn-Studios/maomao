@@ -487,6 +487,7 @@ export class JobStore {
         staleJobIds.push(...stale.map((row) => row.id));
         for (const row of stale) this.resolveStackMemberCoverage(row.id, "stale");
       }
+      this.retireReviewerRuns(staleJobIds, "stale");
 
       const existing = this.db
         .prepare(
@@ -965,7 +966,9 @@ export class JobStore {
         `${stackDedupPrefix(escapeLike(stackId))}@%`,
         exceptDedupKey,
       ) as { id: number }[];
-    return rows.map((r) => r.id);
+    const ids = rows.map((r) => r.id);
+    this.retireReviewerRuns(ids, "stale");
+    return ids;
   }
 
   /** A stack counts as resolved once any stack_review job exists for it —
@@ -1434,6 +1437,8 @@ export class JobStore {
     const assignments = Object.keys(fields).map((column) => `${column} = ?`);
     const values = Object.keys(fields).map((column) => fields[column]);
     this.db.prepare(`UPDATE jobs SET ${assignments.join(", ")} WHERE id = ?`).run(...values, id);
+    // Dead jobs retire their live runs so the /reviewers queue stays honest.
+    if (state === "stale" || state === "cancelled") this.retireReviewerRuns([id], state);
     // Also settles delegated stack-member coverage: a covered member on a
     // finished run takes this job's outcome. No-ops for members of live
     // runs — the stack's own retry/reconcile logic owns those rows.
@@ -1503,8 +1508,10 @@ export class JobStore {
          RETURNING id`,
       )
       .all(...values) as { id: number }[];
+    const ids = rows.map((row) => row.id);
+    this.retireReviewerRuns(ids, "cancelled");
     for (const row of rows) this.resolveStackMemberCoverage(row.id, "cancelled");
-    return rows.map((row) => row.id);
+    return ids;
   }
 
   /**
@@ -1617,9 +1624,29 @@ export class JobStore {
     return { ok: true, reset: targets.length };
   }
 
+  /** Moves queued/running specialist runs to the terminal `stale`/`cancelled`
+   * state of their owning job so a dead job's runs stop masquerading as
+   * queued work on the /reviewers board. Runs already done/failed keep their
+   * recorded outcome. */
+  retireReviewerRuns(jobIds: number[], state: "stale" | "cancelled"): number {
+    if (jobIds.length === 0) return 0;
+    const marks = jobIds.map(() => "?").join(",");
+    return this.db
+      .prepare(
+        `UPDATE reviewer_runs SET state = ?, finished_at = COALESCE(finished_at, ?)
+         WHERE job_id IN (${marks}) AND state IN ('queued', 'running')`,
+      )
+      .run(state, nowIso(), ...jobIds).changes;
+  }
+
   patchReviewer(id: number, extra: Partial<ReviewerRunRow>): void {
     const current = this.getReviewerRun(id);
     if (!current) return;
+    // `stale`/`cancelled` are one-way run states, mirroring the job rule: a
+    // late pipeline write must not resurrect a run retired with its job.
+    if ((current.state === "stale" || current.state === "cancelled") && extra.state !== undefined && extra.state !== current.state) {
+      return;
+    }
     const columns: string[] = [];
     const values: unknown[] = [];
     for (const [key, value] of Object.entries(extra)) {
