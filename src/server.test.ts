@@ -581,6 +581,86 @@ describe("manual review trigger", () => {
     expect(store.getReviewerRun(run.id)?.state).toBe("queued");
   });
 
+  it("filters and paginates the /reviewers board", async () => {
+    const { app, store } = testApp();
+    const enqueueReview = (prNumber: number, roles: string[]) =>
+      store.enqueue({
+        repoFullName: "acme/widgets",
+        repoOwner: "acme",
+        repoName: "widgets",
+        installationId: 1,
+        prNumber,
+        prTitle: "Hello",
+        prBody: "",
+        prHtmlUrl: "https://example.test",
+        prAuthor: "dev",
+        baseSha: "b",
+        headSha: "h",
+        baseRef: "main",
+        headRef: "f",
+        reviewers: roles.map((role) => ({ role, title: role })),
+      });
+    const created = enqueueReview(8, ["correctness"]);
+    const run = store.listReviewerRuns(created.job.id)[0]!;
+    store.patchReviewer(run.id, { state: "running" });
+    // 54 more queued runs so the board spans two 50-per-page pages.
+    const roles = ["correctness", "security", "tests", "architecture", "api", "maintainer"];
+    for (let i = 0; i < 9; i += 1) enqueueReview(9 + i, roles);
+
+    const running = await app.request("/reviewers?state=running");
+    expect(running.status).toBe(200);
+    const runningHtml = await running.text();
+    expect(runningHtml).toContain('value="running" selected');
+    expect(runningHtml).toContain("run-row");
+
+    const missing = await app.request("/reviewers?state=failed");
+    expect(missing.status).toBe(200);
+    expect(await missing.text()).toContain("No reviewer runs with status failed");
+    const done = await app.request("/reviewers?state=done");
+    expect(done.status).toBe(200);
+    expect(await done.text()).toContain("No reviewer runs with status done");
+
+    // State and page combine: 54 queued runs still span two pages when filtered.
+    const queuedPage2 = await app.request("/reviewers?state=queued&page=2");
+    expect(queuedPage2.status).toBe(200);
+    const queuedPage2Html = await queuedPage2.text();
+    expect(queuedPage2Html).toContain("Page 2 / 2");
+    expect(queuedPage2Html).toContain('value="queued" selected');
+
+    // Unknown states degrade to the unfiltered board.
+    const bogus = await app.request("/reviewers?state=bogus");
+    expect(bogus.status).toBe(200);
+    const bogusHtml = await bogus.text();
+    expect(bogusHtml).toContain('value="" selected');
+    expect(bogusHtml).toContain("run-row");
+
+    const first = await app.request("/reviewers");
+    expect(first.status).toBe(200);
+    expect(await first.text()).toContain("Page 1 / 2");
+    const second = await app.request("/reviewers?page=2");
+    expect(second.status).toBe(200);
+    expect(await second.text()).toContain("Page 2 / 2");
+
+    // Non-numeric, non-finite, and non-positive page values land on page 1.
+    for (const bad of ["0", "-3", "abc", "Infinity", "1e999"]) {
+      const res = await app.request(`/reviewers?page=${bad}`);
+      expect(res.status).toBe(200);
+      expect(await res.text()).toContain("Page 1 / 2");
+    }
+
+    // A page beyond the total says so instead of claiming no runs exist.
+    const beyond = await app.request("/reviewers?page=999");
+    expect(beyond.status).toBe(200);
+    const beyondHtml = await beyond.text();
+    expect(beyondHtml).toContain("beyond the last page");
+    expect(beyondHtml).toContain("/reviewers?page=2");
+
+    // Huge finite pages clamp instead of overflowing the SQLite offset bind.
+    const huge = await app.request("/reviewers?page=180143985094820");
+    expect(huge.status).toBe(200);
+    expect(await huge.text()).toContain("beyond the last page");
+  });
+
   it("respects REVIEW_DRAFTS for manual triggers", async () => {
     const { app, enqueued } = testApp({}, mockGithub(fakePull({ draft: true })));
     const res = await app.request("/reviews", {

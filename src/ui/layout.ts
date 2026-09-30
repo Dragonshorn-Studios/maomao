@@ -35,6 +35,9 @@ export interface PageOptions {
   /** Repository + job-type selects on the home page: `repos` is the option
    * list, `repo`/`type` the active filter values. */
   jobFilters?: { repos: string[]; repo?: string; type?: string };
+  /** /reviewers board: active run-state filter and offset pagination. */
+  runFilters?: { state?: string };
+  runPagination?: { page: number; pageSize: number; total: number };
   /**
    * Operator chrome (connections, config, health, chat, forms). Dashboard and
    * job overview stay on the default surface so their controls are untouched.
