@@ -30,6 +30,8 @@ const RUN_STATES: Record<ReviewerState, LabeledState> = {
   running: { text: "Running", hint: "Collecting observations", mark: "◉" },
   done: { text: "Done", hint: "Reviewer finished", mark: "●" },
   failed: { text: "Failed", hint: "Reviewer did not finish", mark: "!" },
+  stale: { text: "Stale", hint: "A newer commit exists for this pull request", mark: "△" },
+  cancelled: { text: "Cancelled", hint: "Run cancelled with its job", mark: "–" },
 };
 
 const SEVERITY: Record<Severity, { text: string; mark: string }> = {

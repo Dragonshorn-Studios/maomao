@@ -691,6 +691,8 @@ const RUN_STATE_FILTERS = [
   { value: "running", label: "Running" },
   { value: "done", label: "Done" },
   { value: "failed", label: "Failed" },
+  { value: "stale", label: "Stale" },
+  { value: "cancelled", label: "Cancelled" },
 ];
 
 export function renderReviewerBoard(

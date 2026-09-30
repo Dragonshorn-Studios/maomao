@@ -619,6 +619,19 @@ describe("manual review trigger", () => {
     const done = await app.request("/reviewers?state=done");
     expect(done.status).toBe(200);
     expect(await done.text()).toContain("No reviewer runs with status done");
+    const cancelled = await app.request("/reviewers?state=cancelled");
+    expect(cancelled.status).toBe(200);
+    const cancelledHtml = await cancelled.text();
+    expect(cancelledHtml).toContain('value="cancelled" selected');
+    expect(cancelledHtml).toContain("No reviewer runs with status cancelled");
+
+    // Retiring the job turns its live run into a stale-filter hit.
+    store.setJobState(created.job.id, "stale");
+    const stale = await app.request("/reviewers?state=stale");
+    expect(stale.status).toBe(200);
+    const staleHtml = await stale.text();
+    expect(staleHtml).toContain('value="stale" selected');
+    expect(staleHtml).toContain("run-row");
 
     // State and page combine: 54 queued runs still span two pages when filtered.
     const queuedPage2 = await app.request("/reviewers?state=queued&page=2");

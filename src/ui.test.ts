@@ -2089,5 +2089,15 @@ describe("review job list filters, nested stack members, and reviewer board", ()
     });
     expect(exactLast).toContain("Page 2 / 2");
     expect(exactLast).not.toContain("Older runs");
+
+    // Terminal run states filter at the store level and show their labels.
+    store.setJobState(memberJob.id, "stale");
+    const stale = store.listReviewerRunBoard({ state: "stale" });
+    expect(stale.total).toBe(1);
+    expect(stale.rows[0]?.state).toBe("stale");
+    const staleHtml = renderReviewerBoard(stale.rows, { runFilters: { state: "stale" } });
+    expect(staleHtml).toContain('value="stale" selected');
+    expect(staleHtml).toContain(">Stale</option>");
+    expect(staleHtml).toContain(">Cancelled</option>");
   });
 });

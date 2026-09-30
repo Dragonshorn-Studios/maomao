@@ -1,6 +1,7 @@
 import Database from "better-sqlite3";
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
+import { nowIso } from "./util.js";
 
 export type SqliteDb = Database.Database;
 
@@ -597,6 +598,20 @@ function migrate(db: SqliteDb): void {
       ["diff_note", "TEXT"],
     ];
     for (const [name, ddl] of findingColumns) ensureColumn(db, "findings", name, ddl);
+
+    // Backfill: runs predating reviewer-run terminal states stayed 'queued'
+    // on dead jobs forever — settle them to their job's outcome (idempotent).
+    // Stamps finished_at to match the runtime retireReviewerRuns path; the
+    // column is ensured first because pre-usage schemas may not have it.
+    ensureColumn(db, "reviewer_runs", "finished_at", "TEXT");
+    const backfillRunState = db.prepare(
+      `UPDATE reviewer_runs SET state = ?, finished_at = COALESCE(finished_at, ?)
+       WHERE state IN ('queued', 'running')
+         AND job_id IN (SELECT id FROM jobs WHERE state = ?)`,
+    );
+    const backfillNow = nowIso();
+    backfillRunState.run("stale", backfillNow, "stale");
+    backfillRunState.run("cancelled", backfillNow, "cancelled");
   } finally {
     db.pragma("foreign_keys = ON");
     db.pragma("legacy_alter_table = OFF");

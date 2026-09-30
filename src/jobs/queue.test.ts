@@ -67,6 +67,9 @@ describe("stack job helpers", () => {
     expect(store.getJob(queued)?.finished_at).toBeTruthy();
     expect(store.getJob(rerun)?.state).toBe("stale");
     expect(store.getJob(otherStack)?.state).toBe("queued");
+    // Their specialist runs retired with them — nothing stays queued.
+    expect(store.listReviewerRuns(queued).map((run) => run.state)).toEqual(["stale"]);
+    expect(store.listReviewerRuns(rerun).map((run) => run.state)).toEqual(["stale"]);
 
     // LIKE metacharacters in the id must not over-match: 'a_b' != 'aXb'.
     expect(store.staleOpenStackJobs("acme/widgets", "a_b", "stack:a_b@zzz")).toEqual([]);
