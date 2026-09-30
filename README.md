@@ -330,6 +330,8 @@ When a job reaches a terminal state (`completed`, `failed`, `stale`, `cancelled`
 
 One caveat on final states: a terminal job can still be **relabeled** afterward (e.g. a `completed` job relabeled `stale` when a later push supersedes its head). Relabels never emit a second line — the stream's last line for that job can therefore lag the `jobs` table's final `state`. Reconcile against `jobs` (or `/api/jobs`) when exact end state matters.
 
+Two more edges worth knowing for consumers: `attempt` is exact only for retries performed **after** this deploy — the `retry_count` column backfills to 0, so jobs retried before the migration report `attempt=1`. And retrying a job irreversibly NULLs the previous attempt's usage columns, making the summary line the only durable per-attempt usage record (best-effort, at-most-once — a crash between the transition commit and the write loses it; a startup backfill of missed terminal lines is the planned recovery path).
+
 The same line can also be POSTed directly to an OpenObserve ingest endpoint:
 
 ```bash

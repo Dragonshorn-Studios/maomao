@@ -528,6 +528,14 @@ describe("emitJobSummary", () => {
       ["failed", 1, true],
       ["stale", 2, true],
     ]);
+    const staled = store.getJob(jobId)!;
+    // The retry nulled started_at and the head-move sweep is a raw-UPDATE
+    // path, so the documented whole-lifetime span applies: created_at →
+    // finished_at, not ~0 like a setJobState transition would report.
+    expect(staled.started_at).toBeNull();
+    expect(payloadLines()[1].duration_ms).toBe(
+      Date.parse(staled.finished_at!) - Date.parse(staled.created_at),
+    );
   });
 
   it("emits attempt 3 after two store-level retries", () => {
