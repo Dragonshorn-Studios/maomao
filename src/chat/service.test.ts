@@ -13,6 +13,15 @@ import { ChatStore } from "./store.js";
 
 const HEAD = "head333";
 
+function fencedOperatorQuestion(prompt: string | undefined): string {
+  expect(prompt).toContain("UNTRUSTED_OPERATOR_QUESTION");
+  expect(prompt).toContain("END_UNTRUSTED_OPERATOR_QUESTION");
+  const start = prompt!.indexOf("UNTRUSTED_OPERATOR_QUESTION");
+  const end = prompt!.indexOf("END_UNTRUSTED_OPERATOR_QUESTION");
+  expect(end).toBeGreaterThan(start);
+  return prompt!.slice(start + "UNTRUSTED_OPERATOR_QUESTION".length, end);
+}
+
 function baseJob(overrides: Partial<JobRow> = {}): JobRow {
   return {
     id: 1,
@@ -186,7 +195,7 @@ describe("ChatService", () => {
     expect(runs[0]?.prompt).toContain(`Reviewed head commit: ${HEAD}`);
     expect(runs[0]?.prompt).toContain("unsafe cast");
     expect(runs[0]?.prompt).toContain("Read-only");
-    expect(runs[0]?.prompt.endsWith("why is this high?")).toBe(true);
+    expect(fencedOperatorQuestion(runs[0]?.prompt)).toContain("why is this high?");
     expect(runs[1]?.prompt).toBe("and the rest?");
   });
 
@@ -216,8 +225,8 @@ describe("ChatService", () => {
     await Promise.all([first, second]);
     const messages = chatStore.listMessages(conversation.id);
     expect(messages.map((message) => message.role)).toEqual(["user", "assistant", "user", "assistant"]);
-    expect(runs[0]?.prompt.endsWith("first")).toBe(true);
-    expect(runs[1]?.prompt.endsWith("second")).toBe(true);
+    expect(fencedOperatorQuestion(runs[0]?.prompt)).toContain("first");
+    expect(runs[1]?.prompt).toBe("second");
   });
 
   it("refuses to persist a reply when opencode exits nonzero", async () => {
