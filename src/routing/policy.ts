@@ -1,4 +1,4 @@
-import { severityRank, type AggregatorFinding, type AggregatorResult, type Severity } from "../schema.js";
+import { capMissingTestSeverity, severityRank, type AggregatorFinding, type AggregatorResult, type Severity } from "../schema.js";
 import type { InternalEscalationResult } from "./schema.js";
 import { POLICIES_WITH_INTERNAL, type PoisonAlertPolicy } from "./types.js";
 
@@ -25,7 +25,7 @@ export function mergeInternalEscalation(
   const rejected = new Set(lab.rejected_finding_ids ?? []);
   if (lab.findings.length > 0) {
     const merged = assignFindingIds(
-      lab.findings.map((finding) => ({
+      capMissingTestSeverity(lab.findings.map((finding) => ({
         severity: finding.severity,
         confidence: finding.confidence,
         category: finding.category,
@@ -34,7 +34,7 @@ export function mergeInternalEscalation(
         summary: finding.summary,
         body: finding.body,
         reviewers_agreed: finding.reviewers_agreed,
-      })),
+      }))),
     );
     return {
       schema_version: 1,

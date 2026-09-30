@@ -18,11 +18,20 @@ import {
   type OpenCodePort,
   type OpenCodeRunResult,
 } from "../opencode/parse.js";
-import { buildAggregatorPrompt, buildBriefPrompt, buildReviewerPrompt, buildStackCumulativePrompt, KNOWN_REVIEWER_ROLES } from "../prompts.js";
+import {
+  buildAggregatorPrompt,
+  buildBriefPrompt,
+  buildInternalEscalationPrompt,
+  buildReviewerPrompt,
+  buildRouterPrompt,
+  buildStackCumulativePrompt,
+  KNOWN_REVIEWER_ROLES,
+} from "../prompts.js";
 import { applyProfileToSpecs, enqueuePullJob, reviewerSpecs } from "./enqueue.js";
 import type { ProfileDefinition } from "../config-revisions.js";
 import {
   fallbackAggregator,
+  capMissingTestSeverity,
   parseAggregatorResult,
   parseBriefResult,
   parseReviewerResult,
@@ -59,7 +68,6 @@ import {
   mergeModelDecision,
 } from "../routing/select.js";
 import { parseInternalEscalationResult, parseRouterResult } from "../routing/parse.js";
-import { buildInternalEscalationPrompt, buildRouterPrompt } from "../routing/prompts.js";
 import { internalEscalationResultSchema } from "../routing/schema.js";
 import type { RoutingDecision } from "../routing/types.js";
 import {
@@ -1666,11 +1674,12 @@ async function runStackCumulativeRun(
         signal,
       });
       const parsed = parseReviewerResult(result.text || result.stdout, "stack_cumulative");
+      const calibrated = { ...parsed, findings: capMissingTestSeverity(parsed.findings) };
       if (run) {
         deps.store.patchReviewer(run.id, {
           state: "done",
           raw_output: truncate(result.text || result.stdout, 200_000),
-          normalized_json: JSON.stringify(parsed, null, 2),
+          normalized_json: JSON.stringify(calibrated, null, 2),
           stdout: truncate(result.stdout, 80_000),
           stderr: truncate(result.stderr, 20_000),
           exit_code: result.exitCode,
@@ -1680,8 +1689,8 @@ async function runStackCumulativeRun(
           validation_error: null,
         });
       }
-      deps.store.log(job.id, `Stack cumulative done: ${parsed.findings.length} cross-PR finding(s)`, "info", run?.id);
-      return parsed;
+      deps.store.log(job.id, `Stack cumulative done: ${calibrated.findings.length} cross-PR finding(s)`, "info", run?.id);
+      return calibrated;
     } catch (error) {
       lastError = formatError(error);
       if (run) {
@@ -1847,6 +1856,16 @@ async function routeSpecialists(
   const allowlist = profileDefinition?.reviewers.length
     ? profileDefinition.reviewers.map((reviewer) => reviewer.role)
     : config.reviewers.map((role) => role.id);
+  const roleCatalog = allowlist.map((id) => {
+    const configured = config.reviewers.find((role) => role.id === id);
+    const builtIn = KNOWN_REVIEWER_ROLES.find((role) => role.id === id);
+    const custom = store.configs.getCustomRole(id);
+    return {
+      id,
+      title: configured?.title ?? builtIn?.title ?? custom?.title ?? id,
+      description: custom?.description ? custom.description.slice(0, 500) : undefined,
+    };
+  });
 
   if (config.routing.mode === "fixed") {
     if (existing.length === 0) {
@@ -1903,6 +1922,7 @@ async function routeSpecialists(
         model: routerModel,
         prompt: buildRouterPrompt({
           allowedRoles: allowlist,
+          roleCatalog,
           signals,
           diff,
           maxDiffChars: config.routing.maxDiffChars,

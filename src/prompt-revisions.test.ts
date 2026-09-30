@@ -65,6 +65,20 @@ describe("prompt revision lifecycle", () => {
     expect(prompts.activatePromptRevision(first.revision.id, "octocat")).toHaveProperty("error");
     expect(prompts.rollbackPromptRevision(first.revision.id, "octocat")).toHaveProperty("revision");
   });
+
+  it("disables an active override and restores the built-in fallback", () => {
+    const prompts = store();
+    const draft = prompts.createDraft({ roleId: "tests", body: "Custom tests policy.", createdBy: "octocat" });
+    if (!("revision" in draft)) throw new Error("draft failed");
+    prompts.activatePromptRevision(draft.revision.id, "octocat");
+
+    const disabled = prompts.deactivatePromptRevision(draft.revision.id, "alice");
+
+    expect(disabled).toHaveProperty("revision");
+    expect(prompts.getActivePrompt("tests")).toBeUndefined();
+    expect(prompts.getPromptRevision(draft.revision.id)?.status).toBe("retired");
+    expect(prompts.deactivatePromptRevision(draft.revision.id, "alice")).toHaveProperty("error");
+  });
 });
 
 describe("fixtures and evaluation", () => {

@@ -220,7 +220,50 @@ export function parseReviewerResult(
 }
 
 const ADVISORY_TEST_COVERAGE_RE =
-  /\b(untested|missing tests?|no tests?( coverage)?|test coverage|without (a )?tests?|add (a |an )?tests?|lacks? tests?)\b/i;
+  /\b(untested|missing (tests?|regression coverage)|no (tests?( coverage)?|regression coverage)|test coverage|coverage gap|uncovered (path|branch|case)|not covered by (a )?tests?|without (a )?tests?|add (a |an )?tests?|needs? (a )?(regression )?tests?|lacks?( (of )?(test|regression) coverage| tests?))\b/i;
+
+function isMissingTestCoverageClaim(finding: {
+  category?: string;
+  summary: string;
+  body?: string;
+  reason?: string;
+  reviewer?: string;
+  reviewers_agreed?: string[];
+}): boolean {
+  const category = (finding.category ?? "").toLowerCase();
+  const testOwned =
+    category === "tests" ||
+    category.startsWith("test") ||
+    finding.reviewer === "tests" ||
+    (finding.reviewers_agreed ?? []).includes("tests");
+  // A coverage-shaped summary is strong enough for stack_cumulative, whose
+  // schema requires category="cross_pr". Prose-only matches still require a
+  // tests-owned category/role so a real security defect that merely mentions
+  // missing regression coverage is not severity-capped.
+  return (
+    ADVISORY_TEST_COVERAGE_RE.test(finding.summary) ||
+    (testOwned && ADVISORY_TEST_COVERAGE_RE.test(`${finding.body ?? ""}\n${finding.reason ?? ""}`))
+  );
+}
+
+/** Deterministic backstop: missing coverage alone can never survive aggregation as high/blocker. */
+export function capMissingTestSeverity<
+  T extends {
+    severity: Severity;
+    category?: string;
+    summary: string;
+    body?: string;
+    reason?: string;
+    reviewer?: string;
+    reviewers_agreed?: string[];
+  },
+>(findings: T[]): T[] {
+  return findings.map((finding) =>
+    (finding.severity === "blocker" || finding.severity === "high") && isMissingTestCoverageClaim(finding)
+      ? { ...finding, severity: "medium" }
+      : finding,
+  );
+}
 
 /** Low/info missing-coverage notes that must not become a cluster of GitHub inline threads. */
 export function isAdvisoryMissingTestFinding(finding: {
@@ -286,7 +329,7 @@ export function coalesceAdvisoryTestFindings(findings: AggregatorFinding[]): Agg
 }
 
 function withAdvisoryTestCoalesce(parsed: AggregatorResult): AggregatorResult {
-  const findings = coalesceAdvisoryTestFindings(parsed.findings);
+  const findings = coalesceAdvisoryTestFindings(capMissingTestSeverity(parsed.findings));
   const combined = findings.find(
     (finding) =>
       finding.category === "tests" &&
@@ -363,7 +406,7 @@ export function fallbackAggregator(reviewers: ReviewerResult[]): AggregatorResul
     }
   }
   findings.sort((a, b) => severityRank(a.severity) - severityRank(b.severity));
-  const coalesced = coalesceAdvisoryTestFindings(findings);
+  const coalesced = coalesceAdvisoryTestFindings(capMissingTestSeverity(findings));
   if (coalesced.length === 0) {
     return {
       schema_version: 1,

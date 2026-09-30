@@ -23,7 +23,7 @@ import { LIVE_JOB_STATES } from "./config.js";
 import { effectiveConfigEntries } from "./config-effective.js";
 import type { ProfileFieldErrors, ProfileFormValues } from "./config-form.js";
 import { decodeProfileAction, decodeProfileForm, applyProfileAction, profileFormToDefinition } from "./config-form.js";
-import { KNOWN_REVIEWER_ROLES, promptBodyFromRolePrompt } from "./prompts.js";
+import { KNOWN_REVIEWER_ROLES, PROVIDER_PROBE_PROMPT, promptBodyFromRolePrompt } from "./prompts.js";
 import { subscribe } from "./events.js";
 import { redactSecrets, truncate } from "./util.js";
 import { readFileSync } from "node:fs";
@@ -1362,7 +1362,7 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
         const result = await ctx.opencode.run({
           cwd: workspace,
           model,
-          prompt: "Reply with exactly the word: ok",
+          prompt: PROVIDER_PROBE_PROMPT,
           timeoutMs: 60_000,
           extraArgs: ctx.config.opencode.extraArgs,
           title: `maomao-provider-test-${id}`,
@@ -1963,6 +1963,7 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
       "draft-created": "Prompt draft created.",
       "draft-saved": "Prompt draft saved.",
       activated: "Prompt revision activated.",
+      deactivated: "Prompt override disabled; the built-in prompt is active again.",
       "rolled-back": "Prompt revision rolled back.",
       "fixture-saved": "Fixture saved.",
       evaluated: "Evaluation recorded.",
@@ -2056,6 +2057,15 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
     const result = ctx.store.prompts.rollbackPromptRevision(Number(c.req.param("id")), actor.login);
     if ("error" in result) return renderPromptError(c, result.error, 400);
     return c.redirect("/config/prompts?notice=rolled-back", 302);
+  });
+
+  app.post("/config/prompts/:id/deactivate", (c) => {
+    if (!gateOn) return c.redirect("/", 302);
+    const actor = configActor(c);
+    if (!actor) return promptWriteDenied(c);
+    const result = ctx.store.prompts.deactivatePromptRevision(Number(c.req.param("id")), actor.login);
+    if ("error" in result) return renderPromptError(c, result.error, 400);
+    return c.redirect("/config/prompts?notice=deactivated", 302);
   });
 
   app.post("/config/prompts/fixtures", async (c) => {
