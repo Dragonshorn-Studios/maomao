@@ -936,6 +936,26 @@ describe("emitJobSummary", () => {
     expect(store.listReviewerRuns(jobId)[0].state).toBe("failed");
   });
 
+  it("emits the reviewer-run snapshot captured with the transition, not a post-commit re-read", () => {
+    setJobSummarySink(capture);
+    const store = makeStore();
+    const jobId = seedJob(store);
+    const run = store.listReviewerRuns(jobId)[0];
+    store.patchReviewer(run.id, { prompt_tokens: 100, completion_tokens: 40 });
+    const snapshotRuns = store.listReviewerRuns(jobId);
+    // Models a retry racing between the terminal commit and emission: the
+    // retry nulls attempt-level usage in the live rows, but the line must
+    // report the transition-time snapshot.
+    store.patchReviewer(run.id, { prompt_tokens: null, completion_tokens: null, total_tokens: null, cost: null });
+    const job = { ...store.getJob(jobId)!, state: "failed" as const, finished_at: "2026-01-01T00:00:00.000Z" };
+    emitJobSummary(store, jobId, process.env, { job, runs: snapshotRuns });
+    expect(payloadLines()[0]).toMatchObject({
+      state: "failed",
+      prompt_tokens: 100,
+      completion_tokens: 40,
+    });
+  });
+
   it("logs and returns when the store read throws", () => {
     const err = vi.spyOn(console, "error").mockImplementation(() => {});
     const broken = {

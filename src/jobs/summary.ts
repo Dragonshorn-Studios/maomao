@@ -119,6 +119,13 @@ export interface JobSummaryOptions {
    * exact transition that fired it even if the row changes after commit.
    */
   job?: JobRow;
+  /**
+   * Reviewer-run snapshot captured inside the same transition transaction
+   * as `job` — skips the post-commit re-read so a retry landing between
+   * commit and emission can't pair the terminal row with already-reset
+   * attempt usage.
+   */
+  runs?: ReviewerRunRow[];
   /** The job was claimed-and-running when it went terminal — usage fields are a snapshot, not a final tally. */
   partialUsage?: boolean;
 }
@@ -268,7 +275,7 @@ export function emitJobSummary(
   try {
     const job = opts?.job ?? store.getJob(jobId);
     if (!job) return;
-    const line = JSON.stringify(buildJobSummary(job, store.listReviewerRuns(jobId), opts));
+    const line = JSON.stringify(buildJobSummary(job, opts?.runs ?? store.listReviewerRuns(jobId), opts));
     // The two channels are independent: a broken stdout sink must not
     // suppress a configured ingest POST (and vice versa via the queue).
     try {
