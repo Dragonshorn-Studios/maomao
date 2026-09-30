@@ -21,6 +21,7 @@ import type { ForgePort } from "../forge/port.js";
 import { forgeTargetOf } from "../forge/types.js";
 import type { ChatConversationRow, ChatMessageRow, ChatStore } from "./store.js";
 import { ExplainerEventParser } from "./events.js";
+import { buildExplainerPrompt } from "../prompts.js";
 
 export class ChatBudgetError extends Error {
   readonly kind: "messages" | "cost";
@@ -300,30 +301,21 @@ export class ChatService {
       provider: job.provider,
       instance: job.provider_instance,
     });
-    const findingLines = findings
-      .map(
-        (finding) =>
-          `- [${finding.severity ?? "?"}] ${finding.summary} (${finding.current_path ?? "?"}:${
-            finding.current_line ?? "?"
-          }, fingerprint ${finding.fingerprint})`,
-      )
-      .join("\n");
-    const lines = [
-      "You are Maomao's code explainer. You explain a reviewed change to the operator who ran the review.",
-      "Read-only: you can read, glob, and grep the repository, but you must never modify anything.",
-      "",
-      `Repository: ${job.repo_full_name} (${job.job_type === "health_scan" ? "health scan" : job.job_type === "repo_brief" ? "repo brief" : "pull request"} by ${job.pr_author || "unknown"})`,
-      `Change under review: ${job.pr_title || "(no title)"}`,
-      `Reviewed head commit: ${job.head_sha}`,
-      "",
-      "Maomao's review reported these findings on this exact commit:",
-      findingLines || "(no findings — the review came back clean)",
-      "",
-      "Explain trade-offs and reasoning like a reviewer would; cite files as path:line.",
-      "",
-      `The operator asks: ${question}`,
-    ];
-    return lines.join("\n");
+    return buildExplainerPrompt({
+      repoFullName: job.repo_full_name,
+      changeKind: job.job_type === "health_scan" ? "health scan" : job.job_type === "repo_brief" ? "repo brief" : "pull request",
+      author: job.pr_author,
+      title: job.pr_title,
+      headSha: job.head_sha,
+      findings: findings.map((finding) => ({
+        fingerprint: finding.fingerprint,
+        severity: finding.severity,
+        path: finding.current_path,
+        line: finding.current_line,
+        summary: finding.summary,
+      })),
+      question,
+    });
   }
 }
 

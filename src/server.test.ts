@@ -2291,6 +2291,22 @@ describe("prompt configuration routes", () => {
     expect(created.status).toBe(302);
     const revision = store.prompts.listPromptRevisions()[0];
     expect(revision?.created_by).toBe("octocat");
+    if (!revision) throw new Error("prompt revision missing");
+    store.prompts.activatePromptRevision(revision.id, "octocat");
+    const activePage = await app.request("/config/prompts", { headers: { cookie: session } });
+    const activeArtifacts = await csrfArtifacts(activePage);
+    expect(activeArtifacts.html).toContain("Disable override");
+    const disabled = await app.request(`/config/prompts/${revision.id}/deactivate`, {
+      method: "POST",
+      headers: {
+        cookie: `${session}; ${activeArtifacts.csrfCookie}`,
+        "content-type": "application/x-www-form-urlencoded",
+      },
+      body: `csrf_token=${encodeURIComponent(activeArtifacts.csrfToken)}`,
+    });
+    expect(disabled.status).toBe(302);
+    expect(disabled.headers.get("location")).toContain("notice=deactivated");
+    expect(store.prompts.getActivePrompt("correctness")).toBeUndefined();
     log.mockRestore();
   });
 

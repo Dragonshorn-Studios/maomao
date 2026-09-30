@@ -202,6 +202,48 @@ describe("advisory missing-test coalesce", () => {
     expect(aggregated.summary).toContain("src/github/webhooks.ts:518");
   });
 
+  it("caps missing-test-only findings at medium in model and fallback aggregation", () => {
+    const parsed = parseAggregatorResult(JSON.stringify({
+      verdict: "comment",
+      summary: "coverage",
+      findings: [
+        {
+          severity: "high",
+          confidence: 0.9,
+          category: "tests",
+          summary: "Missing test for installer checksum branch",
+          body: "Add a test for the untested branch.",
+          reviewers_agreed: ["tests"],
+        },
+        {
+          severity: "high",
+          confidence: 0.9,
+          category: "security",
+          summary: "Authorization bypass is reachable",
+          body: "The changed guard permits anonymous writes.",
+          reviewers_agreed: ["security"],
+        },
+      ],
+    }));
+    expect(parsed.findings[0]?.severity).toBe("medium");
+    expect(parsed.findings[1]?.severity).toBe("high");
+
+    const fallback = fallbackAggregator([{
+      schema_version: 1,
+      reviewer: "tests",
+      verdict: "findings",
+      summary: "",
+      findings: [{
+        severity: "blocker",
+        confidence: 0.9,
+        category: "tests",
+        summary: "No tests cover publishing",
+        reason: "The publish branch lacks tests.",
+      }],
+    }]);
+    expect(fallback.findings[0]?.severity).toBe("medium");
+  });
+
   it("strips locations from LLM aggregator output so GitHub does not get a cluster of test nits", () => {
     const parsed = parseAggregatorResult(
       JSON.stringify({

@@ -516,7 +516,8 @@ A **stack review** job is one logical operation: it re-pins each member's SHAs a
 
 `/config/prompts` manages **versioned specialist prompts**: per-role revisions with an operator-editable body. Security guardrails (the hard rules and JSON schema) are composed at runtime and are never part of an editable revision — the UI shows them separately.
 
-- Drafts → explicit activation → retired history; rollback re-activates a retired revision. Activation never affects running or historical jobs: each reviewer run stamps the prompt revision it used (`prompt_revision_id`).
+- Drafts → explicit activation → retired history; rollback re-activates a retired revision. **Disable override** retires the active revision and immediately restores the built-in/env role body for subsequent reviewer runs. Activation never rewrites historical jobs: each reviewer run stamps the prompt revision it used (`prompt_revision_id`).
+- The same page inventories the built-in prompts for router, aggregator, verifier, internal poison-alert reconciliation, stack-cumulative review, repo brief, and Ask Maomao. Their instruction text is centralized in `src/prompts.ts`; profiles/providers select models and execution policy, not hidden prompt text.
 - **Fixtures** are explicitly saved, sanitized inputs (PR metadata plus a bounded diff, with optional severity/category expectations) and require a provenance acknowledgement — they are never auto-captured from reviewed code.
 - **Evaluation** runs a draft prompt against a fixture fully offline: no GitHub writes, no repository credentials, schema-validated findings, recorded usage/duration/model/revision, and an explicit cost cap. Failures (timeouts, invalid output, budget breach) count as evaluation failures, never as passing reviews. Results compare draft against the active prompt with matched/missed/unexpected signals; evaluation never auto-activates.
 

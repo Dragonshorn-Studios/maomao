@@ -3458,7 +3458,7 @@ describe("active prompt revision consumption", () => {
     };
     const created = store.enqueue({ ...jobInput("nopromptsha"), reviewers: [] });
     await createPipeline({ config, store, github, checkout: await fixtureCheckout(), opencode }).run(created.job.id);
-    expect(promptsSeen[0]).toContain("Focus: bugs");
+    expect(promptsSeen[0]).toContain("Focus on concrete behavioral defects introduced by the PR");
     expect(store.listReviewerRuns(created.job.id)[0]?.prompt_revision_id ?? null).toBeNull();
   });
 });

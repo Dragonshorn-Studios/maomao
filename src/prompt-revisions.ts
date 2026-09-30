@@ -4,7 +4,7 @@ import { join } from "node:path";
 import type { SqliteDb } from "./db.js";
 import { nowIso, truncate } from "./util.js";
 import { formatSchemaError, parseReviewerResult } from "./schema.js";
-import { composeReviewerPrompt, promptBodyFromRolePrompt } from "./prompts.js";
+import { buildPromptEvaluationPrompt, promptBodyFromRolePrompt } from "./prompts.js";
 import { KNOWN_REVIEWER_ROLES } from "./prompts.js";
 import type { OpenCodePort, OpenCodeRunResult } from "./opencode/parse.js";
 
@@ -167,6 +167,18 @@ export class PromptRevisionStore {
     return { revision: this.getPromptRevision(id)! };
   }
 
+  /** Retires the live override so subsequent runs use the built-in/env role body again. */
+  deactivatePromptRevision(id: number, actor: string): { revision: PromptRevisionRow } | { error: string } {
+    const revision = this.getPromptRevision(id);
+    if (!revision || revision.status !== "active") return { error: "only an active prompt override can be disabled" };
+    const now = nowIso();
+    this.db
+      .prepare(`UPDATE prompt_revisions SET status = 'retired', updated_at = ? WHERE id = ? AND status = 'active'`)
+      .run(now, id);
+    this.audit("deactivated", actor, id, `${revision.role_id} prompt override disabled; built-in restored`);
+    return { revision: this.getPromptRevision(id)! };
+  }
+
   getPromptRevision(id: number): PromptRevisionRow | undefined {
     const row = this.db.prepare(`SELECT * FROM prompt_revisions WHERE id = ?`).get(id) as
       | Record<string, unknown>
@@ -285,15 +297,13 @@ export class PromptRevisionStore {
     } catch {
       return runFailure("fixture metadata is corrupt (invalid JSON)");
     }
-    const prompt = `${composeReviewerPrompt(revision.body)}
-
-Repository: ${prMeta.repo ?? "fixture/unknown"}
-PR: #${prMeta.prNumber ?? 0} ${prMeta.title ?? "(fixture)"}
-Author: ${prMeta.author ?? "fixture"}
-Base SHA: fixture
-Head SHA: fixture
-
-The unified diff of the fixture is available as pr.diff in the working directory.`;
+    const prompt = buildPromptEvaluationPrompt({
+      body: revision.body,
+      repoFullName: prMeta.repo,
+      prNumber: prMeta.prNumber,
+      prTitle: prMeta.title,
+      author: prMeta.author,
+    });
 
     try {
       const result = await input.opencode.run({

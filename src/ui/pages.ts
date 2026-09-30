@@ -12,7 +12,7 @@ import type { EffectiveConfigEntry } from "../config-effective.js";
 import type { Severity } from "../schema.js";
 import { parseBriefPayload, type BriefPayload } from "../jobs/brief.js";
 import { elapsedMs, escapeHtml, formatDuration, shortSha } from "../util.js";
-import { KNOWN_REVIEWER_ROLES, promptBodyFromRolePrompt } from "../prompts.js";
+import { KNOWN_REVIEWER_ROLES, PIPELINE_PROMPT_STAGES, promptBodyFromRolePrompt } from "../prompts.js";
 import {
   cancelledBannerCopy,
   diffUnavailableCopy,
@@ -2190,6 +2190,13 @@ function promptRoleCard(
     ? `<span class="state state-completed">Override #${active.id}</span>`
     : `<span class="state state-queued">Built-in</span>`;
   const csrf = csrfInput(data.csrfToken);
+  const disableOverride =
+    active && data.canWrite
+      ? `<form method="post" action="/config/prompts/${active.id}/deactivate" class="inline-form">
+          ${csrf}
+          <button type="submit" class="btn-secondary">Disable override</button>
+        </form>`
+      : "";
   const overrideForm =
     data.canWrite && drafts.length === 0
       ? `<details class="prompt-override">
@@ -2223,6 +2230,7 @@ function promptRoleCard(
       <summary>${active ? "Current override" : "Built-in instructions"}</summary>
       <pre class="log-panel">${escapeHtml(currentBody)}</pre>
     </details>
+    ${disableOverride}
     ${overrideForm}
     ${
       data.canWrite
@@ -2299,6 +2307,15 @@ export function renderPromptConfigPage(data: PromptConfigPageData): string {
       return `<tr><td>${evaluation.id}</td><td>#${evaluation.prompt_revision_id}</td><td>#${evaluation.fixture_id}</td><td>${escapeHtml(evaluation.model)}</td><td>${escapeHtml(evaluation.status)}</td><td>${detail}</td></tr>`;
     })
     .join("");
+  const pipelineStages = PIPELINE_PROMPT_STAGES.map(
+    (stage) => `<li><article class="card prompt-role">
+      <header class="prompt-role-head">
+        <div><p class="label">${escapeHtml(stage.id)}</p><h3 class="specimen-title">${escapeHtml(stage.title)}</h3></div>
+        <div class="connection-chips"><span class="state state-queued">Built-in runtime guardrail</span></div>
+      </header>
+      <p class="muted">${escapeHtml(stage.purpose)}</p>
+    </article></li>`,
+  ).join("");
   const body = `
     ${configSubNav("prompts")}
     <h1>Specialist prompts</h1>
@@ -2309,6 +2326,9 @@ export function renderPromptConfigPage(data: PromptConfigPageData): string {
     <h2>Roles</h2>
     <ul class="prompt-role-list">${roleCards}${unknown}</ul>
     ${customRolesSection(data)}
+    <h2>Pipeline stage prompts</h2>
+    <p class="muted">These prompts are centralized built-in runtime guardrails. Their model and execution settings live in profiles/providers; their instruction text is not silently overridden by environment or role revisions.</p>
+    <ul class="prompt-role-list">${pipelineStages}</ul>
     <h2>Evaluation fixtures</h2>
     ${fixtureForm}
     ${data.fixtures.length > 0 ? `<table class="config-audit"><thead><tr><th>ID</th><th>Name</th><th>Diff chars</th><th>Expectations</th><th>Saved by</th></tr></thead><tbody>${fixtureRows}</tbody></table>` : `<p class="muted">No fixtures saved.</p>`}
