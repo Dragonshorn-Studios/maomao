@@ -1,5 +1,6 @@
 import type { Config } from "./config.js";
 import type { ProfileRevisionRow } from "./config-revisions.js";
+import type { TelemetrySettingsStore } from "./telemetry/settings.js";
 
 /**
  * Read-only, non-sensitive effective-configuration view for the /config page.
@@ -11,9 +12,10 @@ import type { ProfileRevisionRow } from "./config-revisions.js";
  * fields only to compute presence (length/truthiness) — GitHub private key,
  * webhook secret, OAuth client secret, UI password, session secret. No
  * credential value is ever copied into an entry; credentials appear only as
- * the strings "configured"/"not configured", always badged "environment"
- * since env is their only source. The canary tests in config-effective.test.ts
- * and server.test.ts enforce this.
+ * the strings "configured"/"not configured". Telemetry credentials may also be
+ * badged "stored" — presence resolved via the TelemetrySettingsStore, which
+ * returns masked URLs and presence flags only. The canary tests in
+ * config-effective.test.ts and server.test.ts enforce this.
  *
  * Source labels reflect presence of each entry's own env var, not parse
  * success: an invalid value silently falls back to the default inside
@@ -22,7 +24,7 @@ import type { ProfileRevisionRow } from "./config-revisions.js";
  * own var is unset (marked as inherited instead).
  */
 
-export type ConfigValueSource = "profile" | "environment" | "default";
+export type ConfigValueSource = "profile" | "environment" | "stored" | "default";
 
 export interface EffectiveConfigEntry {
   group: string;
@@ -53,6 +55,7 @@ export function effectiveConfigEntries(
   config: Config,
   env: NodeJS.ProcessEnv,
   activeRevision: ProfileRevisionRow | null,
+  telemetry: Pick<TelemetrySettingsStore, "status" | "sharedStatus">,
 ): EffectiveConfigEntry[] {
   const entries: EffectiveConfigEntry[] = [];
   const src = (envKey: string): ConfigValueSource =>
@@ -311,24 +314,68 @@ export function effectiveConfigEntries(
   row("Publishing", "Post empty reviews", "POST_EMPTY_REVIEW", boolLabel(config.postEmptyReview));
   row("Publishing", "Review drafts", "REVIEW_DRAFTS", boolLabel(config.reviewDrafts));
   row("Telemetry", "Job summaries (stdout/OpenObserve)", "JOB_SUMMARIES", boolLabel(config.jobSummaries));
-  row(
-    "Telemetry",
-    "OpenObserve ingest URL",
-    "OPENOBSERVE_LOGS_URL",
-    envSet(env.OPENOBSERVE_LOGS_URL) ? "configured" : "not set",
-  );
-  row(
-    "Telemetry",
-    "OpenObserve OTLP traces endpoint",
-    "OPENOBSERVE_TRACES_URL",
-    envSet(env.OPENOBSERVE_TRACES_URL) ? "configured" : "not set",
-  );
-  row(
-    "Telemetry",
-    "OpenObserve OTLP metrics endpoint",
-    "OPENOBSERVE_METRICS_URL",
-    envSet(env.OPENOBSERVE_METRICS_URL) ? "configured" : "not set",
-  );
+  // The effective OpenObserve view mirrors /config/telemetry's own
+  // resolution (env > stored > derived-from-shared), so values saved on the
+  // telemetry page show up here instead of a misleading "not set".
+  const telemetrySource = (source: "environment" | "stored" | "none"): ConfigValueSource =>
+    source === "environment" ? "environment" : source === "stored" ? "stored" : "default";
+  const storedNote = "saved on /config/telemetry";
+  const shared = telemetry.sharedStatus(env);
+  add({
+    group: "Telemetry",
+    label: "OpenObserve base URL",
+    value: shared.baseUrl ?? "not set",
+    source: telemetrySource(shared.baseUrlSource),
+    envKey: "OPENOBSERVE_BASE_URL",
+    sourceDetail: shared.baseUrlEnvVar ?? (shared.baseUrlSource === "stored" ? storedNote : undefined),
+  });
+  add({
+    group: "Telemetry",
+    label: "OpenObserve logs stream",
+    value: shared.stream ?? "not set",
+    source: telemetrySource(shared.streamSource),
+    envKey: "OPENOBSERVE_LOGS_STREAM",
+    sourceDetail: shared.streamEnvVar ?? (shared.streamSource === "stored" ? storedNote : undefined),
+  });
+  add({
+    group: "Telemetry",
+    label: "OpenObserve ingestion credentials",
+    value: shared.authSource === "none" ? "not configured" : "configured",
+    source: telemetrySource(shared.authSource),
+    envKey: "OPENOBSERVE_TOKEN",
+    sourceDetail: shared.authEnvVar ?? (shared.authSource === "stored" ? storedNote : undefined),
+  });
+  const endpointLabel: Record<string, string> = {
+    traces: "OpenObserve traces endpoint",
+    metrics: "OpenObserve metrics endpoint",
+    logs: "OpenObserve logs endpoint",
+  };
+  for (const ch of telemetry.status(env)) {
+    const envKey = `OPENOBSERVE_${ch.channel.toUpperCase()}_URL`;
+    add({
+      group: "Telemetry",
+      label: endpointLabel[ch.channel] ?? `OpenObserve ${ch.channel} endpoint`,
+      value: ch.url ?? "not set",
+      source: telemetrySource(ch.urlSource),
+      envKey,
+      sourceDetail:
+        ch.urlEnvVar ??
+        (ch.urlShared && ch.urlSource === "stored" ? "derived from the stored base URL" : undefined),
+    });
+    // A channel-specific credential override is worth its own row; the
+    // common case (inherited shared credentials) is covered by the
+    // "ingestion credentials" row above.
+    if (ch.authSource !== "none" && !ch.authShared) {
+      add({
+        group: "Telemetry",
+        label: `${endpointLabel[ch.channel] ?? `OpenObserve ${ch.channel}`} credentials (override)`,
+        value: "configured",
+        source: telemetrySource(ch.authSource),
+        envKey: `OPENOBSERVE_${ch.channel.toUpperCase()}_TOKEN`,
+        sourceDetail: ch.authEnvVar ?? (ch.authSource === "stored" ? storedNote : undefined),
+      });
+    }
+  }
   row(
     "Telemetry",
     "OTLP service.name",
