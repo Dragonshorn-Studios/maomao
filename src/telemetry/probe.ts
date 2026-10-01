@@ -54,7 +54,9 @@ function probeMetric(): OtlpMetric {
 
 function probeBody(channel: TelemetryChannel, env: NodeJS.ProcessEnv): string {
   if (channel === "logs") {
-    return JSON.stringify({ event: "maomao.telemetry_test", probe: "connection_test", ts: new Date().toISOString() });
+    // _json's documented contract is a JSON array of records (same wrapper
+    // the real ingest POST in jobs/summary.ts uses).
+    return JSON.stringify([{ event: "maomao.telemetry_test", probe: "connection_test", ts: new Date().toISOString() }]);
   }
   return channel === "traces"
     ? JSON.stringify(tracesEnvelope([probeSpan()], env))

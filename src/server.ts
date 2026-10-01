@@ -1440,6 +1440,7 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
     c.html(
       renderTelemetryPage({
         channels: telemetrySettings().status(telemetryEnv()),
+        shared: telemetrySettings().sharedStatus(telemetryEnv()),
         csrfToken: gateOn ? ensureCsrfToken(c, ctx.config.uiSessionSecret) : undefined,
         canWrite: gateOn,
         options: { ...pageOpts, identity: c.get("identity"), notice: extra.notice, error: extra.error },
@@ -1502,6 +1503,38 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
     }, `ad-hoc ${channel}`);
   });
 
+  // Shared connection (base URL + logs stream + credentials the three
+  // channels inherit). Registered before /config/telemetry/:channel so
+  // "shared" isn't read as a channel id.
+  app.post("/config/telemetry/shared", async (c) => {
+    if (!gateOn) return c.redirect("/", 302);
+    const body = await c.req.parseBody();
+    const stored = telemetrySettings().shared() ?? {};
+    // Same one-slot auth rule as the per-channel form: providing any secret
+    // field replaces the whole tuple; all-blank keeps what was stored.
+    const newAuth = {
+      token: telemetryField(body.token),
+      user: telemetryField(body.user),
+      password: telemetryField(body.password),
+    };
+    const keepAuth = !newAuth.token && !newAuth.user && !newAuth.password;
+    const result = telemetrySettings().setShared({
+      baseUrl: telemetryField(body.baseUrl) ?? stored.baseUrl,
+      stream: telemetryField(body.stream) ?? stored.stream,
+      ...(keepAuth ? { token: stored.token, user: stored.user, password: stored.password } : newAuth),
+    });
+    if (!result.ok) return renderTelemetry(c, { error: result.error, status: 400 });
+    return c.redirect("/config/telemetry?notice=" + encodeURIComponent("Shared connection saved."), 303);
+  });
+
+  app.post("/config/telemetry/shared/delete", async (c) => {
+    if (!gateOn) return c.redirect("/", 302);
+    const result = telemetrySettings().clearShared();
+    if (!result.ok) return renderTelemetry(c, { error: result.error, status: 400 });
+    const note = result.removed ? "Stored shared connection cleared." : "No stored shared connection.";
+    return c.redirect("/config/telemetry?notice=" + encodeURIComponent(note), 303);
+  });
+
   app.post("/config/telemetry/:channel", async (c) => {
     if (!gateOn) return c.redirect("/", 302);
     const channel = telemetryChannelParam(c);
@@ -1529,14 +1562,15 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
     if (!gateOn) return c.redirect("/", 302);
     const channel = telemetryChannelParam(c);
     if (!channel) return renderTelemetry(c, { error: "Unknown telemetry channel.", status: 400 });
-    // Verify the *effective* config (env wins over stored) — same invariant
-    // as provider tests: never silently verify different credentials than
-    // the ones in force.
+    // Verify the *effective* config (env wins over stored, shared fills
+    // the gaps) — same invariant as provider tests: never silently verify
+    // different credentials than the ones in force.
     const stored = telemetrySettings().get(channel);
+    const shared = telemetrySettings().shared();
     const env = telemetryEnv();
-    const url = resolveChannelUrl(channel, env, stored);
-    if (!url) return renderTelemetry(c, { error: `No ${channel} endpoint configured — set the env var or save a URL first.`, status: 400 });
-    return runTelemetryProbe(c, channel, { url, ...resolveChannelAuth(channel, env, stored) }, channel);
+    const url = resolveChannelUrl(channel, env, stored, shared);
+    if (!url) return renderTelemetry(c, { error: `No ${channel} endpoint configured — set the env var, the shared connection, or a URL first.`, status: 400 });
+    return runTelemetryProbe(c, channel, { url, ...resolveChannelAuth(channel, env, stored, shared) }, channel);
   });
 
   app.post("/config/telemetry/:channel/delete", async (c) => {

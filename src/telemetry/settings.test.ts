@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { describe, expect, it } from "vitest";
 import {
   TelemetrySettingsStore,
+  deriveChannelUrl,
   maskUrlCredentials,
   resolveChannelAuth,
   resolveChannelUrl,
@@ -119,6 +120,73 @@ describe("channel resolution", () => {
     expect(metrics.authSource).toBe("stored");
     expect(metrics.authDetail).toBe("…9999");
     expect(JSON.stringify(metrics)).not.toContain("secret-token-9999");
+  });
+});
+
+describe("shared connection", () => {
+  it("deriveChannelUrl builds channel endpoints from a base", () => {
+    const base = "https://oo.test/api/default/";
+    expect(deriveChannelUrl("traces", base)).toBe("https://oo.test/api/default/v1/traces");
+    expect(deriveChannelUrl("metrics", base)).toBe("https://oo.test/api/default/v1/metrics");
+    expect(deriveChannelUrl("logs", base, "job_summaries")).toBe("https://oo.test/api/default/job_summaries/_json");
+    expect(deriveChannelUrl("logs", base)).toBeUndefined();
+    expect(deriveChannelUrl("traces", undefined)).toBeUndefined();
+  });
+
+  it("setShared/clearShared round-trips and validates the stream name", () => {
+    const { store: s, path } = store();
+    expect(
+      s.setShared({ baseUrl: "https://oo.test/api/default", stream: "job_summaries", token: "shared-tok-9" }),
+    ).toEqual({ ok: true });
+    expect(s.shared()).toEqual({ baseUrl: "https://oo.test/api/default", stream: "job_summaries", token: "shared-tok-9" });
+    expect(s.setShared({ stream: "bad/name" }).ok).toBe(false);
+    expect(s.setShared({ baseUrl: "ftp://x" }).ok).toBe(false);
+    expect(s.clearShared()).toEqual({ ok: true, removed: true });
+    expect(readFileSync(path, "utf8")).not.toContain("shared-tok-9");
+    expect(s.clearShared()).toEqual({ ok: true, removed: false });
+  });
+
+  it("env base derives channel urls; per-channel env wins; stored base fills the gap", () => {
+    const env = { OPENOBSERVE_BASE_URL: "https://env-oo.test/api/default", OPENOBSERVE_LOGS_STREAM: "summaries" };
+    expect(resolveChannelUrl("traces", env)).toBe("https://env-oo.test/api/default/v1/traces");
+    expect(resolveChannelUrl("logs", env)).toBe("https://env-oo.test/api/default/summaries/_json");
+    const withOverride = { ...env, OPENOBSERVE_METRICS_URL: "https://explicit.test/v1/metrics" };
+    expect(resolveChannelUrl("metrics", withOverride)).toBe("https://explicit.test/v1/metrics");
+    // Stored channel url wins over the stored shared base; stored base is the last resort.
+    const storedShared = { baseUrl: "https://stored-oo.test/api/default", stream: "s" };
+    expect(resolveChannelUrl("traces", {}, { url: "https://chan.test/v1/traces" }, storedShared)).toBe("https://chan.test/v1/traces");
+    expect(resolveChannelUrl("traces", {}, undefined, storedShared)).toBe("https://stored-oo.test/api/default/v1/traces");
+  });
+
+  it("shared stored auth fills the gap — including logs, which has no generic env", () => {
+    const shared = { token: "shared-token-1234" };
+    expect(resolveChannelAuth("traces", {}, undefined, shared)).toEqual({ token: "shared-token-1234", user: undefined, password: undefined });
+    expect(resolveChannelAuth("logs", {}, undefined, shared).token).toBe("shared-token-1234");
+    // Per-channel stored creds beat shared stored creds.
+    expect(resolveChannelAuth("metrics", {}, { user: "mu", password: "mp" }, shared)).toEqual({
+      token: undefined,
+      user: "mu",
+      password: "mp",
+    });
+  });
+
+  it("status marks shared-derived urls and auth", () => {
+    const { store: s } = store();
+    s.setShared({ baseUrl: "https://oo.test/api/default", stream: "summaries", token: "shared-tok-9999" });
+    const statuses = s.status({});
+    const traces = statuses.find((c) => c.channel === "traces")!;
+    expect(traces.url).toBe("https://oo.test/api/default/v1/traces");
+    expect(traces.urlSource).toBe("stored");
+    expect(traces.urlShared).toBe(true);
+    expect(traces.authShared).toBe(true);
+    expect(traces.authDetail).toBe("…9999");
+    const logs = statuses.find((c) => c.channel === "logs")!;
+    expect(logs.url).toBe("https://oo.test/api/default/summaries/_json");
+    const sharedStatus = s.sharedStatus({});
+    expect(sharedStatus.baseUrlSource).toBe("stored");
+    expect(sharedStatus.stream).toBe("summaries");
+    expect(sharedStatus.authSource).toBe("stored");
+    expect(sharedStatus.hasStored).toBe(true);
   });
 });
 

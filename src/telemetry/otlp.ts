@@ -3,6 +3,7 @@ import {
   resolveChannelAuth,
   resolveChannelUrl,
   type TelemetryChannelConfig,
+  type TelemetrySharedConfig,
 } from "./settings.js";
 
 /**
@@ -22,7 +23,9 @@ import {
  * Env (mirrors the OPENOBSERVE_LOGS_* pattern):
  *   OPENOBSERVE_TRACES_URL / OPENOBSERVE_METRICS_URL — full OTLP/HTTP
  *     endpoint per signal (e.g. https://oo.example.com/api/default/v1/traces).
- *     Unset = that signal is silently off.
+ *     Unset = that signal is silently off. OPENOBSERVE_BASE_URL (e.g.
+ *     https://oo.example.com/api/default) derives both when the per-signal
+ *     URL is unset.
  *   Auth, resolved per signal with a generic fallback:
  *     OPENOBSERVE_<SIGNAL>_TOKEN ?? OPENOBSERVE_TOKEN          → Bearer
  *     OPENOBSERVE_<SIGNAL>_USER  ?? OPENOBSERVE_USER           → Basic (user)
@@ -153,8 +156,9 @@ function authHeaders(
   signal: OtlpSignal,
   env: NodeJS.ProcessEnv,
   stored?: TelemetryChannelConfig,
+  shared?: TelemetrySharedConfig,
 ): Record<string, string> {
-  const auth = resolveChannelAuth(signal, env, stored);
+  const auth = resolveChannelAuth(signal, env, stored, shared);
   if (auth.token) return { authorization: `Bearer ${auth.token}` };
   if (auth.user) {
     return { authorization: `Basic ${Buffer.from(`${auth.user}:${auth.password ?? ""}`).toString("base64")}` };
@@ -170,10 +174,11 @@ export function otlpEndpoint(
   signal: OtlpSignal,
   env: NodeJS.ProcessEnv = process.env,
   stored?: TelemetryChannelConfig,
+  shared?: TelemetrySharedConfig,
 ): OtlpEndpoint | null {
-  const url = resolveChannelUrl(signal, env, stored);
+  const url = resolveChannelUrl(signal, env, stored, shared);
   if (!url) return null;
-  return { url, headers: { "content-type": "application/json", ...authHeaders(signal, env, stored) } };
+  return { url, headers: { "content-type": "application/json", ...authHeaders(signal, env, stored, shared) } };
 }
 
 /** Wrap spans in the OTLP resourceSpans envelope for one export call. */
@@ -276,10 +281,11 @@ export function exportTraces(
   spans: OtlpSpan[],
   env: NodeJS.ProcessEnv = process.env,
   stored?: TelemetryChannelConfig,
+  shared?: TelemetrySharedConfig,
 ): void {
   try {
     if (spans.length === 0) return;
-    const endpoint = otlpEndpoint("traces", env, stored);
+    const endpoint = otlpEndpoint("traces", env, stored, shared);
     if (!endpoint) return;
     queueExport("traces", endpoint, JSON.stringify(tracesEnvelope(spans, env)));
   } catch (error) {
@@ -297,10 +303,11 @@ export function exportMetrics(
   metrics: OtlpMetric[],
   env: NodeJS.ProcessEnv = process.env,
   stored?: TelemetryChannelConfig,
+  shared?: TelemetrySharedConfig,
 ): void {
   try {
     if (metrics.length === 0) return;
-    const endpoint = otlpEndpoint("metrics", env, stored);
+    const endpoint = otlpEndpoint("metrics", env, stored, shared);
     if (!endpoint) return;
     queueExport("metrics", endpoint, JSON.stringify(metricsEnvelope(metrics, env)));
   } catch (error) {

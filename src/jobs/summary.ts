@@ -1,6 +1,11 @@
 import type { JobState } from "../config.js";
 import { tokenTotalFromRow } from "../opencode/parse.js";
-import { resolveChannelAuth, resolveChannelUrl, type TelemetryChannelConfig } from "../telemetry/settings.js";
+import {
+  resolveChannelAuth,
+  resolveChannelUrl,
+  type TelemetryChannelConfig,
+  type TelemetrySharedConfig,
+} from "../telemetry/settings.js";
 import type { JobRow, JobStore, ReviewerRunRow } from "./store.js";
 
 /**
@@ -249,9 +254,13 @@ export function flushJobSummaryPosts(): Promise<void> {
   return postChain;
 }
 
-function ingestHeaders(env: NodeJS.ProcessEnv, stored?: TelemetryChannelConfig): Record<string, string> {
+function ingestHeaders(
+  env: NodeJS.ProcessEnv,
+  stored?: TelemetryChannelConfig,
+  shared?: TelemetrySharedConfig,
+): Record<string, string> {
   const headers: Record<string, string> = { "content-type": "application/json" };
-  const auth = resolveChannelAuth("logs", env, stored);
+  const auth = resolveChannelAuth("logs", env, stored, shared);
   if (auth.token) {
     headers.authorization = `Bearer ${auth.token}`;
   } else if (auth.user) {
@@ -272,6 +281,7 @@ export function emitJobSummary(
   env: NodeJS.ProcessEnv = process.env,
   opts?: JobSummaryOptions,
   stored?: TelemetryChannelConfig,
+  shared?: TelemetrySharedConfig,
 ): void {
   try {
     const job = opts?.job ?? store.getJob(jobId);
@@ -286,9 +296,9 @@ export function emitJobSummary(
         `job-summary: stdout write failed for job ${jobId}: ${error instanceof Error ? error.message : String(error)}`,
       );
     }
-    const url = resolveChannelUrl("logs", env, stored);
+    const url = resolveChannelUrl("logs", env, stored, shared);
     if (!url) return;
-    const headers = ingestHeaders(env, stored);
+    const headers = ingestHeaders(env, stored, shared);
     if (headers.authorization && url.startsWith("http://") && !insecureIngestWarned.has(url)) {
       insecureIngestWarned.add(url);
       console.error("job-summary: OPENOBSERVE_LOGS_URL uses http — ingest credentials are sent in cleartext");

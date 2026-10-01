@@ -19,6 +19,10 @@ export class JobQueue {
     return this.telemetry?.get("metrics");
   }
 
+  private metricsShared() {
+    return this.telemetry?.shared();
+  }
+
   start(): void {
     this.started = true;
     for (const job of this.store.listInterruptedJobs()) {
@@ -33,7 +37,7 @@ export class JobQueue {
     if (this.pending.includes(jobId) || this.active.has(jobId)) return;
     this.pending.push(jobId);
     // Gauge on change: depth grows even when no slot is free for pump to act.
-    exportQueueMetrics(this.pending.length, this.active.size, this.concurrency, process.env, this.metricsConfig());
+    exportQueueMetrics(this.pending.length, this.active.size, this.concurrency, process.env, this.metricsConfig(), this.metricsShared());
     if (this.started) this.pump();
   }
 
@@ -41,7 +45,7 @@ export class JobQueue {
     const index = this.pending.indexOf(jobId);
     if (index >= 0) {
       this.pending.splice(index, 1);
-      exportQueueMetrics(this.pending.length, this.active.size, this.concurrency, process.env, this.metricsConfig());
+      exportQueueMetrics(this.pending.length, this.active.size, this.concurrency, process.env, this.metricsConfig(), this.metricsShared());
     }
     abortJob(jobId);
   }
@@ -68,6 +72,6 @@ export class JobQueue {
     // Gauge on change: claims, releases (via the finally's re-pump), and the
     // startup drain all settle depth/slot numbers here. Best-effort OTLP —
     // no-op unless a metrics URL is configured (env or stored).
-    exportQueueMetrics(this.pending.length, this.active.size, this.concurrency, process.env, this.metricsConfig());
+    exportQueueMetrics(this.pending.length, this.active.size, this.concurrency, process.env, this.metricsConfig(), this.metricsShared());
   }
 }

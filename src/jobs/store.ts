@@ -1607,9 +1607,10 @@ export class JobStore {
   private emitTerminalSummary(jobId: number, opts?: JobSummaryOptions): void {
     if (this.opts.emitJobSummaries !== true) return;
     const telemetry = this.opts.telemetry;
-    emitJobSummary(this, jobId, process.env, opts, telemetry?.get("logs"));
-    exportTerminalJobMetrics(this, jobId, process.env, opts, telemetry?.get("metrics"));
-    exportTerminalJobTraces(this, jobId, process.env, opts, telemetry?.get("traces"));
+    const shared = telemetry?.shared();
+    emitJobSummary(this, jobId, process.env, opts, telemetry?.get("logs"), shared);
+    exportTerminalJobMetrics(this, jobId, process.env, opts, telemetry?.get("metrics"), shared);
+    exportTerminalJobTraces(this, jobId, process.env, opts, telemetry?.get("traces"), shared);
   }
 
   patchJob(id: number, extra: Partial<JobRow>): void {

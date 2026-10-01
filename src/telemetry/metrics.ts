@@ -1,7 +1,7 @@
 import type { JobRow, JobStore, ReviewerRunRow } from "../jobs/store.js";
 import { buildJobSummary, type JobSummaryOptions } from "../jobs/summary.js";
 import { attr, exportMetrics, nanoTime, type OtlpAttribute, type OtlpMetric } from "./otlp.js";
-import type { TelemetryChannelConfig } from "./settings.js";
+import type { TelemetryChannelConfig, TelemetrySharedConfig } from "./settings.js";
 
 /**
  * OpenObserve metrics slice (issue #141, meta #138): a small OTLP/HTTP metric
@@ -68,8 +68,9 @@ export function exportQueueMetrics(
   slots: number,
   env: NodeJS.ProcessEnv = process.env,
   stored?: TelemetryChannelConfig,
+  shared?: TelemetrySharedConfig,
 ): void {
-  exportMetrics(queueMetrics(pending, active, slots), env, stored);
+  exportMetrics(queueMetrics(pending, active, slots), env, stored, shared);
 }
 
 /** Metrics for one terminal job transition, from the same snapshot the summary line uses. */
@@ -159,11 +160,12 @@ export function exportTerminalJobMetrics(
   env: NodeJS.ProcessEnv = process.env,
   opts?: JobSummaryOptions,
   stored?: TelemetryChannelConfig,
+  shared?: TelemetrySharedConfig,
 ): void {
   try {
     const job = opts?.job ?? store.getJob(jobId);
     if (!job) return;
-    exportMetrics(terminalJobMetrics(job, opts?.runs ?? store.listReviewerRuns(jobId), opts), env, stored);
+    exportMetrics(terminalJobMetrics(job, opts?.runs ?? store.listReviewerRuns(jobId), opts), env, stored, shared);
   } catch (error) {
     console.error(
       `otlp: terminal metrics failed for job ${jobId}: ${error instanceof Error ? error.message : String(error)}`,
