@@ -1870,19 +1870,34 @@ describe("model picker script", () => {
     btn.appendChild(label);
     const pop = fakeEl("span", ["model-picker-pop"]);
     pop.hidden = true;
+    const searchWrap = fakeEl("span", ["model-picker-search"]);
+    const search = fakeEl("input", ["model-picker-search-input"]);
+    searchWrap.appendChild(search);
     const optEmpty = fakeEl("span", ["model-picker-option"]);
     optEmpty.setAttribute("data-value", "");
     optEmpty.setAttribute("data-label", "— default —");
     optEmpty.setAttribute("aria-selected", "true");
+    const groupA = fakeEl("span", ["model-picker-group"]);
     const optA = fakeEl("span", ["model-picker-option"]);
     optA.setAttribute("data-value", "a/x");
     optA.setAttribute("data-label", "a/x");
     optA.setAttribute("aria-selected", "false");
+    const optA2 = fakeEl("span", ["model-picker-option"]);
+    optA2.setAttribute("data-value", "a/y");
+    optA2.setAttribute("data-label", "a/y");
+    optA2.setAttribute("aria-selected", "false");
+    const groupB = fakeEl("span", ["model-picker-group"]);
+    const optB = fakeEl("span", ["model-picker-option"]);
+    optB.setAttribute("data-value", "b/z");
+    optB.setAttribute("data-label", "b/z");
+    optB.setAttribute("aria-selected", "false");
     const optCustom = fakeEl("span", ["model-picker-option", "model-picker-option-custom"]);
     optCustom.setAttribute("data-custom", "");
     optCustom.setAttribute("data-label", "Custom model");
     optCustom.setAttribute("aria-selected", "false");
-    for (const child of [optEmpty, optA, optCustom]) pop.appendChild(child);
+    const none = fakeEl("span", ["model-picker-none"]);
+    none.hidden = true;
+    for (const child of [searchWrap, optEmpty, groupA, optA, optA2, groupB, optB, optCustom, none]) pop.appendChild(child);
     for (const child of [input, btn, pop]) picker.appendChild(child);
 
     const docListeners = new Map<string, Array<(e: any) => void>>();
@@ -1900,7 +1915,7 @@ describe("model picker script", () => {
       for (const fn of docListeners.get(type) ?? []) fn(event);
       return event;
     };
-    return { picker, input, label, btn, pop, optEmpty, optA, optCustom, docFire };
+    return { picker, input, label, btn, pop, search, optEmpty, groupA, optA, optA2, groupB, optB, optCustom, none, docFire };
   }
 
   it("stamps is-js and toggles the popover on button click", () => {
@@ -1965,6 +1980,69 @@ describe("model picker script", () => {
     docFire("keydown", { key: "Escape", target: btn });
     docFire("keydown", { key: "ArrowDown", target: btn });
     expect(pop.hidden).toBe(false);
+  });
+
+  it("filters options by short name and provider/model, hiding empty groups", () => {
+    const { btn, pop, search, optEmpty, optA, optA2, groupA, groupB, optB, optCustom, none, docFire } = boot();
+    docFire("click", { target: btn });
+    expect(search.focus).toHaveBeenCalled();
+    // Short-name hit: only a/x stays; group B and its option hide.
+    search.value = "x";
+    docFire("input", { target: search });
+    expect(optA.hidden).toBe(false);
+    expect(optA2.hidden).toBe(true);
+    expect(optB.hidden).toBe(true);
+    expect(optEmpty.hidden).toBe(true);
+    expect(optCustom.hidden).toBe(true);
+    expect(groupB.hidden).toBe(true);
+    expect(groupA.hidden).toBe(false);
+    expect(none.hidden).toBe(true);
+    // Provider/model prefix: both a/* options show, group B stays hidden.
+    search.value = "a/";
+    docFire("input", { target: search });
+    expect(optA.hidden).toBe(false);
+    expect(optA2.hidden).toBe(false);
+    expect(groupB.hidden).toBe(true);
+    // Only a group-B hit: group A's header hides instead.
+    search.value = "b/z";
+    docFire("input", { target: search });
+    expect(optB.hidden).toBe(false);
+    expect(groupB.hidden).toBe(false);
+    expect(groupA.hidden).toBe(true);
+    // No hits at all: the empty state shows.
+    search.value = "zzz";
+    docFire("input", { target: search });
+    expect(none.hidden).toBe(false);
+  });
+
+  it("clears the filter on close and skips hidden options when stepping", () => {
+    const { btn, pop, search, optA, optA2, optB, docFire } = boot();
+    docFire("click", { target: btn });
+    search.value = "a/y";
+    docFire("input", { target: search });
+    docFire("keydown", { key: "ArrowDown", target: search });
+    // Only a/y is visible — stepping activates it rather than a hidden option.
+    expect(optA2.classList.contains("is-active")).toBe(true);
+    docFire("keydown", { key: "Escape", target: search });
+    expect(pop.hidden).toBe(true);
+    expect(optA.hidden).toBe(false);
+    expect(optB.hidden).toBe(false);
+    docFire("click", { target: btn });
+    expect(search.value).toBe("");
+  });
+
+  it("lets Space type in the search box while Enter picks the active option", () => {
+    const { btn, input, search, optA, docFire } = boot();
+    docFire("click", { target: btn });
+    search.value = "a/x";
+    docFire("input", { target: search });
+    const space = docFire("keydown", { key: " ", target: search });
+    expect(space.preventDefault).not.toHaveBeenCalled();
+    expect(input.value).toBe("");
+    docFire("keydown", { key: "ArrowDown", target: search });
+    docFire("keydown", { key: "Enter", target: search });
+    expect(optA.getAttribute("aria-selected")).toBe("true");
+    expect(input.value).toBe("a/x");
   });
 
   it("the custom option reveals the text input for free entry", () => {

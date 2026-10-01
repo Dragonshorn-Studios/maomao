@@ -1163,6 +1163,21 @@ details.finding-diff > summary {
    [hidden] guard below — otherwise pops paint open once is-js is stamped. */
 .model-picker.is-js .model-picker-pop:not([hidden]) { display: block; }
 .model-picker-pop[hidden] { display: none; }
+.model-picker-search { display: block; padding: 0 0.15rem 0.3rem; }
+.model-picker-search .model-picker-search-input {
+  width: 100%;
+  box-sizing: border-box;
+  margin-top: 0;
+  font-family: var(--font-mono);
+  font-size: 0.85rem;
+}
+.model-picker-none {
+  display: block;
+  padding: 0.6rem 0.55rem 0.4rem;
+  color: var(--ink-muted);
+  font-size: 0.8rem;
+}
+.model-picker-none[hidden] { display: none; }
 .model-picker-group {
   display: block;
   padding: 0.45rem 0.55rem 0.15rem;
@@ -1172,6 +1187,7 @@ details.finding-diff > summary {
   letter-spacing: 0.05em;
   text-transform: uppercase;
 }
+.model-picker-group[hidden] { display: none; }
 .model-picker-option {
   display: flex;
   align-items: center;
