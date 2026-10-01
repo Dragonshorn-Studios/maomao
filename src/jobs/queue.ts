@@ -1,6 +1,7 @@
 import type { JobStore } from "./store.js";
 import { abortJob } from "./pipeline.js";
 import { exportQueueMetrics } from "../telemetry/metrics.js";
+import type { TelemetrySettingsStore } from "../telemetry/settings.js";
 
 export class JobQueue {
   private readonly pending: number[] = [];
@@ -11,7 +12,12 @@ export class JobQueue {
     private readonly store: JobStore,
     private readonly concurrency: number,
     private readonly run: (jobId: number) => Promise<void>,
+    private readonly telemetry?: TelemetrySettingsStore,
   ) {}
+
+  private metricsConfig() {
+    return this.telemetry?.get("metrics");
+  }
 
   start(): void {
     this.started = true;
@@ -27,7 +33,7 @@ export class JobQueue {
     if (this.pending.includes(jobId) || this.active.has(jobId)) return;
     this.pending.push(jobId);
     // Gauge on change: depth grows even when no slot is free for pump to act.
-    exportQueueMetrics(this.pending.length, this.active.size, this.concurrency);
+    exportQueueMetrics(this.pending.length, this.active.size, this.concurrency, process.env, this.metricsConfig());
     if (this.started) this.pump();
   }
 
@@ -35,7 +41,7 @@ export class JobQueue {
     const index = this.pending.indexOf(jobId);
     if (index >= 0) {
       this.pending.splice(index, 1);
-      exportQueueMetrics(this.pending.length, this.active.size, this.concurrency);
+      exportQueueMetrics(this.pending.length, this.active.size, this.concurrency, process.env, this.metricsConfig());
     }
     abortJob(jobId);
   }
@@ -61,7 +67,7 @@ export class JobQueue {
     }
     // Gauge on change: claims, releases (via the finally's re-pump), and the
     // startup drain all settle depth/slot numbers here. Best-effort OTLP —
-    // no-op unless OPENOBSERVE_METRICS_URL is set.
-    exportQueueMetrics(this.pending.length, this.active.size, this.concurrency);
+    // no-op unless a metrics URL is configured (env or stored).
+    exportQueueMetrics(this.pending.length, this.active.size, this.concurrency, process.env, this.metricsConfig());
   }
 }

@@ -10,6 +10,13 @@ Maomao emits three channels into OpenObserve, all best-effort and never blocking
 
 Each channel is independent — set only the ones you want. Everything below applies per channel.
 
+The operator UI at `/config/telemetry` shows the effective endpoint + auth
+source per channel, persists settings under the XDG data dir (env vars still
+win over stored values), and can POST a probe payload to verify a connection
+before it is committed — either the effective config or ad-hoc values that
+are never saved. The env-var setup below remains the primary path for
+production deployments.
+
 ## 1. OpenObserve side
 
 ### Credentials

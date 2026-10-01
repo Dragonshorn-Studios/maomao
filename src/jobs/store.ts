@@ -11,6 +11,7 @@ import { publish } from "../events.js";
 import { emitJobSummary, type JobSummaryOptions } from "./summary.js";
 import { exportTerminalJobMetrics } from "../telemetry/metrics.js";
 import { exportTerminalJobTraces } from "../telemetry/traces.js";
+import type { TelemetrySettingsStore } from "../telemetry/settings.js";
 import { ReviewConfigStore } from "../config-revisions.js";
 import { PromptRevisionStore } from "../prompt-revisions.js";
 
@@ -439,7 +440,7 @@ export class JobStore {
      * future harness) never write telemetry lines or POST to an
      * OPENOBSERVE_LOGS_URL exported in the surrounding shell.
      */
-    private readonly opts: { emitJobSummaries?: boolean } = {},
+    private readonly opts: { emitJobSummaries?: boolean; telemetry?: TelemetrySettingsStore } = {},
   ) {
     this.configs = new ReviewConfigStore(db, modelCatalog);
     this.prompts = new PromptRevisionStore(db);
@@ -1605,9 +1606,10 @@ export class JobStore {
    */
   private emitTerminalSummary(jobId: number, opts?: JobSummaryOptions): void {
     if (this.opts.emitJobSummaries !== true) return;
-    emitJobSummary(this, jobId, process.env, opts);
-    exportTerminalJobMetrics(this, jobId, process.env, opts);
-    exportTerminalJobTraces(this, jobId, process.env, opts);
+    const telemetry = this.opts.telemetry;
+    emitJobSummary(this, jobId, process.env, opts, telemetry?.get("logs"));
+    exportTerminalJobMetrics(this, jobId, process.env, opts, telemetry?.get("metrics"));
+    exportTerminalJobTraces(this, jobId, process.env, opts, telemetry?.get("traces"));
   }
 
   patchJob(id: number, extra: Partial<JobRow>): void {

@@ -1699,6 +1699,19 @@ body.operator main th {
   border-top: 1px dashed var(--line);
 }
 .provider-key-form input { flex: 1; min-width: 0; }
+.telemetry-list { list-style: none; margin: var(--space-4) 0 0; padding: 0; display: grid; gap: var(--space-3); }
+.telemetry-card { padding: 1rem 1.1rem; }
+.telemetry-url { margin: 0.4rem 0 0; overflow-wrap: anywhere; }
+.telemetry-form { margin-top: 0.75rem; padding-top: 0.7rem; border-top: 1px dashed var(--line); }
+.telemetry-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(14rem, 1fr));
+  gap: 0.6rem 0.9rem;
+}
+.telemetry-field-wide { grid-column: 1 / -1; }
+.telemetry-field span { display: block; color: var(--ink-muted); font-size: 0.8rem; margin-bottom: 0.2rem; }
+.telemetry-field input, .telemetry-field select { width: 100%; }
+.telemetry-actions { display: flex; flex-wrap: wrap; gap: 0.45rem; margin-top: 0.7rem; }
 .operator-form label { display: block; color: var(--ink-muted); font-size: 0.88rem; }
 
 .chat-thought { display: grid; gap: var(--space-2); }
