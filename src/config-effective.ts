@@ -317,6 +317,30 @@ export function effectiveConfigEntries(
     "OPENOBSERVE_LOGS_URL",
     envSet(env.OPENOBSERVE_LOGS_URL) ? "configured" : "not set",
   );
+  row(
+    "Telemetry",
+    "OpenObserve OTLP traces endpoint",
+    "OPENOBSERVE_TRACES_URL",
+    envSet(env.OPENOBSERVE_TRACES_URL) ? "configured" : "not set",
+  );
+  row(
+    "Telemetry",
+    "OpenObserve OTLP metrics endpoint",
+    "OPENOBSERVE_METRICS_URL",
+    envSet(env.OPENOBSERVE_METRICS_URL) ? "configured" : "not set",
+  );
+  row(
+    "Telemetry",
+    "OTLP service.name",
+    "OTEL_SERVICE_NAME",
+    env.OTEL_SERVICE_NAME?.trim() || "maomao",
+  );
+  row(
+    "Telemetry",
+    "OTLP resource attributes",
+    "OTEL_RESOURCE_ATTRIBUTES",
+    envSet(env.OTEL_RESOURCE_ATTRIBUTES) ? "configured" : "not set",
+  );
   row("Publishing", "Max inline comments", "MAX_INLINE_COMMENTS", String(config.maxInlineComments));
   row(
     "Publishing",

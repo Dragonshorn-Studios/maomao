@@ -9,6 +9,8 @@ import { nowIso } from "../util.js";
 import { stackDedupPrefix } from "../stacks/commands.js";
 import { publish } from "../events.js";
 import { emitJobSummary, type JobSummaryOptions } from "./summary.js";
+import { exportTerminalJobMetrics } from "../telemetry/metrics.js";
+import { exportTerminalJobTraces } from "../telemetry/traces.js";
 import { ReviewConfigStore } from "../config-revisions.js";
 import { PromptRevisionStore } from "../prompt-revisions.js";
 
@@ -1447,7 +1449,7 @@ export class JobStore {
     const placeholders = memberJobIds.map(() => "?").join(",");
     const rows = this.db
       .prepare(
-        `SELECT member_job_id, job_id AS stack_job_id, position, state FROM stack_run_members WHERE member_job_id IN (${placeholders})`,
+        `SELECT member_job_id, job_id AS stack_job_id, position, state FROM stack_run_members WHERE member_job_id IN (${placeholders}) ORDER BY job_id`,
       )
       .all(...memberJobIds) as { member_job_id: number; stack_job_id: number; position: number; state: string }[];
     for (const row of rows) {
@@ -1596,13 +1598,16 @@ export class JobStore {
   }
 
   /**
-   * One structured stdout line (+ optional OpenObserve POST) per job landing
-   * in a terminal state (issue #139). Emission never throws — a broken sink
-   * or ingest endpoint must not break job bookkeeping.
+   * Per job landing in a terminal state: one structured stdout line (+
+   * optional OpenObserve log POST, issue #139) and OTLP metrics/traces
+   * exports (#141/#142). Emission never throws — a broken sink or ingest
+   * endpoint must not break job bookkeeping.
    */
   private emitTerminalSummary(jobId: number, opts?: JobSummaryOptions): void {
     if (this.opts.emitJobSummaries !== true) return;
     emitJobSummary(this, jobId, process.env, opts);
+    exportTerminalJobMetrics(this, jobId, process.env, opts);
+    exportTerminalJobTraces(this, jobId, process.env, opts);
   }
 
   patchJob(id: number, extra: Partial<JobRow>): void {

@@ -89,7 +89,7 @@ export function modelPicker(options: {
     <button type="button" class="model-picker-btn" aria-haspopup="listbox" aria-expanded="false"${buttonAttrs}>
       <span class="model-picker-label">${escapeHtml(buttonLabel)}</span><span class="model-picker-caret" aria-hidden="true">▾</span>
     </button>
-    <span class="model-picker-pop" role="listbox" hidden>${emptyOption}${groupsHtml}${customOption}</span>
+    <span class="model-picker-pop" role="listbox" hidden><span class="model-picker-search"><input type="text" class="model-picker-search-input" placeholder="Filter models…" autocomplete="off" spellcheck="false" aria-label="Filter models" /></span>${emptyOption}${groupsHtml}${customOption}<span class="model-picker-none" hidden>No matching models</span></span>
   </span>`;
 }
 
@@ -102,8 +102,11 @@ export const MODEL_PICKER_HREF = "/assets/model-picker.js";
  * popover, picks an option into the text input (button label follows the
  * option's data-label), a `data-custom` option re-shows the input for
  * free-text ids, Escape/outside-click closes, arrows + Enter navigate when
- * open. Plain string (no bundler) so it ships as a static asset; all option
- * text comes from server-rendered attributes, nothing is eval'd.
+ * open. The popover's search input filters options client-side on
+ * `data-value`/`data-label` (so short name and provider/model both match)
+ * and hides provider groups with no hits. Plain string (no bundler) so it
+ * ships as a static asset; all option text comes from server-rendered
+ * attributes, nothing is eval'd.
  */
 export const MODEL_PICKER_JS = String.raw`(function () {
   "use strict";
@@ -112,9 +115,52 @@ export const MODEL_PICKER_JS = String.raw`(function () {
     return Array.prototype.slice.call(picker.querySelectorAll(".model-picker-option"));
   }
 
+  function visibleOptions(picker) {
+    return options(picker).filter(function (o) { return !o.hidden; });
+  }
+
+  function searchInput(picker) {
+    return picker.querySelector(".model-picker-search-input");
+  }
+
   function isOpen(picker) {
     var pop = picker.querySelector(".model-picker-pop");
     return pop && !pop.hidden;
+  }
+
+  // Client-side filter (issue #144): substring over data-value + data-label
+  // covers both the short model name and the full provider/model id; a
+  // provider group header hides once every option under it filtered out.
+  function applyFilter(picker) {
+    var pop = picker.querySelector(".model-picker-pop");
+    if (!pop) return;
+    var input = searchInput(picker);
+    var query = (input ? input.value : "").trim().toLowerCase();
+    var visible = 0;
+    options(picker).forEach(function (o) {
+      var hay = ((o.getAttribute("data-value") || "") + " " + (o.getAttribute("data-label") || "")).toLowerCase();
+      var show = query === "" || hay.indexOf(query) !== -1;
+      o.hidden = !show;
+      if (show) visible += 1;
+    });
+    var group = null;
+    var groupHasHit = false;
+    Array.prototype.slice.call(pop.children).forEach(function (child) {
+      if (!child.classList) return;
+      if (child.classList.contains("model-picker-group")) {
+        if (group) group.hidden = !groupHasHit;
+        group = child;
+        groupHasHit = false;
+      } else if (child.classList.contains("model-picker-option") && !child.hidden) {
+        groupHasHit = true;
+      }
+    });
+    if (group) group.hidden = !groupHasHit;
+    var none = pop.querySelector(".model-picker-none");
+    if (none) none.hidden = visible !== 0;
+    var active = pop.querySelector(".model-picker-option.is-active");
+    if (active && active.hidden) active = null;
+    if (!active) activate(picker, visibleOptions(picker)[0] || null);
   }
 
   function open(picker) {
@@ -124,8 +170,12 @@ export const MODEL_PICKER_JS = String.raw`(function () {
     if (!pop || !btn) return;
     pop.hidden = false;
     btn.setAttribute("aria-expanded", "true");
-    var selected = pop.querySelector('[aria-selected="true"]') || options(picker)[0];
+    var input = searchInput(picker);
+    if (input) input.value = "";
+    applyFilter(picker);
+    var selected = pop.querySelector('[aria-selected="true"]') || visibleOptions(picker)[0];
     activate(picker, selected);
+    if (input) input.focus();
   }
 
   function close(picker) {
@@ -134,6 +184,9 @@ export const MODEL_PICKER_JS = String.raw`(function () {
     if (!pop || !btn) return;
     pop.hidden = true;
     btn.setAttribute("aria-expanded", "false");
+    var input = searchInput(picker);
+    if (input) input.value = "";
+    applyFilter(picker);
     options(picker).forEach(function (o) { o.classList.remove("is-active"); });
   }
 
@@ -175,12 +228,12 @@ export const MODEL_PICKER_JS = String.raw`(function () {
   }
 
   function step(picker, delta) {
-    var list = options(picker);
+    var list = visibleOptions(picker);
     if (!list.length) return;
     var active = picker.querySelector(".model-picker-option.is-active");
     var index = list.indexOf(active);
     if (index === -1) {
-      var selected = picker.querySelector('.model-picker-option[aria-selected="true"]');
+      var selected = picker.querySelector('.model-picker-option[aria-selected="true"]:not([hidden])');
       index = selected ? list.indexOf(selected) : delta > 0 ? -1 : 0;
     }
     index = (index + delta + list.length) % list.length;
@@ -216,6 +269,7 @@ export const MODEL_PICKER_JS = String.raw`(function () {
       }
       return;
     }
+    var inSearch = event.target.closest ? event.target.closest(".model-picker-search-input") : null;
     if (event.key === "Escape") {
       close(picker);
       picker.querySelector(".model-picker-btn").focus();
@@ -225,12 +279,18 @@ export const MODEL_PICKER_JS = String.raw`(function () {
     } else if (event.key === "ArrowUp") {
       event.preventDefault();
       step(picker, -1);
-    } else if (event.key === "Enter" || event.key === " ") {
+    } else if (event.key === "Enter" || (event.key === " " && !inSearch)) {
+      // Space must keep typing in the search box; Enter still picks.
       event.preventDefault();
       pick(picker, picker.querySelector(".model-picker-option.is-active"));
     } else if (event.key === "Tab") {
       close(picker);
     }
+  });
+
+  document.addEventListener("input", function (event) {
+    var picker = event.target.closest ? event.target.closest("[data-model-picker]") : null;
+    if (picker && event.target.closest(".model-picker-search-input")) applyFilter(picker);
   });
 
   // Progressive enhancement: reveal the button/popover and hide the raw

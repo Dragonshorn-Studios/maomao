@@ -5011,6 +5011,175 @@ describe("structured profile editor", () => {
   });
 });
 
+describe("profile model test", () => {
+  const oauthEnv = {
+    UI_SESSION_SECRET: "session-secret-for-tests",
+    GITHUB_OAUTH_CLIENT_ID: "cid",
+    GITHUB_OAUTH_CLIENT_SECRET: "csecret",
+    MAOMAO_ADMIN_GITHUB_IDS: "1001",
+    MAOMAO_PUBLIC_URL: "https://maomao.example",
+  };
+
+  async function operatorCsrf(app: ReturnType<typeof createApp>) {
+    const session = await operatorSession(app);
+    const page = await app.request("/config/profiles", { headers: { cookie: session } });
+    const { csrfCookie, csrfToken } = await csrfArtifacts(page);
+    return { cookie: `${session}; ${csrfCookie}`, csrfToken, session };
+  }
+
+  function testBody(fields: Record<string, string>): string {
+    return new URLSearchParams({ editor: "structured", action: "test", ...fields }).toString();
+  }
+
+  function stubOpencode(result: (model: string) => { exitCode: number; stderr?: string; text?: string }) {
+    const calls: Parameters<OpenCodePort["run"]>[0][] = [];
+    const opencode: OpenCodeLike = {
+      async run(input) {
+        calls.push(input);
+        const outcome = result(input.model);
+        return {
+          stdout: outcome.stderr ?? "ok",
+          stderr: outcome.stderr ?? "",
+          exitCode: outcome.exitCode,
+          text: outcome.text ?? "ok",
+          usage: undefined as never,
+        };
+      },
+    };
+    return { calls, opencode };
+  }
+
+  it("probes deduped non-empty models sequentially, shows the pass notice, and saves nothing", async () => {
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    const { calls, opencode } = stubOpencode(() => ({ exitCode: 0 }));
+    const { app, store } = testApp(oauthEnv, undefined, mockOauthFetch({ id: 1001, login: "octocat" }), { opencode });
+    const { cookie, csrfToken } = await operatorCsrf(app);
+    const before = store.configs.listRevisions().length;
+
+    const response = await app.request("/config/drafts", {
+      method: "POST",
+      headers: { cookie, "content-type": "application/x-www-form-urlencoded" },
+      body: testBody({
+        csrf_token: csrfToken,
+        name: "probe-me",
+        reviewer_count: "3",
+        reviewer_role_0: "correctness",
+        reviewer_model_0: "anthropic/claude-4.5-sonnet",
+        reviewer_role_1: "security",
+        reviewer_model_1: "anthropic/claude-4.5-sonnet",
+        reviewer_role_2: "maintainability",
+        reviewer_model_2: "",
+        router_model: "openai/gpt-5",
+      }),
+    });
+    expect(response.status).toBe(200);
+    const html = await response.text();
+    expect(html).toContain("2 models reachable");
+    expect(html).toContain("anthropic/claude-4.5-sonnet");
+    expect(html).toContain("openai/gpt-5");
+    // Dedupe by provider/model; sequential order router-then-reviewers isn't
+    // guaranteed — only dedupe and full coverage are.
+    expect(calls.map((call) => call.model).sort()).toEqual([
+      "anthropic/claude-4.5-sonnet",
+      "openai/gpt-5",
+    ]);
+    expect(calls[0].prompt).toContain("Reply with exactly the word: ok");
+    expect(calls[0].timeoutMs).toBe(60_000);
+    expect(calls[0].cwd).toContain("maomao-profile-test-");
+    // The submitted values stay in the re-rendered form; nothing persisted.
+    expect(html).toContain('value="probe-me"');
+    expect(store.configs.listRevisions()).toHaveLength(before);
+    log.mockRestore();
+  });
+
+  it("reports the failing model with its redacted detail and keeps values", async () => {
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    const { opencode } = stubOpencode((model) =>
+      model === "bad/model" ? { exitCode: 1, stderr: "boom no such provider", text: "" }
+      : model === "mute/model" ? { exitCode: 0, text: "" }
+      : { exitCode: 0 },
+    );
+    const { app } = testApp(oauthEnv, undefined, mockOauthFetch({ id: 1001, login: "octocat" }), { opencode });
+    const { cookie, csrfToken } = await operatorCsrf(app);
+
+    const response = await app.request("/config/drafts", {
+      method: "POST",
+      headers: { cookie, "content-type": "application/x-www-form-urlencoded" },
+      body: testBody({
+        csrf_token: csrfToken,
+        name: "fails",
+        reviewer_count: "1",
+        reviewer_role_0: "correctness",
+        reviewer_model_0: "bad/model",
+        router_model: "mute/model",
+      }),
+    });
+    expect(response.status).toBe(400);
+    const html = await response.text();
+    expect(html).toContain("2/2 models unreachable");
+    expect(html).toContain("bad/model exited 1 (boom no such provider)");
+    expect(html).toContain("mute/model produced no reply");
+    expect(html).toContain('value="fails"');
+    log.mockRestore();
+  });
+
+  it("probes from the draft edit path too, rendering on the edit page", async () => {
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    const { calls, opencode } = stubOpencode(() => ({ exitCode: 0 }));
+    const { app, store } = testApp(oauthEnv, undefined, mockOauthFetch({ id: 1001, login: "octocat" }), { opencode });
+    const { cookie, csrfToken } = await operatorCsrf(app);
+    store.configs.createDraft({
+      definition: { name: "default", reviewers: [{ role: "correctness" }], minPublishableSeverity: "medium" },
+      createdBy: "octocat",
+    });
+    const draft = store.configs.listRevisions()[0];
+
+    const response = await app.request(`/config/drafts/${draft.id}`, {
+      method: "POST",
+      headers: { cookie, "content-type": "application/x-www-form-urlencoded" },
+      body: testBody({ csrf_token: csrfToken, name: "edited", router_model: "test/model" }),
+    });
+    expect(response.status).toBe(200);
+    const html = await response.text();
+    expect(html).toContain("1 model reachable");
+    expect(html).toContain(`Edit draft #${draft.id}`);
+    expect(calls.map((call) => call.model)).toEqual(["test/model"]);
+    log.mockRestore();
+  });
+
+  it("short-circuits to a notice when every model field is empty", async () => {
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    const { calls, opencode } = stubOpencode(() => ({ exitCode: 0 }));
+    const { app } = testApp(oauthEnv, undefined, mockOauthFetch({ id: 1001, login: "octocat" }), { opencode });
+    const { cookie, csrfToken } = await operatorCsrf(app);
+
+    const response = await app.request("/config/drafts", {
+      method: "POST",
+      headers: { cookie, "content-type": "application/x-www-form-urlencoded" },
+      body: testBody({ csrf_token: csrfToken, name: "nothing", reviewer_count: "1", reviewer_role_0: "correctness" }),
+    });
+    expect(response.status).toBe(200);
+    expect(await response.text()).toContain("Nothing to test");
+    expect(calls).toHaveLength(0);
+    log.mockRestore();
+  });
+
+  it("reports unavailable when there is no OpenCode runner", async () => {
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    const { app } = testApp(oauthEnv, undefined, mockOauthFetch({ id: 1001, login: "octocat" }));
+    const { cookie, csrfToken } = await operatorCsrf(app);
+
+    const response = await app.request("/config/drafts", {
+      method: "POST",
+      headers: { cookie, "content-type": "application/x-www-form-urlencoded" },
+      body: testBody({ csrf_token: csrfToken, name: "no-runner", router_model: "test/model" }),
+    });
+    expect(response.status).toBe(503);
+    expect(await response.text()).toContain("no OpenCode runner");
+    log.mockRestore();
+  });
+});
+
 describe("structured profile editor review fixes", () => {
   const oauthEnv = {
     UI_SESSION_SECRET: "session-secret-for-tests",

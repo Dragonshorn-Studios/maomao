@@ -345,6 +345,49 @@ OPENOBSERVE_LOGS_PASSWORD=...
 
 Unset `OPENOBSERVE_LOGS_URL` means stdout-only; a failing or slow endpoint never affects jobs (POSTs are fire-and-forget and serialized to one in-flight request, errors are logged without credentials, and the pending queue is capped — overflow drops and logs rather than backlogs, since the stdout line is the durable copy). Emission is **at-most-once**: it happens in-process right after the terminal-state commit, so a crash in between permanently loses that job's line — there is no durable outbox. If exact-once accounting ever matters, the recovery path is a startup backfill over terminal rows; until then treat the stream as best-effort telemetry. In OpenObserve, filter a stream on e.g. `event='maomao.job_summary' AND job_type='pr_review'` or `repo='owner/name'` for per-repo dashboards. One line is emitted **per terminal transition**: for per-job totals take the latest `attempt` line, which mirrors the UI's own rollup (a retry discards attempt-1 run/aggregation usage the same way the UI does); summing every attempt re-counts the `routing`/`internal_escalation` stages that retries don't reset. `duration_ms` is measured from `started_at` (the claim timestamp) and falls back to `created_at` only when `started_at` was never stamped — i.e. still-queued jobs terminated by the raw-UPDATE cancel/stale-sweep paths. A queued job failed via `setJobState` gets `started_at` stamped at the transition itself, so it reports ~0 rather than creation-to-finish. For a retried job terminating while still queued the same split applies: on the raw-UPDATE cancel/sweep paths it measures from the original `created_at` (the retry nulled `started_at` and nothing re-stamps it) — a whole-lifetime span, not the attempt's — while through `setJobState` it reports ~0 like any queued transition.
 
+### OTLP groundwork
+
+`src/telemetry/otlp.ts` is a thin hand-rolled **OTLP/HTTP exporter** — no OpenTelemetry SDK, zero new dependencies — ready for the OpenObserve metrics and traces slices to land on (see [docs/telemetry/otlp-exporter.md](docs/telemetry/otlp-exporter.md) for the decision record). It resolves per-signal endpoints and emits standard OTLP/JSON envelopes with the fleet's resource conventions:
+
+```bash
+OPENOBSERVE_TRACES_URL=https://oo.example.com/api/default/v1/traces
+OPENOBSERVE_METRICS_URL=https://oo.example.com/api/default/v1/metrics
+# auth — per-signal override wins, generic is the fallback (never logged):
+OPENOBSERVE_TOKEN=...                       # or OPENOBSERVE_USER + OPENOBSERVE_PASSWORD (Basic)
+OPENOBSERVE_TRACES_TOKEN=...                # per-signal overrides also supported
+# resource attrs — the standard OTel env names other fleet apps use:
+OTEL_SERVICE_NAME=maomao
+OTEL_RESOURCE_ATTRIBUTES=deployment.environment=prod,fleet=szefowo
+```
+
+Exports are fire-and-forget — serialized to one in-flight POST, depth-capped, 10s-bounded, credentials redacted from errors — so a broken endpoint can never affect job flow. Attribute payloads carry the same usage-metadata-only rule as job summaries: ids, states, durations, token counts; never secrets, PII, diffs, or review bodies.
+
+### OTLP metrics
+
+With `OPENOBSERVE_METRICS_URL` set, Maomao exports a small metric set (`src/telemetry/metrics.ts`), emitted alongside the same events the job-summary stream keys on:
+
+| Metric | Kind | Attributes | Emitted |
+|---|---|---|---|
+| `maomao.queue.depth` | gauge | — | every queue mutation (pending jobs waiting for a slot) |
+| `maomao.queue.slots_in_use` | gauge | — | every queue mutation (claimed runner slots) |
+| `maomao.queue.slots` | gauge | — | every queue mutation (configured `JOB_CONCURRENCY`) |
+| `maomao.jobs` | delta counter | `job_type`, `repo`, `provider_instance`, `state`, `attempt`, `usage_complete` | each job reaching a terminal state |
+| `maomao.job.tokens` | delta sum | job attrs + `kind` (`prompt`/`completion`/`total`) | each terminal job |
+| `maomao.job.cost_usd` | delta sum | job attrs | each terminal job with a reported cost |
+| `maomao.job.duration_ms` | delta histogram | job attrs + `state` | each terminal job with both timestamps |
+
+Queue gauges report on change, not on a timer — the same mutation that moves a job also exports the new values. Per-job counters use **delta** temporality and are built from the same `buildJobSummary` snapshot the stdout line uses, so both channels agree: a retried job emits again under a higher `attempt` (routing/internal-escalation spend carries across attempts — summing every point re-counts those stages, same caveat as the summary stream), and `usage_complete=false` marks mid-flight snapshots (a floor, not a total).
+
+### OTLP traces
+
+With `OPENOBSERVE_TRACES_URL` set, each terminal job run emits one trace (`src/telemetry/traces.ts`), reconstructed from the persisted stage timings — no tracing context threads the pipeline:
+
+- `maomao.job.<job_type>` — root span per job run (`job_id`, `job_type`, `repo`, `provider_instance`, `pr_number`, `head_sha`, terminal `state`, `attempt`, `usage_complete`, `queued_ms`)
+- `maomao.stage.routing`, `maomao.stage.reviewer` (one per `reviewer_runs` row), `maomao.stage.aggregation`, `maomao.stage.internal_escalation` — stage spans with `state`, `model`, `total_tokens`, `cost_usd` attributes; stages that only record `duration_ms` hang off their neighbours' timestamps
+- `maomao.stack.member` — zero-duration marker for stack members that never got a member job
+
+Stack linkage is by **shared trace, not runtime context**: trace and span ids are deterministic hashes of the job id, so a member `pr_review` emits its whole span tree (root + stage spans) inside the `stack_review` job's trace, parented directly to the stack root — OpenObserve shows `stack_review → member pr_review → specialist steps` in one trace. A member job belonging to several stack runs joins the latest one.
+
 ## Run locally
 
 ```bash
