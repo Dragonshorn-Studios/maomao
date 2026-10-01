@@ -1708,6 +1708,8 @@ export function renderProfileForm(
         </label>
       </fieldset>
       <button type="submit" name="action" value="save" class="btn">Save draft</button>
+      <button type="submit" name="action" value="test" class="btn-secondary"
+        title="Probe every non-empty provider/model field sequentially (60s each) — does not save the draft">Test models</button>
       <a href="/config/profiles">Cancel</a>
     </form>
     ${discoveryStatus}

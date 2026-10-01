@@ -63,7 +63,9 @@ export type ProfileFormAction =
   | { kind: "add" }
   | { kind: "remove"; index: number }
   | { kind: "up"; index: number }
-  | { kind: "down"; index: number };
+  | { kind: "down"; index: number }
+  /** Probe configured models without saving; the route runs it, not the form reducer. */
+  | { kind: "test" };
 
 /** Field keys the renderer understands; zod paths map onto these. */
 export type ProfileFieldKey =
@@ -161,6 +163,7 @@ export function decodeProfileAction(body: Record<string, unknown>): ProfileFormA
   const raw = asString(body.action);
   if (raw === "" || raw === "save") return { kind: "save" };
   if (raw === "add") return { kind: "add" };
+  if (raw === "test") return { kind: "test" };
   const [kind, indexRaw] = raw.split(":");
   const index = asIndex(indexRaw);
   if (kind === "remove" && index >= 0) return { kind: "remove", index };

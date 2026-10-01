@@ -1404,6 +1404,91 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
     }
   });
 
+  /**
+   * Profile editor "Test models" (issue #145): probes every non-empty model
+   * field on the posted form — same opencode-run probe as Providers → Test
+   * key — sequentially and deduped by provider/model, under the same
+   * billable-run limiter + in-flight guard. Renders the result on the editor
+   * without persisting anything; secrets stay server-side (stderr is
+   * redacted before display).
+   */
+  const runProfileModelTest = async (
+    c: Context<AppEnv>,
+    body: Record<string, unknown>,
+    renderPage: (opts: { values: ProfileFormValues; notice?: string; error?: string; status: 200 | 400 | 429 | 503 }) => Response,
+  ): Promise<Response> => {
+    const values = decodeProfileForm(body);
+    if (!ctx.opencode) {
+      return renderPage({ values, error: "Model test is unavailable on this process (no OpenCode runner).", status: 503 });
+    }
+    if (!providerTestLimiter.wouldAllow("provider-test", PROVIDER_TEST_LIMIT, PROVIDER_TEST_WINDOW_MS)) {
+      return renderPage({ values, error: "Too many model tests — wait a few minutes before trying again.", status: 429 });
+    }
+    if (providerTestInFlight) {
+      return renderPage({ values, error: "A model test is already running — try again when it finishes.", status: 429 });
+    }
+    const models = [
+      ...new Set(
+        [values.routerModel, ...values.reviewers.map((row) => row.model)]
+          .map((model) => model.trim())
+          .filter((model) => model !== ""),
+      ),
+    ];
+    if (models.length === 0) {
+      return renderPage({ values, notice: "Nothing to test — every model field is empty (inherits the default model).", status: 200 });
+    }
+    providerTestLimiter.record("provider-test", PROVIDER_TEST_LIMIT, PROVIDER_TEST_WINDOW_MS);
+    providerTestInFlight = true;
+    const secrets = providerSecrets();
+    try {
+      const workspace = await mkdtemp(join(tmpdir(), "maomao-profile-test-"));
+      try {
+        const failures: string[] = [];
+        for (const model of models) {
+          try {
+            const result = await ctx.opencode.run({
+              cwd: workspace,
+              model,
+              prompt: PROVIDER_PROBE_PROMPT,
+              timeoutMs: 60_000,
+              extraArgs: ctx.config.opencode.extraArgs,
+              title: "maomao-profile-test",
+              signal: c.req.raw.signal,
+            });
+            if (result.exitCode !== 0) {
+              const detail = truncate(redactSecrets(result.stderr.trim() || result.stdout.trim(), secrets) || "no output", 200);
+              failures.push(`${model} exited ${result.exitCode} (${detail})`);
+            } else if (!(result.text || "").trim()) {
+              failures.push(`${model} produced no reply`);
+            }
+          } catch (error) {
+            const detail = truncate(redactSecrets(error instanceof Error ? error.message : String(error), secrets), 200);
+            failures.push(`${model} failed (${detail})`);
+          }
+        }
+        if (failures.length === 0) {
+          return renderPage({
+            values,
+            notice: `${models.length === 1 ? "1 model" : `${models.length} models`} reachable — ${models.join(", ")} answered a real opencode run.`,
+            status: 200,
+          });
+        }
+        return renderPage({
+          values,
+          error: `${failures.length}/${models.length} ${models.length === 1 ? "model" : "models"} unreachable — ${failures.join("; ")}`,
+          status: 400,
+        });
+      } finally {
+        await rm(workspace, { recursive: true, force: true }).catch(() => {});
+      }
+    } catch (error) {
+      const message = truncate(redactSecrets(error instanceof Error ? error.message : String(error), secrets), 200);
+      return renderPage({ values, error: `Model test failed: ${message}`, status: 400 });
+    } finally {
+      providerTestInFlight = false;
+    }
+  };
+
   // Re-runs `opencode models` so the profile editor's datalist picks up newly
   // configured providers (a stored key in auth.json only appears in the list
   // after a refresh).
@@ -1583,6 +1668,16 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
     if (!actor) return configWriteDenied(c);
     const bodyPreview = await c.req.parseBody();
     if (bodyPreview.editor === "structured") {
+      if (decodeProfileAction(bodyPreview).kind === "test") {
+        return runProfileModelTest(c, bodyPreview, (opts) =>
+          c.html(
+            renderNewProfilePage(
+              profilesPageData(c, { notice: opts.notice, error: opts.error, form: { values: opts.values } }),
+            ),
+            opts.status,
+          ),
+        );
+      }
       const outcome = handleProfileForm(bodyPreview, (form, status) =>
         c.html(
           renderNewProfilePage(profilesPageData(c, { error: form.errors.form, form })),
@@ -1651,6 +1746,23 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
           }),
           status,
         );
+      if (decodeProfileAction(bodyPreview).kind === "test") {
+        return runProfileModelTest(c, bodyPreview, (opts) =>
+          c.html(
+            renderDraftEditPage({
+              revision: existing,
+              identity: c.get("identity"),
+              canWrite: gateOn,
+              csrfToken: ensureCsrfToken(c, ctx.config.uiSessionSecret),
+              notice: opts.notice,
+              error: opts.error,
+              profileEditor: profileEditorBase(),
+              form: { values: opts.values },
+            }),
+            opts.status,
+          ),
+        );
+      }
       const outcome = handleProfileForm(bodyPreview, renderEditPage);
       if (outcome.kind === "render") return outcome.response;
       const result = ctx.store.configs.updateDraft({
