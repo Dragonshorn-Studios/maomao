@@ -8,6 +8,7 @@ import type { FindingRow, FindingStatus } from "../findings/types.js";
 import { nowIso } from "../util.js";
 import { stackDedupPrefix } from "../stacks/commands.js";
 import { publish } from "../events.js";
+import { emitJobSummary, type JobSummaryOptions } from "./summary.js";
 import { ReviewConfigStore } from "../config-revisions.js";
 import { PromptRevisionStore } from "../prompt-revisions.js";
 
@@ -122,6 +123,8 @@ export interface JobRow {
   escalation_id: string | null;
   poison_alert_policy: string | null;
   manual_escalate_requested: number | null;
+  /** Bumped by retryFailedReviewers — discriminates terminal summary lines per attempt. */
+  retry_count: number;
 }
 
 export interface ReviewerRunRow {
@@ -318,6 +321,10 @@ const ACTIVE_JOB_STATES: readonly JobState[] = ["queued", ...LIVE_JOB_STATES];
 // and cancellation all scope to exactly these states.
 const ACTIVE_STATES_SQL = ACTIVE_JOB_STATES.map((state) => `'${state}'`).join(", ");
 
+// Sentinel thrown inside retryFailedReviewers' transaction to roll the whole
+// retry back when a reviewer-run guard misses mid-transaction.
+class RunGuardMiss extends Error {}
+
 // Claimed-to-be-running states only (no 'queued'): the stack enqueue stales an
 // in-flight run on the same membership key so its abort propagates (issue #131).
 const LIVE_STATES_SQL = LIVE_JOB_STATES.map((state) => `'${state}'`).join(", ");
@@ -424,6 +431,13 @@ export class JobStore {
   constructor(
     private readonly db: SqliteDb,
     modelCatalog: string[] = [],
+    /**
+     * emitJobSummaries: opt-in — production (src/index.ts) passes true.
+     * Off by default so synthetic/fixture stores (the demo UI, tests, any
+     * future harness) never write telemetry lines or POST to an
+     * OPENOBSERVE_LOGS_URL exported in the surrounding shell.
+     */
+    private readonly opts: { emitJobSummaries?: boolean } = {},
   ) {
     this.configs = new ReviewConfigStore(db, modelCatalog);
     this.prompts = new PromptRevisionStore(db);
@@ -432,6 +446,14 @@ export class JobStore {
   enqueue(input: NewJobInput & { profileRevisionId?: number }): EnqueueResult {
     const createdAt = nowIso();
     const staleJobIds: number[] = [];
+    // Pre-transition rows per staled job: only rows that were live or queued
+    // *transition* into 'stale' — already-terminal rows are only relabeled for
+    // history and must not emit a second job-summary line (issue #139). The
+    // full row is kept so emission reports the in-transaction snapshot.
+    const staleRows = new Map<number, JobRow>();
+    // Same snapshot for reviewer runs: a retry/reset landing between commit
+    // and emission can't pair the terminal row with already-reset usage.
+    const staleRuns = new Map<number, ReviewerRunRow[]>();
     const scope = normalizeScope({ provider: input.provider, instance: input.providerInstance });
 
     const jobType = input.jobType ?? "pr_review";
@@ -442,6 +464,9 @@ export class JobStore {
     // change supersedes it.
     const dedupKey = jobType === "repo_brief" ? randomUUID() : (input.dedupKey ?? "");
 
+    // BEGIN IMMEDIATE for every emission-path write transaction: take the
+    // write lock up front so a hypothetical second writer gets busy_timeout
+    // instead of a deferred-read SQLITE_BUSY_SNAPSHOT mid-sweep.
     const result = this.db.transaction(() => {
       // Briefs are pinned to an immutable SHA, so a newer SHA can never stale
       // one — and marking an in-flight brief stale would abort it mid-run.
@@ -455,14 +480,30 @@ export class JobStore {
         // are re-pinned in place), terminal rows stay untouched as history.
         const stale = this.db
           .prepare(
-            `UPDATE jobs
-             SET state = 'stale', updated_at = ?, finished_at = COALESCE(finished_at, ?)
+            `SELECT * FROM jobs
              WHERE provider = ? AND provider_instance = ? AND repo_full_name = ?
-               AND job_type = 'stack_review' AND dedup_key = ? AND state IN (${LIVE_STATES_SQL})
-             RETURNING id`,
+               AND job_type = 'stack_review' AND dedup_key = ? AND state IN (${LIVE_STATES_SQL})`,
           )
-          .all(createdAt, createdAt, scope.provider, scope.instance, input.repoFullName, dedupKey) as { id: number }[];
-        staleJobIds.push(...stale.map((row) => row.id));
+          .all(scope.provider, scope.instance, input.repoFullName, dedupKey) as JobRow[];
+        const staled = stale.length
+          ? (this.db
+              .prepare(
+                `UPDATE jobs
+                 SET state = 'stale', updated_at = ?, finished_at = COALESCE(finished_at, ?)
+                 WHERE id IN (${stale.map(() => "?").join(", ")}) AND state IN (${LIVE_STATES_SQL})
+                 RETURNING id`,
+              )
+              .all(createdAt, createdAt, ...stale.map((row) => row.id)) as { id: number }[])
+          : [];
+        // Only rows the guarded UPDATE actually transitioned get aborted/emitted.
+        const transitionedIds = new Set(staled.map((row) => row.id));
+        staleJobIds.push(...transitionedIds);
+        for (const row of stale) {
+          staleRows.set(row.id, row);
+          if (transitionedIds.has(row.id) && ACTIVE_JOB_STATES.includes(row.state)) {
+            staleRuns.set(row.id, this.listReviewerRuns(row.id));
+          }
+        }
         // Dead same-key rows at this head would collide with the recheck row
         // on the jobs UNIQUE — move their dedup key aside (the
         // `stack-retired:` namespace never claims stack identity back).
@@ -477,15 +518,32 @@ export class JobStore {
       } else if (jobType !== "repo_brief") {
         const stale = this.db
           .prepare(
-            `UPDATE jobs
-             SET state = 'stale', updated_at = ?, finished_at = COALESCE(finished_at, ?)
+            `SELECT * FROM jobs
              WHERE provider = ? AND provider_instance = ? AND repo_full_name = ? AND pr_number = ? AND head_sha != ?
-               AND job_type = ? AND dedup_key = ? AND state NOT IN ('stale', 'cancelled')
-             RETURNING id`,
+               AND job_type = ? AND dedup_key = ? AND state NOT IN ('stale', 'cancelled')`,
           )
-          .all(createdAt, createdAt, scope.provider, scope.instance, input.repoFullName, input.prNumber, input.headSha, jobType, dedupKey) as { id: number }[];
-        staleJobIds.push(...stale.map((row) => row.id));
-        for (const row of stale) this.resolveStackMemberCoverage(row.id, "stale");
+          .all(scope.provider, scope.instance, input.repoFullName, input.prNumber, input.headSha, jobType, dedupKey) as JobRow[];
+        const staledIds = stale.length
+          ? new Set(
+              (this.db
+                .prepare(
+                  `UPDATE jobs
+                   SET state = 'stale', updated_at = ?, finished_at = COALESCE(finished_at, ?)
+                   WHERE id IN (${stale.map(() => "?").join(", ")}) AND state NOT IN ('stale', 'cancelled')
+                   RETURNING id`,
+                )
+                .all(createdAt, createdAt, ...stale.map((row) => row.id)) as { id: number }[]).map((row) => row.id),
+            )
+          : new Set<number>();
+        // Only rows the guarded UPDATE actually transitioned get aborted/emitted.
+        staleJobIds.push(...staledIds);
+        for (const row of stale) {
+          if (staledIds.has(row.id)) {
+            this.resolveStackMemberCoverage(row.id, "stale");
+            if (ACTIVE_JOB_STATES.includes(row.state)) staleRuns.set(row.id, this.listReviewerRuns(row.id));
+          }
+          staleRows.set(row.id, row);
+        }
       }
       this.retireReviewerRuns(staleJobIds, "stale");
 
@@ -559,10 +617,22 @@ export class JobStore {
       const job = this.getJob(jobId);
       if (!job) throw new Error("failed to load inserted job");
       return { job, created: true, staleJobIds };
-    })();
+    }).immediate();
 
     publish({ type: "jobs" });
-    for (const id of staleJobIds) publish({ type: "job", jobId: id });
+    for (const id of staleJobIds) {
+      publish({ type: "job", jobId: id });
+      const pre = staleRows.get(id);
+      if (pre && ACTIVE_JOB_STATES.includes(pre.state)) {
+        // A claimed-running job's usage snapshot can still grow while the
+        // caller aborts it — flag the line as a floor, not a final tally.
+        this.emitTerminalSummary(id, {
+          partialUsage: LIVE_JOB_STATES.includes(pre.state),
+          job: { ...pre, state: "stale", finished_at: pre.finished_at ?? createdAt, updated_at: createdAt },
+          runs: staleRuns.get(id),
+        });
+      }
+    }
     if (result.job) publish({ type: "job", jobId: result.job.id });
     return result;
   }
@@ -948,26 +1018,59 @@ export class JobStore {
   staleOpenStackJobs(repoFullName: string, stackId: string, exceptDedupKey: string, provider?: string, providerInstance?: string): number[] {
     const scope = normalizeScope({ provider, instance: providerInstance });
     const now = nowIso();
-    const rows = this.db
-      .prepare(
-        `UPDATE jobs SET state = 'stale', updated_at = ?, finished_at = COALESCE(finished_at, ?)
-         WHERE provider = ? AND provider_instance = ? AND repo_full_name = ? AND job_type = 'stack_review'
-           AND state NOT IN ('stale', 'cancelled')
-           AND (dedup_key = ? OR dedup_key LIKE ? ESCAPE '\\') AND dedup_key != ?
-         RETURNING id`,
-      )
-      .all(
-        now,
-        now,
-        scope.provider,
-        scope.instance,
-        repoFullName,
-        stackDedupPrefix(stackId),
-        `${stackDedupPrefix(escapeLike(stackId))}@%`,
-        exceptDedupKey,
-      ) as { id: number }[];
-    const ids = rows.map((r) => r.id);
-    this.retireReviewerRuns(ids, "stale");
+    // Snapshot + transition in one transaction so the pre-state map stays
+    // accurate if the process model ever gains a second writer.
+    const rows = this.db.transaction(() => {
+      const stale = this.db
+        .prepare(
+          `SELECT * FROM jobs
+           WHERE provider = ? AND provider_instance = ? AND repo_full_name = ? AND job_type = 'stack_review'
+             AND state NOT IN ('stale', 'cancelled')
+             AND (dedup_key = ? OR dedup_key LIKE ? ESCAPE '\\') AND dedup_key != ?`,
+        )
+        .all(
+          scope.provider,
+          scope.instance,
+          repoFullName,
+          stackDedupPrefix(stackId),
+          `${stackDedupPrefix(escapeLike(stackId))}@%`,
+          exceptDedupKey,
+        ) as JobRow[];
+      const staledIds = new Set(
+        stale.length
+          ? (this.db
+              .prepare(
+                `UPDATE jobs SET state = 'stale', updated_at = ?, finished_at = COALESCE(finished_at, ?)
+                 WHERE id IN (${stale.map(() => "?").join(", ")}) AND state NOT IN ('stale', 'cancelled')
+                 RETURNING id`,
+              )
+              .all(now, now, ...stale.map((row) => row.id)) as { id: number }[]).map((row) => row.id)
+          : [],
+      );
+      // Only rows the guarded UPDATE actually transitioned get aborted/emitted.
+      const transitioned = stale.filter((row) => staledIds.has(row.id));
+      this.retireReviewerRuns(transitioned.map((row) => row.id), "stale");
+      // Run snapshot for the emitting rows (pre-state ACTIVE), captured in the
+      // same transaction as the transition.
+      const runs = new Map(
+        transitioned
+          .filter((row) => ACTIVE_JOB_STATES.includes(row.state))
+          .map((row) => [row.id, this.listReviewerRuns(row.id)] as const),
+      );
+      return { transitioned, runs };
+    }).immediate();
+    const ids = rows.transitioned.map((r) => r.id);
+    for (const row of rows.transitioned) {
+      // Already-terminal rows are only relabeled — emitting them again would
+      // double-count spend on the dashboards this stream feeds.
+      if (ACTIVE_JOB_STATES.includes(row.state)) {
+        this.emitTerminalSummary(row.id, {
+          partialUsage: LIVE_JOB_STATES.includes(row.state),
+          job: { ...row, state: "stale", finished_at: row.finished_at ?? now, updated_at: now },
+          runs: rows.runs.get(row.id),
+        });
+      }
+    }
     return ids;
   }
 
@@ -1403,54 +1506,112 @@ export class JobStore {
       .reverse() as JobLogRow[];
   }
 
-  setJobState(id: number, state: JobState, extra: Partial<JobRow> = {}): void {
-    const job = this.getJob(id);
-    if (!job) return;
-    // `stale` and `cancelled` are one-way terminal states: a late pipeline
-    // failure (or a racing transition) must not resurrect or relabel them.
-    // Same-state patches still apply — patchJob relies on this.
-    if ((job.state === "stale" || job.state === "cancelled") && state !== job.state) {
-      // This runs inside error-handling paths; its own failure must not escape.
-      try {
-        this.log(id, `Ignored state transition ${job.state} -> ${state} on terminal job`, "warn");
-      } catch (error) {
-        console.error(`store: could not log refused transition for job ${id}: ${error instanceof Error ? error.message : String(error)}`);
+  setJobState(id: number, state: JobState, extra: Partial<JobRow> = {}, opts?: { keepCurrentState?: boolean }): void {
+    // Read + write in one transaction with a state-guarded UPDATE — the same
+    // pattern cancelJobs/staleOpenStackJobs use — so the terminal-emission
+    // pre-state stays accurate even if a second writer ever appears.
+    const transition = this.db.transaction(() => {
+      const current = this.getJob(id);
+      if (!current) return undefined;
+      // keepCurrentState (patchJob): the caller isn't requesting a transition,
+      // so the SET clause re-writes whatever the row says NOW — never a state
+      // the caller last saw outside the transaction, which under a second
+      // writer would revert a concurrent transition.
+      const targetState = opts?.keepCurrentState ? current.state : state;
+      // `stale` and `cancelled` are one-way terminal states: a late pipeline
+      // failure (or a racing transition) must not resurrect or relabel them.
+      // Same-state patches still apply — patchJob relies on this.
+      if ((current.state === "stale" || current.state === "cancelled") && targetState !== current.state) {
+        // This runs inside error-handling paths; its own failure must not escape.
+        try {
+          this.log(id, `Ignored state transition ${current.state} -> ${state} on terminal job`, "warn");
+        } catch (error) {
+          console.error(`store: could not log refused transition for job ${id}: ${error instanceof Error ? error.message : String(error)}`);
+        }
+        return undefined;
       }
-      return;
-    }
-    const updatedAt = nowIso();
-    const startedAt = extra.started_at ?? job.started_at ?? (state !== "queued" ? updatedAt : null);
-    const finishedAt =
-      extra.finished_at ??
-      (TERMINAL_JOB_STATES.includes(state) ? (job.finished_at ?? updatedAt) : job.finished_at);
-    const fields: Record<string, unknown> = {
-      state,
-      started_at: startedAt,
-      finished_at: finishedAt,
-      updated_at: updatedAt,
-    };
-    for (const [key, value] of Object.entries(extra)) {
-      if (value === undefined) continue;
-      if (key === "started_at" || key === "finished_at" || key === "state") continue;
-      if (JOB_PATCH_KEYS.has(key)) fields[key] = value;
-    }
-    const assignments = Object.keys(fields).map((column) => `${column} = ?`);
-    const values = Object.keys(fields).map((column) => fields[column]);
-    this.db.prepare(`UPDATE jobs SET ${assignments.join(", ")} WHERE id = ?`).run(...values, id);
-    // Dead jobs retire their live runs so the /reviewers queue stays honest.
-    if (state === "stale" || state === "cancelled") this.retireReviewerRuns([id], state);
+      const updatedAt = nowIso();
+      const startedAt = extra.started_at ?? current.started_at ?? (targetState !== "queued" ? updatedAt : null);
+      const finishedAt =
+        extra.finished_at ??
+        (TERMINAL_JOB_STATES.includes(targetState) ? (current.finished_at ?? updatedAt) : current.finished_at);
+      const fields: Record<string, unknown> = {
+        state: targetState,
+        started_at: startedAt,
+        finished_at: finishedAt,
+        updated_at: updatedAt,
+      };
+      for (const [key, value] of Object.entries(extra)) {
+        if (value === undefined) continue;
+        if (key === "started_at" || key === "finished_at" || key === "state") continue;
+        if (JOB_PATCH_KEYS.has(key)) fields[key] = value;
+      }
+      const assignments = Object.keys(fields).map((column) => `${column} = ?`);
+      const values = Object.keys(fields).map((column) => fields[column]);
+      const { changes } = this.db
+        .prepare(`UPDATE jobs SET ${assignments.join(", ")} WHERE id = ? AND state = ?`)
+        .run(...values, id, current.state);
+      if (changes === 0) {
+        // Same warn as the refused-transition path: a raced state change must
+        // be visible in the job log, not silently dropped.
+        try {
+          this.log(id, `Ignored state transition ${current.state} -> ${targetState}: job state changed concurrently`, "warn");
+        } catch (error) {
+          console.error(`store: could not log raced transition for job ${id}: ${error instanceof Error ? error.message : String(error)}`);
+        }
+        return undefined;
+      }
+      // Dead jobs retire their live runs so the /reviewers queue stays honest.
+      if (targetState === "stale" || targetState === "cancelled") this.retireReviewerRuns([id], targetState);
+      const emits = TERMINAL_JOB_STATES.includes(targetState) && !TERMINAL_JOB_STATES.includes(current.state);
+      // `written` + `runs` are the exact post-transition snapshots: passing
+      // them to emission keeps the emitted line atomic with the transition
+      // instead of re-reading after commit (a re-entrant publish subscriber
+      // or a hypothetical second writer could mutate the rows in between).
+      // Reading runs after the retireReviewerRuns UPDATE is safe: retirement
+      // only touches run state/finished_at, never the usage columns the line
+      // reports.
+      return {
+        pre: current,
+        target: targetState,
+        written: { ...current, ...fields } as JobRow,
+        runs: emits ? this.listReviewerRuns(id) : undefined,
+      };
+    }).immediate();
+    if (!transition) return;
     // Also settles delegated stack-member coverage: a covered member on a
     // finished run takes this job's outcome. No-ops for members of live
     // runs — the stack's own retry/reconcile logic owns those rows.
-    this.resolveStackMemberCoverage(id, state);
+    this.resolveStackMemberCoverage(id, transition.target);
+    if (TERMINAL_JOB_STATES.includes(transition.target) && !TERMINAL_JOB_STATES.includes(transition.pre.state)) {
+      // Stale/cancel of a claimed-running job snapshots usage mid-flight — the
+      // run may not have unwound its usage yet, so the line is a floor.
+      const partialUsage =
+        (transition.target === "stale" || transition.target === "cancelled") &&
+        LIVE_JOB_STATES.includes(transition.pre.state);
+      this.emitTerminalSummary(id, { partialUsage, job: transition.written, runs: transition.runs });
+    }
     publish({ type: "job", jobId: id });
     publish({ type: "jobs" });
+  }
+
+  /**
+   * One structured stdout line (+ optional OpenObserve POST) per job landing
+   * in a terminal state (issue #139). Emission never throws — a broken sink
+   * or ingest endpoint must not break job bookkeeping.
+   */
+  private emitTerminalSummary(jobId: number, opts?: JobSummaryOptions): void {
+    if (this.opts.emitJobSummaries !== true) return;
+    emitJobSummary(this, jobId, process.env, opts);
   }
 
   patchJob(id: number, extra: Partial<JobRow>): void {
     const job = this.getJob(id);
     if (!job) return;
-    this.setJobState(id, job.state, extra);
+    // Not a transition: keepCurrentState makes the guarded UPDATE re-write
+    // the state the row holds inside the transaction rather than echo the
+    // stale read above, which could revert a concurrent transition.
+    this.setJobState(id, job.state, extra, { keepCurrentState: true });
   }
 
   isStale(id: number): boolean {
@@ -1459,12 +1620,14 @@ export class JobStore {
   }
 
   /**
-   * Moves every matching non-terminal job to `cancelled` in a single UPDATE
-   * (implicit transaction) and returns the ids that actually transitioned,
-   * then retires their live reviewer runs to `cancelled` in a second UPDATE. Idempotent by construction: terminal jobs (completed,
-   * failed, stale, already cancelled) never match, so a duplicate merge
-   * webhook is a no-op. The where-union makes an unfiltered database-wide
-   * cancellation unrepresentable.
+   * Moves every matching non-terminal job to `cancelled` and returns the ids
+   * that actually transitioned: a SELECT snapshots pre-transition states for
+   * the terminal-summary emission, then a guarded UPDATE (still matching on
+   * active states) performs the transition and retires their live reviewer
+   * runs to `cancelled` — all in one transaction. Idempotent by construction:
+   * terminal jobs (completed, failed, stale, already cancelled) never match,
+   * so a duplicate merge webhook is a no-op. The where-union makes an
+   * unfiltered database-wide cancellation unrepresentable.
    */
   cancelJobs(
     where:
@@ -1477,41 +1640,73 @@ export class JobStore {
     const now = nowIso();
     const scope = normalizeScope("scope" in where ? where.scope : undefined);
     const clauses = [`state IN (${ACTIVE_STATES_SQL})`];
-    const values: unknown[] = [reason, actor, now, now];
+    const whereValues: unknown[] = [];
     // A type-wide (global) cancel targets every forge scope; all other
     // variants stay inside the normalized scope like before.
     const spansScopes = "jobType" in where && where.repoFullName == null;
     if (!spansScopes) {
       clauses.push("provider = ?", "provider_instance = ?");
-      values.push(scope.provider, scope.instance);
+      whereValues.push(scope.provider, scope.instance);
     }
     if ("jobId" in where) {
       clauses.push("id = ?");
-      values.push(where.jobId);
+      whereValues.push(where.jobId);
     } else if ("jobType" in where) {
       clauses.push("job_type = ?");
-      values.push(where.jobType);
+      whereValues.push(where.jobType);
       if (where.repoFullName != null) {
         clauses.push("repo_full_name = ?");
-        values.push(where.repoFullName);
+        whereValues.push(where.repoFullName);
       }
     } else {
       clauses.push("repo_full_name = ?", "pr_number = ?");
-      values.push(where.repoFullName, where.prNumber);
+      whereValues.push(where.repoFullName, where.prNumber);
     }
-    const rows = this.db
-      .prepare(
-        `UPDATE jobs
-         SET state = 'cancelled', cancelled_reason = ?, cancelled_by = ?,
-             finished_at = COALESCE(finished_at, ?), updated_at = ?
-         WHERE ${clauses.join(" AND ")}
-         RETURNING id`,
-      )
-      .all(...values) as { id: number }[];
-    const ids = rows.map((row) => row.id);
-    this.retireReviewerRuns(ids, "cancelled");
+    // Snapshot pre-transition state in the same transaction as the UPDATE:
+    // cancel of a claimed-running job emits a summary whose usage figures may
+    // still grow as the run unwinds, and the pair must stay atomic if the
+    // process model ever gains a second writer.
+    const { preStates, preRuns, rows } = this.db.transaction(() => {
+      const snapshot = new Map(
+        (this.db.prepare(`SELECT * FROM jobs WHERE ${clauses.join(" AND ")}`).all(...whereValues) as JobRow[]).map(
+          (row) => [row.id, row],
+        ),
+      );
+      const updated = this.db
+        .prepare(
+          `UPDATE jobs
+           SET state = 'cancelled', cancelled_reason = ?, cancelled_by = ?,
+               finished_at = COALESCE(finished_at, ?), updated_at = ?
+           WHERE ${clauses.join(" AND ")}
+           RETURNING id`,
+        )
+        .all(reason, actor, now, now, ...whereValues) as { id: number }[];
+      this.retireReviewerRuns(updated.map((row) => row.id), "cancelled");
+      // Run snapshot per transitioned row — same transaction, so a retry or
+      // second writer landing after commit can't pair the cancelled row with
+      // already-reset attempt usage.
+      const preRuns = new Map(updated.map((row) => [row.id, this.listReviewerRuns(row.id)] as const));
+      return { preStates: snapshot, preRuns, rows: updated };
+    }).immediate();
     for (const row of rows) this.resolveStackMemberCoverage(row.id, "cancelled");
-    return ids;
+    for (const row of rows) {
+      const pre = preStates.get(row.id);
+      this.emitTerminalSummary(row.id, {
+        partialUsage: pre != null && LIVE_JOB_STATES.includes(pre.state),
+        job: pre
+          ? {
+              ...pre,
+              state: "cancelled",
+              cancelled_reason: reason,
+              cancelled_by: actor,
+              finished_at: pre.finished_at ?? now,
+              updated_at: now,
+            }
+          : undefined,
+        runs: preRuns.get(row.id),
+      });
+    }
+    return rows.map((row) => row.id);
   }
 
   /**
@@ -1585,33 +1780,53 @@ export class JobStore {
     if (targets.length === 0) return { ok: false, error: "no failed reviewers to retry" };
 
     const updatedAt = nowIso();
-    this.db.transaction(() => {
-      const reset = this.db.prepare(
-        `UPDATE reviewer_runs SET
-           state = 'queued', attempt = 0, validation_error = NULL, raw_output = NULL,
-           normalized_json = NULL, stdout = NULL, stderr = NULL, exit_code = NULL,
-           started_at = NULL, finished_at = NULL, duration_ms = NULL,
-           prompt_tokens = NULL, completion_tokens = NULL, cost = NULL,
-           reasoning_tokens = NULL, cache_read_tokens = NULL, cache_write_tokens = NULL,
-           total_tokens = NULL, usage_complete = NULL, usage_warning = NULL
-         WHERE id = ?`,
-      );
-      for (const run of targets) reset.run(run.id);
-      this.db
-        .prepare(
-          `UPDATE jobs SET
-             state = 'queued', failure_reason = NULL, started_at = NULL, finished_at = NULL,
-             aggregator_state = 'queued', aggregator_started_at = NULL, aggregator_finished_at = NULL,
-             aggregator_raw = NULL, aggregator_normalized = NULL, aggregator_duration_ms = NULL,
-             aggregator_prompt_tokens = NULL, aggregator_completion_tokens = NULL, aggregator_cost = NULL,
-             aggregator_reasoning_tokens = NULL, aggregator_cache_read_tokens = NULL,
-             aggregator_cache_write_tokens = NULL, aggregator_total_tokens = NULL,
-             aggregator_usage_complete = NULL, aggregator_usage_warning = NULL,
-             updated_at = ?
-           WHERE id = ?`,
-        )
-        .run(updatedAt, jobId);
-    })();
+    // Guarded writes inside the transaction — same pattern as setJobState/
+    // cancelJobs: the requeue (and each run reset) only lands if the row is
+    // still in the state the pre-checks validated.
+    let guardPassed = true;
+    let resetCount = 0;
+    try {
+      this.db.transaction(() => {
+        const { changes } = this.db
+          .prepare(
+            `UPDATE jobs SET
+               state = 'queued', failure_reason = NULL, started_at = NULL, finished_at = NULL,
+               retry_count = retry_count + 1,
+               aggregator_state = 'queued', aggregator_started_at = NULL, aggregator_finished_at = NULL,
+               aggregator_raw = NULL, aggregator_normalized = NULL, aggregator_duration_ms = NULL,
+               aggregator_prompt_tokens = NULL, aggregator_completion_tokens = NULL, aggregator_cost = NULL,
+               aggregator_reasoning_tokens = NULL, aggregator_cache_read_tokens = NULL,
+               aggregator_cache_write_tokens = NULL, aggregator_total_tokens = NULL,
+               aggregator_usage_complete = NULL, aggregator_usage_warning = NULL,
+               updated_at = ?
+             WHERE id = ? AND state = ?`,
+          )
+          .run(updatedAt, jobId, job.state);
+        if (changes === 0) {
+          guardPassed = false;
+          return;
+        }
+        const reset = this.db.prepare(
+          `UPDATE reviewer_runs SET
+             state = 'queued', attempt = 0, validation_error = NULL, raw_output = NULL,
+             normalized_json = NULL, stdout = NULL, stderr = NULL, exit_code = NULL,
+             started_at = NULL, finished_at = NULL, duration_ms = NULL,
+             prompt_tokens = NULL, completion_tokens = NULL, cost = NULL,
+             reasoning_tokens = NULL, cache_read_tokens = NULL, cache_write_tokens = NULL,
+             total_tokens = NULL, usage_complete = NULL, usage_warning = NULL
+           WHERE id = ? AND state = 'failed'`,
+        );
+        for (const run of targets) resetCount += reset.run(run.id).changes;
+        // A mid-transaction run-guard miss must roll back the requeue too: a
+        // retried job whose failed runs kept stale state would aggregate
+        // stale output and emit a phantom attempt line.
+        if (resetCount !== targets.length) throw new RunGuardMiss();
+      }).immediate();
+    } catch (error) {
+      if (error instanceof RunGuardMiss) return { ok: false, error: "reviewer run state changed — retry aborted" };
+      throw error;
+    }
+    if (!guardPassed) return { ok: false, error: "job state changed — retry aborted" };
 
     this.log(
       jobId,
@@ -1621,7 +1836,7 @@ export class JobStore {
     );
     publish({ type: "job", jobId });
     publish({ type: "jobs" });
-    return { ok: true, reset: targets.length };
+    return { ok: true, reset: resetCount };
   }
 
   /** Moves queued/running specialist runs to the terminal `stale`/`cancelled`

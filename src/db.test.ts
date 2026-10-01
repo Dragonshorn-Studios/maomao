@@ -108,6 +108,8 @@ describe("usage schema migration", () => {
       expect(job?.aggregator_prompt_tokens).toBe(9);
       expect(job?.aggregator_cost).toBe(0.01);
       expect(job?.aggregator_total_tokens).toBeNull();
+      // ensureColumn backfills the additive default on the pre-existing row.
+      expect(job?.retry_count).toBe(0);
       expect(job?.aggregator_usage_complete).toBeNull();
       expect(job?.github_account_id).toBeNull();
       expect(job?.github_repository_id).toBeNull();

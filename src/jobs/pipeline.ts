@@ -28,6 +28,7 @@ import {
   KNOWN_REVIEWER_ROLES,
 } from "../prompts.js";
 import { applyProfileToSpecs, enqueuePullJob, reviewerSpecs } from "./enqueue.js";
+import { jobSpend } from "./summary.js";
 import type { ProfileDefinition } from "../config-revisions.js";
 import {
   fallbackAggregator,
@@ -1134,24 +1135,8 @@ function stackSharedPaths(members: StackMemberRow[], diffs: Map<number, string>)
 
 /** Recorded model spend of one member job: routing, specialists, aggregation, escalations. */
 function memberJobSpend(store: JobStore, jobId: number): { cost: number; tokens: number } {
-  const job = store.getJob(jobId);
-  let cost = 0;
-  let tokens = 0;
-  if (job) {
-    cost += (job.routing_cost ?? 0) + (job.aggregator_cost ?? 0) + (job.internal_escalation_cost ?? 0);
-    tokens += (job.routing_total_tokens ?? 0) + (job.aggregator_total_tokens ?? 0) + (job.internal_escalation_total_tokens ?? 0);
-  }
-  for (const run of store.listReviewerRuns(jobId)) {
-    cost += run.cost ?? 0;
-    tokens +=
-      run.total_tokens ??
-      (run.prompt_tokens ?? 0) +
-        (run.completion_tokens ?? 0) +
-        (run.reasoning_tokens ?? 0) +
-        (run.cache_read_tokens ?? 0) +
-        (run.cache_write_tokens ?? 0);
-  }
-  return { cost, tokens };
+  const spend = jobSpend(store.getJob(jobId), store.listReviewerRuns(jobId));
+  return { cost: spend.costUsd ?? 0, tokens: spend.totalTokens };
 }
 
 async function runStackJob(deps: PipelineDeps, forge: ForgeRegistry, jobId: number, signal: AbortSignal): Promise<void> {

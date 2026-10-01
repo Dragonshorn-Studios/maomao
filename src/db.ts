@@ -126,6 +126,7 @@ function migrate(db: SqliteDb): void {
       review_mode TEXT NOT NULL DEFAULT 'full',
       brief_json TEXT,
       dedup_key TEXT NOT NULL DEFAULT '',
+      retry_count INTEGER NOT NULL DEFAULT 0,
       UNIQUE (provider, provider_instance, repo_full_name, pr_number, head_sha, job_type, dedup_key)
     );
 
@@ -574,6 +575,7 @@ function migrate(db: SqliteDb): void {
       ["review_mode", "TEXT NOT NULL DEFAULT 'full'"],
       ["scan_branch", "TEXT"],
       ["dedup_key", "TEXT NOT NULL DEFAULT ''"],
+      ["retry_count", "INTEGER NOT NULL DEFAULT 0"],
     ];
     for (const [name, ddl] of jobColumns) ensureColumn(db, "jobs", name, ddl);
 

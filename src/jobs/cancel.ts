@@ -55,10 +55,10 @@ function abortJobsSafely(input: CancelInput, jobIds: number[]): void {
  * Cancels every non-terminal review job for one pull request (all head SHAs)
  * with the same reason. Currently the merge webhook's path; the manual UI
  * cancel actions planned in #49 are expected to go through cancelJob in this
- * same service. The state transition is one atomic UPDATE (see
- * JobStore.cancelJobs), so a worker claiming the job either sees the cancelled
- * state or the update wins the race (single-process design: synchronous
- * SQLite, one queue in memory).
+ * same service. The state transition is a guarded UPDATE after a pre-state
+ * SELECT (see JobStore.cancelJobs), so a worker claiming the job either sees
+ * the cancelled state or the update wins the race (single-process design:
+ * synchronous SQLite, one queue in memory).
  */
 export function cancelJobsForPull(
   store: JobStore,

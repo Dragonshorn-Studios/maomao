@@ -259,6 +259,8 @@ describe("env-var to entry mapping (table)", () => {
     ["GITHUB_REVIEW_REQUEST_CHANGES_MIN_SEVERITY", "Request-changes minimum severity"],
     ["GITHUB_REVIEW_ALLOW_REQUEST_CHANGES", "Allow REQUEST_CHANGES verdicts"],
     ["REVIEW_DRAFTS", "Review drafts"],
+    ["JOB_SUMMARIES", "Job summaries (stdout/OpenObserve)"],
+    ["OPENOBSERVE_LOGS_URL", "OpenObserve ingest URL"],
     ["MAX_INLINE_COMMENTS", "Max inline comments"],
     ["MAOMAO_OVERRIDE_AUTHORS", "Comment override authors"],
     ["POISON_ALERT_INTERNAL_MAX_COST_USD", "Internal max cost"],
@@ -279,6 +281,8 @@ describe("env-var to entry mapping (table)", () => {
     GITHUB_REVIEW_REQUEST_CHANGES_MIN_SEVERITY: "high",
     GITHUB_REVIEW_ALLOW_REQUEST_CHANGES: "true",
     REVIEW_DRAFTS: "true",
+    JOB_SUMMARIES: "false",
+    OPENOBSERVE_LOGS_URL: "https://oo.example.com/api/x/_json",
     MAX_INLINE_COMMENTS: "9",
     POISON_ALERT_INTERNAL_MAX_COST_USD: "0.5",
     POISON_ALERT_INTERNAL_MAX_TOKENS: "100000",
@@ -291,6 +295,8 @@ describe("env-var to entry mapping (table)", () => {
     ROUTER_TIMEOUT_MS: "45s",
     GITHUB_REVIEW_ALLOW_REQUEST_CHANGES: "enabled",
     REVIEW_DRAFTS: "enabled",
+    JOB_SUMMARIES: "disabled",
+    OPENOBSERVE_LOGS_URL: "configured",
     POISON_ALERT_INTERNAL_MAX_COST_USD: "$0.50",
   };
   // Rows that only render when the feature is enabled.

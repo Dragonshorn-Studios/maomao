@@ -324,6 +324,27 @@ Mention/command dispatch uses a GitHub issue comment and needs **Issues: Write**
 
 Maomao records OpenCode `step_finish` usage across every unique agent step (including tool-call steps). Token totals include input, output, reasoning, and cache read/write when the CLI reports them. **These figures are provider/OpenCode-reported usage, not an independently calculated invoice.** If the JSON stream ends without a matching `step_finish` (see [opencode#26855](https://github.com/anomalyco/opencode/issues/26855)), the UI marks usage incomplete and treats the stored numbers as a minimum.
 
+## Job summaries and OpenObserve
+
+When a job reaches a terminal state (`completed`, `failed`, `stale`, `cancelled`), Maomao writes **one structured JSON line to stdout** — picked up by Docker/Coolify log drivers — with usage metadata only: `event` (always `maomao.job_summary` — the filter key for picking these lines out of the mixed stdout stream), `job_id`, `job_type`, `repo`, `pr`, `provider`, `provider_instance` (the forge host, e.g. `github.com` — needed for per-instance dashboards on multi-forge deployments), `state`, `duration_ms`, `prompt_tokens`/`completion_tokens`/`total_tokens`, `cost_usd`, `head_sha`, `finished_at`, `usage_complete` (false when the job was staled/cancelled mid-run or a stage flagged incomplete usage — treat figures as a minimum, not a total), and `attempt` (1 for the first run; a retried job emits one line per attempt — dedup on `(job_id, attempt)` so retries aren't double-counted). The payload never contains secrets, webhook URLs, diffs, or review bodies. The summary lines share stdout with maomao's plain-text logs — filter on `"event":"maomao.job_summary"` — and can be disabled entirely with `JOB_SUMMARIES=false`. Job JSON on `/api/jobs` also exposes the backing `retry_count` column that powers `attempt`.
+
+One caveat on final states: a terminal job can still be **relabeled** afterward (e.g. a `completed` job relabeled `stale` when a later push supersedes its head). Relabels never emit a second line — the stream's last line for that job can therefore lag the `jobs` table's final `state`. Reconcile against `jobs` (or `/api/jobs`) when exact end state matters.
+
+Two more edges worth knowing for consumers: `attempt` is exact only for retries performed **after** this deploy — the `retry_count` column backfills to 0, so jobs retried before the migration report `attempt=1`. And retrying a job irreversibly NULLs the previous attempt's usage columns, making the summary line the only durable per-attempt usage record (best-effort, at-most-once — a crash between the transition commit and the write loses it; a startup backfill of missed terminal lines is the planned recovery path).
+
+The same line can also be POSTed directly to an OpenObserve ingest endpoint:
+
+```bash
+OPENOBSERVE_LOGS_URL=https://oo.example.com/api/default/maomao/_json
+# optional auth — never logged:
+OPENOBSERVE_LOGS_TOKEN=...              # Authorization: Bearer
+# or:
+OPENOBSERVE_LOGS_USER=...               # Authorization: Basic (user:password)
+OPENOBSERVE_LOGS_PASSWORD=...
+```
+
+Unset `OPENOBSERVE_LOGS_URL` means stdout-only; a failing or slow endpoint never affects jobs (POSTs are fire-and-forget and serialized to one in-flight request, errors are logged without credentials, and the pending queue is capped — overflow drops and logs rather than backlogs, since the stdout line is the durable copy). Emission is **at-most-once**: it happens in-process right after the terminal-state commit, so a crash in between permanently loses that job's line — there is no durable outbox. If exact-once accounting ever matters, the recovery path is a startup backfill over terminal rows; until then treat the stream as best-effort telemetry. In OpenObserve, filter a stream on e.g. `event='maomao.job_summary' AND job_type='pr_review'` or `repo='owner/name'` for per-repo dashboards. One line is emitted **per terminal transition**: for per-job totals take the latest `attempt` line, which mirrors the UI's own rollup (a retry discards attempt-1 run/aggregation usage the same way the UI does); summing every attempt re-counts the `routing`/`internal_escalation` stages that retries don't reset. `duration_ms` is measured from `started_at` (the claim timestamp) and falls back to `created_at` only when `started_at` was never stamped — i.e. still-queued jobs terminated by the raw-UPDATE cancel/stale-sweep paths. A queued job failed via `setJobState` gets `started_at` stamped at the transition itself, so it reports ~0 rather than creation-to-finish. For a retried job terminating while still queued the same split applies: on the raw-UPDATE cancel/sweep paths it measures from the original `created_at` (the retry nulled `started_at` and nothing re-stamps it) — a whole-lifetime span, not the attempt's — while through `setJobState` it reports ~0 like any queued transition.
+
 ## Run locally
 
 ```bash
