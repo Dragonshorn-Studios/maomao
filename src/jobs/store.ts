@@ -9,6 +9,7 @@ import { nowIso } from "../util.js";
 import { stackDedupPrefix } from "../stacks/commands.js";
 import { publish } from "../events.js";
 import { emitJobSummary, type JobSummaryOptions } from "./summary.js";
+import { exportTerminalJobMetrics } from "../telemetry/metrics.js";
 import { ReviewConfigStore } from "../config-revisions.js";
 import { PromptRevisionStore } from "../prompt-revisions.js";
 
@@ -1596,13 +1597,15 @@ export class JobStore {
   }
 
   /**
-   * One structured stdout line (+ optional OpenObserve POST) per job landing
-   * in a terminal state (issue #139). Emission never throws — a broken sink
-   * or ingest endpoint must not break job bookkeeping.
+   * Per job landing in a terminal state: one structured stdout line (+
+   * optional OpenObserve log POST, issue #139) and one OTLP metrics export
+   * (#141). Emission never throws — a broken sink or ingest endpoint must
+   * not break job bookkeeping.
    */
   private emitTerminalSummary(jobId: number, opts?: JobSummaryOptions): void {
     if (this.opts.emitJobSummaries !== true) return;
     emitJobSummary(this, jobId, process.env, opts);
+    exportTerminalJobMetrics(this, jobId, process.env, opts);
   }
 
   patchJob(id: number, extra: Partial<JobRow>): void {

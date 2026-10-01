@@ -360,7 +360,23 @@ OTEL_SERVICE_NAME=maomao
 OTEL_RESOURCE_ATTRIBUTES=deployment.environment=prod,fleet=szefowo
 ```
 
-Exports are fire-and-forget — serialized to one in-flight POST, depth-capped, 10s-bounded, credentials redacted from errors — so a broken endpoint can never affect job flow. Attribute payloads carry the same usage-metadata-only rule as job summaries: ids, states, durations, token counts; never secrets, PII, diffs, or review bodies. Nothing emits yet — `exportTraces`/`exportMetrics` are the seam the metrics and traces slices plug into.
+Exports are fire-and-forget — serialized to one in-flight POST, depth-capped, 10s-bounded, credentials redacted from errors — so a broken endpoint can never affect job flow. Attribute payloads carry the same usage-metadata-only rule as job summaries: ids, states, durations, token counts; never secrets, PII, diffs, or review bodies.
+
+### OTLP metrics
+
+With `OPENOBSERVE_METRICS_URL` set, Maomao exports a small metric set (`src/telemetry/metrics.ts`), emitted alongside the same events the job-summary stream keys on:
+
+| Metric | Kind | Attributes | Emitted |
+|---|---|---|---|
+| `maomao.queue.depth` | gauge | — | every queue mutation (pending jobs waiting for a slot) |
+| `maomao.queue.slots_in_use` | gauge | — | every queue mutation (claimed runner slots) |
+| `maomao.queue.slots` | gauge | — | every queue mutation (configured `JOB_CONCURRENCY`) |
+| `maomao.jobs` | delta counter | `job_type`, `repo`, `provider_instance`, `state`, `attempt`, `usage_complete` | each job reaching a terminal state |
+| `maomao.job.tokens` | delta sum | job attrs + `kind` (`prompt`/`completion`/`total`) | each terminal job |
+| `maomao.job.cost_usd` | delta sum | job attrs | each terminal job with a reported cost |
+| `maomao.job.duration_ms` | delta histogram | job attrs + `state` | each terminal job with both timestamps |
+
+Queue gauges report on change, not on a timer — the same mutation that moves a job also exports the new values. Per-job counters use **delta** temporality and are built from the same `buildJobSummary` snapshot the stdout line uses, so both channels agree: a retried job emits again under a higher `attempt` (routing/internal-escalation spend carries across attempts — summing every point re-counts those stages, same caveat as the summary stream), and `usage_complete=false` marks mid-flight snapshots (a floor, not a total).
 
 ## Run locally
 

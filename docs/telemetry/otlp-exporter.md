@@ -52,7 +52,5 @@ Switch to the OTel SDK if we need: context propagation **across processes** (the
 
 ## What lands on this skeleton
 
-- **#141 (metrics)**: `exportMetrics(...)` with gauge/sum/histogram data points for queue depth, job durations, token/cost rates.
+- **#141 (metrics)** — landed in this stack: `src/telemetry/metrics.ts` emits queue gauges and per-terminal-job counters/histograms via `exportMetrics(...)`.
 - **#142 (traces)**: `exportTraces(...)` — root span per job run, child spans for routing → specialists → aggregation → escalation, `stack_review` roots linking member `pr_review` spans.
-
-Nothing emits yet: this PR ships the transport, wire-format encoders, env resolution, and tests only.
