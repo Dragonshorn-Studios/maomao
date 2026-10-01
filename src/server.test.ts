@@ -6301,9 +6301,10 @@ describe("telemetry config routes", () => {
     log.mockRestore();
   });
 
-  it("shows env-derived status badges when env vars win", async () => {
+  it("shows env-derived status badges when env vars win, and still offers clear for shadowed stored config", async () => {
     const log = vi.spyOn(console, "log").mockImplementation(() => {});
     const { telemetrySettings } = telemetryCtx();
+    telemetrySettings.set("metrics", { url: "https://stored.test/m", token: "storedtok-1234" });
     const { app } = testApp(
       {
         UI_PASSWORD: "hunter2",
@@ -6320,6 +6321,8 @@ describe("telemetry config routes", () => {
     expect(html).toContain("OPENOBSERVE_METRICS_URL");
     expect(html).toContain("OPENOBSERVE_METRICS_TOKEN");
     expect(html).not.toContain("envtoken");
+    // Stored entry is fully shadowed by env badges, but Clear must still render.
+    expect(html).toContain('formaction="/config/telemetry/metrics/delete"');
     log.mockRestore();
   });
 

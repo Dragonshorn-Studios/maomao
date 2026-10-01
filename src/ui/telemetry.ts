@@ -48,7 +48,9 @@ function authBadge(channel: TelemetryChannelStatus): string {
 function channelCard(channel: TelemetryChannelStatus, csrfToken: string | undefined, canWrite: boolean): string {
   const meta = TELEMETRY_CHANNELS.find((c) => c.id === channel.channel);
   const id = escapeHtml(channel.channel);
-  const hasStored = channel.urlSource === "stored" || channel.authSource === "stored";
+  // Badges describe effective sources; the clear action keys off the file so
+  // a stored config fully shadowed by env stays removable.
+  const hasStored = channel.hasStored;
   const hasConfig = channel.url != null;
   const form = canWrite
     ? `<form method="post" action="/config/telemetry/${id}" class="telemetry-form">

@@ -49,6 +49,8 @@ export interface TelemetryChannelStatus {
   authDetail?: string;
   /** Env var feeding auth when authSource === "environment". */
   authEnvVar?: string;
+  /** A stored entry exists for this channel — may be fully shadowed by env. */
+  hasStored: boolean;
 }
 
 type TelemetryFile = Partial<Record<TelemetryChannel, TelemetryChannelConfig>>;
@@ -164,6 +166,7 @@ export class TelemetrySettingsStore {
       const storedAuth = stored && (stored.token || stored.user) ? "stored" : null;
       return {
         channel: id,
+        hasStored: stored != null && Boolean(stored.url || stored.token || stored.user || stored.password),
         url: envVar ? maskUrlCredentials(env[envVar]!.trim()) : storedUrl ? maskUrlCredentials(storedUrl) : undefined,
         urlSource: envVar ? "environment" : storedUrl ? "stored" : "none",
         urlEnvVar: envVar,
