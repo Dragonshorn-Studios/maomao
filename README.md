@@ -336,9 +336,10 @@ The same line can also be POSTed directly to an OpenObserve ingest endpoint:
 
 ```bash
 OPENOBSERVE_LOGS_URL=https://oo.example.com/api/default/maomao/_json
-# optional auth — never logged:
-OPENOBSERVE_LOGS_TOKEN=...              # Authorization: Bearer
-# or:
+# optional auth — never logged; ingestion is always HTTP Basic:
+OPENOBSERVE_LOGS_EMAIL=...              # Authorization: Basic (email:ingestion-token)
+OPENOBSERVE_LOGS_TOKEN=...              # o2oi_… — sent as the Basic password
+# or (legacy user/password):
 OPENOBSERVE_LOGS_USER=...               # Authorization: Basic (user:password)
 OPENOBSERVE_LOGS_PASSWORD=...
 ```
@@ -352,9 +353,10 @@ Unset `OPENOBSERVE_LOGS_URL` means stdout-only; a failing or slow endpoint never
 ```bash
 OPENOBSERVE_TRACES_URL=https://oo.example.com/api/default/v1/traces
 OPENOBSERVE_METRICS_URL=https://oo.example.com/api/default/v1/metrics
-# auth — per-signal override wins, generic is the fallback (never logged):
-OPENOBSERVE_TOKEN=...                       # or OPENOBSERVE_USER + OPENOBSERVE_PASSWORD (Basic)
-OPENOBSERVE_TRACES_TOKEN=...                # per-signal overrides also supported
+# auth — per-signal override wins, generic is the fallback (never logged);
+# ingestion is always HTTP Basic (token = password, OO email = username):
+OPENOBSERVE_EMAIL=... + OPENOBSERVE_TOKEN=...   # or OPENOBSERVE_USER + OPENOBSERVE_PASSWORD (Basic)
+OPENOBSERVE_TRACES_EMAIL=... + OPENOBSERVE_TRACES_TOKEN=...   # per-signal overrides also supported
 # resource attrs — the standard OTel env names other fleet apps use:
 OTEL_SERVICE_NAME=maomao
 OTEL_RESOURCE_ATTRIBUTES=deployment.environment=prod,fleet=szefowo

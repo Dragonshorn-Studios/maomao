@@ -8,6 +8,7 @@ import {
   maskUrlCredentials,
   resolveChannelAuth,
   resolveChannelUrl,
+  telemetryAuthHeader,
   telemetryConfigPath,
 } from "./settings.js";
 
@@ -78,22 +79,45 @@ describe("channel resolution", () => {
     const env = { OPENOBSERVE_TRACES_URL: "https://env.test/v1/traces", OPENOBSERVE_TOKEN: "env-token" };
     const stored = { url: "https://stored.test/v1/traces", token: "stored-token" };
     expect(resolveChannelUrl("traces", env, stored)).toBe("https://env.test/v1/traces");
-    expect(resolveChannelAuth("traces", env, stored)).toEqual({ token: "env-token", user: undefined, password: undefined });
+    expect(resolveChannelAuth("traces", env, stored)).toEqual({ email: undefined, token: "env-token", user: undefined, password: undefined });
   });
 
-  it("any token wins over any user across prefixes, and password resolves independently", () => {
+  it("any token wins over any user across prefixes, and password/email resolve independently", () => {
     // OPENOBSERVE_TRACES_USER + generic OPENOBSERVE_TOKEN must still pick
-    // Bearer — the precedence the exporter documented before stored settings.
-    const env = { OPENOBSERVE_TRACES_USER: "u", OPENOBSERVE_TOKEN: "tok" };
-    expect(resolveChannelAuth("traces", env)).toEqual({ token: "tok", user: undefined, password: undefined });
+    // the ingestion-token path — the precedence the exporter documented.
+    const env = { OPENOBSERVE_TRACES_USER: "u", OPENOBSERVE_TOKEN: "tok", OPENOBSERVE_EMAIL: "ops@x" };
+    expect(resolveChannelAuth("traces", env)).toEqual({ email: "ops@x", token: "tok", user: "u", password: undefined });
     const env2 = { OPENOBSERVE_METRICS_PASSWORD: "per-pw", OPENOBSERVE_USER: "gen-u", OPENOBSERVE_PASSWORD: "gen-pw" };
-    expect(resolveChannelAuth("metrics", env2)).toEqual({ token: undefined, user: "gen-u", password: "per-pw" });
+    expect(resolveChannelAuth("metrics", env2)).toEqual({ email: undefined, token: undefined, user: "gen-u", password: "per-pw" });
+  });
+
+  it("env email pairs with a token across prefixes; the header is Basic email:token", () => {
+    const env = { OPENOBSERVE_TRACES_TOKEN: "per-tok", OPENOBSERVE_EMAIL: "gen@oo.test" };
+    expect(resolveChannelAuth("traces", env)).toEqual({ email: "gen@oo.test", token: "per-tok", user: undefined, password: undefined });
+    expect(telemetryAuthHeader(resolveChannelAuth("traces", env)).authorization).toBe(
+      `Basic ${Buffer.from("gen@oo.test:per-tok").toString("base64")}`,
+    );
+  });
+
+  it("telemetryAuthHeader: ingestion token becomes the Basic password; no email falls back to user:password", () => {
+    expect(telemetryAuthHeader({ email: "e@x", token: "o2oi_abc" }).authorization).toBe(
+      `Basic ${Buffer.from("e@x:o2oi_abc").toString("base64")}`,
+    );
+    // Token without email is unusable — the legacy pair takes over.
+    expect(telemetryAuthHeader({ token: "o2oi_abc", user: "u", password: "p" }).authorization).toBe(
+      `Basic ${Buffer.from("u:p").toString("base64")}`,
+    );
+    expect(telemetryAuthHeader({ token: "o2oi_abc" }).authorization).toBeUndefined();
+    expect(telemetryAuthHeader({ user: "u", password: "p" }).authorization).toBe(
+      `Basic ${Buffer.from("u:p").toString("base64")}`,
+    );
+    expect(telemetryAuthHeader({})).toEqual({});
   });
 
   it("generic OPENOBSERVE_* auth falls back for otlp signals but not logs", () => {
     const env = { OPENOBSERVE_USER: "u", OPENOBSERVE_PASSWORD: "p" };
     expect(resolveChannelAuth("metrics", env).user).toBe("u");
-    expect(resolveChannelAuth("logs", env)).toEqual({ token: undefined, user: undefined, password: undefined });
+    expect(resolveChannelAuth("logs", env)).toEqual({ email: undefined, token: undefined, user: undefined, password: undefined });
     // Stored creds fill the gap for logs when no per-signal env exists.
     expect(resolveChannelAuth("logs", env, { user: "su", password: "sp" }).user).toBe("su");
   });
@@ -160,10 +184,11 @@ describe("shared connection", () => {
 
   it("shared stored auth fills the gap — including logs, which has no generic env", () => {
     const shared = { token: "shared-token-1234" };
-    expect(resolveChannelAuth("traces", {}, undefined, shared)).toEqual({ token: "shared-token-1234", user: undefined, password: undefined });
+    expect(resolveChannelAuth("traces", {}, undefined, shared)).toEqual({ email: undefined, token: "shared-token-1234", user: undefined, password: undefined });
     expect(resolveChannelAuth("logs", {}, undefined, shared).token).toBe("shared-token-1234");
     // Per-channel stored creds beat shared stored creds.
     expect(resolveChannelAuth("metrics", {}, { user: "mu", password: "mp" }, shared)).toEqual({
+      email: undefined,
       token: undefined,
       user: "mu",
       password: "mp",

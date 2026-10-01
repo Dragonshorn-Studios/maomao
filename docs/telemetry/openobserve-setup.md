@@ -32,17 +32,27 @@ orgs or streams.
 ### Credentials
 
 OpenObserve authenticates ingestion with `Authorization: Basic <base64(email:password)>`.
-Create a dedicated user (or reuse an existing login); maomao builds the header
-itself from `OPENOBSERVE_USER`/`OPENOBSERVE_PASSWORD`, so keep the raw email
-and password — no base64 needed:
+The preferred credential is an **ingestion token** (`o2oi_…`, created in
+OpenObserve → Management → Ingestion tokens): it goes in the *password* slot
+with your OpenObserve account email as the username — maomao builds the
+header itself, so keep the raw email and token, no base64 needed:
+
+```bash
+OPENOBSERVE_EMAIL=maomao-ingest@example.com
+OPENOBSERVE_TOKEN=o2oi_xxxxxxxxxxxx
+```
+
+Ingestion tokens are for *sending* data; MCP/service-account tokens are for
+reading or managing OpenObserve and are not used here.
+
+Bearer is not sent — OpenObserve ingestion rejects it (a `502` from the edge
+on any Bearer request is a telltale sign). The alternative is a regular
+user/password pair, sent the same way via Basic:
 
 ```bash
 OPENOBSERVE_USER=maomao-ingest@example.com
 OPENOBSERVE_PASSWORD=<password>
 ```
-
-A Bearer token (`OPENOBSERVE_TOKEN`) also works if your deployment fronts OO
-with a token-issuing proxy; for a stock OpenObserve, Basic is the path.
 
 ### Endpoints
 
@@ -69,11 +79,11 @@ OPENOBSERVE_METRICS_URL=https://oo.example.com/api/default/v1/metrics
 OPENOBSERVE_TRACES_URL=https://oo.example.com/api/default/v1/traces
 
 # Logs auth — per-signal only (the logs channel predates the generic names):
-OPENOBSERVE_LOGS_USER=maomao-ingest@example.com
-OPENOBSERVE_LOGS_PASSWORD=<password>
+OPENOBSERVE_LOGS_EMAIL=maomao-ingest@example.com
+OPENOBSERVE_LOGS_TOKEN=o2oi_xxxxxxxxxxxx
 # OTLP auth — generic, shared by traces + metrics (per-signal overrides exist):
-OPENOBSERVE_USER=maomao-ingest@example.com
-OPENOBSERVE_PASSWORD=<password>
+OPENOBSERVE_EMAIL=maomao-ingest@example.com
+OPENOBSERVE_TOKEN=o2oi_xxxxxxxxxxxx
 
 # Resource attributes stamped on every OTLP envelope (fleet conventions):
 OTEL_SERVICE_NAME=maomao
@@ -84,10 +94,13 @@ OTEL_RESOURCE_ATTRIBUTES=deployment.environment=prod,fleet=<name>
   metrics, and traces emit from the same seam). Queue gauges are unaffected —
   they emit on queue mutations regardless.
 - Auth resolution: OTLP signals take `OPENOBSERVE_<SIGNAL>_TOKEN ??
-  OPENOBSERVE_TOKEN` (Bearer) or `OPENOBSERVE_<SIGNAL>_USER ??
+  OPENOBSERVE_TOKEN` + `OPENOBSERVE_<SIGNAL>_EMAIL ?? OPENOBSERVE_EMAIL`
+  (Basic `email:ingestion-token`) or `OPENOBSERVE_<SIGNAL>_USER ??
   OPENOBSERVE_USER` + the matching `_PASSWORD` (Basic), `<SIGNAL>` = `TRACES`
   or `METRICS`. The logs channel reads only `OPENOBSERVE_LOGS_TOKEN` /
-  `OPENOBSERVE_LOGS_USER` / `OPENOBSERVE_LOGS_PASSWORD` — no generic fallback.
+  `OPENOBSERVE_LOGS_EMAIL` / `OPENOBSERVE_LOGS_USER` /
+  `OPENOBSERVE_LOGS_PASSWORD` — no generic fallback. A token without an
+  email cannot authenticate — set both.
   Stored shared credentials from `/config/telemetry` do reach the logs
   channel (the page's own layer), so saving credentials once there covers
   all three.

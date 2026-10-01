@@ -1,6 +1,7 @@
 import { randomBytes } from "node:crypto";
 import {
   resolveChannelAuth,
+  telemetryAuthHeader,
   resolveChannelUrl,
   type TelemetryChannelConfig,
   type TelemetrySharedConfig,
@@ -26,8 +27,10 @@ import {
  *     Unset = that signal is silently off. OPENOBSERVE_BASE_URL (e.g.
  *     https://oo.example.com/api/default) derives both when the per-signal
  *     URL is unset.
- *   Auth, resolved per signal with a generic fallback:
- *     OPENOBSERVE_<SIGNAL>_TOKEN ?? OPENOBSERVE_TOKEN          → Bearer
+ *   Auth, resolved per signal with a generic fallback — always HTTP Basic
+ *   (OpenObserve ingestion rejects Bearer):
+ *     (OPENOBSERVE_<SIGNAL>_EMAIL ?? OPENOBSERVE_EMAIL) +
+ *     (OPENOBSERVE_<SIGNAL>_TOKEN ?? OPENOBSERVE_TOKEN)        → Basic (email:ingestion-token)
  *     OPENOBSERVE_<SIGNAL>_USER  ?? OPENOBSERVE_USER           → Basic (user)
  *     OPENOBSERVE_<SIGNAL>_PASSWORD ?? OPENOBSERVE_PASSWORD    → Basic (pass)
  *   Resource conventions shared with the rest of the fleet:
@@ -158,12 +161,7 @@ function authHeaders(
   stored?: TelemetryChannelConfig,
   shared?: TelemetrySharedConfig,
 ): Record<string, string> {
-  const auth = resolveChannelAuth(signal, env, stored, shared);
-  if (auth.token) return { authorization: `Bearer ${auth.token}` };
-  if (auth.user) {
-    return { authorization: `Basic ${Buffer.from(`${auth.user}:${auth.password ?? ""}`).toString("base64")}` };
-  }
-  return {};
+  return telemetryAuthHeader(resolveChannelAuth(signal, env, stored, shared));
 }
 
 /**

@@ -2,6 +2,7 @@ import type { JobState } from "../config.js";
 import { tokenTotalFromRow } from "../opencode/parse.js";
 import {
   resolveChannelAuth,
+  telemetryAuthHeader,
   resolveChannelUrl,
   type TelemetryChannelConfig,
   type TelemetrySharedConfig,
@@ -260,13 +261,7 @@ function ingestHeaders(
   shared?: TelemetrySharedConfig,
 ): Record<string, string> {
   const headers: Record<string, string> = { "content-type": "application/json" };
-  const auth = resolveChannelAuth("logs", env, stored, shared);
-  if (auth.token) {
-    headers.authorization = `Bearer ${auth.token}`;
-  } else if (auth.user) {
-    headers.authorization = `Basic ${Buffer.from(`${auth.user}:${auth.password ?? ""}`).toString("base64")}`;
-  }
-  return headers;
+  return { ...headers, ...telemetryAuthHeader(resolveChannelAuth("logs", env, stored, shared)) };
 }
 
 /**

@@ -36,6 +36,9 @@ export const TELEMETRY_CHANNELS: ReadonlyArray<{ id: TelemetryChannel; label: st
 
 export interface TelemetryChannelConfig {
   url?: string;
+  /** OpenObserve email — the Basic-auth username paired with the ingestion token. */
+  email?: string;
+  /** OpenObserve ingestion token (o2oi_…) — sent as the Basic-auth password, never Bearer. */
   token?: string;
   user?: string;
   password?: string;
@@ -51,6 +54,9 @@ export interface TelemetryChannelConfig {
 export interface TelemetrySharedConfig {
   baseUrl?: string;
   stream?: string;
+  /** OpenObserve email — the Basic-auth username paired with the ingestion token. */
+  email?: string;
+  /** OpenObserve ingestion token (o2oi_…) — sent as the Basic-auth password, never Bearer. */
   token?: string;
   user?: string;
   password?: string;
@@ -167,14 +173,14 @@ function urlEnvVars(channel: TelemetryChannel): string[] {
 /**
  * Env auth for one channel — the same precedence the OTLP exporter used
  * before stored settings existed: any TOKEN (per-signal then generic) wins,
- * then any USER; password resolves across both prefixes independently.
- * Traces/metrics fall back to the generic OPENOBSERVE_* names; logs has no
- * generic fallback.
+ * then any USER; password and email resolve across both prefixes
+ * independently. Traces/metrics fall back to the generic OPENOBSERVE_* names;
+ * logs has no generic fallback.
  */
 function envAuth(
   channel: TelemetryChannel,
   env: NodeJS.ProcessEnv,
-): { token?: string; user?: string; password?: string; envVar: string } | null {
+): { email?: string; token?: string; user?: string; password?: string; envVar: string } | null {
   const prefix = `OPENOBSERVE_${channel.toUpperCase()}`;
   const names = channel === "logs" ? [prefix] : [prefix, "OPENOBSERVE"];
   const firstSet = (suffix: string): { value: string; envVar: string } | null => {
@@ -185,7 +191,17 @@ function envAuth(
     return null;
   };
   const token = firstSet("TOKEN");
-  if (token) return { token: token.value, envVar: token.envVar };
+  if (token) {
+    // A token without an email can't authenticate — keep the user/password
+    // pair in the resolution so telemetryAuthHeader can fall back to it.
+    return {
+      token: token.value,
+      email: firstSet("EMAIL")?.value,
+      user: firstSet("USER")?.value,
+      password: firstSet("PASSWORD")?.value,
+      envVar: token.envVar,
+    };
+  }
   const user = firstSet("USER");
   if (user) return { user: user.value, password: firstSet("PASSWORD")?.value ?? "", envVar: user.envVar };
   return null;
@@ -212,7 +228,7 @@ export class TelemetrySettingsStore {
     const raw = readSettingsFile(this.path)[channel];
     if (!raw || typeof raw !== "object") return undefined;
     const clean: TelemetryChannelConfig = {};
-    for (const key of ["url", "token", "user", "password"] as const) {
+    for (const key of ["url", "email", "token", "user", "password"] as const) {
       const value = raw[key];
       if (typeof value === "string" && value) clean[key] = value;
     }
@@ -224,7 +240,7 @@ export class TelemetrySettingsStore {
     const raw = readSettingsFile(this.path).shared;
     if (!raw || typeof raw !== "object") return undefined;
     const clean: TelemetrySharedConfig = {};
-    for (const key of ["baseUrl", "stream", "token", "user", "password"] as const) {
+    for (const key of ["baseUrl", "stream", "email", "token", "user", "password"] as const) {
       const value = raw[key];
       if (typeof value === "string" && value) clean[key] = value;
     }
@@ -253,7 +269,7 @@ export class TelemetrySettingsStore {
       const authShared = !envAuthVar && !channelAuth && sharedAuth;
       return {
         channel: id,
-        hasStored: stored != null && Boolean(stored.url || stored.token || stored.user || stored.password),
+        hasStored: stored != null && Boolean(stored.url || stored.email || stored.token || stored.user || stored.password),
         url: url ? maskUrlCredentials(url) : undefined,
         urlSource: envVar || envDerived ? "environment" : storedUrl || storedDerived ? "stored" : "none",
         urlEnvVar: envVar ?? (envDerived ? SHARED_BASE_URL_ENV : undefined),
@@ -294,7 +310,7 @@ export class TelemetrySettingsStore {
       authEnvVar: envAuthVar ?? undefined,
       authDetail: envAuthVar ?? (storedAuth ? fingerprint(shared!.token ?? shared!.user ?? "") : undefined),
       hasStored: Boolean(
-        shared && (shared.baseUrl || shared.stream || shared.token || shared.user || shared.password),
+        shared && (shared.baseUrl || shared.stream || shared.email || shared.token || shared.user || shared.password),
       ),
     };
   }
@@ -315,7 +331,7 @@ export class TelemetrySettingsStore {
     }
     const file = readSettingsFile(this.path);
     const next: TelemetryChannelConfig = {};
-    for (const key of ["url", "token", "user", "password"] as const) {
+    for (const key of ["url", "email", "token", "user", "password"] as const) {
       const value = config[key]?.trim();
       if (value) next[key] = value;
     }
@@ -350,7 +366,7 @@ export class TelemetrySettingsStore {
     }
     const file = readSettingsFile(this.path);
     const next: TelemetrySharedConfig = {};
-    for (const key of ["baseUrl", "stream", "token", "user", "password"] as const) {
+    for (const key of ["baseUrl", "stream", "email", "token", "user", "password"] as const) {
       const value = config[key]?.trim();
       if (value) next[key] = value;
     }
@@ -386,7 +402,7 @@ export class TelemetrySettingsStore {
     const file = readSettingsFile(this.path);
     const secrets: string[] = [];
     for (const entry of Object.values(file)) {
-      for (const value of [entry?.token, entry?.user, entry?.password]) {
+      for (const value of [entry?.token, entry?.user, entry?.password, entry?.email]) {
         if (typeof value === "string" && value.length >= 8) secrets.push(value);
       }
     }
@@ -419,8 +435,8 @@ function validateUrl(url: string | undefined, label: string): string | null {
   return null;
 }
 
-function validateSecrets(config: { token?: string; user?: string; password?: string }): string | null {
-  for (const key of ["token", "user", "password"] as const) {
+function validateSecrets(config: { email?: string; token?: string; user?: string; password?: string }): string | null {
+  for (const key of ["email", "token", "user", "password"] as const) {
     const value = config[key];
     if (value != null && value !== "" && /[\x00-\x1f\x7f\s]/.test(value)) {
       return `${key} must not contain whitespace or control characters.`;
@@ -439,12 +455,47 @@ export function resolveChannelAuth(
   env: NodeJS.ProcessEnv = process.env,
   stored?: TelemetryChannelConfig,
   shared?: TelemetrySharedConfig,
-): { token?: string; user?: string; password?: string } {
+): { email?: string; token?: string; user?: string; password?: string } {
   const envResult = envAuth(channel, env);
-  if (envResult) return { token: envResult.token, user: envResult.user, password: envResult.password };
-  const pick = (c?: { token?: string; user?: string; password?: string }) =>
-    c && (c.token || c.user) ? { token: c.token, user: c.user, password: c.password } : undefined;
+  if (envResult) {
+    return { email: envResult.email, token: envResult.token, user: envResult.user, password: envResult.password };
+  }
+  const pick = (c?: { email?: string; token?: string; user?: string; password?: string }) =>
+    c && (c.token || c.user) ? { email: c.email, token: c.token, user: c.user, password: c.password } : undefined;
   return pick(stored) ?? pick(shared) ?? {};
+}
+
+/**
+ * The Authorization header for resolved credentials. OpenObserve ingestion
+ * auth is HTTP Basic — the ingestion token goes in the *password* slot with
+ * the OpenObserve email as the username; Bearer is not accepted for
+ * ingestion. A token without an email is unusable, so it falls through to
+ * the legacy user/password pair rather than emitting a broken header.
+ */
+let tokenWithoutEmailWarned = false;
+
+export function telemetryAuthHeader(auth: {
+  email?: string;
+  token?: string;
+  user?: string;
+  password?: string;
+}): Record<string, string> {
+  const basic = (user: string, password: string) =>
+    `Basic ${Buffer.from(`${user}:${password}`).toString("base64")}`;
+  if (auth.token?.trim() && auth.email?.trim()) {
+    return { authorization: basic(auth.email.trim(), auth.token.trim()) };
+  }
+  if (auth.token?.trim() && !auth.user?.trim() && !tokenWithoutEmailWarned) {
+    tokenWithoutEmailWarned = true;
+    console.error(
+      "openobserve: an ingestion token is configured without an OpenObserve email — " +
+        "ingestion tokens are sent as the Basic-auth password (email = username), so no credentials will be sent",
+    );
+  }
+  if (auth.user?.trim()) {
+    return { authorization: basic(auth.user.trim(), auth.password ?? "") };
+  }
+  return {};
 }
 
 /**

@@ -29,11 +29,13 @@ Issue [#143](https://github.com/Dragonshorn-Studios/maomao/issues/143) (child of
 OPENOBSERVE_TRACES_URL=https://oo.example.com/api/default/v1/traces
 OPENOBSERVE_METRICS_URL=https://oo.example.com/api/default/v1/metrics
 
-# Auth — per-signal override wins, generic is the fallback:
-OPENOBSERVE_TOKEN=...                 # Authorization: Bearer
-# or: OPENOBSERVE_USER=... + OPENOBSERVE_PASSWORD=...   # Basic
-# per-signal: OPENOBSERVE_TRACES_TOKEN / OPENOBSERVE_TRACES_USER / ..._PASSWORD
-#             OPENOBSERVE_METRICS_TOKEN / OPENOBSERVE_METRICS_USER / ..._PASSWORD
+# Auth — per-signal override wins, generic is the fallback. Ingestion is
+# always HTTP Basic: the ingestion token is the password and the OpenObserve
+# email the username (Bearer is not sent):
+OPENOBSERVE_EMAIL=... + OPENOBSERVE_TOKEN=...        # Basic (email:ingestion-token)
+# or: OPENOBSERVE_USER=... + OPENOBSERVE_PASSWORD=...   # Basic (legacy user/password)
+# per-signal: OPENOBSERVE_TRACES_TOKEN / OPENOBSERVE_TRACES_EMAIL / OPENOBSERVE_TRACES_USER / ..._PASSWORD
+#             OPENOBSERVE_METRICS_TOKEN / OPENOBSERVE_METRICS_EMAIL / OPENOBSERVE_METRICS_USER / ..._PASSWORD
 
 # Resource conventions (standard OTel env names, shared with the fleet):
 OTEL_SERVICE_NAME=maomao              # resource attr service.name

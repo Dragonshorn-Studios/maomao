@@ -127,18 +127,31 @@ describe("otlpEndpoint", () => {
     expect(endpoint?.headers.authorization).toBeUndefined();
   });
 
-  it("prefers a per-signal token over the generic token", () => {
+  it("prefers a per-signal token over the generic token, sent as Basic email:token", () => {
     const env = {
       OPENOBSERVE_METRICS_URL: METRICS_URL,
+      OPENOBSERVE_METRICS_EMAIL: "sig@oo.test",
       OPENOBSERVE_METRICS_TOKEN: "sig-tok",
       OPENOBSERVE_TOKEN: "generic-tok",
+      OPENOBSERVE_EMAIL: "gen@oo.test",
     } as NodeJS.ProcessEnv;
-    expect(otlpEndpoint("metrics", env)?.headers.authorization).toBe("Bearer sig-tok");
+    expect(otlpEndpoint("metrics", env)?.headers.authorization).toBe(
+      `Basic ${Buffer.from("sig@oo.test:sig-tok").toString("base64")}`,
+    );
     const fallback = {
       OPENOBSERVE_METRICS_URL: METRICS_URL,
       OPENOBSERVE_TOKEN: "generic-tok",
+      OPENOBSERVE_EMAIL: "gen@oo.test",
     } as NodeJS.ProcessEnv;
-    expect(otlpEndpoint("metrics", fallback)?.headers.authorization).toBe("Bearer generic-tok");
+    expect(otlpEndpoint("metrics", fallback)?.headers.authorization).toBe(
+      `Basic ${Buffer.from("gen@oo.test:generic-tok").toString("base64")}`,
+    );
+    // A token without an email cannot authenticate — no header is emitted.
+    const noEmail = {
+      OPENOBSERVE_METRICS_URL: METRICS_URL,
+      OPENOBSERVE_METRICS_TOKEN: "sig-tok",
+    } as NodeJS.ProcessEnv;
+    expect(otlpEndpoint("metrics", noEmail)?.headers.authorization).toBeUndefined();
   });
 
   it("falls back to basic auth from generic credentials", () => {
@@ -194,11 +207,14 @@ describe("exportTraces/exportMetrics", () => {
     vi.stubGlobal("fetch", fetchMock);
     vi.stubEnv("OPENOBSERVE_TRACES_URL", TRACES_URL);
     vi.stubEnv("OPENOBSERVE_TOKEN", "tok");
+    vi.stubEnv("OPENOBSERVE_EMAIL", "ops@oo.test");
     exportTraces([makeSpan()]);
     await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
     const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
     expect(url).toBe(TRACES_URL);
-    expect((init.headers as Record<string, string>).authorization).toBe("Bearer tok");
+    expect((init.headers as Record<string, string>).authorization).toBe(
+      `Basic ${Buffer.from("ops@oo.test:tok").toString("base64")}`,
+    );
     const body = JSON.parse(init.body as string);
     expect(body.resourceSpans[0].scopeSpans[0].spans[0].name).toBe("job.run");
   });
@@ -216,11 +232,14 @@ describe("exportTraces/exportMetrics", () => {
 
     vi.stubEnv("OPENOBSERVE_TRACES_URL", TRACES_URL);
     vi.stubEnv("OPENOBSERVE_TRACES_TOKEN", "env-tok");
+    vi.stubEnv("OPENOBSERVE_TRACES_EMAIL", "env@oo.test");
     exportTraces([makeSpan()], process.env, { url: "https://stored.test/v1/traces", user: "su", password: "sp" });
     await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
     const [url2, init2] = fetchMock.mock.calls[1] as [string, RequestInit];
     expect(url2).toBe(TRACES_URL);
-    expect((init2.headers as Record<string, string>).authorization).toBe("Bearer env-tok");
+    expect((init2.headers as Record<string, string>).authorization).toBe(
+      `Basic ${Buffer.from("env@oo.test:env-tok").toString("base64")}`,
+    );
   });
 
   it("serializes exports: one POST in flight, order preserved", async () => {
@@ -268,6 +287,7 @@ describe("exportTraces/exportMetrics", () => {
     const httpUrl = "http://oo.internal/api/default/v1/metrics";
     vi.stubEnv("OPENOBSERVE_METRICS_URL", httpUrl);
     vi.stubEnv("OPENOBSERVE_TOKEN", "tok");
+    vi.stubEnv("OPENOBSERVE_EMAIL", "ops@oo.test");
     exportMetrics([makeGauge()]);
     exportMetrics([makeGauge()]);
     await flushOtlpExports();

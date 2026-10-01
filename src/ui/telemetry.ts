@@ -136,7 +136,7 @@ function helpBlock(): string {
     <ol class="telemetry-steps">
       <li>In OpenObserve, create or copy an <strong>ingestion token</strong> (it usually starts with <code>o2oi_</code>).</li>
       <li>Copy your organization API base URL, for example <code>https://openobserve.example.com/api/default</code>.</li>
-      <li>Paste the base URL and ingestion token below.</li>
+      <li>Paste the base URL, your OpenObserve email, and the ingestion token below.</li>
       <li>Choose a logs stream name, for example <code>maomao</code>.</li>
       <li>Save, then run <strong>Test all</strong>.</li>
     </ol>
@@ -148,29 +148,42 @@ function helpBlock(): string {
 
 function authFields(prefix: string, storedAuth: boolean, tokenLabel: string, tokenHelp: string): string {
   const scope = prefix ? ` for ${prefix.replace(/-$/, "")}` : "";
+  const keep = storedAuth ? "Keep stored credential" : "";
   return `
     <div class="telemetry-grid">
-      <label class="telemetry-field telemetry-field-wide">
-        <span>${tokenLabel}</span>
-        <input type="password" name="${prefix}token" autocomplete="off" minlength="4"
-          placeholder="${storedAuth ? "Keep stored credential" : "o2oi_…"}"
-          aria-label="${escapeHtml(tokenLabel)}"/>
-        <small class="muted">${tokenHelp}</small>
-      </label>
+      <div class="telemetry-auth-alt">
+        <label class="telemetry-field">
+          <span>OpenObserve email</span>
+          <input type="email" name="${prefix}email" autocomplete="off"
+            placeholder="${keep || "you@example.com"}"
+            aria-label="OpenObserve email${scope}"/>
+        </label>
+        <label class="telemetry-field">
+          <span>${tokenLabel}</span>
+          <input type="password" name="${prefix}token" autocomplete="off" minlength="4"
+            placeholder="${keep || "o2oi_…"}"
+            aria-label="${escapeHtml(tokenLabel)}${scope}"/>
+        </label>
+        <small class="muted telemetry-auth-alt-note">${tokenHelp} Maomao sends the token as the basic-auth
+        <em>password</em> with this email as the username — OpenObserve ingestion does not accept Bearer tokens.</small>
+      </div>
       <div class="telemetry-or" role="separator"><span>OR</span></div>
-      <label class="telemetry-field">
-        <span>User</span>
-        <input type="text" name="${prefix}user" autocomplete="off"
-          placeholder="${storedAuth ? "Keep stored credential" : "maomao-ingest@example.com"}"
-          aria-label="Basic-auth user${scope}"/>
-        <small class="muted">Alternative: OpenObserve basic auth. Use either a token <em>or</em> user/password — not both.</small>
-      </label>
-      <label class="telemetry-field">
-        <span>Password</span>
-        <input type="password" name="${prefix}password" autocomplete="off"
-          placeholder="${storedAuth ? "Keep stored credential" : ""}"
-          aria-label="Basic-auth password${scope}"/>
-      </label>
+      <div class="telemetry-auth-alt">
+        <label class="telemetry-field">
+          <span>User</span>
+          <input type="text" name="${prefix}user" autocomplete="off"
+            placeholder="${keep}"
+            aria-label="Basic-auth user${scope}"/>
+        </label>
+        <label class="telemetry-field">
+          <span>Password</span>
+          <input type="password" name="${prefix}password" autocomplete="off"
+            placeholder="${keep}"
+            aria-label="Basic-auth password${scope}"/>
+        </label>
+        <small class="muted telemetry-auth-alt-note">Legacy alternative: a regular OpenObserve user/password
+        (also sent as basic auth). Use either email + ingestion token <em>or</em> user/password — not both.</small>
+      </div>
     </div>`;
 }
 
@@ -210,8 +223,8 @@ function sharedCard(shared: TelemetrySharedStatus, csrfToken: string | undefined
           ${shared.hasStored ? `<button type="submit" formaction="/config/telemetry/shared/delete" formnovalidate class="btn-danger">Clear all</button>` : ""}
         </div>
         <p class="muted">Blank fields keep what is stored. Environment variables (<code>OPENOBSERVE_BASE_URL</code>,
-        <code>OPENOBSERVE_LOGS_STREAM</code>, <code>OPENOBSERVE_TOKEN</code> / <code>OPENOBSERVE_USER</code> /
-        <code>OPENOBSERVE_PASSWORD</code>) always win over saved values.</p>
+        <code>OPENOBSERVE_LOGS_STREAM</code>, <code>OPENOBSERVE_EMAIL</code>, <code>OPENOBSERVE_TOKEN</code> /
+        <code>OPENOBSERVE_USER</code> / <code>OPENOBSERVE_PASSWORD</code>) always win over saved values.</p>
       </form>
       <form method="post" action="/config/telemetry/test-all" class="telemetry-inline-form">
         ${csrfInput(csrfToken)}
@@ -341,7 +354,11 @@ function adHocForm(csrfToken: string | undefined, canWrite: boolean): string {
           <input type="url" name="url" required autocomplete="off" placeholder="https://openobserve.example.com/api/default/v1/traces"/>
         </label>
         <label class="telemetry-field">
-          <span>Token</span>
+          <span>Email</span>
+          <input type="email" name="email" autocomplete="off"/>
+        </label>
+        <label class="telemetry-field">
+          <span>Ingestion token</span>
           <input type="password" name="token" autocomplete="off"/>
         </label>
         <label class="telemetry-field">

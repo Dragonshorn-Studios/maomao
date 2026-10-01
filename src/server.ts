@@ -1523,11 +1523,48 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
     if (!url) return renderTelemetry(c, { error: "Endpoint URL is required for an ad-hoc test.", status: 400 });
     return runTelemetryProbe(c, channel, {
       url,
+      email: telemetryField(body.email),
       token: telemetryField(body.token),
       user: telemetryField(body.user),
       password: telemetryField(body.password),
     }, `ad-hoc ${channel}`);
   });
+
+  // Auth is one slot with two methods: ingestion (email + token, sent as
+  // Basic email:token) and legacy basic (user + password). Typing any field
+  // of a method replaces that method — merging with its stored half so e.g.
+  // a new email keeps the stored token — and drops the other method;
+  // all-blank keeps the whole stored credential.
+  const savedAuth = (
+    stored: { email?: string; token?: string; user?: string; password?: string },
+    typed: { email?: string; token?: string; user?: string; password?: string },
+  ): { email?: string; token?: string; user?: string; password?: string } => {
+    const ingestionTyped = typed.email !== undefined || typed.token !== undefined;
+    const basicTyped = typed.user !== undefined || typed.password !== undefined;
+    if (ingestionTyped) return { email: typed.email ?? stored.email, token: typed.token ?? stored.token };
+    if (basicTyped) return { user: typed.user ?? stored.user, password: typed.password ?? stored.password };
+    return { email: stored.email, token: stored.token, user: stored.user, password: stored.password };
+  };
+
+  // Human-facing warnings for a saved credential: an incomplete ingestion
+  // pair cannot authenticate, and typing both methods is ambiguous.
+  const authWarnings = (
+    typed: { email?: string; token?: string; user?: string; password?: string },
+    saved: { email?: string; token?: string },
+  ): string[] => {
+    const warnings: string[] = [];
+    if (typed.email !== undefined || typed.token !== undefined) {
+      if (typed.user !== undefined || typed.password !== undefined) {
+        warnings.push("both an ingestion token and user/password were provided — the ingestion token will be used");
+      }
+      if (saved.token && !saved.email) {
+        warnings.push("the ingestion token has no OpenObserve email — add the email or the credential cannot authenticate");
+      } else if (saved.email && !saved.token) {
+        warnings.push("an OpenObserve email without an ingestion token has no effect — add the token");
+      }
+    }
+    return warnings;
+  };
 
   // Shared connection (base URL + logs stream + credentials the three
   // channels inherit). Registered before /config/telemetry/:channel so
@@ -1564,25 +1601,22 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
     if (!gateOn) return c.redirect("/", 302);
     const body = await c.req.parseBody();
     const stored = telemetrySettings().shared() ?? {};
-    // Same one-slot auth rule as the per-channel form: providing any secret
-    // field replaces the whole tuple; all-blank keeps what was stored.
     const newAuth = {
+      email: telemetryField(body.email),
       token: telemetryField(body.token),
       user: telemetryField(body.user),
       password: telemetryField(body.password),
     };
-    const keepAuth = !newAuth.token && !newAuth.user && !newAuth.password;
+    const auth = savedAuth(stored, newAuth);
     const result = telemetrySettings().setShared({
       baseUrl: telemetryField(body.baseUrl) ?? stored.baseUrl,
       stream: telemetryField(body.stream) ?? stored.stream,
-      ...(keepAuth ? { token: stored.token, user: stored.user, password: stored.password } : newAuth),
+      ...auth,
     });
     if (!result.ok) return renderTelemetry(c, { error: result.error, status: 400 });
-    const warning =
-      newAuth.token && (newAuth.user || newAuth.password)
-        ? " Both a token and user/password were provided — only one authentication method is needed; the token will be used."
-        : "";
-    return c.redirect("/config/telemetry?notice=" + encodeURIComponent(`Shared connection saved.${warning}`), 303);
+    const warnings = authWarnings(newAuth, auth);
+    const note = `Shared connection saved.${warnings.length ? ` ${warnings.join("; ")}.` : ""}`;
+    return c.redirect("/config/telemetry?notice=" + encodeURIComponent(note), 303);
   });
 
   // Removes only the stored credentials, keeping base URL and stream.
@@ -1611,21 +1645,21 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
     if (!channel) return renderTelemetry(c, { error: "Unknown telemetry channel.", status: 400 });
     const body = await c.req.parseBody();
     const stored = telemetrySettings().get(channel) ?? {};
-    // Auth is one slot: providing any of token/user/password replaces the
-    // whole tuple (a stale token must not survive a user+password save);
-    // leaving all three blank keeps what was stored.
     const newAuth = {
+      email: telemetryField(body[`${channel}-email`]),
       token: telemetryField(body[`${channel}-token`]),
       user: telemetryField(body[`${channel}-user`]),
       password: telemetryField(body[`${channel}-password`]),
     };
-    const keepAuth = !newAuth.token && !newAuth.user && !newAuth.password;
+    const auth = savedAuth(stored, newAuth);
     const result = telemetrySettings().set(channel, {
       url: telemetryField(body[`url-${channel}`]) ?? stored.url,
-      ...(keepAuth ? { token: stored.token, user: stored.user, password: stored.password } : newAuth),
+      ...auth,
     });
     if (!result.ok) return renderTelemetry(c, { error: result.error, status: 400 });
-    return c.redirect("/config/telemetry?notice=" + encodeURIComponent(`${channel} override saved.`), 303);
+    const warnings = authWarnings(newAuth, auth);
+    const note = `${channel} override saved.${warnings.length ? ` ${warnings.join("; ")}.` : ""}`;
+    return c.redirect("/config/telemetry?notice=" + encodeURIComponent(note), 303);
   });
 
   app.post("/config/telemetry/:channel/test", async (c) => {
