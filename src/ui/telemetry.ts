@@ -149,21 +149,20 @@ function helpBlock(): string {
 function authFields(prefix: string, storedAuth: boolean, tokenLabel: string, tokenHelp: string): string {
   const scope = prefix ? ` for ${prefix.replace(/-$/, "")}` : "";
   return `
-    <div class="telemetry-grid">
-      <label class="telemetry-field telemetry-field-wide">
-        <span>${tokenLabel}</span>
-        <input type="password" name="${prefix}token" autocomplete="off" minlength="4"
-          placeholder="${storedAuth ? "Keep stored credential" : "o2oi_…"}"
-          aria-label="${escapeHtml(tokenLabel)}"/>
-        <small class="muted">${tokenHelp}</small>
-      </label>
-      <div class="telemetry-or" role="separator"><span>OR</span></div>
+    <label class="telemetry-field telemetry-field-wide">
+      <span>${tokenLabel}</span>
+      <input type="password" name="${prefix}token" autocomplete="off" minlength="4"
+        placeholder="${storedAuth ? "Keep stored credential" : "o2oi_…"}"
+        aria-label="${escapeHtml(tokenLabel)}"/>
+      <small class="muted">${tokenHelp}</small>
+    </label>
+    <div class="telemetry-or" role="separator"><span>OR</span></div>
+    <div class="telemetry-auth-alt">
       <label class="telemetry-field">
         <span>User</span>
         <input type="text" name="${prefix}user" autocomplete="off"
           placeholder="${storedAuth ? "Keep stored credential" : "maomao-ingest@example.com"}"
           aria-label="Basic-auth user${scope}"/>
-        <small class="muted">Alternative: OpenObserve basic auth. Use either a token <em>or</em> user/password — not both.</small>
       </label>
       <label class="telemetry-field">
         <span>Password</span>
@@ -171,6 +170,7 @@ function authFields(prefix: string, storedAuth: boolean, tokenLabel: string, tok
           placeholder="${storedAuth ? "Keep stored credential" : ""}"
           aria-label="Basic-auth password${scope}"/>
       </label>
+      <small class="muted telemetry-auth-alt-note">Alternative: OpenObserve basic auth. Use either a token <em>or</em> user/password — not both.</small>
     </div>`;
 }
 
