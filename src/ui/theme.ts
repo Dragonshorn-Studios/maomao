@@ -1188,6 +1188,9 @@ details.finding-diff > summary {
   text-transform: uppercase;
 }
 .model-picker-group[hidden] { display: none; }
+/* Same [hidden] guard for options: the flex rule below beats the UA
+   [hidden] display:none — search filtering relies on it hiding. */
+.model-picker-option[hidden] { display: none; }
 .model-picker-option {
   display: flex;
   align-items: center;
