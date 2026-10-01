@@ -329,9 +329,19 @@ export class TelemetrySettingsStore {
   setShared(config: TelemetrySharedConfig): { ok: true } | { ok: false; error: string } {
     const urlError = validateUrl(config.baseUrl, "Base URL");
     if (urlError) return { ok: false, error: urlError };
+    const base = config.baseUrl?.trim().split(/[?#]/)[0].replace(/\/+$/, "");
+    if (base && /\/(v1\/(traces|metrics)|[^/]+\/_json)$/.test(base)) {
+      return {
+        ok: false,
+        error: "Enter the OpenObserve organization API base URL instead. Example: https://openobserve.example.com/api/default",
+      };
+    }
     const stream = config.stream?.trim();
+    if (stream && /^https?:\/\//i.test(stream)) {
+      return { ok: false, error: "Enter only the stream name, for example: maomao" };
+    }
     if (stream && /[\x00-\x1f\x7f\s/?#]/.test(stream)) {
-      return { ok: false, error: "Logs stream must be a plain stream name — no whitespace, slashes, or query characters." };
+      return { ok: false, error: "Logs stream must be a plain stream name — no whitespace, slashes, or query characters. For example: maomao" };
     }
     const secretError = validateSecrets(config);
     if (secretError) return { ok: false, error: secretError };

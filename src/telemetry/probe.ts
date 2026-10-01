@@ -100,9 +100,20 @@ export async function probeTelemetryChannel(
       body: probeBody(channel, env),
       signal: AbortSignal.timeout(PROBE_TIMEOUT_MS),
     });
+    // A HTML body means the probe hit a login page or reverse proxy, not the
+    // OpenObserve ingest API — report that instead of dumping markup.
+    const contentType = response.headers.get("content-type") ?? "";
+    const body = (await response.text()).trim();
+    if (contentType.includes("html") || body.startsWith("<")) {
+      return {
+        ok: false,
+        status: response.status,
+        detail: `HTTP ${response.status} — Received an HTML response instead of an OpenObserve telemetry response. Check the endpoint or reverse proxy.`,
+      };
+    }
     if (response.ok) return { ok: true, status: response.status };
-    const body = truncate(redactSecrets((await response.text()).trim(), secrets), 300);
-    return { ok: false, status: response.status, detail: `HTTP ${response.status}${body ? ` — ${body}` : ""}` };
+    const detail = truncate(redactSecrets(body, secrets), 300);
+    return { ok: false, status: response.status, detail: `HTTP ${response.status}${detail ? ` — ${detail}` : ""}` };
   } catch (error) {
     const raw = error instanceof Error ? error.message : String(error);
     return { ok: false, detail: truncate(redactSecrets(raw, secrets), 300) || "request failed" };

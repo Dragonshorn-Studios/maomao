@@ -78,10 +78,11 @@ import {
   roleFormValuesFromRole,
 } from "./ui/index.js";
 import { renderProvidersPage } from "./ui/providers.js";
-import { renderTelemetryPage } from "./ui/telemetry.js";
+import { renderTelemetryPage, TELEMETRY_PAGE_HREF, TELEMETRY_PAGE_JS, type TelemetryProbeRow } from "./ui/telemetry.js";
 import {
   TELEMETRY_CHANNELS,
   TelemetrySettingsStore,
+  maskUrlCredentials,
   resolveChannelAuth,
   resolveChannelUrl,
   telemetryConfigPath,
@@ -574,6 +575,13 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
 
   app.get(MODEL_PICKER_HREF, (c) =>
     c.newResponse(MODEL_PICKER_JS, 200, {
+      "content-type": "text/javascript; charset=utf-8",
+      "cache-control": "public, max-age=3600",
+    }),
+  );
+
+  app.get(TELEMETRY_PAGE_HREF, (c) =>
+    c.newResponse(TELEMETRY_PAGE_JS, 200, {
       "content-type": "text/javascript; charset=utf-8",
       "cache-control": "public, max-age=3600",
     }),
@@ -1435,7 +1443,7 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
     typeof value === "string" && value.trim() ? value.trim() : undefined;
   const renderTelemetry = (
     c: Context<AppEnv>,
-    extra: { notice?: string; error?: string; status?: number } = {},
+    extra: { notice?: string; error?: string; status?: number; probeResults?: TelemetryProbeRow[] } = {},
   ) =>
     c.html(
       renderTelemetryPage({
@@ -1443,6 +1451,7 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
         shared: telemetrySettings().sharedStatus(telemetryEnv()),
         csrfToken: gateOn ? ensureCsrfToken(c, ctx.config.uiSessionSecret) : undefined,
         canWrite: gateOn,
+        probeResults: extra.probeResults,
         options: { ...pageOpts, identity: c.get("identity"), notice: extra.notice, error: extra.error },
       }),
       (extra.status ?? 200) as 200 | 400 | 429 | 503,
@@ -1480,6 +1489,23 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
     }
   };
 
+  /** One probe → one compact result row for the Test all summary. */
+  const probeRow = async (channel: TelemetryChannel): Promise<TelemetryProbeRow> => {
+    const env = telemetryEnv();
+    const settings = telemetrySettings();
+    const url = resolveChannelUrl(channel, env, settings.get(channel), settings.shared());
+    const masked = url ? maskUrlCredentials(url) : undefined;
+    if (!url) return { channel, ok: false, detail: "not configured — set the shared connection or an override" };
+    const result = await probeTelemetryChannel(
+      channel,
+      { url, ...resolveChannelAuth(channel, env, settings.get(channel), settings.shared()) },
+      env,
+      ctx.telemetryFetch ?? fetch,
+    );
+    if (result.ok) return { channel, ok: true, detail: `Connected — HTTP ${result.status}`, url: masked };
+    return { channel, ok: false, detail: result.detail, url: masked };
+  };
+
   app.get("/config/telemetry", (c) => {
     if (!gateOn) return c.redirect("/", 302);
     return renderTelemetry(c, { notice: c.req.query("notice") ?? undefined, error: c.req.query("error") ?? undefined });
@@ -1506,6 +1532,34 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
   // Shared connection (base URL + logs stream + credentials the three
   // channels inherit). Registered before /config/telemetry/:channel so
   // "shared" isn't read as a channel id.
+  // Probes all three channels against their effective config and renders a
+  // compact per-channel summary on the page. Registered before
+  // /config/telemetry/:channel so "test-all" isn't read as a channel id.
+  app.post("/config/telemetry/test-all", async (c) => {
+    if (!gateOn) return c.redirect("/", 302);
+    if (!providerTestLimiter.wouldAllow("telemetry-test", PROVIDER_TEST_LIMIT, PROVIDER_TEST_WINDOW_MS)) {
+      return renderTelemetry(c, { error: "Too many connection tests — wait a few minutes before trying again.", status: 429 });
+    }
+    if (telemetryTestInFlight) {
+      return renderTelemetry(c, { error: "A connection test is already running — try again when it finishes.", status: 429 });
+    }
+    telemetryTestInFlight = true;
+    try {
+      const results: TelemetryProbeRow[] = [];
+      for (const meta of TELEMETRY_CHANNELS) results.push(await probeRow(meta.id));
+      providerTestLimiter.record("telemetry-test", PROVIDER_TEST_LIMIT, PROVIDER_TEST_WINDOW_MS);
+      const failed = results.filter((r) => !r.ok).length;
+      return renderTelemetry(c, {
+        probeResults: results,
+        ...(failed
+          ? { error: `${failed} of ${results.length} channel probes failed.`, status: 400 }
+          : { notice: "All three channels connected." }),
+      });
+    } finally {
+      telemetryTestInFlight = false;
+    }
+  });
+
   app.post("/config/telemetry/shared", async (c) => {
     if (!gateOn) return c.redirect("/", 302);
     const body = await c.req.parseBody();
@@ -1524,7 +1578,23 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
       ...(keepAuth ? { token: stored.token, user: stored.user, password: stored.password } : newAuth),
     });
     if (!result.ok) return renderTelemetry(c, { error: result.error, status: 400 });
-    return c.redirect("/config/telemetry?notice=" + encodeURIComponent("Shared connection saved."), 303);
+    const warning =
+      newAuth.token && (newAuth.user || newAuth.password)
+        ? " Both a token and user/password were provided — only one authentication method is needed; the token will be used."
+        : "";
+    return c.redirect("/config/telemetry?notice=" + encodeURIComponent(`Shared connection saved.${warning}`), 303);
+  });
+
+  // Removes only the stored credentials, keeping base URL and stream.
+  app.post("/config/telemetry/shared/delete-auth", async (c) => {
+    if (!gateOn) return c.redirect("/", 302);
+    const stored = telemetrySettings().shared() ?? {};
+    const result = telemetrySettings().setShared({
+      baseUrl: stored.baseUrl,
+      stream: stored.stream,
+    });
+    if (!result.ok) return renderTelemetry(c, { error: result.error, status: 400 });
+    return c.redirect("/config/telemetry?notice=" + encodeURIComponent("Stored credential cleared — base URL and stream kept."), 303);
   });
 
   app.post("/config/telemetry/shared/delete", async (c) => {
@@ -1545,17 +1615,17 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
     // whole tuple (a stale token must not survive a user+password save);
     // leaving all three blank keeps what was stored.
     const newAuth = {
-      token: telemetryField(body.token),
-      user: telemetryField(body.user),
-      password: telemetryField(body.password),
+      token: telemetryField(body[`${channel}-token`]),
+      user: telemetryField(body[`${channel}-user`]),
+      password: telemetryField(body[`${channel}-password`]),
     };
     const keepAuth = !newAuth.token && !newAuth.user && !newAuth.password;
     const result = telemetrySettings().set(channel, {
-      url: telemetryField(body.url) ?? stored.url,
+      url: telemetryField(body[`url-${channel}`]) ?? stored.url,
       ...(keepAuth ? { token: stored.token, user: stored.user, password: stored.password } : newAuth),
     });
     if (!result.ok) return renderTelemetry(c, { error: result.error, status: 400 });
-    return c.redirect("/config/telemetry?notice=" + encodeURIComponent(`${channel} settings saved.`), 303);
+    return c.redirect("/config/telemetry?notice=" + encodeURIComponent(`${channel} override saved.`), 303);
   });
 
   app.post("/config/telemetry/:channel/test", async (c) => {
