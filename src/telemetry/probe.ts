@@ -9,7 +9,7 @@ import {
   type OtlpMetric,
   type OtlpSpan,
 } from "./otlp.js";
-import type { TelemetryChannel, TelemetryChannelConfig } from "./settings.js";
+import { telemetryAuthHeader, type TelemetryChannel, type TelemetryChannelConfig } from "./settings.js";
 
 /**
  * Synchronous connection probe for /config/telemetry: POST one real
@@ -64,11 +64,7 @@ function probeBody(channel: TelemetryChannel, env: NodeJS.ProcessEnv): string {
 }
 
 function probeAuth(config: TelemetryChannelConfig): Record<string, string> {
-  const token = config.token?.trim();
-  if (token) return { authorization: `Bearer ${token}` };
-  const user = config.user?.trim();
-  if (user) return { authorization: `Basic ${Buffer.from(`${user}:${config.password ?? ""}`).toString("base64")}` };
-  return {};
+  return telemetryAuthHeader(config);
 }
 
 const PROBE_TIMEOUT_MS = 10_000;

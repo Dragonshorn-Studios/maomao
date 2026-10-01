@@ -6351,12 +6351,18 @@ describe("telemetry config routes", () => {
       body:
         `baseUrl=${encodeURIComponent("https://oo.test/api/default")}` +
         `&stream=${encodeURIComponent("job_summaries")}` +
+        `&email=${encodeURIComponent("ops@oo.test")}` +
         `&token=${encodeURIComponent("shared-token-1234")}` +
         `&csrf_token=${encodeURIComponent(csrfToken)}`,
     });
     expect(saved.status).toBe(303);
     expect(JSON.parse(readFileSync(settingsPath, "utf8"))).toEqual({
-      shared: { baseUrl: "https://oo.test/api/default", stream: "job_summaries", token: "shared-token-1234" },
+      shared: {
+        baseUrl: "https://oo.test/api/default",
+        stream: "job_summaries",
+        email: "ops@oo.test",
+        token: "shared-token-1234",
+      },
     });
 
     const after = await (await app.request("/config/telemetry", { headers: { cookie: session } })).text();
@@ -6377,7 +6383,7 @@ describe("telemetry config routes", () => {
     expect(tested.status).toBe(200);
     expect(calls).toHaveLength(1);
     expect(calls[0].url).toBe("https://oo.test/api/default/v1/metrics");
-    expect(calls[0].auth).toBe("Bearer shared-token-1234");
+    expect(calls[0].auth).toBe(`Basic ${Buffer.from("ops@oo.test:shared-token-1234").toString("base64")}`);
     expect(calls[0].body).toContain("maomao.telemetry_test");
 
     const page3 = await app.request("/config/telemetry", { headers: { cookie: session } });
@@ -6397,6 +6403,7 @@ describe("telemetry config routes", () => {
     const { telemetrySettings, settingsPath } = telemetryCtx();
     telemetrySettings.set("logs", {
       url: "https://oo.test/api/default/stream/_json",
+      email: "logs@oo.test",
       token: "stored-token-xyz",
     });
     expect(existsSync(settingsPath)).toBe(true);
@@ -6427,7 +6434,7 @@ describe("telemetry config routes", () => {
     expect(testedHtml).toContain("HTTP 200");
     expect(calls).toHaveLength(1);
     expect(calls[0].url).toBe("https://oo.test/api/default/stream/_json");
-    expect(calls[0].auth).toBe("Bearer stored-token-xyz");
+    expect(calls[0].auth).toBe(`Basic ${Buffer.from("logs@oo.test:stored-token-xyz").toString("base64")}`);
     expect(calls[0].body).toContain("maomao.telemetry_test");
     expect(testedHtml).not.toContain("stored-token-xyz");
     log.mockRestore();
@@ -6449,6 +6456,7 @@ describe("telemetry config routes", () => {
         UI_SESSION_SECRET: "session-secret-for-tests",
         OPENOBSERVE_METRICS_URL: "https://env.test/api/default/v1/metrics",
         OPENOBSERVE_METRICS_TOKEN: "envtoken",
+        OPENOBSERVE_METRICS_EMAIL: "env@oo.test",
       },
       undefined,
       undefined,
@@ -6465,7 +6473,7 @@ describe("telemetry config routes", () => {
     });
     expect(calls).toHaveLength(1);
     expect(calls[0].url).toBe("https://env.test/api/default/v1/metrics");
-    expect(calls[0].auth).toBe("Bearer envtoken");
+    expect(calls[0].auth).toBe(`Basic ${Buffer.from("env@oo.test:envtoken").toString("base64")}`);
     expect(calls[0].body).toContain("maomao.telemetry_test");
     const testedHtml = await tested.text();
     expect(testedHtml).toContain("HTTP 401");
@@ -6734,7 +6742,7 @@ describe("telemetry config routes", () => {
     });
     expect(saved.status).toBe(303);
     const location = saved.headers.get("location") ?? "";
-    expect(decodeURIComponent(location)).toContain("only one authentication method is needed");
+    expect(decodeURIComponent(location)).toContain("the ingestion token will be used");
     log.mockRestore();
   });
 });

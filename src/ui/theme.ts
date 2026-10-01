@@ -1724,6 +1724,14 @@ body.operator main th {
   letter-spacing: 0.08em;
 }
 .telemetry-or::before, .telemetry-or::after { content: ""; flex: 1; border-top: 1px dashed var(--line); }
+.telemetry-auth-alt {
+  grid-column: 1 / -1;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(14rem, 1fr));
+  gap: 0.6rem 0.9rem;
+  max-width: 34rem;
+}
+.telemetry-auth-alt-note { grid-column: 1 / -1; display: block; }
 .telemetry-help { margin-bottom: var(--space-3); }
 .telemetry-help summary { cursor: pointer; font-weight: 600; }
 .telemetry-steps { margin: 0.6rem 0; padding-left: 1.2rem; }

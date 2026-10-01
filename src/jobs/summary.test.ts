@@ -1017,6 +1017,7 @@ describe("emitJobSummary", () => {
     const jobId = seedJob(store);
     emitJobSummary(store, jobId, {
       OPENOBSERVE_LOGS_URL: "https://oo.example.com/api/default/maomao/_json",
+      OPENOBSERVE_LOGS_EMAIL: "ops@oo.example.com",
       OPENOBSERVE_LOGS_TOKEN: "secret-token",
     } as NodeJS.ProcessEnv);
     await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
@@ -1026,7 +1027,9 @@ describe("emitJobSummary", () => {
     expect(init.method).toBe("POST");
     // Bounded delivery — a hung endpoint can't linger past the timeout.
     expect(init.signal).toBeInstanceOf(AbortSignal);
-    expect((init.headers as Record<string, string>).authorization).toBe("Bearer secret-token");
+    expect((init.headers as Record<string, string>).authorization).toBe(
+      `Basic ${Buffer.from("ops@oo.example.com:secret-token").toString("base64")}`,
+    );
     expect((init.headers as Record<string, string>)["content-type"]).toBe("application/json");
     // _json's documented contract is a JSON array with exactly the one record.
     const body = JSON.parse(init.body as string) as Record<string, unknown>[];
@@ -1043,6 +1046,7 @@ describe("emitJobSummary", () => {
     const store = makeStore();
     const env = {
       OPENOBSERVE_LOGS_URL: "http://oo-warn-check.internal/api/default/maomao/_json",
+      OPENOBSERVE_LOGS_EMAIL: "ops@oo.example.com",
       OPENOBSERVE_LOGS_TOKEN: "secret-token",
     } as NodeJS.ProcessEnv;
     emitJobSummary(store, seedJob(store, 4, "s1"), env);
@@ -1142,7 +1146,7 @@ describe("emitJobSummary", () => {
     expect(logged).toContain("<credentials>@");
   });
 
-  it("prefers TOKEN over user/password and sends no auth header when neither is set", async () => {
+  it("a TOKEN without an EMAIL falls back to user/password Basic; nothing emits unauthenticated", async () => {
     const fetchMock = vi.fn().mockResolvedValue({ ok: true, status: 200 });
     vi.stubGlobal("fetch", fetchMock);
     setJobSummarySink(capture);
@@ -1158,7 +1162,7 @@ describe("emitJobSummary", () => {
     await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
     const headers = (call: number) =>
       (fetchMock.mock.calls[call][1] as RequestInit).headers as Record<string, string>;
-    expect(headers(0).authorization).toBe("Bearer tok");
+    expect(headers(0).authorization).toBe(`Basic ${Buffer.from("u:p").toString("base64")}`);
     expect(headers(1).authorization).toBeUndefined();
   });
 
