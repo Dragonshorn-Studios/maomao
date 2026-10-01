@@ -8,69 +8,181 @@ import {
 } from "../telemetry/settings.js";
 
 /**
- * OpenObserve connection page (/config/telemetry): a shared-connection card
- * (one base URL like https://host/api/<org> + credentials + logs stream that
- * all three channels inherit), per-channel status with source badges (env
- * var / stored / none) and override forms, a "Test connection" probe against
- * the effective config, and a scratch form to probe ad-hoc values before
- * committing them. Secrets are never rendered — stored values show a last-4
- * fingerprint, env values show the var name.
+ * OpenObserve connection page (/config/telemetry): a shared connection card
+ * (base URL + ingestion token + logs stream that all three channels
+ * inherit), a read-only "Effective endpoints" section that live-derives the
+ * URLs Maomao will call, and an "Advanced channel overrides" section for
+ * per-channel endpoint/credential overrides. Probes ("Test all" or
+ * per-channel) POST one real telemetry payload to verify the effective
+ * config. Secrets are never rendered — a stored credential shows only
+ * "Credential stored".
  */
+
+export interface TelemetryProbeRow {
+  channel: string;
+  ok: boolean;
+  /** e.g. "Connected — HTTP 200" or "HTTP 401 — Unauthorized". */
+  detail: string;
+  /** Effective URL probed, credentials masked. */
+  url?: string;
+}
 
 export interface TelemetryPageData {
   channels: TelemetryChannelStatus[];
   shared: TelemetrySharedStatus;
   csrfToken?: string;
   canWrite: boolean;
+  /** Result of a "Test all" run, rendered as a compact summary. */
+  probeResults?: TelemetryProbeRow[];
   options: PageOptions;
 }
 
-function sourceLabel(source: TelemetryChannelStatus["urlSource"] | TelemetryChannelStatus["authSource"]): string {
-  if (source === "environment") return "environment";
-  if (source === "stored") return "stored";
-  return "none";
+export const TELEMETRY_PAGE_HREF = "/assets/telemetry.js";
+
+/**
+ * Live effective-endpoint derivation + copy buttons. Reads the shared base
+ * URL / logs stream inputs and each channel's endpoint-override input, then
+ * mirrors the server's deriveChannelUrl logic. No secrets involved — it only
+ * reads the URL/stream fields. Runs deferred on /config/telemetry only.
+ */
+export const TELEMETRY_PAGE_JS = String.raw`(function () {
+  "use strict";
+
+  function field(name) {
+    return document.querySelector('input[name="' + name + '"]');
+  }
+
+  function cleanBase(value) {
+    return (value || "").trim().split(/[?#]/)[0].replace(/\/+$/, "");
+  }
+
+  function derive(channel, base, stream) {
+    if (!base) return null;
+    if (channel === "logs") {
+      var name = (stream || "").trim();
+      return name ? base + "/" + encodeURIComponent(name) + "/_json" : null;
+    }
+    return base + "/v1/" + channel;
+  }
+
+  function copyText(button, text) {
+    function done(ok) {
+      button.textContent = ok ? "Copied" : "Copy failed";
+      setTimeout(function () { button.textContent = "Copy"; }, 1500);
+    }
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(text).then(function () { done(true); }, function () { done(false); });
+    } else {
+      var area = document.createElement("textarea");
+      area.value = text;
+      document.body.appendChild(area);
+      area.select();
+      try { done(document.execCommand("copy")); } catch (e) { done(false); }
+      document.body.removeChild(area);
+    }
+  }
+
+  function refresh() {
+    var section = document.querySelector("[data-shared-base]");
+    var typedBase = cleanBase(field("baseUrl") && field("baseUrl").value);
+    var typedStream = field("stream") && field("stream").value.trim();
+    var base = typedBase || (section ? section.getAttribute("data-shared-base") : "");
+    var stream = typedStream || (section ? section.getAttribute("data-shared-stream") : "");
+    var rows = document.querySelectorAll("[data-endpoint]");
+    for (var i = 0; i < rows.length; i++) {
+      var row = rows[i];
+      var channel = row.getAttribute("data-endpoint");
+      var override = row.getAttribute("data-override-input");
+      var overrideValue = override && field(override) ? field(override).value.trim() : "";
+      var pinned = row.getAttribute("data-pinned") === "1";
+      var fallback = row.getAttribute("data-fallback") || "";
+      var url = overrideValue || (pinned ? fallback : derive(channel, base, stream)) || fallback;
+      var value = row.querySelector(".endpoint-value");
+      var button = row.querySelector(".endpoint-copy");
+      if (url) {
+        value.textContent = url;
+        row.classList.remove("endpoint-missing");
+        if (button) button.disabled = false;
+      } else {
+        var hint = !base
+          ? "Enter a Base URL above to calculate this endpoint."
+          : "Enter a Logs stream above to calculate this endpoint.";
+        value.textContent = hint;
+        row.classList.add("endpoint-missing");
+        if (button) button.disabled = true;
+      }
+    }
+  }
+
+  var rows = document.querySelectorAll("[data-endpoint]");
+  if (!rows.length) return;
+  document.addEventListener("input", refresh);
+  for (var i = 0; i < rows.length; i++) {
+    (function (row) {
+      var button = row.querySelector(".endpoint-copy");
+      if (!button) return;
+      button.addEventListener("click", function () {
+        var value = row.querySelector(".endpoint-value").textContent;
+        copyText(button, value);
+      });
+    })(rows[i]);
+  }
+  refresh();
+})();`;
+
+function helpBlock(): string {
+  return `<details class="card telemetry-help">
+    <summary>How to configure OpenObserve</summary>
+    <ol class="telemetry-steps">
+      <li>In OpenObserve, create or copy an <strong>ingestion token</strong> (it usually starts with <code>o2oi_</code>).</li>
+      <li>Copy your organization API base URL, for example <code>https://openobserve.example.com/api/default</code>.</li>
+      <li>Paste the base URL and ingestion token below.</li>
+      <li>Choose a logs stream name, for example <code>maomao</code>.</li>
+      <li>Save, then run <strong>Test all</strong>.</li>
+    </ol>
+    <p class="muted">Telemetry ingestion tokens are for <em>sending</em> data into OpenObserve. MCP / service-account
+    tokens are for <em>reading</em> or managing OpenObserve and are normally configured elsewhere — do not use them
+    here.</p>
+  </details>`;
 }
 
-function urlBadge(channel: TelemetryChannelStatus): string {
-  if (channel.urlSource === "environment") {
-    return `<span class="state state-completed">url from env <code>${escapeHtml(channel.urlEnvVar ?? "")}</code></span>`;
-  }
-  if (channel.urlSource === "stored") {
-    return `<span class="state state-completed">url stored${channel.urlShared ? " (shared)" : ""}</span>`;
-  }
-  return `<span class="state state-queued">no url</span>`;
-}
-
-function authBadge(channel: TelemetryChannelStatus): string {
-  if (channel.authSource === "environment") {
-    return `<span class="state state-completed">auth from env <code>${escapeHtml(channel.authEnvVar ?? "")}</code></span>`;
-  }
-  if (channel.authSource === "stored") {
-    const via = channel.authShared ? " (shared)" : "";
-    return `<span class="state state-completed">auth stored${via} ${escapeHtml(channel.authDetail ?? "")}</span>`;
-  }
-  return `<span class="state state-queued">no auth</span>`;
+function authFields(prefix: string, storedAuth: boolean, tokenLabel: string, tokenHelp: string): string {
+  const scope = prefix ? ` for ${prefix.replace(/-$/, "")}` : "";
+  return `
+    <div class="telemetry-grid">
+      <label class="telemetry-field telemetry-field-wide">
+        <span>${tokenLabel}</span>
+        <input type="password" name="${prefix}token" autocomplete="off" minlength="4"
+          placeholder="${storedAuth ? "Keep stored credential" : "o2oi_…"}"
+          aria-label="${escapeHtml(tokenLabel)}"/>
+        <small class="muted">${tokenHelp}</small>
+      </label>
+      <div class="telemetry-or" role="separator"><span>OR</span></div>
+      <label class="telemetry-field">
+        <span>User</span>
+        <input type="text" name="${prefix}user" autocomplete="off"
+          placeholder="${storedAuth ? "Keep stored credential" : "maomao-ingest@example.com"}"
+          aria-label="Basic-auth user${scope}"/>
+        <small class="muted">Alternative: OpenObserve basic auth. Use either a token <em>or</em> user/password — not both.</small>
+      </label>
+      <label class="telemetry-field">
+        <span>Password</span>
+        <input type="password" name="${prefix}password" autocomplete="off"
+          placeholder="${storedAuth ? "Keep stored credential" : ""}"
+          aria-label="Basic-auth password${scope}"/>
+      </label>
+    </div>`;
 }
 
 function sharedCard(shared: TelemetrySharedStatus, csrfToken: string | undefined, canWrite: boolean): string {
-  const baseBadge =
-    shared.baseUrlSource === "environment"
-      ? `<span class="state state-completed">base url from env <code>${escapeHtml(shared.baseUrlEnvVar ?? "")}</code></span>`
-      : shared.baseUrlSource === "stored"
-        ? `<span class="state state-completed">base url stored</span>`
-        : `<span class="state state-queued">no base url</span>`;
-  const streamBadge =
-    shared.streamSource === "environment"
-      ? `<span class="state state-completed">stream from env <code>${escapeHtml(shared.streamEnvVar ?? "")}</code></span>`
-      : shared.streamSource === "stored"
-        ? `<span class="state state-completed">stream stored</span>`
-        : `<span class="state state-queued">no logs stream</span>`;
-  const authBadgeHtml =
-    shared.authSource === "environment"
-      ? `<span class="state state-completed">auth from env <code>${escapeHtml(shared.authEnvVar ?? "")}</code></span>`
-      : shared.authSource === "stored"
-        ? `<span class="state state-completed">auth stored ${escapeHtml(shared.authDetail ?? "")}</span>`
-        : `<span class="state state-queued">no auth</span>`;
+  const field = (source: TelemetrySharedStatus["baseUrlSource"], envVar?: string): string => {
+    if (source === "environment") return `from environment variable <code>${escapeHtml(envVar ?? "")}</code>`;
+    if (source === "stored") return "stored";
+    return "not set";
+  };
+  const statusLine = `Base URL: ${field(shared.baseUrlSource, shared.baseUrlEnvVar)} ·
+    Logs stream: ${field(shared.streamSource, shared.streamEnvVar)} ·
+    Credential: ${field(shared.authSource, shared.authEnvVar)}`;
   const form = canWrite
     ? `<form method="post" action="/config/telemetry/shared" class="telemetry-form">
         ${csrfInput(csrfToken)}
@@ -78,111 +190,134 @@ function sharedCard(shared: TelemetrySharedStatus, csrfToken: string | undefined
           <label class="telemetry-field telemetry-field-wide">
             <span>Base URL</span>
             <input type="url" name="baseUrl" autocomplete="off"
-              placeholder="${shared.baseUrl ? escapeHtml(shared.baseUrl) : "https://oo.example.com/api/default"}"
-              aria-label="Shared OpenObserve base URL"/>
+              placeholder="${shared.baseUrl ? escapeHtml(shared.baseUrl) : "https://openobserve.example.com/api/default"}"
+              aria-label="OpenObserve organization API base URL"/>
+            <small class="muted">OpenObserve organization API base URL. Do not include <code>/v1/traces</code>, <code>/v1/metrics</code>, or a stream name.</small>
           </label>
           <label class="telemetry-field">
             <span>Logs stream</span>
             <input type="text" name="stream" autocomplete="off"
-              placeholder="${shared.stream ? escapeHtml(shared.stream) : "job_summaries"}"
-              aria-label="OpenObserve stream for job summaries"/>
-          </label>
-          <label class="telemetry-field">
-            <span>Bearer token</span>
-            <input type="password" name="token" autocomplete="off" minlength="4"
-              placeholder="${shared.authSource === "stored" ? "Keep stored credential" : "OPENOBSERVE_TOKEN"}"
-              aria-label="Shared bearer token"/>
-          </label>
-          <label class="telemetry-field">
-            <span>User</span>
-            <input type="text" name="user" autocomplete="off"
-              placeholder="${shared.authSource === "stored" ? "Keep stored credential" : "OPENOBSERVE_USER"}"
-              aria-label="Shared basic-auth user"/>
-          </label>
-          <label class="telemetry-field">
-            <span>Password</span>
-            <input type="password" name="password" autocomplete="off"
-              placeholder="${shared.authSource === "stored" ? "Keep stored credential" : "OPENOBSERVE_PASSWORD"}"
-              aria-label="Shared basic-auth password"/>
+              placeholder="${shared.stream ? escapeHtml(shared.stream) : "maomao"}"
+              aria-label="OpenObserve stream for job summary logs"/>
+            <small class="muted">OpenObserve stream used for Maomao job summary logs. The stream is created automatically when OpenObserve receives the first log event — you do not need to create it manually.</small>
           </label>
         </div>
+        ${authFields("", shared.authSource === "stored", "OpenObserve ingestion token",
+          "Recommended. Paste an OpenObserve ingestion token, typically beginning with <code>o2oi_</code>. It is intended for sending logs, metrics and traces — do not use an MCP/read-only service-account token here.")}
         <div class="telemetry-actions">
           <button type="submit" class="btn">Save</button>
-          ${shared.hasStored ? `<button type="submit" formaction="/config/telemetry/shared/delete" formnovalidate class="btn-danger">Clear stored</button>` : ""}
+          ${shared.authSource === "stored" ? `<button type="submit" formaction="/config/telemetry/shared/delete-auth" formnovalidate class="btn-secondary">Clear stored credential</button>` : ""}
+          ${shared.hasStored ? `<button type="submit" formaction="/config/telemetry/shared/delete" formnovalidate class="btn-danger">Clear all</button>` : ""}
         </div>
-        <p class="muted">One OpenObserve org usually feeds all three channels — set the base here once; per-channel fields below are overrides. The logs channel also needs a stream name. Env counterparts: <code>OPENOBSERVE_BASE_URL</code>, <code>OPENOBSERVE_LOGS_STREAM</code>, <code>OPENOBSERVE_TOKEN</code>/<code>OPENOBSERVE_USER</code>/<code>OPENOBSERVE_PASSWORD</code> (auth env applies to traces/metrics only; logs takes <code>OPENOBSERVE_LOGS_*</code> or these stored credentials).</p>
+        <p class="muted">Blank fields keep what is stored. Environment variables (<code>OPENOBSERVE_BASE_URL</code>,
+        <code>OPENOBSERVE_LOGS_STREAM</code>, <code>OPENOBSERVE_TOKEN</code> / <code>OPENOBSERVE_USER</code> /
+        <code>OPENOBSERVE_PASSWORD</code>) always win over saved values.</p>
+      </form>
+      <form method="post" action="/config/telemetry/test-all" class="telemetry-inline-form">
+        ${csrfInput(csrfToken)}
+        <button type="submit" class="btn-secondary"
+          title="Probe all three channels with the effective (saved/env) configuration">Test all</button>
+        <span class="muted">Tests the saved + environment configuration of all three channels — save first.</span>
       </form>`
     : "";
-  return `<li class="card telemetry-card" data-channel="shared">
+  return `<section class="card telemetry-card" data-channel="shared">
     <header class="connection-head">
       <div>
-        <p class="label">shared</p>
-        <h3 class="specimen-title">Shared connection</h3>
-        <p class="muted">base URL + credentials all channels inherit</p>
+        <h3 class="specimen-title">OpenObserve connection</h3>
+        <p class="muted">Configure OpenObserve once here. Traces, metrics and logs inherit these settings unless you explicitly override a channel below.</p>
       </div>
-      <div class="connection-chips">${baseBadge} ${streamBadge} ${authBadgeHtml}</div>
     </header>
-    ${shared.baseUrl ? `<p class="muted telemetry-url">Effective base: <code>${escapeHtml(shared.baseUrl)}</code>${shared.stream ? ` · stream <code>${escapeHtml(shared.stream)}</code>` : ""}</p>` : ""}
+    <p class="muted">${statusLine}</p>
     ${form}
-  </li>`;
+  </section>`;
+}
+
+/** Read-only derived endpoints; values update live via telemetry.js. */
+function effectiveEndpoints(channels: TelemetryChannelStatus[], shared: TelemetrySharedStatus): string {
+  const rows = channels
+    .map((channel) => {
+      const pinned = channel.urlSource !== "none" && !channel.urlShared;
+      const value = channel.url ?? "";
+      const missing = value === "";
+      return `<div class="endpoint-row${missing ? " endpoint-missing" : ""}" data-endpoint="${channel.channel}"
+        data-override-input="url-${channel.channel}" data-fallback="${escapeHtml(value)}"${pinned ? ` data-pinned="1"` : ""}>
+        <span class="endpoint-label">${escapeHtml(channel.channel === "logs" ? "Logs" : channel.channel === "traces" ? "Traces" : "Metrics")}</span>
+        <code class="endpoint-value">${escapeHtml(missing ? "not configured" : value)}</code>
+        <button type="button" class="btn-secondary endpoint-copy"${missing ? " disabled" : ""}>Copy</button>
+      </div>`;
+    })
+    .join("");
+  return `<section class="card" data-shared-base="${escapeHtml(shared.baseUrl ?? "")}" data-shared-stream="${escapeHtml(shared.stream ?? "")}">
+    <h2>Effective endpoints</h2>
+    <p class="muted">The URLs Maomao will call. They update as you type above.</p>
+    ${rows}
+  </section>`;
+}
+
+function endpointSourceText(channel: TelemetryChannelStatus): string {
+  if (channel.urlSource === "environment") {
+    return `from environment variable <code>${escapeHtml(channel.urlEnvVar ?? "")}</code>`;
+  }
+  if (channel.urlSource === "stored") {
+    return channel.urlShared ? "derived from the shared connection" : "custom override (stored)";
+  }
+  return "not configured";
+}
+
+function authSourceText(channel: TelemetryChannelStatus): string {
+  if (channel.authSource === "environment") {
+    return `from environment variable <code>${escapeHtml(channel.authEnvVar ?? "")}</code>`;
+  }
+  if (channel.authSource === "stored") {
+    return channel.authShared ? "using the shared credentials" : "channel-specific credentials (stored)";
+  }
+  return "no credentials configured";
 }
 
 function channelCard(channel: TelemetryChannelStatus, csrfToken: string | undefined, canWrite: boolean): string {
   const meta = TELEMETRY_CHANNELS.find((c) => c.id === channel.channel);
   const id = escapeHtml(channel.channel);
-  // Badges describe effective sources; the clear action keys off the file so
-  // a stored config fully shadowed by env stays removable.
-  const hasStored = channel.hasStored;
   const hasConfig = channel.url != null;
-  const form = canWrite
-    ? `<form method="post" action="/config/telemetry/${id}" class="telemetry-form">
-        ${csrfInput(csrfToken)}
-        <div class="telemetry-grid">
-          <label class="telemetry-field telemetry-field-wide">
-            <span>Endpoint URL</span>
-            <input type="url" name="url" autocomplete="off"
-              placeholder="${channel.url ? escapeHtml(channel.url) : "inherit shared base + /v1/…"}"
-              aria-label="Endpoint URL for ${id}"/>
-          </label>
-          <label class="telemetry-field">
-            <span>Bearer token</span>
-            <input type="password" name="token" autocomplete="off" minlength="4"
-              placeholder="${channel.authSource === "stored" ? "Keep stored credential" : "OPENOBSERVE_*_TOKEN"}"
-              aria-label="Bearer token for ${id}"/>
-          </label>
-          <label class="telemetry-field">
-            <span>User</span>
-            <input type="text" name="user" autocomplete="off"
-              placeholder="${channel.authSource === "stored" ? "Keep stored credential" : "OPENOBSERVE_*_USER"}"
-              aria-label="Basic-auth user for ${id}"/>
-          </label>
-          <label class="telemetry-field">
-            <span>Password</span>
-            <input type="password" name="password" autocomplete="off"
-              placeholder="${channel.authSource === "stored" ? "Keep stored credential" : "OPENOBSERVE_*_PASSWORD"}"
-              aria-label="Basic-auth password for ${id}"/>
-          </label>
-        </div>
-        <div class="telemetry-actions">
-          <button type="submit" class="btn">Save</button>
-          <button type="submit" formaction="/config/telemetry/${id}/test" formnovalidate class="btn-secondary"
-            ${hasConfig ? "" : "disabled"} title="POST one probe payload to the effective endpoint">Test connection</button>
-          ${hasStored ? `<button type="submit" formaction="/config/telemetry/${id}/delete" formnovalidate class="btn-danger">Clear stored</button>` : ""}
-        </div>
-        <p class="muted">Blank fields inherit the shared connection / keep the stored value. Environment variables always win over stored values — unset them to use the page's config.</p>
-      </form>`
+  const overrideForm = canWrite
+    ? `<details class="telemetry-override">
+        <summary>Override this channel (optional)</summary>
+        <form method="post" action="/config/telemetry/${id}" class="telemetry-form">
+          ${csrfInput(csrfToken)}
+          <div class="telemetry-grid">
+            <label class="telemetry-field telemetry-field-wide">
+              <span>Endpoint URL</span>
+              <input type="url" name="url-${id}" autocomplete="off"
+                placeholder="Leave blank to use the derived endpoint"
+                aria-label="Endpoint URL override for ${id}"/>
+              <small class="muted">Optional. Leave blank to use the endpoint derived from the shared Base URL.</small>
+            </label>
+          </div>
+          ${authFields(`${id}-`, channel.authSource === "stored" && !channel.authShared, `${meta?.label ?? id} token`,
+            "Optional. Leave blank to use the shared OpenObserve ingestion credentials.")}
+          <div class="telemetry-actions">
+            <button type="submit" class="btn">Save override</button>
+            ${channel.hasStored ? `<button type="submit" formaction="/config/telemetry/${id}/delete" formnovalidate class="btn-danger">Clear stored override</button>` : ""}
+          </div>
+        </form>
+      </details>`
     : "";
   return `<li class="card telemetry-card" data-channel="${id}">
     <header class="connection-head">
       <div>
-        <p class="label">${id}</p>
         <h3 class="specimen-title">${escapeHtml(meta?.label ?? channel.channel)}</h3>
         <p class="muted">${escapeHtml(meta?.detail ?? "")}</p>
       </div>
-      <div class="connection-chips">${urlBadge(channel)} ${authBadge(channel)}</div>
     </header>
-    ${channel.url ? `<p class="muted telemetry-url">Effective endpoint: <code>${escapeHtml(channel.url)}</code></p>` : ""}
-    ${form}
+    <p class="muted telemetry-url">Effective endpoint: ${channel.url ? `<code>${escapeHtml(channel.url)}</code>` : "<em>not configured</em>"} — ${endpointSourceText(channel)}</p>
+    <p class="muted">Authentication: ${authSourceText(channel)}</p>
+    ${canWrite ? `<div class="telemetry-actions">
+      <form method="post" action="/config/telemetry/${id}/test" class="telemetry-inline-form">
+        ${csrfInput(csrfToken)}
+        <button type="submit" class="btn-secondary" ${hasConfig ? "" : "disabled"}
+          title="POST one probe payload to the effective endpoint">Test connection</button>
+      </form>
+    </div>` : ""}
+    ${overrideForm}
   </li>`;
 }
 
@@ -192,9 +327,8 @@ function adHocForm(csrfToken: string | undefined, canWrite: boolean): string {
     (c) => `<option value="${c.id}">${escapeHtml(c.label)}</option>`,
   ).join("");
   return `
-  <section class="card">
-    <h2>Test ad-hoc values</h2>
-    <p class="muted">Probe an endpoint without saving it — nothing here is persisted.</p>
+  <details class="card telemetry-override">
+    <summary>Test ad-hoc values — probe an endpoint without saving anything</summary>
     <form method="post" action="/config/telemetry/test" class="telemetry-form">
       ${csrfInput(csrfToken)}
       <div class="telemetry-grid">
@@ -204,10 +338,10 @@ function adHocForm(csrfToken: string | undefined, canWrite: boolean): string {
         </label>
         <label class="telemetry-field telemetry-field-wide">
           <span>Endpoint URL</span>
-          <input type="url" name="url" required autocomplete="off" placeholder="https://oo.example.com/api/default/v1/traces"/>
+          <input type="url" name="url" required autocomplete="off" placeholder="https://openobserve.example.com/api/default/v1/traces"/>
         </label>
         <label class="telemetry-field">
-          <span>Bearer token</span>
+          <span>Token</span>
           <input type="password" name="token" autocomplete="off"/>
         </label>
         <label class="telemetry-field">
@@ -223,23 +357,36 @@ function adHocForm(csrfToken: string | undefined, canWrite: boolean): string {
         <button type="submit" class="btn-secondary">Test these values</button>
       </div>
     </form>
-  </section>`;
+  </details>`;
+}
+
+function probeResultsBlock(results: TelemetryProbeRow[]): string {
+  const rows = results
+    .map(
+      (r) => `<li class="${r.ok ? "probe-ok" : "probe-fail"}">
+        <strong>${escapeHtml(r.channel)}</strong> — ${escapeHtml(r.detail)}${r.url ? ` <code>${escapeHtml(r.url)}</code>` : ""}
+      </li>`,
+    )
+    .join("");
+  return `<ul class="probe-results">${rows}</ul>`;
 }
 
 export function renderTelemetryPage(data: TelemetryPageData): string {
-  const cards = [sharedCard(data.shared, data.csrfToken, data.canWrite), ...data.channels.map((channel) => channelCard(channel, data.csrfToken, data.canWrite))].join("");
+  const cards = data.channels.map((channel) => channelCard(channel, data.csrfToken, data.canWrite)).join("");
   const body = `
     ${configSubNav("telemetry")}
     ${data.options.notice ? `<p class="notice" role="status">${escapeHtml(data.options.notice)}</p>` : ""}
     ${data.options.error ? `<p class="error" role="alert">${escapeHtml(data.options.error)}</p>` : ""}
     <h1>Telemetry</h1>
-    <p class="muted">OpenObserve connection for each export channel. See the
-    <a href="https://github.com/Dragonshorn-Studios/maomao/blob/main/docs/telemetry/openobserve-setup.md">OpenObserve setup guide</a>
-    for endpoint URLs and credentials. Env source: ${data.channels
-      .map((c) => `${c.channel} ${sourceLabel(c.urlSource)}/${sourceLabel(c.authSource)}`)
-      .join(" · ")}</p>
+    ${helpBlock()}
+    ${sharedCard(data.shared, data.csrfToken, data.canWrite)}
+    ${data.probeResults ? probeResultsBlock(data.probeResults) : ""}
+    ${effectiveEndpoints(data.channels, data.shared)}
+    <h2>Advanced channel overrides</h2>
+    <p class="muted">Normally you do not need anything below. Leave these fields blank to inherit the shared OpenObserve connection.</p>
     <ul class="telemetry-list">${cards}</ul>
     ${adHocForm(data.csrfToken, data.canWrite)}
+    <script src="${TELEMETRY_PAGE_HREF}" defer></script>
   `;
   return layout("Telemetry", body, { ...data.options, surface: "operator" });
 }

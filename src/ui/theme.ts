@@ -1712,6 +1712,38 @@ body.operator main th {
 .telemetry-field span { display: block; color: var(--ink-muted); font-size: 0.8rem; margin-bottom: 0.2rem; }
 .telemetry-field input, .telemetry-field select { width: 100%; }
 .telemetry-actions { display: flex; flex-wrap: wrap; gap: 0.45rem; margin-top: 0.7rem; }
+.telemetry-inline-form { margin: 0; }
+.telemetry-or {
+  grid-column: 1 / -1;
+  display: flex;
+  align-items: center;
+  gap: 0.7rem;
+  color: var(--ink-muted);
+  font-size: 0.8rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+.telemetry-or::before, .telemetry-or::after { content: ""; flex: 1; border-top: 1px dashed var(--line); }
+.telemetry-help { margin-bottom: var(--space-3); }
+.telemetry-help summary { cursor: pointer; font-weight: 600; }
+.telemetry-steps { margin: 0.6rem 0; padding-left: 1.2rem; }
+.telemetry-override { margin-top: 0.7rem; }
+.telemetry-override summary { cursor: pointer; color: var(--ink-muted); font-size: 0.85rem; }
+.endpoint-row {
+  display: grid;
+  grid-template-columns: 4.5rem 1fr auto;
+  align-items: center;
+  gap: 0.7rem;
+  padding: 0.35rem 0;
+}
+.endpoint-label { font-weight: 600; }
+.endpoint-value { overflow-wrap: anywhere; }
+.endpoint-missing .endpoint-value { color: var(--ink-muted); font-style: italic; }
+.endpoint-copy { padding: 0.15rem 0.55rem; font-size: 0.8rem; }
+.probe-results { list-style: none; margin: var(--space-3) 0; padding: 0; display: grid; gap: 0.3rem; }
+.probe-ok { color: var(--jade); }
+.probe-fail { color: var(--cinnabar); }
+.probe-results code { font-size: 0.8rem; color: var(--ink-muted); }
 .operator-form label { display: block; color: var(--ink-muted); font-size: 0.88rem; }
 
 .chat-thought { display: grid; gap: var(--space-2); }
