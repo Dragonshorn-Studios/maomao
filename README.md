@@ -388,6 +388,8 @@ With `OPENOBSERVE_TRACES_URL` set, each terminal job run emits one trace (`src/t
 
 Stack linkage is by **shared trace, not runtime context**: trace and span ids are deterministic hashes of the job id, so a member `pr_review` emits its whole span tree (root + stage spans) inside the `stack_review` job's trace, parented directly to the stack root — OpenObserve shows `stack_review → member pr_review → specialist steps` in one trace. A member job belonging to several stack runs joins the latest one.
 
+Operator-side setup (endpoints, credentials, dashboarding semantics, troubleshooting): [docs/telemetry/openobserve-setup.md](docs/telemetry/openobserve-setup.md).
+
 ## Run locally
 
 ```bash
