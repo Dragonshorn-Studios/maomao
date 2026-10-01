@@ -53,4 +53,4 @@ Switch to the OTel SDK if we need: context propagation **across processes** (the
 ## What lands on this skeleton
 
 - **#141 (metrics)** — landed in this stack: `src/telemetry/metrics.ts` emits queue gauges and per-terminal-job counters/histograms via `exportMetrics(...)`.
-- **#142 (traces)**: `exportTraces(...)` — root span per job run, child spans for routing → specialists → aggregation → escalation, `stack_review` roots linking member `pr_review` spans.
+- **#142 (traces)** — landed in this stack: `src/telemetry/traces.ts` rebuilds the span tree at terminal time from the persisted stage timings (`buildJobSummary` snapshot + `reviewer_runs` rows). Trace/span ids are deterministic hashes of the job id, so member `pr_review` jobs parent into the `stack_review` trace without in-flight context propagation.

@@ -378,6 +378,16 @@ With `OPENOBSERVE_METRICS_URL` set, Maomao exports a small metric set (`src/tele
 
 Queue gauges report on change, not on a timer — the same mutation that moves a job also exports the new values. Per-job counters use **delta** temporality and are built from the same `buildJobSummary` snapshot the stdout line uses, so both channels agree: a retried job emits again under a higher `attempt` (routing/internal-escalation spend carries across attempts — summing every point re-counts those stages, same caveat as the summary stream), and `usage_complete=false` marks mid-flight snapshots (a floor, not a total).
 
+### OTLP traces
+
+With `OPENOBSERVE_TRACES_URL` set, each terminal job run emits one trace (`src/telemetry/traces.ts`), reconstructed from the persisted stage timings — no tracing context threads the pipeline:
+
+- `maomao.job.<job_type>` — root span per job run (`job_id`, `job_type`, `repo`, `provider_instance`, `pr_number`, `head_sha`, terminal `state`, `attempt`, `usage_complete`, `queued_ms`)
+- `maomao.stage.routing`, `maomao.stage.reviewer` (one per `reviewer_runs` row), `maomao.stage.aggregation`, `maomao.stage.internal_escalation` — stage spans with `state`, `model`, `total_tokens`, `cost_usd` attributes; stages that only record `duration_ms` hang off their neighbours' timestamps
+- `maomao.stack.member` — zero-duration marker for stack members that never got a member job
+
+Stack linkage is by **shared trace, not runtime context**: trace and span ids are deterministic hashes of the job id, so a member `pr_review` emits its whole span tree (root + stage spans) inside the `stack_review` job's trace, parented directly to the stack root — OpenObserve shows `stack_review → member pr_review → specialist steps` in one trace. A member job belonging to several stack runs joins the latest one.
+
 ## Run locally
 
 ```bash
