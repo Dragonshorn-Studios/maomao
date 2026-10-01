@@ -345,6 +345,23 @@ OPENOBSERVE_LOGS_PASSWORD=...
 
 Unset `OPENOBSERVE_LOGS_URL` means stdout-only; a failing or slow endpoint never affects jobs (POSTs are fire-and-forget and serialized to one in-flight request, errors are logged without credentials, and the pending queue is capped — overflow drops and logs rather than backlogs, since the stdout line is the durable copy). Emission is **at-most-once**: it happens in-process right after the terminal-state commit, so a crash in between permanently loses that job's line — there is no durable outbox. If exact-once accounting ever matters, the recovery path is a startup backfill over terminal rows; until then treat the stream as best-effort telemetry. In OpenObserve, filter a stream on e.g. `event='maomao.job_summary' AND job_type='pr_review'` or `repo='owner/name'` for per-repo dashboards. One line is emitted **per terminal transition**: for per-job totals take the latest `attempt` line, which mirrors the UI's own rollup (a retry discards attempt-1 run/aggregation usage the same way the UI does); summing every attempt re-counts the `routing`/`internal_escalation` stages that retries don't reset. `duration_ms` is measured from `started_at` (the claim timestamp) and falls back to `created_at` only when `started_at` was never stamped — i.e. still-queued jobs terminated by the raw-UPDATE cancel/stale-sweep paths. A queued job failed via `setJobState` gets `started_at` stamped at the transition itself, so it reports ~0 rather than creation-to-finish. For a retried job terminating while still queued the same split applies: on the raw-UPDATE cancel/sweep paths it measures from the original `created_at` (the retry nulled `started_at` and nothing re-stamps it) — a whole-lifetime span, not the attempt's — while through `setJobState` it reports ~0 like any queued transition.
 
+### OTLP groundwork
+
+`src/telemetry/otlp.ts` is a thin hand-rolled **OTLP/HTTP exporter** — no OpenTelemetry SDK, zero new dependencies — ready for the OpenObserve metrics and traces slices to land on (see [docs/telemetry/otlp-exporter.md](docs/telemetry/otlp-exporter.md) for the decision record). It resolves per-signal endpoints and emits standard OTLP/JSON envelopes with the fleet's resource conventions:
+
+```bash
+OPENOBSERVE_TRACES_URL=https://oo.example.com/api/default/v1/traces
+OPENOBSERVE_METRICS_URL=https://oo.example.com/api/default/v1/metrics
+# auth — per-signal override wins, generic is the fallback (never logged):
+OPENOBSERVE_TOKEN=...                       # or OPENOBSERVE_USER + OPENOBSERVE_PASSWORD (Basic)
+OPENOBSERVE_TRACES_TOKEN=...                # per-signal overrides also supported
+# resource attrs — the standard OTel env names other fleet apps use:
+OTEL_SERVICE_NAME=maomao
+OTEL_RESOURCE_ATTRIBUTES=deployment.environment=prod,fleet=szefowo
+```
+
+Exports are fire-and-forget — serialized to one in-flight POST, depth-capped, 10s-bounded, credentials redacted from errors — so a broken endpoint can never affect job flow. Attribute payloads carry the same usage-metadata-only rule as job summaries: ids, states, durations, token counts; never secrets, PII, diffs, or review bodies. Nothing emits yet — `exportTraces`/`exportMetrics` are the seam the metrics and traces slices plug into.
+
 ## Run locally
 
 ```bash
