@@ -4,7 +4,7 @@ import { PassThrough } from "node:stream";
 import type { ChildProcess } from "node:child_process";
 import { describe, expect, it, vi } from "vitest";
 import { loadConfig } from "./config.js";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { openDb } from "./db.js";
@@ -19,6 +19,7 @@ type OpenCodeLike = OpenCodePort;
 import { createApp } from "./server.js";
 import { ForgeConnectionStore } from "./forge/connections.js";
 import { ProviderCredentialStore } from "./opencode/credentials.js";
+import { TelemetrySettingsStore } from "./telemetry/settings.js";
 import { ModelDiscovery } from "./opencode/models.js";
 import { generateForgeKeyHex } from "./forge/secretbox.js";
 import { computeSignature } from "./gitlab/signature.js";
@@ -6223,6 +6224,318 @@ describe("global review pause", () => {
     });
     expect(denied.status).toBe(403);
     expect(store.getGlobalPause()).toBeUndefined();
+    log.mockRestore();
+  });
+});
+
+describe("telemetry config routes", () => {
+  const telemetryCtx = () => {
+    const dir = mkdtempSync(join(tmpdir(), "maomao-telemetry-"));
+    const settingsPath = join(dir, "telemetry.json");
+    return { telemetrySettings: new TelemetrySettingsStore(settingsPath), settingsPath };
+  };
+
+  it("renders the page, saves and clears per-channel settings without exposing secrets", async () => {
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    const { telemetrySettings, settingsPath } = telemetryCtx();
+    const { app } = testApp(
+      { UI_PASSWORD: "hunter2", UI_SESSION_SECRET: "session-secret-for-tests" },
+      undefined,
+      undefined,
+      { telemetrySettings },
+    );
+    const { session } = await loginSession(app);
+
+    const page = await app.request("/config/telemetry", { headers: { cookie: session } });
+    const { csrfCookie, csrfToken, html } = await csrfArtifacts(page);
+    expect(html).toContain("Telemetry");
+    expect(html).toContain('data-channel="traces"');
+    expect(html).toContain('data-channel="metrics"');
+    expect(html).toContain('data-channel="logs"');
+    expect(html).toContain("no url");
+
+    const saved = await app.request("/config/telemetry/traces", {
+      method: "POST",
+      headers: { cookie: `${session}; ${csrfCookie}`, "content-type": "application/x-www-form-urlencoded" },
+      body:
+        `url=${encodeURIComponent("https://oo.test/api/default/v1/traces")}` +
+        `&token=${encodeURIComponent("tok-abcdef-secret")}` +
+        `&csrf_token=${encodeURIComponent(csrfToken)}`,
+    });
+    expect(saved.status).toBe(303);
+    expect(JSON.parse(readFileSync(settingsPath, "utf8"))).toEqual({
+      traces: { url: "https://oo.test/api/default/v1/traces", token: "tok-abcdef-secret" },
+    });
+    expect(statSync(settingsPath).mode & 0o777).toBe(0o600);
+
+    const after = await app.request("/config/telemetry", { headers: { cookie: session } });
+    const afterHtml = await after.text();
+    expect(afterHtml).toContain("url stored");
+    expect(afterHtml).toContain("auth stored");
+    expect(afterHtml).not.toContain("tok-abcdef-secret");
+    expect(afterHtml).toContain('formaction="/config/telemetry/traces/test"');
+
+    // Blank secret fields keep the stored auth.
+    const page2 = await app.request("/config/telemetry", { headers: { cookie: session } });
+    const artifacts2 = await csrfArtifacts(page2);
+    const saved2 = await app.request("/config/telemetry/traces", {
+      method: "POST",
+      headers: { cookie: `${session}; ${artifacts2.csrfCookie}`, "content-type": "application/x-www-form-urlencoded" },
+      body: `url=${encodeURIComponent("https://oo2.test/api/default/v1/traces")}&csrf_token=${encodeURIComponent(artifacts2.csrfToken)}`,
+    });
+    expect(saved2.status).toBe(303);
+    expect(telemetrySettings.get("traces")).toEqual({
+      url: "https://oo2.test/api/default/v1/traces",
+      token: "tok-abcdef-secret",
+    });
+
+    const page3 = await app.request("/config/telemetry", { headers: { cookie: session } });
+    const artifacts3 = await csrfArtifacts(page3);
+    const cleared = await app.request("/config/telemetry/traces/delete", {
+      method: "POST",
+      headers: { cookie: `${session}; ${artifacts3.csrfCookie}`, "content-type": "application/x-www-form-urlencoded" },
+      body: `csrf_token=${encodeURIComponent(artifacts3.csrfToken)}`,
+    });
+    expect(cleared.status).toBe(303);
+    expect(telemetrySettings.get("traces")).toBeUndefined();
+    log.mockRestore();
+  });
+
+  it("shows env-derived status badges when env vars win, and still offers clear for shadowed stored config", async () => {
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    const { telemetrySettings } = telemetryCtx();
+    telemetrySettings.set("metrics", { url: "https://stored.test/m", token: "storedtok-1234" });
+    const { app } = testApp(
+      {
+        UI_PASSWORD: "hunter2",
+        UI_SESSION_SECRET: "session-secret-for-tests",
+        OPENOBSERVE_METRICS_URL: "https://env.test/api/default/v1/metrics",
+        OPENOBSERVE_METRICS_TOKEN: "envtoken",
+      },
+      undefined,
+      undefined,
+      { telemetrySettings },
+    );
+    const { session } = await loginSession(app);
+    const html = await (await app.request("/config/telemetry", { headers: { cookie: session } })).text();
+    expect(html).toContain("OPENOBSERVE_METRICS_URL");
+    expect(html).toContain("OPENOBSERVE_METRICS_TOKEN");
+    expect(html).not.toContain("envtoken");
+    // Stored entry is fully shadowed by env badges, but Clear must still render.
+    expect(html).toContain('formaction="/config/telemetry/metrics/delete"');
+    log.mockRestore();
+  });
+
+  it("saves a shared connection, derives channel endpoints, and probes the derived config", async () => {
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    const { telemetrySettings, settingsPath } = telemetryCtx();
+    const calls: Array<{ url: string; auth?: string; body: string }> = [];
+    const telemetryFetch = (async (input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => {
+      const headers = new Headers(init?.headers);
+      calls.push({ url: String(input), auth: headers.get("authorization") ?? undefined, body: String(init?.body) });
+      return new Response("ok", { status: 200 });
+    }) as typeof fetch;
+    const { app } = testApp(
+      { UI_PASSWORD: "hunter2", UI_SESSION_SECRET: "session-secret-for-tests" },
+      undefined,
+      undefined,
+      { telemetrySettings, telemetryFetch },
+    );
+    const { session } = await loginSession(app);
+    const page = await app.request("/config/telemetry", { headers: { cookie: session } });
+    const { csrfCookie, csrfToken } = await csrfArtifacts(page);
+
+    const saved = await app.request("/config/telemetry/shared", {
+      method: "POST",
+      headers: { cookie: `${session}; ${csrfCookie}`, "content-type": "application/x-www-form-urlencoded" },
+      body:
+        `baseUrl=${encodeURIComponent("https://oo.test/api/default")}` +
+        `&stream=${encodeURIComponent("job_summaries")}` +
+        `&token=${encodeURIComponent("shared-token-1234")}` +
+        `&csrf_token=${encodeURIComponent(csrfToken)}`,
+    });
+    expect(saved.status).toBe(303);
+    expect(JSON.parse(readFileSync(settingsPath, "utf8"))).toEqual({
+      shared: { baseUrl: "https://oo.test/api/default", stream: "job_summaries", token: "shared-token-1234" },
+    });
+
+    const after = await (await app.request("/config/telemetry", { headers: { cookie: session } })).text();
+    expect(after).toContain("https://oo.test/api/default/v1/traces");
+    expect(after).toContain("https://oo.test/api/default/job_summaries/_json");
+    expect(after).toContain("url stored (shared)");
+    expect(after).toContain("auth stored (shared)");
+    expect(after).not.toContain("shared-token-1234");
+
+    // A channel probe uses the derived endpoint and the shared credential.
+    const page2 = await app.request("/config/telemetry", { headers: { cookie: session } });
+    const artifacts2 = await csrfArtifacts(page2);
+    const tested = await app.request("/config/telemetry/metrics/test", {
+      method: "POST",
+      headers: { cookie: `${session}; ${artifacts2.csrfCookie}`, "content-type": "application/x-www-form-urlencoded" },
+      body: `csrf_token=${encodeURIComponent(artifacts2.csrfToken)}`,
+    });
+    expect(tested.status).toBe(200);
+    expect(calls).toHaveLength(1);
+    expect(calls[0].url).toBe("https://oo.test/api/default/v1/metrics");
+    expect(calls[0].auth).toBe("Bearer shared-token-1234");
+    expect(calls[0].body).toContain("maomao.telemetry_test");
+
+    const page3 = await app.request("/config/telemetry", { headers: { cookie: session } });
+    const artifacts3 = await csrfArtifacts(page3);
+    const cleared = await app.request("/config/telemetry/shared/delete", {
+      method: "POST",
+      headers: { cookie: `${session}; ${artifacts3.csrfCookie}`, "content-type": "application/x-www-form-urlencoded" },
+      body: `csrf_token=${encodeURIComponent(artifacts3.csrfToken)}`,
+    });
+    expect(cleared.status).toBe(303);
+    expect(telemetrySettings.shared()).toBeUndefined();
+    log.mockRestore();
+  });
+
+  it("probes the effective config on POST test and reports HTTP status", async () => {
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    const { telemetrySettings, settingsPath } = telemetryCtx();
+    telemetrySettings.set("logs", {
+      url: "https://oo.test/api/default/stream/_json",
+      token: "stored-token-xyz",
+    });
+    expect(existsSync(settingsPath)).toBe(true);
+    const calls: Array<{ url: string; auth?: string; body: string }> = [];
+    const telemetryFetch = (async (input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => {
+      const headers = new Headers(init?.headers);
+      calls.push({ url: String(input), auth: headers.get("authorization") ?? undefined, body: String(init?.body) });
+      return new Response("ok", { status: 200 });
+    }) as typeof fetch;
+    const { app } = testApp(
+      { UI_PASSWORD: "hunter2", UI_SESSION_SECRET: "session-secret-for-tests" },
+      undefined,
+      undefined,
+      { telemetrySettings, telemetryFetch },
+    );
+    const { session } = await loginSession(app);
+    const page = await app.request("/config/telemetry", { headers: { cookie: session } });
+    const { csrfCookie, csrfToken } = await csrfArtifacts(page);
+
+    const tested = await app.request("/config/telemetry/logs/test", {
+      method: "POST",
+      headers: { cookie: `${session}; ${csrfCookie}`, "content-type": "application/x-www-form-urlencoded" },
+      body: `csrf_token=${encodeURIComponent(csrfToken)}`,
+    });
+    expect(tested.status).toBe(200);
+    const testedHtml = await tested.text();
+    expect(testedHtml).toContain("probe accepted");
+    expect(testedHtml).toContain("HTTP 200");
+    expect(calls).toHaveLength(1);
+    expect(calls[0].url).toBe("https://oo.test/api/default/stream/_json");
+    expect(calls[0].auth).toBe("Bearer stored-token-xyz");
+    expect(calls[0].body).toContain("maomao.telemetry_test");
+    expect(testedHtml).not.toContain("stored-token-xyz");
+    log.mockRestore();
+  });
+
+  it("env config wins over stored on the test route", async () => {
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    const { telemetrySettings } = telemetryCtx();
+    telemetrySettings.set("metrics", { url: "https://stored.test/m", token: "storedtok" });
+    const calls: Array<{ url: string; auth?: string; body: string }> = [];
+    const telemetryFetch = (async (input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => {
+      const headers = new Headers(init?.headers);
+      calls.push({ url: String(input), auth: headers.get("authorization") ?? undefined, body: String(init?.body) });
+      return new Response("unauthorized", { status: 401 });
+    }) as typeof fetch;
+    const { app } = testApp(
+      {
+        UI_PASSWORD: "hunter2",
+        UI_SESSION_SECRET: "session-secret-for-tests",
+        OPENOBSERVE_METRICS_URL: "https://env.test/api/default/v1/metrics",
+        OPENOBSERVE_METRICS_TOKEN: "envtoken",
+      },
+      undefined,
+      undefined,
+      { telemetrySettings, telemetryFetch },
+    );
+    const { session } = await loginSession(app);
+    const page = await app.request("/config/telemetry", { headers: { cookie: session } });
+    const { csrfCookie, csrfToken } = await csrfArtifacts(page);
+
+    const tested = await app.request("/config/telemetry/metrics/test", {
+      method: "POST",
+      headers: { cookie: `${session}; ${csrfCookie}`, "content-type": "application/x-www-form-urlencoded" },
+      body: `csrf_token=${encodeURIComponent(csrfToken)}`,
+    });
+    expect(calls).toHaveLength(1);
+    expect(calls[0].url).toBe("https://env.test/api/default/v1/metrics");
+    expect(calls[0].auth).toBe("Bearer envtoken");
+    expect(calls[0].body).toContain("maomao.telemetry_test");
+    const testedHtml = await tested.text();
+    expect(testedHtml).toContain("HTTP 401");
+    expect(testedHtml).not.toContain("envtoken");
+    log.mockRestore();
+  });
+
+  it("ad-hoc test probes submitted values without persisting them", async () => {
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    const { telemetrySettings, settingsPath } = telemetryCtx();
+    const calls: Array<{ url: string; auth?: string; body: string }> = [];
+    const telemetryFetch = (async (input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => {
+      const headers = new Headers(init?.headers);
+      calls.push({ url: String(input), auth: headers.get("authorization") ?? undefined, body: String(init?.body) });
+      return new Response("ok", { status: 200 });
+    }) as typeof fetch;
+    const { app } = testApp(
+      { UI_PASSWORD: "hunter2", UI_SESSION_SECRET: "session-secret-for-tests" },
+      undefined,
+      undefined,
+      { telemetrySettings, telemetryFetch },
+    );
+    const { session } = await loginSession(app);
+    const page = await app.request("/config/telemetry", { headers: { cookie: session } });
+    const { csrfCookie, csrfToken } = await csrfArtifacts(page);
+
+    const tested = await app.request("/config/telemetry/test", {
+      method: "POST",
+      headers: { cookie: `${session}; ${csrfCookie}`, "content-type": "application/x-www-form-urlencoded" },
+      body:
+        `channel=traces` +
+        `&url=${encodeURIComponent("https://adhoc.test/api/default/v1/traces")}` +
+        `&user=${encodeURIComponent("probe-user")}&password=${encodeURIComponent("probe-pw")}` +
+        `&csrf_token=${encodeURIComponent(csrfToken)}`,
+    });
+    expect(tested.status).toBe(200);
+    expect(await tested.text()).toContain("probe accepted");
+    expect(calls).toHaveLength(1);
+    expect(calls[0].url).toBe("https://adhoc.test/api/default/v1/traces");
+    expect(calls[0].auth).toBe(`Basic ${Buffer.from("probe-user:probe-pw").toString("base64")}`);
+    expect(calls[0].body).toContain("maomao.telemetry_test");
+    expect(existsSync(settingsPath)).toBe(false);
+    log.mockRestore();
+  });
+
+  it("test route without any configured url reports the gap instead of probing", async () => {
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    const { telemetrySettings } = telemetryCtx();
+    let called = 0;
+    const telemetryFetch = (async () => {
+      called += 1;
+      return new Response("ok", { status: 200 });
+    }) as typeof fetch;
+    const { app } = testApp(
+      { UI_PASSWORD: "hunter2", UI_SESSION_SECRET: "session-secret-for-tests" },
+      undefined,
+      undefined,
+      { telemetrySettings, telemetryFetch },
+    );
+    const { session } = await loginSession(app);
+    const page = await app.request("/config/telemetry", { headers: { cookie: session } });
+    const { csrfCookie, csrfToken } = await csrfArtifacts(page);
+    const tested = await app.request("/config/telemetry/traces/test", {
+      method: "POST",
+      headers: { cookie: `${session}; ${csrfCookie}`, "content-type": "application/x-www-form-urlencoded" },
+      body: `csrf_token=${encodeURIComponent(csrfToken)}`,
+    });
+    expect(tested.status).toBe(400);
+    expect(await tested.text()).toContain("No traces endpoint configured");
+    expect(called).toBe(0);
     log.mockRestore();
   });
 });

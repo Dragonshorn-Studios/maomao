@@ -203,6 +203,26 @@ describe("exportTraces/exportMetrics", () => {
     expect(body.resourceSpans[0].scopeSpans[0].spans[0].name).toBe("job.run");
   });
 
+  it("uses the stored config when no env vars are set, and env wins over it", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true, status: 200 });
+    vi.stubGlobal("fetch", fetchMock);
+    exportTraces([makeSpan()], process.env, { url: "https://stored.test/v1/traces", user: "su", password: "sp" });
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
+    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(url).toBe("https://stored.test/v1/traces");
+    expect((init.headers as Record<string, string>).authorization).toBe(
+      `Basic ${Buffer.from("su:sp").toString("base64")}`,
+    );
+
+    vi.stubEnv("OPENOBSERVE_TRACES_URL", TRACES_URL);
+    vi.stubEnv("OPENOBSERVE_TRACES_TOKEN", "env-tok");
+    exportTraces([makeSpan()], process.env, { url: "https://stored.test/v1/traces", user: "su", password: "sp" });
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
+    const [url2, init2] = fetchMock.mock.calls[1] as [string, RequestInit];
+    expect(url2).toBe(TRACES_URL);
+    expect((init2.headers as Record<string, string>).authorization).toBe("Bearer env-tok");
+  });
+
   it("serializes exports: one POST in flight, order preserved", async () => {
     const order: string[] = [];
     const fetchMock = vi.fn().mockImplementation(async (url: string) => {

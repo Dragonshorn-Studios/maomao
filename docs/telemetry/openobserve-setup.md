@@ -10,6 +10,23 @@ Maomao emits three channels into OpenObserve, all best-effort and never blocking
 
 Each channel is independent — set only the ones you want. Everything below applies per channel.
 
+The operator UI at `/config/telemetry` shows the effective endpoint + auth
+source per channel, persists settings under the XDG data dir (env vars still
+win over stored values), and can POST a probe payload to verify a connection
+before it is committed — either the effective config or ad-hoc values that
+are never saved. The env-var setup below remains the primary path for
+production deployments.
+
+Since all three channels usually live in one OO org, there is a shorthand:
+a **shared base URL** `https://<host>/api/<org>` (env `OPENOBSERVE_BASE_URL`
+or the shared section on `/config/telemetry`) from which the channel
+endpoints are derived — `…/v1/traces`, `…/v1/metrics`, and for the logs
+channel `…/<stream>/_json` (which also needs a stream name, env
+`OPENOBSERVE_LOGS_STREAM`). Resolution per channel: the channel's own URL
+env var wins, then the env base, then a stored per-channel URL, then the
+stored base. Per-channel fields remain overrides for deployments that split
+orgs or streams.
+
 ## 1. OpenObserve side
 
 ### Credentials
@@ -42,10 +59,12 @@ credentials are sent in cleartext`).
 ## 2. Maomao env
 
 ```bash
-# Logs — job summary stream (existing channel). Note the stream name in the path:
-OPENOBSERVE_LOGS_URL=https://oo.example.com/api/default/maomao/_json
+# Shorthand — one base per org derives all three channel endpoints:
+OPENOBSERVE_BASE_URL=https://oo.example.com/api/default
+OPENOBSERVE_LOGS_STREAM=maomao        # stream name for the logs channel
 
-# OTLP signals — no stream name; OO maps by signal type:
+# …or explicit per-channel endpoints (a set channel URL wins over the base):
+OPENOBSERVE_LOGS_URL=https://oo.example.com/api/default/maomao/_json
 OPENOBSERVE_METRICS_URL=https://oo.example.com/api/default/v1/metrics
 OPENOBSERVE_TRACES_URL=https://oo.example.com/api/default/v1/traces
 
@@ -69,6 +88,9 @@ OTEL_RESOURCE_ATTRIBUTES=deployment.environment=prod,fleet=<name>
   OPENOBSERVE_USER` + the matching `_PASSWORD` (Basic), `<SIGNAL>` = `TRACES`
   or `METRICS`. The logs channel reads only `OPENOBSERVE_LOGS_TOKEN` /
   `OPENOBSERVE_LOGS_USER` / `OPENOBSERVE_LOGS_PASSWORD` — no generic fallback.
+  Stored shared credentials from `/config/telemetry` do reach the logs
+  channel (the page's own layer), so saving credentials once there covers
+  all three.
 
 ## 3. Verify
 

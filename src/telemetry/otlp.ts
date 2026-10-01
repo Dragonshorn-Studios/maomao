@@ -1,4 +1,10 @@
 import { randomBytes } from "node:crypto";
+import {
+  resolveChannelAuth,
+  resolveChannelUrl,
+  type TelemetryChannelConfig,
+  type TelemetrySharedConfig,
+} from "./settings.js";
 
 /**
  * Thin OTLP/HTTP exporter groundwork (issue #143, meta #138): hand-rolled
@@ -17,7 +23,9 @@ import { randomBytes } from "node:crypto";
  * Env (mirrors the OPENOBSERVE_LOGS_* pattern):
  *   OPENOBSERVE_TRACES_URL / OPENOBSERVE_METRICS_URL — full OTLP/HTTP
  *     endpoint per signal (e.g. https://oo.example.com/api/default/v1/traces).
- *     Unset = that signal is silently off.
+ *     Unset = that signal is silently off. OPENOBSERVE_BASE_URL (e.g.
+ *     https://oo.example.com/api/default) derives both when the per-signal
+ *     URL is unset.
  *   Auth, resolved per signal with a generic fallback:
  *     OPENOBSERVE_<SIGNAL>_TOKEN ?? OPENOBSERVE_TOKEN          → Bearer
  *     OPENOBSERVE_<SIGNAL>_USER  ?? OPENOBSERVE_USER           → Basic (user)
@@ -28,16 +36,6 @@ import { randomBytes } from "node:crypto";
  */
 
 export type OtlpSignal = "traces" | "metrics";
-
-const SIGNAL_URL_ENV: Record<OtlpSignal, string> = {
-  traces: "OPENOBSERVE_TRACES_URL",
-  metrics: "OPENOBSERVE_METRICS_URL",
-};
-
-const SIGNAL_ENV_PREFIX: Record<OtlpSignal, string> = {
-  traces: "OPENOBSERVE_TRACES",
-  metrics: "OPENOBSERVE_METRICS",
-};
 
 export interface OtlpEndpoint {
   url: string;
@@ -150,24 +148,37 @@ export function resourceAttributes(env: NodeJS.ProcessEnv = process.env): OtlpAt
   return attrs;
 }
 
-/** Authorization headers for one signal: per-signal value wins, generic OPENOBSERVE_* is the fallback. */
-function authHeaders(signal: OtlpSignal, env: NodeJS.ProcessEnv): Record<string, string> {
-  const prefix = SIGNAL_ENV_PREFIX[signal];
-  const token = env[`${prefix}_TOKEN`]?.trim() || env.OPENOBSERVE_TOKEN?.trim();
-  if (token) return { authorization: `Bearer ${token}` };
-  const user = env[`${prefix}_USER`]?.trim() || env.OPENOBSERVE_USER?.trim();
-  if (user) {
-    const password = env[`${prefix}_PASSWORD`] ?? env.OPENOBSERVE_PASSWORD ?? "";
-    return { authorization: `Basic ${Buffer.from(`${user}:${password}`).toString("base64")}` };
+/**
+ * Authorization headers for one signal: env wins (per-signal then generic
+ * OPENOBSERVE_*), the stored /config/telemetry value fills the gap.
+ */
+function authHeaders(
+  signal: OtlpSignal,
+  env: NodeJS.ProcessEnv,
+  stored?: TelemetryChannelConfig,
+  shared?: TelemetrySharedConfig,
+): Record<string, string> {
+  const auth = resolveChannelAuth(signal, env, stored, shared);
+  if (auth.token) return { authorization: `Bearer ${auth.token}` };
+  if (auth.user) {
+    return { authorization: `Basic ${Buffer.from(`${auth.user}:${auth.password ?? ""}`).toString("base64")}` };
   }
   return {};
 }
 
-/** Resolve the configured endpoint for one signal, or null when its URL env is unset. */
-export function otlpEndpoint(signal: OtlpSignal, env: NodeJS.ProcessEnv = process.env): OtlpEndpoint | null {
-  const url = env[SIGNAL_URL_ENV[signal]]?.trim();
+/**
+ * Resolve the configured endpoint for one signal — env URL wins over the
+ * stored one — or null when neither layer configures a URL.
+ */
+export function otlpEndpoint(
+  signal: OtlpSignal,
+  env: NodeJS.ProcessEnv = process.env,
+  stored?: TelemetryChannelConfig,
+  shared?: TelemetrySharedConfig,
+): OtlpEndpoint | null {
+  const url = resolveChannelUrl(signal, env, stored, shared);
   if (!url) return null;
-  return { url, headers: { "content-type": "application/json", ...authHeaders(signal, env) } };
+  return { url, headers: { "content-type": "application/json", ...authHeaders(signal, env, stored, shared) } };
 }
 
 /** Wrap spans in the OTLP resourceSpans envelope for one export call. */
@@ -266,10 +277,15 @@ export function flushOtlpExports(): Promise<void> {
  * Fire-and-forget one trace export. Never throws: a broken or unconfigured
  * endpoint must not affect job flow. Empty span batches are skipped.
  */
-export function exportTraces(spans: OtlpSpan[], env: NodeJS.ProcessEnv = process.env): void {
+export function exportTraces(
+  spans: OtlpSpan[],
+  env: NodeJS.ProcessEnv = process.env,
+  stored?: TelemetryChannelConfig,
+  shared?: TelemetrySharedConfig,
+): void {
   try {
     if (spans.length === 0) return;
-    const endpoint = otlpEndpoint("traces", env);
+    const endpoint = otlpEndpoint("traces", env, stored, shared);
     if (!endpoint) return;
     queueExport("traces", endpoint, JSON.stringify(tracesEnvelope(spans, env)));
   } catch (error) {
@@ -283,10 +299,15 @@ export function exportTraces(spans: OtlpSpan[], env: NodeJS.ProcessEnv = process
  * Fire-and-forget one metrics export. Never throws. Empty metric batches
  * are skipped.
  */
-export function exportMetrics(metrics: OtlpMetric[], env: NodeJS.ProcessEnv = process.env): void {
+export function exportMetrics(
+  metrics: OtlpMetric[],
+  env: NodeJS.ProcessEnv = process.env,
+  stored?: TelemetryChannelConfig,
+  shared?: TelemetrySharedConfig,
+): void {
   try {
     if (metrics.length === 0) return;
-    const endpoint = otlpEndpoint("metrics", env);
+    const endpoint = otlpEndpoint("metrics", env, stored, shared);
     if (!endpoint) return;
     queueExport("metrics", endpoint, JSON.stringify(metricsEnvelope(metrics, env)));
   } catch (error) {

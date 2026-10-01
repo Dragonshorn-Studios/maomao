@@ -78,6 +78,17 @@ import {
   roleFormValuesFromRole,
 } from "./ui/index.js";
 import { renderProvidersPage } from "./ui/providers.js";
+import { renderTelemetryPage } from "./ui/telemetry.js";
+import {
+  TELEMETRY_CHANNELS,
+  TelemetrySettingsStore,
+  resolveChannelAuth,
+  resolveChannelUrl,
+  telemetryConfigPath,
+  type TelemetryChannel,
+  type TelemetryChannelConfig,
+} from "./telemetry/settings.js";
+import { probeTelemetryChannel } from "./telemetry/probe.js";
 import { ProviderCredentialStore, opencodeAuthPath, providerAuthSecrets } from "./opencode/credentials.js";
 import { opencodeEnvSecrets } from "./opencode/spawn.js";
 import { ModelDiscovery } from "./opencode/models.js";
@@ -135,6 +146,10 @@ export interface ServerContext {
   modelDiscovery?: ModelDiscovery;
   /** "Ask Maomao" explainer backend; undefined until MAOMAO_EXPLAIN_ENABLED. */
   chat?: { service: ChatService; store: ChatStore };
+  /** Operator-managed OpenObserve settings for /config/telemetry; defaults to the XDG path. */
+  telemetrySettings?: TelemetrySettingsStore;
+  /** Injectable transport for the telemetry connection probe (tests). */
+  telemetryFetch?: typeof fetch;
   /** The environment loadConfig consumed; defaults to process.env. Injectable for tests. */
   env?: NodeJS.ProcessEnv;
 }
@@ -292,6 +307,7 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
   const PROVIDER_TEST_WINDOW_MS = 10 * 60 * 1000;
   const providerTestLimiter = new WindowRateLimiter();
   let providerTestInFlight = false;
+  let telemetryTestInFlight = false;
   const oauthStates = new OAuthStateStore();
 
   app.use("*", async (c, next) => {
@@ -1402,6 +1418,169 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
     } finally {
       providerTestInFlight = false;
     }
+  });
+
+  // ---- OpenObserve telemetry (/config/telemetry) — per-channel endpoint + credentials ----
+  // Stored settings are write-only like provider keys (fingerprint display);
+  // env wins per field. Probes POST one usage-metadata-only payload to the
+  // endpoint — real round-trip proof, not just a config save.
+  const telemetrySettings = () =>
+    ctx.telemetrySettings ?? new TelemetrySettingsStore(telemetryConfigPath(ctx.env ?? process.env));
+  const telemetryEnv = () => ctx.env ?? process.env;
+  const telemetryChannelParam = (c: Context<AppEnv>): TelemetryChannel | null => {
+    const param = c.req.param("channel");
+    return TELEMETRY_CHANNELS.some((ch) => ch.id === param) ? (param as TelemetryChannel) : null;
+  };
+  const telemetryField = (value: unknown): string | undefined =>
+    typeof value === "string" && value.trim() ? value.trim() : undefined;
+  const renderTelemetry = (
+    c: Context<AppEnv>,
+    extra: { notice?: string; error?: string; status?: number } = {},
+  ) =>
+    c.html(
+      renderTelemetryPage({
+        channels: telemetrySettings().status(telemetryEnv()),
+        shared: telemetrySettings().sharedStatus(telemetryEnv()),
+        csrfToken: gateOn ? ensureCsrfToken(c, ctx.config.uiSessionSecret) : undefined,
+        canWrite: gateOn,
+        options: { ...pageOpts, identity: c.get("identity"), notice: extra.notice, error: extra.error },
+      }),
+      (extra.status ?? 200) as 200 | 400 | 429 | 503,
+    );
+
+  const runTelemetryProbe = async (
+    c: Context<AppEnv>,
+    channel: TelemetryChannel,
+    config: TelemetryChannelConfig,
+    label: string,
+  ): Promise<Response> => {
+    // One request/response POST to an external endpoint — serialize probes
+    // and cap the rate like provider tests (operator verification, not a hot
+    // path; a single global bucket suffices for a single-operator app).
+    if (!providerTestLimiter.wouldAllow("telemetry-test", PROVIDER_TEST_LIMIT, PROVIDER_TEST_WINDOW_MS)) {
+      return renderTelemetry(c, { error: "Too many connection tests — wait a few minutes before trying again.", status: 429 });
+    }
+    if (telemetryTestInFlight) {
+      return renderTelemetry(c, { error: "A connection test is already running — try again when it finishes.", status: 429 });
+    }
+    telemetryTestInFlight = true;
+    try {
+      const result = await probeTelemetryChannel(channel, config, telemetryEnv(), ctx.telemetryFetch ?? fetch);
+      providerTestLimiter.record("telemetry-test", PROVIDER_TEST_LIMIT, PROVIDER_TEST_WINDOW_MS);
+      if (result.ok) {
+        const cleartext =
+          config.url?.startsWith("http://") && (config.token || config.user)
+            ? " Warning: http endpoint — credentials were sent in cleartext."
+            : "";
+        return renderTelemetry(c, { notice: `${label}: probe accepted — HTTP ${result.status}.${cleartext}` });
+      }
+      return renderTelemetry(c, { error: `${label}: ${result.detail}`, status: 400 });
+    } finally {
+      telemetryTestInFlight = false;
+    }
+  };
+
+  app.get("/config/telemetry", (c) => {
+    if (!gateOn) return c.redirect("/", 302);
+    return renderTelemetry(c, { notice: c.req.query("notice") ?? undefined, error: c.req.query("error") ?? undefined });
+  });
+
+  // Registered before /config/telemetry/:channel so "test" isn't read as a channel id.
+  app.post("/config/telemetry/test", async (c) => {
+    if (!gateOn) return c.redirect("/", 302);
+    const body = await c.req.parseBody();
+    const channel = typeof body.channel === "string" && TELEMETRY_CHANNELS.some((ch) => ch.id === body.channel)
+      ? (body.channel as TelemetryChannel)
+      : null;
+    if (!channel) return renderTelemetry(c, { error: "Unknown telemetry channel.", status: 400 });
+    const url = telemetryField(body.url);
+    if (!url) return renderTelemetry(c, { error: "Endpoint URL is required for an ad-hoc test.", status: 400 });
+    return runTelemetryProbe(c, channel, {
+      url,
+      token: telemetryField(body.token),
+      user: telemetryField(body.user),
+      password: telemetryField(body.password),
+    }, `ad-hoc ${channel}`);
+  });
+
+  // Shared connection (base URL + logs stream + credentials the three
+  // channels inherit). Registered before /config/telemetry/:channel so
+  // "shared" isn't read as a channel id.
+  app.post("/config/telemetry/shared", async (c) => {
+    if (!gateOn) return c.redirect("/", 302);
+    const body = await c.req.parseBody();
+    const stored = telemetrySettings().shared() ?? {};
+    // Same one-slot auth rule as the per-channel form: providing any secret
+    // field replaces the whole tuple; all-blank keeps what was stored.
+    const newAuth = {
+      token: telemetryField(body.token),
+      user: telemetryField(body.user),
+      password: telemetryField(body.password),
+    };
+    const keepAuth = !newAuth.token && !newAuth.user && !newAuth.password;
+    const result = telemetrySettings().setShared({
+      baseUrl: telemetryField(body.baseUrl) ?? stored.baseUrl,
+      stream: telemetryField(body.stream) ?? stored.stream,
+      ...(keepAuth ? { token: stored.token, user: stored.user, password: stored.password } : newAuth),
+    });
+    if (!result.ok) return renderTelemetry(c, { error: result.error, status: 400 });
+    return c.redirect("/config/telemetry?notice=" + encodeURIComponent("Shared connection saved."), 303);
+  });
+
+  app.post("/config/telemetry/shared/delete", async (c) => {
+    if (!gateOn) return c.redirect("/", 302);
+    const result = telemetrySettings().clearShared();
+    if (!result.ok) return renderTelemetry(c, { error: result.error, status: 400 });
+    const note = result.removed ? "Stored shared connection cleared." : "No stored shared connection.";
+    return c.redirect("/config/telemetry?notice=" + encodeURIComponent(note), 303);
+  });
+
+  app.post("/config/telemetry/:channel", async (c) => {
+    if (!gateOn) return c.redirect("/", 302);
+    const channel = telemetryChannelParam(c);
+    if (!channel) return renderTelemetry(c, { error: "Unknown telemetry channel.", status: 400 });
+    const body = await c.req.parseBody();
+    const stored = telemetrySettings().get(channel) ?? {};
+    // Auth is one slot: providing any of token/user/password replaces the
+    // whole tuple (a stale token must not survive a user+password save);
+    // leaving all three blank keeps what was stored.
+    const newAuth = {
+      token: telemetryField(body.token),
+      user: telemetryField(body.user),
+      password: telemetryField(body.password),
+    };
+    const keepAuth = !newAuth.token && !newAuth.user && !newAuth.password;
+    const result = telemetrySettings().set(channel, {
+      url: telemetryField(body.url) ?? stored.url,
+      ...(keepAuth ? { token: stored.token, user: stored.user, password: stored.password } : newAuth),
+    });
+    if (!result.ok) return renderTelemetry(c, { error: result.error, status: 400 });
+    return c.redirect("/config/telemetry?notice=" + encodeURIComponent(`${channel} settings saved.`), 303);
+  });
+
+  app.post("/config/telemetry/:channel/test", async (c) => {
+    if (!gateOn) return c.redirect("/", 302);
+    const channel = telemetryChannelParam(c);
+    if (!channel) return renderTelemetry(c, { error: "Unknown telemetry channel.", status: 400 });
+    // Verify the *effective* config (env wins over stored, shared fills
+    // the gaps) — same invariant as provider tests: never silently verify
+    // different credentials than the ones in force.
+    const stored = telemetrySettings().get(channel);
+    const shared = telemetrySettings().shared();
+    const env = telemetryEnv();
+    const url = resolveChannelUrl(channel, env, stored, shared);
+    if (!url) return renderTelemetry(c, { error: `No ${channel} endpoint configured — set the env var, the shared connection, or a URL first.`, status: 400 });
+    return runTelemetryProbe(c, channel, { url, ...resolveChannelAuth(channel, env, stored, shared) }, channel);
+  });
+
+  app.post("/config/telemetry/:channel/delete", async (c) => {
+    if (!gateOn) return c.redirect("/", 302);
+    const channel = telemetryChannelParam(c);
+    if (!channel) return renderTelemetry(c, { error: "Unknown telemetry channel.", status: 400 });
+    const result = telemetrySettings().clear(channel);
+    if (!result.ok) return renderTelemetry(c, { error: result.error, status: 400 });
+    const note = result.removed ? `Stored ${channel} settings cleared.` : `No stored ${channel} settings.`;
+    return c.redirect("/config/telemetry?notice=" + encodeURIComponent(note), 303);
   });
 
   /**

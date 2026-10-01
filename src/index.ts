@@ -16,7 +16,8 @@ import { ChatStore } from "./chat/store.js";
 import { oauthCallbackUrl, oauthEnabled } from "./oauth.js";
 import { ForgeConnectionStore, countConnections } from "./forge/connections.js";
 import { ensureEnvGitLabConnection } from "./forge/bootstrap.js";
-import { ForgeRegistry } from "./forge/registry.js";
+import { ForgeRegistry } from "./forge/registry.js"
+import { TelemetrySettingsStore, telemetryConfigPath } from "./telemetry/settings.js";;
 
 const config = loadConfig();
 mkdirSync(config.workspaceRoot, { recursive: true });
@@ -45,7 +46,13 @@ assertRuntimeConfig(config, {
   gitlabConnections: countConnections(db, "gitlab"),
   gitlabBootstrap: Boolean(config.gitlabBootstrap),
 });
-const store = new JobStore(db, config.modelCatalog, { emitJobSummaries: config.jobSummaries });
+// Operator-managed OpenObserve settings: /config/telemetry persists per-channel
+// endpoint credentials here; env vars stay authoritative over stored values.
+const telemetrySettings = new TelemetrySettingsStore(telemetryConfigPath(process.env));
+const store = new JobStore(db, config.modelCatalog, {
+  emitJobSummaries: config.jobSummaries,
+  telemetry: telemetrySettings,
+});
 // A crash mid-creation can leave pending scan-issue claims (issue_number 0);
 // no loop is in flight at boot, so anything left over is orphaned.
 const orphanedClaims = store.clearOrphanedScanIssueClaims();
@@ -82,7 +89,7 @@ const pipeline = createPipeline({
   opencode,
   getInstallationToken,
 });
-const queue = new JobQueue(store, config.jobConcurrency, (jobId) => pipeline.run(jobId));
+const queue = new JobQueue(store, config.jobConcurrency, (jobId) => pipeline.run(jobId), telemetrySettings);
 queue.start();
 
 const chatStore = config.chat.enabled ? new ChatStore(db) : undefined;
@@ -109,6 +116,7 @@ const app = createApp({
   forgeConnections,
   chat,
   modelDiscovery,
+  telemetrySettings,
   startedAt: Date.now(),
   env: process.env,
 });

@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import type { JobRow, JobStore, ReviewerRunRow, StackMemberRow } from "../jobs/store.js";
 import { buildJobSummary, type JobSummaryOptions } from "../jobs/summary.js";
 import { attr, exportTraces, nanoTime, type OtlpAttribute, type OtlpSpan } from "./otlp.js";
+import type { TelemetryChannelConfig, TelemetrySharedConfig } from "./settings.js";
 
 /**
  * OpenObserve traces slice (issue #142, meta #138): one OTLP/HTTP trace per
@@ -218,6 +219,8 @@ export function exportTerminalJobTraces(
   jobId: number,
   env: NodeJS.ProcessEnv = process.env,
   opts?: JobSummaryOptions,
+  stored?: TelemetryChannelConfig,
+  shared?: TelemetrySharedConfig,
 ): void {
   try {
     const job = opts?.job ?? store.getJob(jobId);
@@ -227,6 +230,8 @@ export function exportTerminalJobTraces(
     exportTraces(
       jobTrace(job, opts?.runs ?? store.listReviewerRuns(job.id), opts, membership, members),
       env,
+      stored,
+      shared,
     );
   } catch (error) {
     console.error(

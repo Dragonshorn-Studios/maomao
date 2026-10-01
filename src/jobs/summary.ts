@@ -1,5 +1,11 @@
 import type { JobState } from "../config.js";
 import { tokenTotalFromRow } from "../opencode/parse.js";
+import {
+  resolveChannelAuth,
+  resolveChannelUrl,
+  type TelemetryChannelConfig,
+  type TelemetrySharedConfig,
+} from "../telemetry/settings.js";
 import type { JobRow, JobStore, ReviewerRunRow } from "./store.js";
 
 /**
@@ -248,14 +254,17 @@ export function flushJobSummaryPosts(): Promise<void> {
   return postChain;
 }
 
-function ingestHeaders(env: NodeJS.ProcessEnv): Record<string, string> {
+function ingestHeaders(
+  env: NodeJS.ProcessEnv,
+  stored?: TelemetryChannelConfig,
+  shared?: TelemetrySharedConfig,
+): Record<string, string> {
   const headers: Record<string, string> = { "content-type": "application/json" };
-  const token = env.OPENOBSERVE_LOGS_TOKEN?.trim();
-  const user = env.OPENOBSERVE_LOGS_USER?.trim();
-  if (token) {
-    headers.authorization = `Bearer ${token}`;
-  } else if (user) {
-    headers.authorization = `Basic ${Buffer.from(`${user}:${env.OPENOBSERVE_LOGS_PASSWORD ?? ""}`).toString("base64")}`;
+  const auth = resolveChannelAuth("logs", env, stored, shared);
+  if (auth.token) {
+    headers.authorization = `Bearer ${auth.token}`;
+  } else if (auth.user) {
+    headers.authorization = `Basic ${Buffer.from(`${auth.user}:${auth.password ?? ""}`).toString("base64")}`;
   }
   return headers;
 }
@@ -271,6 +280,8 @@ export function emitJobSummary(
   jobId: number,
   env: NodeJS.ProcessEnv = process.env,
   opts?: JobSummaryOptions,
+  stored?: TelemetryChannelConfig,
+  shared?: TelemetrySharedConfig,
 ): void {
   try {
     const job = opts?.job ?? store.getJob(jobId);
@@ -285,9 +296,9 @@ export function emitJobSummary(
         `job-summary: stdout write failed for job ${jobId}: ${error instanceof Error ? error.message : String(error)}`,
       );
     }
-    const url = env.OPENOBSERVE_LOGS_URL?.trim();
+    const url = resolveChannelUrl("logs", env, stored, shared);
     if (!url) return;
-    const headers = ingestHeaders(env);
+    const headers = ingestHeaders(env, stored, shared);
     if (headers.authorization && url.startsWith("http://") && !insecureIngestWarned.has(url)) {
       insecureIngestWarned.add(url);
       console.error("job-summary: OPENOBSERVE_LOGS_URL uses http — ingest credentials are sent in cleartext");
