@@ -374,6 +374,24 @@ describe("exportTraces/exportMetrics", () => {
     expect(err).toHaveBeenCalledWith(expect.stringContaining("invalid envelope"));
   });
 
+  it("redacts the endpoint URL before truncating long error bodies", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: false,
+      status: 400,
+      text: async () => `${"x".repeat(290)} ${TRACES_URL} tail`,
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    setAppLogSink(captureAppLog);
+    vi.stubEnv("OPENOBSERVE_TRACES_URL", TRACES_URL);
+    exportTraces([makeSpan()]);
+    await flushOtlpExports();
+    await flushIngestPosts();
+    const [event] = appLogLines.map((line) => JSON.parse(line) as Record<string, unknown>);
+    expect(event.response).toContain("<otlp-url>");
+    expect(event.response).not.toContain("oo.example.com");
+  });
+
   it("posts failure events to the logs channel config, not the failed channel's", async () => {
     // Stored metrics endpoint fails while a stored logs endpoint is healthy:
     // the app-log event must land on the logs ingest, not the OTLP endpoint.

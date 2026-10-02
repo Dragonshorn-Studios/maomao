@@ -296,7 +296,7 @@ function queueExport(
         // malformed envelope vs wrong endpoint) — carry it, sanitized and
         // capped, into the app-log event and stderr.
         const raw = typeof response.text === "function" ? await response.text().catch(() => "") : "";
-        const detail = redactEndpointError(raw.replace(/\s+/g, " ").trim().slice(0, 300), endpoint.url);
+        const detail = redactEndpointError(raw.replace(/\s+/g, " ").trim(), endpoint.url).slice(0, 300);
         const auth = endpoint.headers.authorization;
         const safeDetail = auth ? detail.split(auth).join("[redacted]") : detail;
         console.error(`otlp: ${signal} export returned ${response.status}${safeDetail ? `: ${safeDetail}` : ""}`);
