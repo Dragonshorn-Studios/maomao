@@ -1,5 +1,6 @@
 import type { Config } from "./config.js";
 import type { ProfileRevisionRow } from "./config-revisions.js";
+import { telemetryUserIdEnabled } from "./telemetry/traces.js";
 import type { TelemetrySettingsStore } from "./telemetry/settings.js";
 
 /**
@@ -314,6 +315,12 @@ export function effectiveConfigEntries(
   row("Publishing", "Post empty reviews", "POST_EMPTY_REVIEW", boolLabel(config.postEmptyReview));
   row("Publishing", "Review drafts", "REVIEW_DRAFTS", boolLabel(config.reviewDrafts));
   row("Telemetry", "Job summaries (stdout/OpenObserve)", "JOB_SUMMARIES", boolLabel(config.jobSummaries));
+  row(
+    "Telemetry",
+    "Session user attribute (PR author login)",
+    "TELEMETRY_USER_ID",
+    boolLabel(telemetryUserIdEnabled(env)),
+  );
   // The effective OpenObserve view mirrors /config/telemetry's own
   // resolution (env > stored > derived-from-shared), so values saved on the
   // telemetry page show up here instead of a misleading "not set".

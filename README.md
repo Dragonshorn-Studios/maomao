@@ -364,7 +364,7 @@ OTEL_SERVICE_NAME=maomao
 OTEL_RESOURCE_ATTRIBUTES=deployment.environment=prod,fleet=szefowo
 ```
 
-Exports are fire-and-forget — serialized to one in-flight POST, depth-capped, 10s-bounded, credentials redacted from errors — so a broken endpoint can never affect job flow. Attribute payloads carry the same usage-metadata-only rule as job summaries: ids, states, durations, token counts; never secrets, PII, diffs, or review bodies.
+Exports are fire-and-forget — serialized to one in-flight POST, depth-capped, 10s-bounded, credentials redacted from errors — so a broken endpoint can never affect job flow. Attribute payloads carry the same usage-metadata-only rule as job summaries: ids, states, durations, token counts; never secrets, PII, diffs, or review bodies. The one identity attribute is `user.id` on trace spans — the PR author's forge login (visible on the pull request itself), emitted for OpenObserve's Sessions user column. Set `TELEMETRY_USER_ID=false` to omit it where a deployment's data-governance policy does not allow author logins at the telemetry endpoint.
 
 ### OTLP metrics
 
@@ -409,8 +409,13 @@ LLM-call stage spans (`maomao.stage.reviewer`, `.routing`, `.aggregation`,
 `.internal_escalation`) also carry the OTel `gen_ai.*` semantic attributes
 (`gen_ai.operation.name`=`chat`, `gen_ai.provider.name`,
 `gen_ai.request/response.model`, `gen_ai.usage.*_tokens`,
-`gen_ai.usage.cost`, `gen_ai.prompt.name` = reviewer role) with
-`span_kind` CLIENT, so OpenObserve's AI observability picks them up. Costs
+`gen_ai.usage.cost`, `gen_ai.prompt.name` = reviewer role,
+`gen_ai.agent.name`/`.id`) with
+`span_kind` CLIENT, so OpenObserve's AI observability picks them up. Every
+span in the trace shares `gen_ai.conversation.id`/`session.id` =
+`maomao-job-<id>` so one job groups as one AI Observability session, and
+`user.id` = the PR author fills the Sessions user column (opt out with
+`TELEMETRY_USER_ID=false`). Costs
 emit `cost_usd`/`gen_ai.usage.cost` plus an exact integer
 `cost_usd_micros` twin — OpenObserve's strict traces decoder rejects
 fractional `doubleValue` (`invalid type: map, expected f64`), so

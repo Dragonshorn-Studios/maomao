@@ -93,6 +93,10 @@ OTEL_RESOURCE_ATTRIBUTES=deployment.environment=prod,fleet=<name>
 - `JOB_SUMMARIES=false` turns off **all** terminal-state telemetry (logs,
   metrics, and traces emit from the same seam). Queue gauges are unaffected —
   they emit on queue mutations regardless.
+- `TELEMETRY_USER_ID=false` strips `user.id` (the PR author's forge login —
+  the one identity attribute trace spans carry, used for OpenObserve's
+  Sessions user column) from every span. Unset means enabled; a set-but-
+  unparseable value fails closed and strips it too.
 - Auth resolution is the same for all three channels:
   `OPENOBSERVE_<CH>_TOKEN ?? OPENOBSERVE_TOKEN` +
   `OPENOBSERVE_<CH>_EMAIL ?? OPENOBSERVE_EMAIL`
@@ -146,6 +150,17 @@ Enqueue a review (or dequeue/requeue to move the queue), then:
   `gen_ai.operation.name`, provider/model, token usage (prompt/completion/
   input/output/total, cache read/write) and `gen_ai.usage.cost`, so OO's
   AI observability views populate.
+- **One job = one AI Observability session**: every span shares
+  `gen_ai.conversation.id`/`session.id` = `maomao-job-<id>` (both keys —
+  `session.id` covers older OO builds whose session extractor predates the
+  gen_ai key) and `gen_ai.agent.name`/`.id` per stage (reviewer role,
+  `maomao-router`, `maomao-aggregator`, `maomao-internal-escalation`), so
+  Sessions, Agent Graph and Insights group a job's model calls as one
+  conversation. `user.id` = the PR author fills the Sessions user column;
+  `TELEMETRY_USER_ID=false` opts out (see §2). Session/signal data appears
+  with a lag — OO's stream-schema cache, ingest-time agent-registry
+  discovery and the scheduled `_agent_signals` rollup all take time, so
+  give it a little while after the first job lands.
 - **Cost attrs are decoder-compat**: OO's strict traces decoder rejects
   fractional `doubleValue` attributes (`Invalid json: invalid type: map,
   expected f64`) — an envelope bug that silently dropped cost-bearing

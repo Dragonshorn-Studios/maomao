@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import type { JobRow, JobStore, ReviewerRunRow, StackMemberRow } from "../jobs/store.js";
 import { buildJobSummary, type JobSummaryOptions } from "../jobs/summary.js";
+import { parseBoolean } from "../util.js";
 import {
   attr,
   compatDoubleAttr,
@@ -39,8 +40,21 @@ import type { TelemetryChannelConfig, TelemetrySharedConfig } from "./settings.j
  * `maomao.stack.member` marker so the trace still shows them.
  *
  * Usage metadata only (hard rule from #139): ids, states, durations, token
- * counts — no PII, secrets, diff text, or review bodies.
+ * counts — no PII, secrets, diff text, or review bodies. The one identity
+ * attribute is `user.id` = the PR author's forge login (public in the PR
+ * itself), emitted for OpenObserve's Sessions user column.
  */
+
+/**
+ * Whether trace spans may carry `user.id` (the PR author's forge login).
+ * Unset = enabled (the Sessions user column the attribute exists for). Once
+ * the variable is set the parse is fail-closed: a typo like `flase` strips
+ * the identity attr rather than silently re-enabling identity egress.
+ */
+export const telemetryUserIdEnabled = (env: NodeJS.ProcessEnv): boolean =>
+  env.TELEMETRY_USER_ID == null || env.TELEMETRY_USER_ID.trim() === ""
+    ? true
+    : parseBoolean(env.TELEMETRY_USER_ID, false);
 
 /** Deterministic ids let a member job join its stack's trace without storage. */
 const hexId = (seed: string, len: number): string => createHash("sha256").update(seed).digest("hex").slice(0, len);
@@ -77,6 +91,8 @@ const genAiAttrs = (opts: {
   responded?: boolean;
   /** Session id grouping a job's model calls for OO AI Observability Sessions. */
   conversationId?: string | null;
+  /** Session owner for the Sessions user column (the PR author). */
+  userId?: string | null;
   /** Agent node identity for OO Agent Graph/Insights rollups. */
   agentName?: string | null;
   agentId?: string | null;
@@ -90,7 +106,16 @@ const genAiAttrs = (opts: {
 }): OtlpAttribute[] => {
   const attrs: OtlpAttribute[] = [attr("gen_ai.operation.name", "chat")];
   if (opts.provider) attrs.push(attr("gen_ai.provider.name", opts.provider));
-  if (opts.conversationId) attrs.push(attr("gen_ai.conversation.id", opts.conversationId));
+  if (opts.conversationId) {
+    attrs.push(
+      attr("gen_ai.conversation.id", opts.conversationId),
+      // OTel session.id is the first key OO's session-id extractor checks and
+      // canonicalizes to gen_ai_conversation_id; emitting both covers builds
+      // whose extractor predates the gen_ai key.
+      attr("session.id", opts.conversationId),
+    );
+  }
+  if (opts.userId) attrs.push(attr("user.id", opts.userId));
   if (opts.agentName) attrs.push(attr("gen_ai.agent.name", opts.agentName));
   if (opts.agentId) attrs.push(attr("gen_ai.agent.id", opts.agentId));
   if (opts.model) {
@@ -168,6 +193,7 @@ export function jobTrace(
   opts?: JobSummaryOptions,
   membership: { stackJobId: number; position: number } | null = null,
   members: Pick<StackMemberRow, "position" | "pr_number" | "member_job_id" | "state">[] = [],
+  includeUserId = true,
 ): OtlpSpan[] {
   const summary = buildJobSummary(job, runs, opts);
   const startMs = msOf(job.started_at) ?? msOf(job.created_at) ?? Date.now();
@@ -177,6 +203,9 @@ export function jobTrace(
   // The job is the session: every LLM-call span in this trace shares it so
   // OpenObserve Sessions/Insights group a job's model calls as one conversation.
   const conversationId = `maomao-job-${job.id}`;
+  // TELEMETRY_USER_ID=false strips the one identity attribute for deployments
+  // whose data-governance policy bars author logins at the OO endpoint.
+  const userId = includeUserId ? job.pr_author : null;
 
   const rootAttrs: OtlpAttribute[] = [
     attr("job_id", job.id),
@@ -188,6 +217,11 @@ export function jobTrace(
     attr("attempt", summary.attempt),
     attr("usage_complete", summary.usage_complete),
     attr("head_sha", job.head_sha),
+    // The whole trace is the session — tag the root too, not just LLM spans.
+    attr("session.id", conversationId),
+    attr("gen_ai.conversation.id", conversationId),
+    // Same falsy gate as genAiAttrs' userId — no empty-string user.id.
+    ...(userId ? [attr("user.id", userId)] : []),
   ];
   const createdMs = msOf(job.created_at);
   if (createdMs != null && msOf(job.started_at) != null) {
@@ -237,6 +271,7 @@ export function jobTrace(
           // "fallback" means the router call failed and diagnosis decided.
           responded: job.routing_source !== "fallback",
           conversationId,
+          userId,
           agentName: "maomao-router",
           agentId: "maomao-router",
           totalTokens: job.routing_total_tokens,
@@ -285,6 +320,7 @@ export function jobTrace(
               model: run.model,
               responded: run.state === "done",
               conversationId,
+              userId,
               agentName: run.role,
               agentId: `reviewer.${run.role}`,
               promptName: run.role,
@@ -339,6 +375,7 @@ export function jobTrace(
               // both left no model response; only "done" + no fallback did.
               responded: job.aggregator_state === "done" && job.aggregator_fallback !== 1,
               conversationId,
+              userId,
               agentName: "maomao-aggregator",
               agentId: "maomao-aggregator",
               totalTokens: job.aggregator_total_tokens,
@@ -381,6 +418,7 @@ export function jobTrace(
           model: job.internal_escalation_model,
           responded: job.internal_escalation_state === "done",
           conversationId,
+          userId,
           agentName: "maomao-internal-escalation",
           agentId: "maomao-internal-escalation",
           totalTokens: job.internal_escalation_total_tokens,
@@ -441,7 +479,14 @@ export function exportTerminalJobTraces(
     const membership = store.stackMembershipForJobs([job.id]).get(job.id) ?? null;
     const members = job.job_type === "stack_review" ? store.listStackMembers(job.id) : [];
     exportTraces(
-      jobTrace(job, opts?.runs ?? store.listReviewerRuns(job.id), opts, membership, members),
+      jobTrace(
+        job,
+        opts?.runs ?? store.listReviewerRuns(job.id),
+        opts,
+        membership,
+        members,
+        telemetryUserIdEnabled(env),
+      ),
       env,
       stored,
       shared,

@@ -1,8 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { openDb } from "../db.js";
 import { JobStore } from "../jobs/store.js";
-import { exportTerminalJobTraces, jobTrace, traceIdForJob } from "./traces.js";
-import { flushOtlpExports, nanoTime, type OtlpSpan } from "./otlp.js";
+import { exportTerminalJobTraces, jobTrace, telemetryUserIdEnabled, traceIdForJob } from "./traces.js";
+import { flushOtlpExports, nanoTime, type OtlpAttribute, type OtlpSpan } from "./otlp.js";
 
 const TRACES_URL = "https://oo.example.com/api/default/v1/traces";
 
@@ -154,9 +154,15 @@ describe("jobTrace", () => {
     expect(attrValue(reviewer, "cost_usd_micros")).toEqual({ intValue: "10000" });
     expect(attrValue(reviewer, "gen_ai.prompt.name")).toEqual({ stringValue: "correctness" });
     expect(attrValue(reviewer, "gen_ai.conversation.id")).toEqual({ stringValue: `maomao-job-${jobId}` });
+    expect(attrValue(reviewer, "session.id")).toEqual({ stringValue: `maomao-job-${jobId}` });
+    expect(attrValue(reviewer, "user.id")).toEqual({ stringValue: "dev" });
     expect(attrValue(reviewer, "gen_ai.agent.name")).toEqual({ stringValue: "correctness" });
     expect(attrValue(reviewer, "gen_ai.agent.id")).toEqual({ stringValue: "reviewer.correctness" });
     expect(attrValue(reviewer, "error.type")).toBeUndefined();
+    const root = jobTrace(store.getJob(jobId)!, store.listReviewerRuns(jobId))[0];
+    expect(attrValue(root, "gen_ai.conversation.id")).toEqual({ stringValue: `maomao-job-${jobId}` });
+    expect(attrValue(root, "session.id")).toEqual({ stringValue: `maomao-job-${jobId}` });
+    expect(attrValue(root, "user.id")).toEqual({ stringValue: "dev" });
   });
 
   it("marks a failed reviewer run with an exception event, not first_output", () => {
@@ -243,9 +249,56 @@ describe("jobTrace", () => {
     for (const [name, agent] of expectations) {
       const span = spans.find((s) => s.name === name)!;
       expect(attrValue(span, "gen_ai.conversation.id")).toEqual({ stringValue: `maomao-job-${jobId}` });
+      expect(attrValue(span, "session.id")).toEqual({ stringValue: `maomao-job-${jobId}` });
+      expect(attrValue(span, "user.id")).toEqual({ stringValue: "dev" });
       expect(attrValue(span, "gen_ai.agent.name")).toEqual({ stringValue: agent });
       expect(attrValue(span, "gen_ai.agent.id")).toEqual({ stringValue: agent });
     }
+  });
+
+  it("omits user.id everywhere when pr_author is empty", () => {
+    const store = makeStore();
+    const jobId = seedJob(store);
+    store["db"].prepare(`UPDATE jobs SET pr_author = '' WHERE id = ?`).run(jobId);
+    const run = store.listReviewerRuns(jobId)[0];
+    store["db"]
+      .prepare(
+        `UPDATE reviewer_runs SET state = 'done', model = 'gpt-5', started_at = ?, finished_at = ?, total_tokens = 5 WHERE id = ?`,
+      )
+      .run("2026-10-01T08:00:01.000Z", "2026-10-01T08:00:02.000Z", run.id);
+    const spans = jobTrace(store.getJob(jobId)!, store.listReviewerRuns(jobId));
+    expect(spans.some((s) => s.name === "maomao.stage.reviewer")).toBe(true);
+    for (const span of spans) {
+      expect(attrValue(span, "user.id")).toBeUndefined();
+    }
+  });
+
+  it("omits user.id everywhere when includeUserId is false (TELEMETRY_USER_ID=false)", () => {
+    const store = makeStore();
+    const jobId = seedJob(store);
+    const run = store.listReviewerRuns(jobId)[0];
+    store["db"]
+      .prepare(
+        `UPDATE reviewer_runs SET state = 'done', model = 'gpt-5', started_at = ?, finished_at = ?, total_tokens = 5 WHERE id = ?`,
+      )
+      .run("2026-10-01T08:00:01.000Z", "2026-10-01T08:00:02.000Z", run.id);
+    const spans = jobTrace(
+      store.getJob(jobId)!,
+      store.listReviewerRuns(jobId),
+      undefined,
+      null,
+      [],
+      false,
+    );
+    expect(spans.some((s) => s.name === "maomao.stage.reviewer")).toBe(true);
+    for (const span of spans) {
+      expect(attrValue(span, "user.id")).toBeUndefined();
+    }
+    // The session grouping itself is unaffected — only the identity attr.
+    expect(attrValue(spans[0], "session.id")).toEqual({ stringValue: `maomao-job-${jobId}` });
+    expect(attrValue(spans[0], "gen_ai.conversation.id")).toEqual({
+      stringValue: `maomao-job-${jobId}`,
+    });
   });
 
   it("caps exception.message at 500 chars", () => {
@@ -537,6 +590,61 @@ describe("exportTerminalJobTraces", () => {
     ) as OtlpSpan;
     expect(attrValue(reviewer, "state")).toEqual({ stringValue: "stale" });
     expect(reviewer.status).toEqual({ code: 0 });
+  });
+
+  it("TELEMETRY_USER_ID=false strips user.id through the export path", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true, status: 200 });
+    vi.stubGlobal("fetch", fetchMock);
+    vi.stubEnv("OPENOBSERVE_TRACES_URL", TRACES_URL);
+    vi.stubEnv("TELEMETRY_USER_ID", "false");
+    const store = makeStore();
+    const jobId = seedJob(store);
+    const run = store.listReviewerRuns(jobId)[0];
+    store["db"]
+      .prepare(
+        `UPDATE reviewer_runs SET state = 'done', model = 'gpt-5', started_at = ?, finished_at = ?, total_tokens = 5 WHERE id = ?`,
+      )
+      .run("2026-10-01T08:00:01.000Z", "2026-10-01T08:00:02.000Z", run.id);
+    store.setJobState(jobId, "completed");
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
+    const body = JSON.parse((fetchMock.mock.calls[0] as [string, RequestInit])[1].body as string);
+    const spans = body.resourceSpans[0].scopeSpans[0].spans;
+    for (const span of spans) {
+      expect(span.attributes.find((a: OtlpAttribute) => a.key === "user.id")).toBeUndefined();
+    }
+    const root = spans.find((s: OtlpSpan) => s.name === "maomao.job.pr_review") as OtlpSpan;
+    expect(root.attributes).toEqual(
+      expect.arrayContaining([
+        { key: "session.id", value: { stringValue: `maomao-job-${jobId}` } },
+        { key: "gen_ai.conversation.id", value: { stringValue: `maomao-job-${jobId}` } },
+      ]),
+    );
+  });
+
+  it("telemetryUserIdEnabled fails closed on set-but-unparseable values", () => {
+    expect(telemetryUserIdEnabled({})).toBe(true);
+    expect(telemetryUserIdEnabled({ TELEMETRY_USER_ID: "true" })).toBe(true);
+    expect(telemetryUserIdEnabled({ TELEMETRY_USER_ID: "false" })).toBe(false);
+    expect(telemetryUserIdEnabled({ TELEMETRY_USER_ID: "0" })).toBe(false);
+    // A typo'd opt-out strips the identity attr rather than silently emitting.
+    expect(telemetryUserIdEnabled({ TELEMETRY_USER_ID: "flase" })).toBe(false);
+  });
+
+  it("emits user.id = pr_author by default through the export path", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true, status: 200 });
+    vi.stubGlobal("fetch", fetchMock);
+    vi.stubEnv("OPENOBSERVE_TRACES_URL", TRACES_URL);
+    const store = makeStore();
+    const jobId = seedJob(store);
+    store.setJobState(jobId, "completed");
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
+    const body = JSON.parse((fetchMock.mock.calls[0] as [string, RequestInit])[1].body as string);
+    const root = body.resourceSpans[0].scopeSpans[0].spans.find(
+      (s: OtlpSpan) => s.name === "maomao.job.pr_review",
+    ) as OtlpSpan;
+    expect(root.attributes).toEqual(
+      expect.arrayContaining([{ key: "user.id", value: { stringValue: "dev" } }]),
+    );
   });
 
   it("never throws when the store lookup fails", () => {
