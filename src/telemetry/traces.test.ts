@@ -205,11 +205,57 @@ describe("jobTrace", () => {
     store["db"]
       .prepare(`UPDATE reviewer_runs SET state = 'stale', finished_at = ? WHERE id = ?`)
       .run("2026-10-01T08:00:02.000Z", run.id);
+    store["db"]
+      .prepare(`INSERT INTO reviewer_runs (job_id, role, title, state, finished_at) VALUES (?, 'perf', 'Perf', 'cancelled', ?)`)
+      .run(jobId, "2026-10-01T08:00:02.000Z");
     const spans = jobTrace(store.getJob(jobId)!, store.listReviewerRuns(jobId));
-    const reviewer = spans.find((s) => s.name === "maomao.stage.reviewer")!;
-    expect(reviewer.status).toEqual({ code: 0 });
-    expect(attrValue(reviewer, "error.type")).toBeUndefined();
-    expect(reviewer.events).toBeUndefined();
+    const reviewers = spans.filter((s) => s.name === "maomao.stage.reviewer");
+    expect(reviewers).toHaveLength(2);
+    for (const reviewer of reviewers) {
+      expect(reviewer.status).toEqual({ code: 0 });
+      expect(attrValue(reviewer, "error.type")).toBeUndefined();
+      expect(reviewer.events).toBeUndefined();
+    }
+  });
+
+  it("marks routing, aggregation, and escalation spans with gen_ai agent + conversation ids", () => {
+    const store = makeStore();
+    const jobId = seedJob(store);
+    store.patchJob(jobId, {
+      started_at: "2026-10-01T08:00:00.000Z",
+      routing_state: "done",
+      routing_duration_ms: 120,
+      routing_model: "m7",
+      aggregator_state: "done",
+      aggregator_started_at: "2026-10-01T08:00:10.000Z",
+      aggregator_finished_at: "2026-10-01T08:00:12.000Z",
+      aggregator_model: "m-agg",
+      internal_escalation_state: "done",
+      internal_escalation_model: "m-esc",
+      internal_escalation_duration_ms: 500,
+    });
+    const spans = jobTrace(store.getJob(jobId)!, store.listReviewerRuns(jobId));
+    const expectations: [string, string][] = [
+      ["maomao.stage.routing", "maomao-router"],
+      ["maomao.stage.aggregation", "maomao-aggregator"],
+      ["maomao.stage.internal_escalation", "maomao-internal-escalation"],
+    ];
+    for (const [name, agent] of expectations) {
+      const span = spans.find((s) => s.name === name)!;
+      expect(attrValue(span, "gen_ai.conversation.id")).toEqual({ stringValue: `maomao-job-${jobId}` });
+      expect(attrValue(span, "gen_ai.agent.name")).toEqual({ stringValue: agent });
+      expect(attrValue(span, "gen_ai.agent.id")).toEqual({ stringValue: agent });
+    }
+  });
+
+  it("caps exception.message at 500 chars", () => {
+    const store = makeStore();
+    const jobId = seedJob(store);
+    const reason = "x".repeat(600);
+    store.setJobState(jobId, "failed", { failure_reason: reason });
+    const root = jobTrace(store.getJob(jobId)!, store.listReviewerRuns(jobId))[0];
+    const [event] = root.events!;
+    expect(eventAttr(event, "exception.message")).toEqual({ stringValue: reason.slice(0, 500) });
   });
 
   it("marks a stale job's root span UNSET rather than error", () => {
@@ -430,6 +476,67 @@ describe("exportTerminalJobTraces", () => {
     expect(body.resourceSpans[0].resource.attributes).toEqual(
       expect.arrayContaining([{ key: "service.name", value: { stringValue: "maomao" } }]),
     );
+  });
+
+  it("carries span events through the OTLP envelope", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true, status: 200 });
+    vi.stubGlobal("fetch", fetchMock);
+    vi.stubEnv("OPENOBSERVE_TRACES_URL", TRACES_URL);
+    const store = makeStore();
+    const jobId = seedJob(store);
+    store.setJobState(jobId, "failed", { failure_reason: "boom" });
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
+    const body = JSON.parse((fetchMock.mock.calls[0] as [string, RequestInit])[1].body as string);
+    const root = body.resourceSpans[0].scopeSpans[0].spans.find(
+      (s: OtlpSpan) => s.name === "maomao.job.pr_review",
+    ) as OtlpSpan;
+    expect(root.events?.[0]?.name).toBe("exception");
+    expect(root.events?.[0]?.attributes).toEqual(
+      expect.arrayContaining([{ key: "exception.message", value: { stringValue: "boom" } }]),
+    );
+  });
+
+  it("emits a staled in-flight run as 'stale', not still 'running'", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true, status: 200 });
+    vi.stubGlobal("fetch", fetchMock);
+    vi.stubEnv("OPENOBSERVE_TRACES_URL", TRACES_URL);
+    const store = makeStore();
+    const jobId = seedJob(store);
+    const run = store.listReviewerRuns(jobId)[0];
+    store["db"]
+      .prepare(`UPDATE reviewer_runs SET state = 'running', started_at = ? WHERE id = ?`)
+      .run("2026-10-01T08:00:01.000Z", run.id);
+    store["db"].prepare(`UPDATE jobs SET state = 'reviewing', started_at = ? WHERE id = ?`).run("2026-10-01T08:00:00.000Z", jobId);
+    // A new head SHA stales the in-flight job; the emitted trace must carry
+    // the post-retirement run state, not the pre-sweep 'running' snapshot.
+    store.enqueue({
+      repoFullName: "acme/widgets",
+      repoOwner: "acme",
+      repoName: "widgets",
+      installationId: 9,
+      prNumber: 4,
+      prTitle: "t",
+      prBody: "body",
+      prHtmlUrl: "https://github.com/acme/widgets/pull/4",
+      prAuthor: "dev",
+      baseSha: "base",
+      headSha: "newhead",
+      baseRef: "main",
+      headRef: "feat",
+      jobType: "pr_review",
+      reviewers: [{ role: "correctness", title: "Correctness" }],
+    });
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalled());
+    const envelope = fetchMock.mock.calls.find((call) =>
+      (call[1] as RequestInit).body?.toString().includes("maomao.stage.reviewer"),
+    );
+    expect(envelope).toBeTruthy();
+    const body = JSON.parse((envelope![1] as RequestInit).body as string);
+    const reviewer = body.resourceSpans[0].scopeSpans[0].spans.find(
+      (s: OtlpSpan) => s.name === "maomao.stage.reviewer",
+    ) as OtlpSpan;
+    expect(attrValue(reviewer, "state")).toEqual({ stringValue: "stale" });
+    expect(reviewer.status).toEqual({ code: 0 });
   });
 
   it("never throws when the store lookup fails", () => {
