@@ -202,7 +202,8 @@ export function jobTrace(
     // The whole trace is the session — tag the root too, not just LLM spans.
     attr("session.id", conversationId),
     attr("gen_ai.conversation.id", conversationId),
-    attr("user.id", job.pr_author),
+    // Same falsy gate as genAiAttrs' userId — no empty-string user.id.
+    ...(job.pr_author ? [attr("user.id", job.pr_author)] : []),
   ];
   const createdMs = msOf(job.created_at);
   if (createdMs != null && msOf(job.started_at) != null) {

@@ -249,8 +249,27 @@ describe("jobTrace", () => {
     for (const [name, agent] of expectations) {
       const span = spans.find((s) => s.name === name)!;
       expect(attrValue(span, "gen_ai.conversation.id")).toEqual({ stringValue: `maomao-job-${jobId}` });
+      expect(attrValue(span, "session.id")).toEqual({ stringValue: `maomao-job-${jobId}` });
+      expect(attrValue(span, "user.id")).toEqual({ stringValue: "dev" });
       expect(attrValue(span, "gen_ai.agent.name")).toEqual({ stringValue: agent });
       expect(attrValue(span, "gen_ai.agent.id")).toEqual({ stringValue: agent });
+    }
+  });
+
+  it("omits user.id everywhere when pr_author is empty", () => {
+    const store = makeStore();
+    const jobId = seedJob(store);
+    store["db"].prepare(`UPDATE jobs SET pr_author = '' WHERE id = ?`).run(jobId);
+    const run = store.listReviewerRuns(jobId)[0];
+    store["db"]
+      .prepare(
+        `UPDATE reviewer_runs SET state = 'done', model = 'gpt-5', started_at = ?, finished_at = ?, total_tokens = 5 WHERE id = ?`,
+      )
+      .run("2026-10-01T08:00:01.000Z", "2026-10-01T08:00:02.000Z", run.id);
+    const spans = jobTrace(store.getJob(jobId)!, store.listReviewerRuns(jobId));
+    expect(spans.some((s) => s.name === "maomao.stage.reviewer")).toBe(true);
+    for (const span of spans) {
+      expect(attrValue(span, "user.id")).toBeUndefined();
     }
   });
 
