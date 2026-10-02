@@ -349,6 +349,74 @@ describe("exportTraces/exportMetrics", () => {
     ]);
   });
 
+  it("carries the sanitized upstream error body into the failure event", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: false,
+      status: 400,
+      text: async () => `invalid envelope: expected resourceSpans — see ${TRACES_URL}\nignored`,
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const err = vi.spyOn(console, "error").mockImplementation(() => {});
+    setAppLogSink(captureAppLog);
+    vi.stubEnv("OPENOBSERVE_TRACES_URL", TRACES_URL);
+    exportTraces([makeSpan()]);
+    await flushOtlpExports();
+    await flushIngestPosts();
+    const [event] = appLogLines.map((line) => JSON.parse(line) as Record<string, unknown>);
+    expect(event).toEqual(
+      expect.objectContaining({
+        event: "maomao.telemetry_export_failed",
+        signal: "traces",
+        status: 400,
+        response: "invalid envelope: expected resourceSpans — see <otlp-url> ignored",
+      }),
+    );
+    expect(err).toHaveBeenCalledWith(expect.stringContaining("invalid envelope"));
+  });
+
+  it("redacts a credentialed endpoint URL before truncating long error bodies", async () => {
+    const credentialed = "https://keystone:s3cr3t@oo.example.com/api/default/v1/traces";
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: false,
+      status: 400,
+      text: async () => `${"x".repeat(285)} ${credentialed} tail`,
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    setAppLogSink(captureAppLog);
+    vi.stubEnv("OPENOBSERVE_TRACES_URL", credentialed);
+    exportTraces([makeSpan()]);
+    await flushOtlpExports();
+    await flushIngestPosts();
+    const [event] = appLogLines.map((line) => JSON.parse(line) as Record<string, unknown>);
+    // Truncate-first would leak the un-redacted 'https://keystone:s3' prefix.
+    expect(event.response).not.toContain("keystone");
+    expect(event.response).not.toContain("s3cr3t");
+    expect(event.response).not.toContain("oo.example.com");
+  });
+
+  it("redacts the Authorization header before truncating long error bodies", async () => {
+    vi.stubEnv("OPENOBSERVE_TRACES_URL", TRACES_URL);
+    vi.stubEnv("OPENOBSERVE_EMAIL", "test@example.com");
+    vi.stubEnv("OPENOBSERVE_TOKEN", "tok");
+    const sentAuth = `Basic ${Buffer.from("test@example.com:tok").toString("base64")}`;
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: false,
+      status: 400,
+      text: async () => `${"x".repeat(285)} ${sentAuth} tail`,
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    setAppLogSink(captureAppLog);
+    exportTraces([makeSpan()]);
+    await flushOtlpExports();
+    await flushIngestPosts();
+    const [event] = appLogLines.map((line) => JSON.parse(line) as Record<string, unknown>);
+    // A reflected auth value severed by the 300-char cut must not survive partially.
+    expect(event.response).not.toContain("Basic");
+    expect(event.response).not.toContain(Buffer.from("test@example.com:tok").toString("base64").slice(0, 10));
+  });
+
   it("posts failure events to the logs channel config, not the failed channel's", async () => {
     // Stored metrics endpoint fails while a stored logs endpoint is healthy:
     // the app-log event must land on the logs ingest, not the OTLP endpoint.

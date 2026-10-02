@@ -141,12 +141,23 @@ Enqueue a review (or dequeue/requeue to move the queue), then:
   `pr_review` posts its spans the moment *it* finishes, usually before the
   stack's root span exists — OO resolves the parent when the stack job
   lands. A member belonging to several stack runs joins the latest.
+- **LLM-call spans carry `gen_ai.*` attributes** — reviewer, routing,
+  aggregation and internal-escalation stages are CLIENT-kind spans with
+  `gen_ai.operation.name`, provider/model, token usage (prompt/completion/
+  input/output/total, cache read/write) and `gen_ai.usage.cost`, so OO's
+  AI observability views populate.
+- **Cost attrs are decoder-compat**: OO's strict traces decoder rejects
+  fractional `doubleValue` attributes (`Invalid json: invalid type: map,
+  expected f64`) — an envelope bug that silently dropped cost-bearing
+  traces before. Fractional costs therefore emit `cost_usd` as a string
+  plus an exact integer `cost_usd_micros` twin; `gen_ai.usage.cost`
+  strings are coerced back to numbers by OO server-side.
 
 ## 5. Troubleshooting
 
 | stderr line | Meaning |
 |---|---|
-| `otlp: <signal> export returned <status>` | Endpoint reachable but rejected — usually wrong org in the URL or bad credentials (401/403). |
+| `otlp: <signal> export returned <status>: <body>` | Endpoint reachable but rejected — the truncated upstream error body follows the status (400 = payload rejected, 401/403 = auth, 404 = path/org). The same status+body lands in the `maomao.telemetry_export_failed` event's `status`/`response` fields on the logs stream. |
 | `otlp: <signal> export failed: <err>` | Network/TLS error reaching the endpoint; URL path typos surface here. |
 | `otlp: dropping <signal> export: queue full` | More than 256 pending POSTs — endpoint is down or very slow. |
 | `otlp: <signal> endpoint uses http — credentials are sent in cleartext` | URL scheme is `http://` with auth configured. |

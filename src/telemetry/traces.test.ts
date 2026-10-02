@@ -118,6 +118,107 @@ describe("jobTrace", () => {
     expect(reviewer.status).toEqual({ code: 1 });
   });
 
+  it("marks LLM-call spans with gen_ai attributes for OpenObserve AI observability", () => {
+    const store = makeStore();
+    const jobId = seedJob(store);
+    const run = store.listReviewerRuns(jobId)[0];
+    store["db"]
+      .prepare(
+        `UPDATE reviewer_runs SET state = 'done', model = 'gpt-5', provider = 'openai', started_at = ?, finished_at = ?, prompt_tokens = 70, completion_tokens = 30, total_tokens = 100, cost = 0.01, cache_read_tokens = 5 WHERE id = ?`,
+      )
+      .run("2026-10-01T08:00:01.000Z", "2026-10-01T08:00:02.000Z", run.id);
+    store.setJobState(jobId, "completed");
+    const reviewer = jobTrace(store.getJob(jobId)!, store.listReviewerRuns(jobId)).find(
+      (s) => s.name === "maomao.stage.reviewer",
+    )!;
+    expect(reviewer.kind).toBe(3);
+    expect(attrValue(reviewer, "gen_ai.operation.name")).toEqual({ stringValue: "chat" });
+    expect(attrValue(reviewer, "gen_ai.provider.name")).toEqual({ stringValue: "openai" });
+    expect(attrValue(reviewer, "gen_ai.request.model")).toEqual({ stringValue: "gpt-5" });
+    expect(attrValue(reviewer, "gen_ai.usage.prompt_tokens")).toEqual({ intValue: "70" });
+    expect(attrValue(reviewer, "gen_ai.usage.completion_tokens")).toEqual({ intValue: "30" });
+    expect(attrValue(reviewer, "gen_ai.usage.input_tokens")).toEqual({ intValue: "70" });
+    expect(attrValue(reviewer, "gen_ai.usage.output_tokens")).toEqual({ intValue: "30" });
+    expect(attrValue(reviewer, "gen_ai.usage.total_tokens")).toEqual({ intValue: "100" });
+    expect(attrValue(reviewer, "gen_ai.usage.cache_read_tokens")).toEqual({ intValue: "5" });
+    // Fractional doubles go out as strings — OO's strict decoder 400s the
+    // whole envelope on {"doubleValue":0.01}; cost_usd_micros keeps it numeric.
+    expect(attrValue(reviewer, "gen_ai.usage.cost")).toEqual({ stringValue: "0.01" });
+    expect(attrValue(reviewer, "cost_usd")).toEqual({ stringValue: "0.01" });
+    expect(attrValue(reviewer, "cost_usd_micros")).toEqual({ intValue: "10000" });
+    expect(attrValue(reviewer, "gen_ai.prompt.name")).toEqual({ stringValue: "correctness" });
+    expect(attrValue(reviewer, "error.type")).toBeUndefined();
+  });
+
+  it("reports a budget-degraded aggregation as INTERNAL, not an LLM call", () => {
+    const store = makeStore();
+    const jobId = seedJob(store);
+    store.patchJob(jobId, {
+      started_at: "2026-10-01T08:00:00.000Z",
+      aggregator_state: "done",
+      aggregator_started_at: "2026-10-01T08:00:10.000Z",
+      aggregator_finished_at: "2026-10-01T08:00:10.000Z",
+      aggregator_model: null,
+      aggregator_duration_ms: 0,
+      aggregator_fallback: 1,
+    });
+    const agg = jobTrace(store.getJob(jobId)!, store.listReviewerRuns(jobId)).find(
+      (s) => s.name === "maomao.stage.aggregation",
+    )!;
+    expect(agg.kind).toBe(1);
+    expect(attrValue(agg, "gen_ai.operation.name")).toBeUndefined();
+    expect(attrValue(agg, "fallback")).toEqual({ boolValue: true });
+  });
+
+  it("does not fabricate gen_ai.response.model on failed stage calls", () => {
+    const store = makeStore();
+    const jobId = seedJob(store);
+    store.patchJob(jobId, {
+      started_at: "2026-10-01T08:00:00.000Z",
+      routing_state: "done",
+      routing_source: "fallback",
+      routing_duration_ms: 1200,
+      routing_model: "gpt-5",
+      aggregator_state: "done",
+      aggregator_started_at: "2026-10-01T08:00:10.000Z",
+      aggregator_finished_at: "2026-10-01T08:00:11.000Z",
+      aggregator_model: "gpt-5",
+      aggregator_duration_ms: 1000,
+      aggregator_fallback: 1,
+      internal_escalation_state: "failed",
+      internal_escalation_model: "gpt-5",
+      internal_escalation_duration_ms: 3000,
+    });
+    const spans = jobTrace(store.getJob(jobId)!, store.listReviewerRuns(jobId));
+    for (const name of ["maomao.stage.routing", "maomao.stage.aggregation", "maomao.stage.internal_escalation"]) {
+      const span = spans.find((s) => s.name === name)!;
+      expect(attrValue(span, "gen_ai.request.model")).toEqual({ stringValue: "gpt-5" });
+      expect(attrValue(span, "gen_ai.response.model")).toBeUndefined();
+      expect(span.status?.code).toBe(2);
+    }
+  });
+
+  it("treats an aggregator_state=failed row as a failed call, not a response", () => {
+    const store = makeStore();
+    const jobId = seedJob(store);
+    // Job died mid-aggregation: model still seeded, fallback never latched.
+    store.patchJob(jobId, {
+      started_at: "2026-10-01T08:00:00.000Z",
+      aggregator_state: "failed",
+      aggregator_started_at: "2026-10-01T08:00:10.000Z",
+      aggregator_finished_at: "2026-10-01T08:00:11.000Z",
+      aggregator_model: "gpt-5",
+      aggregator_duration_ms: 1000,
+    });
+    const agg = jobTrace(store.getJob(jobId)!, store.listReviewerRuns(jobId)).find(
+      (s) => s.name === "maomao.stage.aggregation",
+    )!;
+    expect(agg.kind).toBe(3);
+    expect(attrValue(agg, "gen_ai.request.model")).toEqual({ stringValue: "gpt-5" });
+    expect(attrValue(agg, "gen_ai.response.model")).toBeUndefined();
+    expect(agg.status?.code).toBe(2);
+  });
+
   it("emits aggregation and internal-escalation spans in stage order", () => {
     const store = makeStore();
     const jobId = seedJob(store);

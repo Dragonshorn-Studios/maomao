@@ -61,6 +61,26 @@ export function attr(key: string, value: string | number | boolean): OtlpAttribu
   return { key, value: { doubleValue: value } };
 }
 
+/** Span kind / status as int enum values — OpenObserve's JSON decoder requires the i32 form. */
+export const SPAN_KIND_INTERNAL = 1;
+export const SPAN_KIND_CLIENT = 3;
+export const STATUS_CODE_OK = 1;
+export const STATUS_CODE_ERROR = 2;
+
+/**
+ * OpenObserve's strict OTLP-JSON span decoder rejects fractional
+ * `doubleValue` ("invalid type: map, expected f64"), dropping the whole
+ * envelope — verified against v1.0.4 (integral doubles and string forms of
+ * integers pass; fractional values 400). Emit integral doubles as
+ * `doubleValue`, fractional ones as `stringValue`; callers that need the
+ * number machine-readable should also emit an `intValue` micros twin.
+ */
+export function compatDoubleAttr(key: string, value: number): OtlpAttribute {
+  return Number.isInteger(value)
+    ? { key, value: { doubleValue: value } }
+    : { key, value: { stringValue: String(value) } };
+}
+
 /** OTLP/JSON span shape; traceId/spanId are lowercase hex (32/16 chars). */
 export interface OtlpSpan {
   traceId: string;
@@ -272,11 +292,24 @@ function queueExport(
         signal: AbortSignal.timeout(10_000),
       });
       if (!response.ok) {
-        console.error(`otlp: ${signal} export returned ${response.status}`);
+        // The upstream error body is the fastest route to "why" (auth vs
+        // malformed envelope vs wrong endpoint) — carry it, sanitized and
+        // capped, into the app-log event and stderr.
+        const raw = typeof response.text === "function" ? await response.text().catch(() => "") : "";
+        const detail = redactEndpointError(raw.replace(/\s+/g, " ").trim(), endpoint.url);
+        const auth = endpoint.headers.authorization;
+        const safeDetail = (auth ? detail.split(auth).join("[redacted]") : detail).slice(0, 300);
+        console.error(`otlp: ${signal} export returned ${response.status}${safeDetail ? `: ${safeDetail}` : ""}`);
         if (appLogs) {
           emitAppLog(
             "telemetry_export_failed",
-            { level: "error", signal, status: response.status, url: maskUrlCredentials(endpoint.url) },
+            {
+              level: "error",
+              signal,
+              status: response.status,
+              url: maskUrlCredentials(endpoint.url),
+              ...(safeDetail ? { response: safeDetail } : {}),
+            },
             env,
             logsStored,
             shared,
