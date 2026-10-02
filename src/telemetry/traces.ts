@@ -39,7 +39,9 @@ import type { TelemetryChannelConfig, TelemetrySharedConfig } from "./settings.j
  * `maomao.stack.member` marker so the trace still shows them.
  *
  * Usage metadata only (hard rule from #139): ids, states, durations, token
- * counts — no PII, secrets, diff text, or review bodies.
+ * counts — no PII, secrets, diff text, or review bodies. The one identity
+ * attribute is `user.id` = the PR author's forge login (public in the PR
+ * itself), emitted for OpenObserve's Sessions user column.
  */
 
 /** Deterministic ids let a member job join its stack's trace without storage. */
