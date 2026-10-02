@@ -35,6 +35,10 @@ function attrValue(span: OtlpSpan, key: string) {
   return span.attributes?.find((a) => a.key === key)?.value;
 }
 
+function eventAttr(event: NonNullable<OtlpSpan["events"]>[number], key: string) {
+  return event.attributes?.find((a) => a.key === key)?.value;
+}
+
 beforeEach(() => {
   vi.stubEnv("OPENOBSERVE_TRACES_URL", "");
   vi.stubEnv("OPENOBSERVE_TOKEN", "");
@@ -149,7 +153,83 @@ describe("jobTrace", () => {
     expect(attrValue(reviewer, "cost_usd")).toEqual({ stringValue: "0.01" });
     expect(attrValue(reviewer, "cost_usd_micros")).toEqual({ intValue: "10000" });
     expect(attrValue(reviewer, "gen_ai.prompt.name")).toEqual({ stringValue: "correctness" });
+    expect(attrValue(reviewer, "gen_ai.conversation.id")).toEqual({ stringValue: `maomao-job-${jobId}` });
+    expect(attrValue(reviewer, "gen_ai.agent.name")).toEqual({ stringValue: "correctness" });
+    expect(attrValue(reviewer, "gen_ai.agent.id")).toEqual({ stringValue: "reviewer.correctness" });
     expect(attrValue(reviewer, "error.type")).toBeUndefined();
+  });
+
+  it("marks a failed reviewer run with an exception event, not first_output", () => {
+    const store = makeStore();
+    const jobId = seedJob(store);
+    const run = store.listReviewerRuns(jobId)[0];
+    store["db"]
+      .prepare(
+        `UPDATE reviewer_runs SET state = 'failed', model = 'gpt-5', started_at = ?, finished_at = ?, duration_ms = 1000, first_output_ms = 120, validation_error = 'boom' WHERE id = ?`,
+      )
+      .run("2026-10-01T08:00:01.000Z", "2026-10-01T08:00:02.000Z", run.id);
+    const reviewer = jobTrace(store.getJob(jobId)!, store.listReviewerRuns(jobId)).find(
+      (s) => s.name === "maomao.stage.reviewer",
+    )!;
+    expect(reviewer.status?.code).toBe(2);
+    expect(reviewer.events).toHaveLength(1);
+    const [event] = reviewer.events!;
+    expect(event.name).toBe("exception");
+    expect(eventAttr(event, "exception.type")).toEqual({ stringValue: "failed" });
+    expect(eventAttr(event, "exception.message")).toEqual({ stringValue: "boom" });
+    expect(event.timeUnixNano).toBe(reviewer.endTimeUnixNano);
+  });
+
+  it("emits an opencode.first_output event from first_output_ms", () => {
+    const store = makeStore();
+    const jobId = seedJob(store);
+    const run = store.listReviewerRuns(jobId)[0];
+    store["db"]
+      .prepare(
+        `UPDATE reviewer_runs SET state = 'done', model = 'gpt-5', started_at = ?, finished_at = ?, duration_ms = 1000, first_output_ms = 250 WHERE id = ?`,
+      )
+      .run("2026-10-01T08:00:01.000Z", "2026-10-01T08:00:02.000Z", run.id);
+    const reviewer = jobTrace(store.getJob(jobId)!, store.listReviewerRuns(jobId)).find(
+      (s) => s.name === "maomao.stage.reviewer",
+    )!;
+    const [event] = reviewer.events!;
+    expect(event.name).toBe("opencode.first_output");
+    expect(eventAttr(event, "elapsed_ms")).toEqual({ intValue: "250" });
+    expect(event.timeUnixNano).toBe(nanoTime(Date.parse("2026-10-01T08:00:01.000Z") + 250));
+  });
+
+  it("reports stale and cancelled states as UNSET, not errors", () => {
+    const store = makeStore();
+    const jobId = seedJob(store);
+    const run = store.listReviewerRuns(jobId)[0];
+    store["db"]
+      .prepare(`UPDATE reviewer_runs SET state = 'stale', finished_at = ? WHERE id = ?`)
+      .run("2026-10-01T08:00:02.000Z", run.id);
+    const spans = jobTrace(store.getJob(jobId)!, store.listReviewerRuns(jobId));
+    const reviewer = spans.find((s) => s.name === "maomao.stage.reviewer")!;
+    expect(reviewer.status).toEqual({ code: 0 });
+    expect(attrValue(reviewer, "error.type")).toBeUndefined();
+    expect(reviewer.events).toBeUndefined();
+  });
+
+  it("marks a stale job's root span UNSET rather than error", () => {
+    const store = makeStore();
+    const jobId = seedJob(store);
+    store["db"].prepare(`UPDATE jobs SET state = 'stale', finished_at = ? WHERE id = ?`).run("2026-10-01T08:05:00.000Z", jobId);
+    const root = jobTrace(store.getJob(jobId)!, store.listReviewerRuns(jobId))[0];
+    expect(root.status).toEqual({ code: 0 });
+    expect(root.events).toBeUndefined();
+  });
+
+  it("marks a failed job's root span with an exception event", () => {
+    const store = makeStore();
+    const jobId = seedJob(store);
+    store.setJobState(jobId, "failed", { failure_reason: "boom" });
+    const root = jobTrace(store.getJob(jobId)!, store.listReviewerRuns(jobId))[0];
+    expect(root.status).toEqual({ code: 2, message: "failed" });
+    const [event] = root.events!;
+    expect(event.name).toBe("exception");
+    expect(eventAttr(event, "exception.message")).toEqual({ stringValue: "boom" });
   });
 
   it("marks a failed reviewer run as an errored call without response.model", () => {

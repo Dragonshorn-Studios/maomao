@@ -18,6 +18,8 @@ export interface OpenCodeRunResult {
   exitCode: number;
   text: string;
   usage: OpenCodeUsage;
+  /** Spawn → first stdout byte: cold start + time-to-first-event. Undefined if no output. */
+  firstOutputMs?: number;
 }
 
 export interface OpenCodeRunInput {

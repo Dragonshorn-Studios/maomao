@@ -519,6 +519,10 @@ function migrate(db: SqliteDb): void {
     ensureColumn(db, "reviewer_runs", "usage_complete", "INTEGER");
     ensureColumn(db, "reviewer_runs", "usage_warning", "TEXT");
     ensureColumn(db, "reviewer_runs", "prompt_revision_id", "INTEGER");
+    ensureColumn(db, "reviewer_runs", "first_output_ms", "INTEGER");
+    ensureColumn(db, "jobs", "routing_first_output_ms", "INTEGER");
+    ensureColumn(db, "jobs", "aggregator_first_output_ms", "INTEGER");
+    ensureColumn(db, "jobs", "internal_escalation_first_output_ms", "INTEGER");
     ensureColumn(db, "jobs", "cancelled_reason", "TEXT");
     ensureColumn(db, "jobs", "cancelled_by", "TEXT");
     ensureColumn(db, "jobs", "forge_connection_id", "TEXT");
