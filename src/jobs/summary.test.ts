@@ -1178,6 +1178,30 @@ describe("emitJobSummary", () => {
     expect(fetchMock.mock.calls[0][0]).toBe("https://oo.example.com/api/default/maomao/_json");
   });
 
+  it("flags telemetry channels with no resolvable endpoint on the summary line", async () => {
+    // Only the logs channel is wired — metrics/traces silently no-op their
+    // exports; the summary line must say so instead of hiding it.
+    vi.stubEnv("OPENOBSERVE_LOGS_URL", "https://oo.example.com/api/default/maomao/_json");
+    setJobSummarySink(capture);
+    const store = makeStore();
+    const jobId = seedJob(store);
+    store.setJobState(jobId, "completed");
+    expect(payloadLines()).toEqual([
+      expect.objectContaining({
+        job_id: jobId,
+        telemetry_unconfigured: ["metrics", "traces"],
+      }),
+    ]);
+  });
+
+  it("omits the unconfigured flag when no telemetry channel resolves at all", () => {
+    setJobSummarySink(capture);
+    const store = makeStore();
+    const jobId = seedJob(store);
+    store.setJobState(jobId, "completed");
+    expect(payloadLines()[0].telemetry_unconfigured).toBeUndefined();
+  });
+
   it("serializes ingest POSTs to one in-flight request", async () => {
     let resolveFirst!: (value: unknown) => void;
     const gate = new Promise((resolve) => {

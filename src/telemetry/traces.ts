@@ -221,6 +221,7 @@ export function exportTerminalJobTraces(
   opts?: JobSummaryOptions,
   stored?: TelemetryChannelConfig,
   shared?: TelemetrySharedConfig,
+  logsStored?: TelemetryChannelConfig,
 ): void {
   try {
     const job = opts?.job ?? store.getJob(jobId);
@@ -232,6 +233,7 @@ export function exportTerminalJobTraces(
       env,
       stored,
       shared,
+      logsStored,
     );
   } catch (error) {
     console.error(

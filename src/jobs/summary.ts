@@ -1,12 +1,12 @@
 import type { JobState } from "../config.js";
 import { tokenTotalFromRow } from "../opencode/parse.js";
+import { resolveChannelUrl, type TelemetryChannelConfig, type TelemetrySharedConfig } from "../telemetry/settings.js";
 import {
-  resolveChannelAuth,
-  telemetryAuthHeader,
-  resolveChannelUrl,
-  type TelemetryChannelConfig,
-  type TelemetrySharedConfig,
-} from "../telemetry/settings.js";
+  flushIngestPosts,
+  ingestHeaders,
+  postIngestLine,
+  warnInsecureIngest,
+} from "../telemetry/ingest.js";
 import type { JobRow, JobStore, ReviewerRunRow } from "./store.js";
 
 /**
@@ -104,6 +104,8 @@ export interface JobSummaryPayload {
   cost_usd: number | null;
   head_sha: string;
   finished_at: string | null;
+  /** Telemetry channels with no resolvable endpoint at emit time, if any. */
+  telemetry_unconfigured?: string[];
   /**
    * Same convention as the UI's usage completeness: false when the line is a
    * floor — either a reported stage flagged its usage incomplete, or the job
@@ -135,6 +137,12 @@ export interface JobSummaryOptions {
   runs?: ReviewerRunRow[];
   /** The job was claimed-and-running when it went terminal — usage fields are a snapshot, not a final tally. */
   partialUsage?: boolean;
+  /**
+   * Telemetry channels whose endpoint resolved to nothing at emit time —
+   * their exports silently no-op'd for this job. Present only on partially
+   * configured deployments; absent when everything or nothing is wired.
+   */
+  telemetryUnconfigured?: string[];
 }
 
 export function buildJobSummary(job: JobRow, runs: ReviewerRunRow[], opts?: JobSummaryOptions): JobSummaryPayload {
@@ -164,6 +172,10 @@ export function buildJobSummary(job: JobRow, runs: ReviewerRunRow[], opts?: JobS
     cost_usd: spend.costUsd,
     head_sha: job.head_sha,
     finished_at: job.finished_at,
+    // Optional: only when some (not all) telemetry channels have an endpoint.
+    ...(opts?.telemetryUnconfigured?.length
+      ? { telemetry_unconfigured: opts.telemetryUnconfigured }
+      : {}),
     usage_complete: opts?.partialUsage === true ? false : reported.every((v) => v == null || v === 1),
     attempt: (job.retry_count ?? 0) + 1,
   };
@@ -178,90 +190,9 @@ export function setJobSummarySink(sink: (line: string) => void): (line: string) 
   return previous;
 }
 
-// Ingest POSTs are serialized so a bulk terminal sweep (e.g. the global-pause
-// cancel flipping hundreds of jobs at once) cannot fan out one unbounded
-// socket per job — at most one request is in flight at a time.
-let postChain: Promise<void> = Promise.resolve();
-
-// Depth cap: serialization bounds concurrency, not backlog — a bulk sweep
-// enqueueing hundreds of lines against an endpoint stalling near the 10s
-// timeout would otherwise delay delivery for tens of minutes. The stdout
-// line is the durable copy, so overflow drops and logs instead of growing
-// the queue without bound.
-const MAX_PENDING_INGEST_POSTS = 256;
-let pendingIngestPosts = 0;
-
-// Warn once per distinct URL: ingest credentials over plain http travel in
-// cleartext — a scheme typo must not silently downgrade transport security.
-const insecureIngestWarned = new Set<string>();
-
-function redactIngestError(message: string, url: string): string {
-  let safe = message.split(url).join("<openobserve-url>");
-  try {
-    const parsed = new URL(url);
-    // Fetch errors can echo the normalized href (lowercased host, added
-    // trailing slash) rather than the verbatim configured string.
-    if (parsed.href !== url) safe = safe.split(parsed.href).join("<openobserve-url>");
-    if (parsed.username || parsed.password) {
-      // Userinfo embedded in the URL survives normalization — strip any
-      // //user:pass@ remnant wherever it appears in the message.
-      safe = safe.replace(/\/\/[^/\s]+@/g, "//<credentials>@");
-    }
-  } catch {
-    // Unparseable configured URL — the exact-string pass above is all we can do.
-  }
-  return safe;
-}
-
-function queueIngestPost(url: string, headers: Record<string, string>, line: string, jobId: number): void {
-  if (pendingIngestPosts >= MAX_PENDING_INGEST_POSTS) {
-    console.error(`job-summary: dropping OpenObserve POST for job ${jobId}: ingest queue full`);
-    return;
-  }
-  pendingIngestPosts += 1;
-  postChain = postChain.then(async () => {
-    try {
-      const response = await fetch(url, {
-        method: "POST",
-        headers,
-        // _json's documented contract is a JSON array of records — wrapping
-        // even for single-line posts so strict deployments don't reject it.
-        body: `[${line}]`,
-        // Bounded so a hung ingest endpoint cannot linger forever; there is no
-        // retry — the stdout line above remains the durable copy.
-        signal: AbortSignal.timeout(10_000),
-      });
-      if (!response.ok) {
-        console.error(`job-summary: OpenObserve POST for job ${jobId} returned ${response.status}`);
-      }
-    } catch (error) {
-      // URL parse/construction errors echo the request URL — strip it (and
-      // any normalized form/userinfo) so credentials embedded in
-      // OPENOBSERVE_LOGS_URL never reach stderr.
-      const raw = error instanceof Error ? error.message : String(error);
-      console.error(`job-summary: OpenObserve POST failed for job ${jobId}: ${redactIngestError(raw, url)}`);
-    } finally {
-      pendingIngestPosts -= 1;
-    }
-    // Self-healing chain: a rejection escaping the task (e.g. console.error
-    // throwing inside the handler) must not leave postChain rejected —
-    // that would skip every later task while their counter increments
-    // still stand, silently wedging all future POSTs at the depth cap.
-  }).catch(() => {});
-}
-
 /** Test hook: resolves once every queued ingest POST has settled. */
 export function flushJobSummaryPosts(): Promise<void> {
-  return postChain;
-}
-
-function ingestHeaders(
-  env: NodeJS.ProcessEnv,
-  stored?: TelemetryChannelConfig,
-  shared?: TelemetrySharedConfig,
-): Record<string, string> {
-  const headers: Record<string, string> = { "content-type": "application/json" };
-  return { ...headers, ...telemetryAuthHeader(resolveChannelAuth("logs", env, stored, shared)) };
+  return flushIngestPosts();
 }
 
 /**
@@ -294,11 +225,8 @@ export function emitJobSummary(
     const url = resolveChannelUrl("logs", env, stored, shared);
     if (!url) return;
     const headers = ingestHeaders(env, stored, shared);
-    if (headers.authorization && url.startsWith("http://") && !insecureIngestWarned.has(url)) {
-      insecureIngestWarned.add(url);
-      console.error("job-summary: OPENOBSERVE_LOGS_URL uses http — ingest credentials are sent in cleartext");
-    }
-    queueIngestPost(url, headers, line, jobId);
+    warnInsecureIngest(url, headers);
+    postIngestLine(url, headers, line, `job ${jobId}`, "job-summary");
   } catch (error) {
     console.error(
       `job-summary: emission failed for job ${jobId}: ${error instanceof Error ? error.message : String(error)}`,

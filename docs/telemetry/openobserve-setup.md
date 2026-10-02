@@ -117,7 +117,12 @@ Enqueue a review (or dequeue/requeue to move the queue), then:
   `maomao.queue.slots_in_use`, `maomao.queue.slots`, `maomao.jobs`,
   `maomao.job.tokens`, `maomao.job.cost_usd`, `maomao.job.duration_ms`.
 - **Logs**: Logs tab → stream `maomao`, filter
-  `event='maomao.job_summary'`.
+  `event='maomao.job_summary'`. The same stream also carries operational
+  events: `maomao.app_boot` (startup, with each channel's config source),
+  `maomao.job_started`, `maomao.telemetry_export_failed` and
+  `maomao.telemetry_export_dropped`. If metrics or traces are missing,
+  check `maomao.job_summary` lines for `telemetry_unconfigured` — it lists
+  channels that resolved no endpoint and silently no-op'd.
 
 ## 4. Semantics worth knowing when dashboarding
 

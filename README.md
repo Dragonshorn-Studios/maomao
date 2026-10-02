@@ -392,6 +392,19 @@ Stack linkage is by **shared trace, not runtime context**: trace and span ids ar
 
 Operator-side setup (endpoints, credentials, dashboarding semantics, troubleshooting): [docs/telemetry/openobserve-setup.md](docs/telemetry/openobserve-setup.md).
 
+### App events
+
+Operational events are emitted on the same stdout-line + logs-channel transport as job summaries (`src/telemetry/app-log.ts`), as `maomao.<event>` records with `level` (`info`/`warn`/`error`) where relevant:
+
+| Event | Fields | Emitted |
+|---|---|---|
+| `maomao.app_boot` | `port`, `job_concurrency`, `telemetry` (per-channel config source) | once at startup |
+| `maomao.job_started` | `job_id`, `job_type`, `repo`, `pr`, `provider_instance`, `head_sha`, `attempt`, `queue_depth`, `slots_in_use` | each job claim |
+| `maomao.telemetry_export_failed` | `signal`, HTTP `status` or `error` (redacted), `url` (credentials masked) | an OTLP export fails |
+| `maomao.telemetry_export_dropped` | `signal`, `reason`, `url` | the export queue is full |
+
+Separately, when **some** telemetry channels are configured but not all, each `maomao.job_summary` line carries `telemetry_unconfigured: [...]` naming the channels whose exports silently no-op'd — a partial setup is visible in the same stream instead of only on stderr. A deployment with no channels configured at all stays quiet.
+
 ## Run locally
 
 ```bash

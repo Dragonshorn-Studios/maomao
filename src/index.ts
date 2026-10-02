@@ -17,7 +17,8 @@ import { oauthCallbackUrl, oauthEnabled } from "./oauth.js";
 import { ForgeConnectionStore, countConnections } from "./forge/connections.js";
 import { ensureEnvGitLabConnection } from "./forge/bootstrap.js";
 import { ForgeRegistry } from "./forge/registry.js"
-import { TelemetrySettingsStore, telemetryConfigPath } from "./telemetry/settings.js";;
+import { TelemetrySettingsStore, telemetryConfigPath } from "./telemetry/settings.js";
+import { emitAppLog } from "./telemetry/app-log.js";
 
 const config = loadConfig();
 mkdirSync(config.workspaceRoot, { recursive: true });
@@ -89,7 +90,13 @@ const pipeline = createPipeline({
   opencode,
   getInstallationToken,
 });
-const queue = new JobQueue(store, config.jobConcurrency, (jobId) => pipeline.run(jobId), telemetrySettings);
+const queue = new JobQueue(
+  store,
+  config.jobConcurrency,
+  (jobId) => pipeline.run(jobId),
+  telemetrySettings,
+  config.jobSummaries,
+);
 queue.start();
 
 const chatStore = config.chat.enabled ? new ChatStore(db) : undefined;
@@ -120,6 +127,25 @@ const app = createApp({
   startedAt: Date.now(),
   env: process.env,
 });
+
+if (config.jobSummaries) {
+  // Operational log stream lands in the same OpenObserve stream as job
+  // summaries — per-channel resolution sources make a partial telemetry
+  // setup diagnosable from the log stream itself.
+  emitAppLog(
+    "app_boot",
+    {
+      port: config.port,
+      job_concurrency: config.jobConcurrency,
+      telemetry: Object.fromEntries(
+        telemetrySettings.status(process.env).map((s) => [s.channel, s.urlSource]),
+      ),
+    },
+    process.env,
+    telemetrySettings.get("logs"),
+    telemetrySettings.shared(),
+  );
+}
 
 serve({ fetch: app.fetch, hostname: config.host, port: config.port }, (info) => {
   console.log(`Maomao listening on http://${info.address}:${info.port}`);

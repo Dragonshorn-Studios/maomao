@@ -11,7 +11,8 @@ import { publish } from "../events.js";
 import { emitJobSummary, type JobSummaryOptions } from "./summary.js";
 import { exportTerminalJobMetrics } from "../telemetry/metrics.js";
 import { exportTerminalJobTraces } from "../telemetry/traces.js";
-import type { TelemetrySettingsStore } from "../telemetry/settings.js";
+import type { TelemetrySettingsStore, TelemetrySharedConfig } from "../telemetry/settings.js";
+import { resolveChannelUrl } from "../telemetry/settings.js";
 import { ReviewConfigStore } from "../config-revisions.js";
 import { PromptRevisionStore } from "../prompt-revisions.js";
 
@@ -1606,11 +1607,26 @@ export class JobStore {
    */
   private emitTerminalSummary(jobId: number, opts?: JobSummaryOptions): void {
     if (this.opts.emitJobSummaries !== true) return;
+    const env = process.env;
     const telemetry = this.opts.telemetry;
     const shared = telemetry?.shared();
-    emitJobSummary(this, jobId, process.env, opts, telemetry?.get("logs"), shared);
-    exportTerminalJobMetrics(this, jobId, process.env, opts, telemetry?.get("metrics"), shared);
-    exportTerminalJobTraces(this, jobId, process.env, opts, telemetry?.get("traces"), shared);
+    // A channel with no resolvable endpoint no-ops its export silently — flag
+    // those channels on the summary line itself so a partial OpenObserve
+    // setup is visible in the same stream. Pure stdout deployments (all
+    // three unconfigured) are indistinguishable from intentional stdout-only
+    // and stay quiet.
+    const unconfigured = (["logs", "metrics", "traces"] as const).filter(
+      (channel) => !resolveChannelUrl(channel, env, telemetry?.get(channel), shared),
+    );
+    const summaryOpts: JobSummaryOptions = {
+      ...opts,
+      telemetryUnconfigured:
+        unconfigured.length > 0 && unconfigured.length < 3 ? [...unconfigured] : undefined,
+    };
+    const logsStored = telemetry?.get("logs");
+    emitJobSummary(this, jobId, env, summaryOpts, logsStored, shared);
+    exportTerminalJobMetrics(this, jobId, env, opts, telemetry?.get("metrics"), shared, logsStored);
+    exportTerminalJobTraces(this, jobId, env, opts, telemetry?.get("traces"), shared, logsStored);
   }
 
   patchJob(id: number, extra: Partial<JobRow>): void {
