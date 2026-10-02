@@ -124,7 +124,7 @@ describe("jobTrace", () => {
     const run = store.listReviewerRuns(jobId)[0];
     store["db"]
       .prepare(
-        `UPDATE reviewer_runs SET state = 'done', model = 'gpt-5', provider = 'openai', started_at = ?, finished_at = ?, prompt_tokens = 70, completion_tokens = 30, total_tokens = 100, cost = 0.01, cache_read_tokens = 5 WHERE id = ?`,
+        `UPDATE reviewer_runs SET state = 'done', model = 'gpt-5', provider = 'openai', started_at = ?, finished_at = ?, prompt_tokens = 70, completion_tokens = 30, total_tokens = 100, cost = 0.01, cache_read_tokens = 5, cache_write_tokens = 3 WHERE id = ?`,
       )
       .run("2026-10-01T08:00:01.000Z", "2026-10-01T08:00:02.000Z", run.id);
     store.setJobState(jobId, "completed");
@@ -135,12 +135,14 @@ describe("jobTrace", () => {
     expect(attrValue(reviewer, "gen_ai.operation.name")).toEqual({ stringValue: "chat" });
     expect(attrValue(reviewer, "gen_ai.provider.name")).toEqual({ stringValue: "openai" });
     expect(attrValue(reviewer, "gen_ai.request.model")).toEqual({ stringValue: "gpt-5" });
+    expect(attrValue(reviewer, "gen_ai.response.model")).toEqual({ stringValue: "gpt-5" });
     expect(attrValue(reviewer, "gen_ai.usage.prompt_tokens")).toEqual({ intValue: "70" });
     expect(attrValue(reviewer, "gen_ai.usage.completion_tokens")).toEqual({ intValue: "30" });
     expect(attrValue(reviewer, "gen_ai.usage.input_tokens")).toEqual({ intValue: "70" });
     expect(attrValue(reviewer, "gen_ai.usage.output_tokens")).toEqual({ intValue: "30" });
     expect(attrValue(reviewer, "gen_ai.usage.total_tokens")).toEqual({ intValue: "100" });
     expect(attrValue(reviewer, "gen_ai.usage.cache_read_tokens")).toEqual({ intValue: "5" });
+    expect(attrValue(reviewer, "gen_ai.usage.cache_write_tokens")).toEqual({ intValue: "3" });
     // Fractional doubles go out as strings — OO's strict decoder 400s the
     // whole envelope on {"doubleValue":0.01}; cost_usd_micros keeps it numeric.
     expect(attrValue(reviewer, "gen_ai.usage.cost")).toEqual({ stringValue: "0.01" });
@@ -148,6 +150,40 @@ describe("jobTrace", () => {
     expect(attrValue(reviewer, "cost_usd_micros")).toEqual({ intValue: "10000" });
     expect(attrValue(reviewer, "gen_ai.prompt.name")).toEqual({ stringValue: "correctness" });
     expect(attrValue(reviewer, "error.type")).toBeUndefined();
+  });
+
+  it("marks a failed reviewer run as an errored call without response.model", () => {
+    const store = makeStore();
+    const jobId = seedJob(store);
+    const run = store.listReviewerRuns(jobId)[0];
+    store["db"]
+      .prepare(
+        `UPDATE reviewer_runs SET state = 'failed', model = 'gpt-5', provider = 'openai', started_at = ?, finished_at = ?, duration_ms = 1000 WHERE id = ?`,
+      )
+      .run("2026-10-01T08:00:01.000Z", "2026-10-01T08:00:02.000Z", run.id);
+    const reviewer = jobTrace(store.getJob(jobId)!, store.listReviewerRuns(jobId)).find(
+      (s) => s.name === "maomao.stage.reviewer",
+    )!;
+    expect(reviewer.kind).toBe(3);
+    expect(attrValue(reviewer, "gen_ai.request.model")).toEqual({ stringValue: "gpt-5" });
+    expect(attrValue(reviewer, "gen_ai.response.model")).toBeUndefined();
+    expect(attrValue(reviewer, "error.type")).toEqual({ stringValue: "failed" });
+    expect(reviewer.status?.code).toBe(2);
+  });
+
+  it("reports a budget-skipped reviewer run as INTERNAL, not an LLM call", () => {
+    const store = makeStore();
+    const jobId = seedJob(store);
+    const run = store.listReviewerRuns(jobId)[0];
+    // Degrade-mode skip: state=failed + finished_at only, no model/tokens/cost.
+    store["db"]
+      .prepare(`UPDATE reviewer_runs SET state = 'failed', finished_at = ? WHERE id = ?`)
+      .run("2026-10-01T08:00:02.000Z", run.id);
+    const reviewer = jobTrace(store.getJob(jobId)!, store.listReviewerRuns(jobId)).find(
+      (s) => s.name === "maomao.stage.reviewer",
+    )!;
+    expect(reviewer.kind).toBe(1);
+    expect(attrValue(reviewer, "gen_ai.operation.name")).toBeUndefined();
   });
 
   it("reports a budget-degraded aggregation as INTERNAL, not an LLM call", () => {

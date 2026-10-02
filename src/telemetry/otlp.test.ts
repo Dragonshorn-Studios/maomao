@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   attr,
+  compatDoubleAttr,
   exportMetrics,
   exportTraces,
   flushOtlpExports,
@@ -79,6 +80,13 @@ describe("attr", () => {
     expect(attr("b", true)).toEqual({ key: "b", value: { boolValue: true } });
     expect(attr("c", 7)).toEqual({ key: "c", value: { intValue: "7" } });
     expect(attr("d", 0.5)).toEqual({ key: "d", value: { doubleValue: 0.5 } });
+  });
+});
+
+describe("compatDoubleAttr", () => {
+  it("keeps integral doubles as doubleValue, sends fractional ones as strings", () => {
+    expect(compatDoubleAttr("x", 2)).toEqual({ key: "x", value: { doubleValue: 2 } });
+    expect(compatDoubleAttr("x", 0.0217)).toEqual({ key: "x", value: { stringValue: "0.0217" } });
   });
 });
 
@@ -379,7 +387,7 @@ describe("exportTraces/exportMetrics", () => {
     const fetchMock = vi.fn().mockResolvedValue({
       ok: false,
       status: 400,
-      text: async () => `${"x".repeat(285)} ${credentialed} tail`,
+      text: async () => `${"x".repeat(270)} ${credentialed} tail`,
     });
     vi.stubGlobal("fetch", fetchMock);
     vi.spyOn(console, "error").mockImplementation(() => {});
@@ -389,7 +397,8 @@ describe("exportTraces/exportMetrics", () => {
     await flushOtlpExports();
     await flushIngestPosts();
     const [event] = appLogLines.map((line) => JSON.parse(line) as Record<string, unknown>);
-    // Truncate-first would leak the un-redacted 'https://keystone:s3' prefix.
+    // The URL straddles the 300-char cut: truncate-first leaks 'https://keystone:s3'.
+    expect(event.response).toContain("<otlp-url>");
     expect(event.response).not.toContain("keystone");
     expect(event.response).not.toContain("s3cr3t");
     expect(event.response).not.toContain("oo.example.com");

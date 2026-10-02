@@ -203,12 +203,15 @@ export function jobTrace(
     if (run.started_at == null && run.finished_at == null && run.duration_ms == null) return;
     const runStart = msOf(run.started_at) ?? cursor;
     const runEnd = msOf(run.finished_at) ?? (run.duration_ms != null ? runStart + run.duration_ms : runStart);
+    // Budget-skipped runs get only state=failed + finished_at — no model,
+    // tokens or cost. Same gate as aggregation: no LLM call, no CLIENT/chat.
+    const ranLlm = run.model != null || run.total_tokens != null || run.cost != null;
     spans.push({
       traceId,
       spanId: spanIdForStage(job.id, `reviewer-${run.id}`),
       parentSpanId: rootId,
       name: "maomao.stage.reviewer",
-      kind: SPAN_KIND_CLIENT,
+      kind: ranLlm ? SPAN_KIND_CLIENT : SPAN_KIND_INTERNAL,
       startTimeUnixNano: nanoTime(runStart),
       endTimeUnixNano: nanoTime(Math.max(runEnd, runStart)),
       attributes: [
@@ -216,18 +219,20 @@ export function jobTrace(
         attr("state", run.state),
         attr("attempt", run.attempt),
         ...usageAttrs(run.model, run.total_tokens, run.cost),
-        ...genAiAttrs({
-          provider: run.provider,
-          model: run.model,
-          responded: run.state === "done",
-          promptName: run.role,
-          promptTokens: run.prompt_tokens,
-          completionTokens: run.completion_tokens,
-          totalTokens: run.total_tokens,
-          cacheRead: run.cache_read_tokens,
-          cacheWrite: run.cache_write_tokens,
-          cost: run.cost,
-        }),
+        ...(ranLlm
+          ? genAiAttrs({
+              provider: run.provider,
+              model: run.model,
+              responded: run.state === "done",
+              promptName: run.role,
+              promptTokens: run.prompt_tokens,
+              completionTokens: run.completion_tokens,
+              totalTokens: run.total_tokens,
+              cacheRead: run.cache_read_tokens,
+              cacheWrite: run.cache_write_tokens,
+              cost: run.cost,
+            })
+          : []),
         ...(run.state !== "done" ? [attr("error.type", run.state)] : []),
       ],
       status: statusFor(run.state),
