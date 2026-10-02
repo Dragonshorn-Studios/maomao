@@ -1,7 +1,17 @@
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { loadConfig } from "./config.js";
 import { effectiveConfigEntries } from "./config-effective.js";
 import type { ProfileRevisionRow } from "./config-revisions.js";
+import { TelemetrySettingsStore } from "./telemetry/settings.js";
+
+function telemetryStore(): TelemetrySettingsStore {
+  return new TelemetrySettingsStore(
+    join(mkdtempSync(join(tmpdir(), "maomao-telemetry-")), "telemetry.json"),
+  );
+}
 
 function fakeRevision(overrides: Partial<ProfileRevisionRow["definition"]> = {}): ProfileRevisionRow {
   const definition = {
@@ -41,7 +51,7 @@ function find(entries: ReturnType<typeof effectiveConfigEntries>, label: string)
 describe("effectiveConfigEntries", () => {
   it("labels defaults when no env vars are set", () => {
     const config = loadConfig({});
-    const entries = effectiveConfigEntries(config, {}, null);
+    const entries = effectiveConfigEntries(config, {}, null, telemetryStore());
     const reviewerModel = find(entries, "Reviewer model");
     expect(reviewerModel.source).toBe("default");
     const roles = find(entries, "Enabled roles");
@@ -77,7 +87,7 @@ describe("effectiveConfigEntries", () => {
       POST_EMPTY_REVIEW: "true",
       GITHUB_WEBHOOK_SECRET: "whsec-canary-value",
       MAX_DIFF_BYTES: "2097152",
-    }, null);
+    }, null, telemetryStore());
     expect(find(entries, "Reviewer model")).toMatchObject({ source: "environment", value: "test/reviewer" });
     expect(find(entries, "Reviewer timeout")).toMatchObject({ source: "environment", value: "300s" });
     expect(find(entries, "Job concurrency")).toMatchObject({ source: "environment", value: "4" });
@@ -92,7 +102,7 @@ describe("effectiveConfigEntries", () => {
   it("labels active-profile overrides with the revision id and reports enforced ceilings", () => {
     const config = loadConfig({});
     const revision = fakeRevision();
-    const entries = effectiveConfigEntries(config, {}, revision);
+    const entries = effectiveConfigEntries(config, {}, revision, telemetryStore());
     const set = find(entries, "Profile reviewer set (effective)");
     expect(set).toMatchObject({ source: "profile", sourceDetail: "#12 (strict)", value: "correctness, security" });
     const router = find(entries, "Profile router model");
@@ -124,7 +134,7 @@ describe("effectiveConfigEntries", () => {
         { role: "security" as never },
       ],
     });
-    const entries = effectiveConfigEntries(config, { REVIEWER_ROLES: "correctness,security" }, revision);
+    const entries = effectiveConfigEntries(config, { REVIEWER_ROLES: "correctness,security" }, revision, telemetryStore());
     // The GUI-set profile wins: api runs even though env does not enable it.
     expect(find(entries, "Profile reviewer set (effective)")).toMatchObject({
       value: "correctness, api, security",
@@ -138,7 +148,7 @@ describe("effectiveConfigEntries", () => {
   it("marks the profile reviewer set as enforced in fixed routing mode", () => {
     const config = loadConfig({ REVIEWER_ROLES: "correctness,security", REVIEWER_ROUTING: "fixed" });
     const revision = fakeRevision({ reviewers: [{ role: "correctness" }] });
-    const entries = effectiveConfigEntries(config, { REVIEWER_ROLES: "correctness,security" }, revision);
+    const entries = effectiveConfigEntries(config, { REVIEWER_ROLES: "correctness,security" }, revision, telemetryStore());
     expect(find(entries, "Profile reviewer set (effective)")).toMatchObject({
       value: "correctness",
     });
@@ -147,7 +157,7 @@ describe("effectiveConfigEntries", () => {
 
   it("marks inherited model slots when only the reviewer model env var is set", () => {
     const env = { OPENCODE_REVIEWER_MODEL: "test/reviewer" };
-    const entries = effectiveConfigEntries(loadConfig(env), env, null);
+    const entries = effectiveConfigEntries(loadConfig(env), env, null, telemetryStore());
     const aggregator = find(entries, "Aggregator model");
     expect(aggregator).toMatchObject({ source: "environment", value: "test/reviewer", sourceDetail: "inherited from OPENCODE_REVIEWER_MODEL" });
     const verifier = find(entries, "Verifier model");
@@ -159,7 +169,7 @@ describe("effectiveConfigEntries", () => {
   it("marks the env router model as shadowed when the profile provides one", () => {
     const env = { OPENCODE_ROUTER_MODEL: "test/env-router" };
     const config = loadConfig(env);
-    const entries = effectiveConfigEntries(config, env, fakeRevision());
+    const entries = effectiveConfigEntries(config, env, fakeRevision(), telemetryStore());
     const envRouter = find(entries, "Router model (env/defaults)");
     expect(envRouter).toMatchObject({ source: "environment", value: "test/env-router" });
     expect(envRouter.sourceDetail).toContain("not in effect");
@@ -181,7 +191,7 @@ describe("effectiveConfigEntries", () => {
       UI_PASSWORD: "PASSWORD-CANARY",
       UI_SESSION_SECRET: "SESSION-SECRET-CANARY",
     };
-    const rendered = JSON.stringify(effectiveConfigEntries(config, env, fakeRevision()));
+    const rendered = JSON.stringify(effectiveConfigEntries(config, env, fakeRevision(), telemetryStore()));
     for (const canary of [
       "PRIVATE-KEY-CANARY-VALUE",
       "WEBHOOK-SECRET-CANARY",
@@ -193,6 +203,57 @@ describe("effectiveConfigEntries", () => {
     }
     expect(rendered).toContain("configured");
   });
+
+  it("shows stored telemetry settings with derived endpoints — secrets never rendered", () => {
+    const store = telemetryStore();
+    store.setShared({
+      baseUrl: "https://oo.example.com/api/default",
+      stream: "maomao",
+      email: "ops@example.com",
+      token: "o2oi_TELEMETRY-CANARY",
+    });
+    const entries = effectiveConfigEntries(loadConfig({}), {}, null, store);
+    const rendered = JSON.stringify(entries);
+    for (const canary of ["o2oi_TELEMETRY-CANARY", "ops@example.com"]) {
+      expect(rendered, `credential canary ${canary} leaked`).not.toContain(canary);
+    }
+    expect(find(entries, "OpenObserve base URL")).toMatchObject({
+      source: "stored",
+      value: "https://oo.example.com/api/default",
+    });
+    expect(find(entries, "OpenObserve logs stream")).toMatchObject({
+      source: "stored",
+      value: "maomao",
+    });
+    expect(find(entries, "OpenObserve ingestion credentials")).toMatchObject({
+      source: "stored",
+      value: "configured",
+    });
+    expect(find(entries, "OpenObserve traces endpoint")).toMatchObject({
+      source: "stored",
+      value: "https://oo.example.com/api/default/v1/traces",
+      sourceDetail: "derived from the stored base URL",
+    });
+    expect(find(entries, "OpenObserve logs endpoint").value).toBe(
+      "https://oo.example.com/api/default/maomao/_json",
+    );
+  });
+
+  it("prefers env telemetry values over stored ones", () => {
+    const store = telemetryStore();
+    store.setShared({ baseUrl: "https://stored.example.com/api/o", stream: "maomao", email: "e@x.test", token: "t" });
+    const env = { OPENOBSERVE_TRACES_URL: "https://env.example.com/api/o/v1/traces" };
+    const entries = effectiveConfigEntries(loadConfig(env), env, null, store);
+    expect(find(entries, "OpenObserve traces endpoint")).toMatchObject({
+      source: "environment",
+      value: "https://env.example.com/api/o/v1/traces",
+      sourceDetail: "OPENOBSERVE_TRACES_URL",
+    });
+    expect(find(entries, "OpenObserve metrics endpoint")).toMatchObject({
+      source: "stored",
+      value: "https://stored.example.com/api/o/v1/metrics",
+    });
+  });
 });
 
   it("omits conditional profile entries when their values are absent", () => {
@@ -201,7 +262,7 @@ describe("effectiveConfigEntries", () => {
       reviewers: [{ role: "security" }],
       maxTotalCostUsd: undefined,
       maxTotalTokens: undefined,
-    }));
+    }), telemetryStore());
     const labels = entries.map((entry) => entry.label);
     for (const absent of [
       "Per-reviewer profile models",
@@ -227,7 +288,7 @@ describe("effectiveConfigEntries", () => {
       GITHUB_ISSUE_CREATION_ENABLED: "true",
       OPENCODE_BIN: "/usr/local/bin/opencode",
     };
-    const entries = effectiveConfigEntries(loadConfig(env), env, null);
+    const entries = effectiveConfigEntries(loadConfig(env), env, null, telemetryStore());
     expect(find(entries, "Webhook actions that enqueue reviews")).toMatchObject({
       source: "environment",
       value: "opened, synchronize",
@@ -261,7 +322,7 @@ describe("env-var to entry mapping (table)", () => {
     ["REVIEW_DRAFTS", "Review drafts"],
     ["JOB_SUMMARIES", "Job summaries (stdout/OpenObserve)"],
     ["TELEMETRY_USER_ID", "Session user attribute (PR author login)"],
-    ["OPENOBSERVE_LOGS_URL", "OpenObserve ingest URL"],
+    ["OPENOBSERVE_LOGS_URL", "OpenObserve logs endpoint"],
     ["MAX_INLINE_COMMENTS", "Max inline comments"],
     ["MAOMAO_OVERRIDE_AUTHORS", "Comment override authors"],
     ["POISON_ALERT_INTERNAL_MAX_COST_USD", "Internal max cost"],
@@ -299,7 +360,7 @@ describe("env-var to entry mapping (table)", () => {
     REVIEW_DRAFTS: "enabled",
     JOB_SUMMARIES: "disabled",
     TELEMETRY_USER_ID: "disabled",
-    OPENOBSERVE_LOGS_URL: "configured",
+    OPENOBSERVE_LOGS_URL: "https://oo.example.com/api/x/_json",
     POISON_ALERT_INTERNAL_MAX_COST_USD: "$0.50",
   };
   // Rows that only render when the feature is enabled.
@@ -314,7 +375,7 @@ describe("env-var to entry mapping (table)", () => {
       env[gate!] = "true";
     }
     if (envKey === "POISON_ALERT_INTERNAL_MODEL") env.POISON_ALERT_INTERNAL_MODEL = "test/lab";
-    const entries = effectiveConfigEntries(loadConfig(env), env, null);
+    const entries = effectiveConfigEntries(loadConfig(env), env, null, telemetryStore());
     const entry = find(entries, label);
     expect(entry.source).toBe("environment");
     expect(entry.value).toContain(rendered[envKey] ?? (accepted[envKey] ?? "sentinel"));

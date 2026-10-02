@@ -4788,6 +4788,26 @@ describe("effective configuration summary", () => {
     expect(sectionFor(html, "GitHub webhook secret")).toContain('>configured</code>');
   });
 
+  it("renders stored telemetry config without leaking the stored secrets", async () => {
+    const settingsPath = join(mkdtempSync(join(tmpdir(), "maomao-eff-telemetry-")), "telemetry.json");
+    const settings = new TelemetrySettingsStore(settingsPath);
+    settings.setShared({
+      baseUrl: "https://oo.example.com/api/default",
+      stream: "maomao",
+      email: "ops@example.com",
+      token: "o2oi_STORED-CANARY",
+    });
+    const { app } = testApp(gateEnv, undefined, undefined, { telemetrySettings: settings });
+    const html = await configPage(app);
+    for (const canary of ["o2oi_STORED-CANARY", "ops@example.com"]) {
+      expect(html, `telemetry canary ${canary} leaked into /config`).not.toContain(canary);
+    }
+    expect(sectionFor(html, "OpenObserve base URL")).toContain(">Stored</span>");
+    expect(sectionFor(html, "OpenObserve traces endpoint")).toContain(
+      "https://oo.example.com/api/default/v1/traces",
+    );
+  });
+
   it("keeps credentials out of the 403 denied page too", async () => {
     // Password-gate sessions carry no identity, so POST /config renders the
     // 403 denial page even while logged in.
