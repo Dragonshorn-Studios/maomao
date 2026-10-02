@@ -374,21 +374,24 @@ describe("exportTraces/exportMetrics", () => {
     expect(err).toHaveBeenCalledWith(expect.stringContaining("invalid envelope"));
   });
 
-  it("redacts the endpoint URL before truncating long error bodies", async () => {
+  it("redacts a credentialed endpoint URL before truncating long error bodies", async () => {
+    const credentialed = "https://keystone:s3cr3t@oo.example.com/api/default/v1/traces";
     const fetchMock = vi.fn().mockResolvedValue({
       ok: false,
       status: 400,
-      text: async () => `${"x".repeat(290)} ${TRACES_URL} tail`,
+      text: async () => `${"x".repeat(285)} ${credentialed} tail`,
     });
     vi.stubGlobal("fetch", fetchMock);
     vi.spyOn(console, "error").mockImplementation(() => {});
     setAppLogSink(captureAppLog);
-    vi.stubEnv("OPENOBSERVE_TRACES_URL", TRACES_URL);
+    vi.stubEnv("OPENOBSERVE_TRACES_URL", credentialed);
     exportTraces([makeSpan()]);
     await flushOtlpExports();
     await flushIngestPosts();
     const [event] = appLogLines.map((line) => JSON.parse(line) as Record<string, unknown>);
-    expect(event.response).toContain("<otlp-url>");
+    // Truncate-first would leak the un-redacted 'https://keystone:s3' prefix.
+    expect(event.response).not.toContain("keystone");
+    expect(event.response).not.toContain("s3cr3t");
     expect(event.response).not.toContain("oo.example.com");
   });
 
