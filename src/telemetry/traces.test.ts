@@ -198,6 +198,27 @@ describe("jobTrace", () => {
     }
   });
 
+  it("treats an aggregator_state=failed row as a failed call, not a response", () => {
+    const store = makeStore();
+    const jobId = seedJob(store);
+    // Job died mid-aggregation: model still seeded, fallback never latched.
+    store.patchJob(jobId, {
+      started_at: "2026-10-01T08:00:00.000Z",
+      aggregator_state: "failed",
+      aggregator_started_at: "2026-10-01T08:00:10.000Z",
+      aggregator_finished_at: "2026-10-01T08:00:11.000Z",
+      aggregator_model: "gpt-5",
+      aggregator_duration_ms: 1000,
+    });
+    const agg = jobTrace(store.getJob(jobId)!, store.listReviewerRuns(jobId)).find(
+      (s) => s.name === "maomao.stage.aggregation",
+    )!;
+    expect(agg.kind).toBe(3);
+    expect(attrValue(agg, "gen_ai.request.model")).toEqual({ stringValue: "gpt-5" });
+    expect(attrValue(agg, "gen_ai.response.model")).toBeUndefined();
+    expect(agg.status?.code).toBe(2);
+  });
+
   it("emits aggregation and internal-escalation spans in stage order", () => {
     const store = makeStore();
     const jobId = seedJob(store);

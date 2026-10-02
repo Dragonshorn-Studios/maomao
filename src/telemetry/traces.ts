@@ -263,16 +263,19 @@ export function jobTrace(
           ? genAiAttrs({
               provider: job.aggregator_provider,
               model: job.aggregator_model,
-              responded: job.aggregator_fallback !== 1,
+              // Model-failure fallback and a job that died mid-aggregation
+              // both left no model response; only "done" + no fallback did.
+              responded: job.aggregator_state === "done" && job.aggregator_fallback !== 1,
               totalTokens: job.aggregator_total_tokens,
               cost: job.aggregator_cost,
             })
           : []),
       ],
-      // Model-failure fallback = attempted LLM call that failed; budget
-      // degradation is a successful deterministic result, not an error.
+      // Model-failure fallback or a failed/mid-aggregation-abort row = an
+      // attempted LLM call that failed; budget degradation is a successful
+      // deterministic result, not an error.
       status:
-        ranLlm && job.aggregator_fallback === 1
+        ranLlm && (job.aggregator_fallback === 1 || job.aggregator_state !== "done")
           ? { code: STATUS_CODE_ERROR, message: "aggregator model call failed" }
           : { code: STATUS_CODE_OK },
     });
