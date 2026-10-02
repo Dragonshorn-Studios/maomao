@@ -229,24 +229,33 @@ export function jobTrace(
   if (aggStart != null || job.aggregator_duration_ms != null) {
     const start = aggStart ?? cursor;
     const end = aggEnd ?? start + (job.aggregator_duration_ms ?? 0);
+    // Budget-degraded aggregations null the model — they never called an LLM,
+    // so they stay INTERNAL and carry no gen_ai attrs; a model that was
+    // attempted (fallback on failure) keeps CLIENT + gen_ai.
+    const ranLlm =
+      job.aggregator_model != null ||
+      job.aggregator_total_tokens != null ||
+      job.aggregator_cost != null;
     spans.push({
       traceId,
       spanId: spanIdForStage(job.id, "aggregation"),
       parentSpanId: rootId,
       name: "maomao.stage.aggregation",
-      kind: SPAN_KIND_CLIENT,
+      kind: ranLlm ? SPAN_KIND_CLIENT : SPAN_KIND_INTERNAL,
       startTimeUnixNano: nanoTime(start),
       endTimeUnixNano: nanoTime(Math.max(end, start)),
       attributes: [
         attr("state", job.aggregator_state),
         ...(job.aggregator_fallback ? [attr("fallback", true)] : []),
         ...usageAttrs(job.aggregator_model, job.aggregator_total_tokens, job.aggregator_cost),
-        ...genAiAttrs({
-          provider: job.aggregator_provider,
-          model: job.aggregator_model,
-          totalTokens: job.aggregator_total_tokens,
-          cost: job.aggregator_cost,
-        }),
+        ...(ranLlm
+          ? genAiAttrs({
+              provider: job.aggregator_provider,
+              model: job.aggregator_model,
+              totalTokens: job.aggregator_total_tokens,
+              cost: job.aggregator_cost,
+            })
+          : []),
       ],
     });
     cursor = Math.max(cursor, end);

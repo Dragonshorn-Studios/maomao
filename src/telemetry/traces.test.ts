@@ -150,6 +150,26 @@ describe("jobTrace", () => {
     expect(attrValue(reviewer, "error.type")).toBeUndefined();
   });
 
+  it("reports a budget-degraded aggregation as INTERNAL, not an LLM call", () => {
+    const store = makeStore();
+    const jobId = seedJob(store);
+    store.patchJob(jobId, {
+      started_at: "2026-10-01T08:00:00.000Z",
+      aggregator_state: "done",
+      aggregator_started_at: "2026-10-01T08:00:10.000Z",
+      aggregator_finished_at: "2026-10-01T08:00:10.000Z",
+      aggregator_model: null,
+      aggregator_duration_ms: 0,
+      aggregator_fallback: 1,
+    });
+    const agg = jobTrace(store.getJob(jobId)!, store.listReviewerRuns(jobId)).find(
+      (s) => s.name === "maomao.stage.aggregation",
+    )!;
+    expect(agg.kind).toBe(1);
+    expect(attrValue(agg, "gen_ai.operation.name")).toBeUndefined();
+    expect(attrValue(agg, "fallback")).toEqual({ boolValue: true });
+  });
+
   it("emits aggregation and internal-escalation spans in stage order", () => {
     const store = makeStore();
     const jobId = seedJob(store);

@@ -395,6 +395,28 @@ describe("exportTraces/exportMetrics", () => {
     expect(event.response).not.toContain("oo.example.com");
   });
 
+  it("redacts the Authorization header before truncating long error bodies", async () => {
+    vi.stubEnv("OPENOBSERVE_TRACES_URL", TRACES_URL);
+    vi.stubEnv("OPENOBSERVE_EMAIL", "test@example.com");
+    vi.stubEnv("OPENOBSERVE_TOKEN", "tok");
+    const sentAuth = `Basic ${Buffer.from("test@example.com:tok").toString("base64")}`;
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: false,
+      status: 400,
+      text: async () => `${"x".repeat(285)} ${sentAuth} tail`,
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    setAppLogSink(captureAppLog);
+    exportTraces([makeSpan()]);
+    await flushOtlpExports();
+    await flushIngestPosts();
+    const [event] = appLogLines.map((line) => JSON.parse(line) as Record<string, unknown>);
+    // A reflected auth value severed by the 300-char cut must not survive partially.
+    expect(event.response).not.toContain("Basic");
+    expect(event.response).not.toContain(Buffer.from("test@example.com:tok").toString("base64").slice(0, 10));
+  });
+
   it("posts failure events to the logs channel config, not the failed channel's", async () => {
     // Stored metrics endpoint fails while a stored logs endpoint is healthy:
     // the app-log event must land on the logs ingest, not the OTLP endpoint.
