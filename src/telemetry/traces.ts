@@ -72,6 +72,8 @@ const usageAttrs = (model: string | null, totalTokens: number | null, cost: numb
 const genAiAttrs = (opts: {
   provider?: string | null;
   model?: string | null;
+  /** Whether the stage actually got a model response back — controls response.model. */
+  responded?: boolean;
   promptName?: string | null;
   promptTokens?: number | null;
   completionTokens?: number | null;
@@ -83,7 +85,9 @@ const genAiAttrs = (opts: {
   const attrs: OtlpAttribute[] = [attr("gen_ai.operation.name", "chat")];
   if (opts.provider) attrs.push(attr("gen_ai.provider.name", opts.provider));
   if (opts.model) {
-    attrs.push(attr("gen_ai.request.model", opts.model), attr("gen_ai.response.model", opts.model));
+    attrs.push(attr("gen_ai.request.model", opts.model));
+    // response.model is only honest when the call returned something.
+    if (opts.responded !== false) attrs.push(attr("gen_ai.response.model", opts.model));
   }
   if (opts.promptName) attrs.push(attr("gen_ai.prompt.name", opts.promptName));
   if (opts.promptTokens != null) {
@@ -178,12 +182,18 @@ export function jobTrace(
         ...genAiAttrs({
           provider: job.routing_provider,
           model: job.routing_model,
+          // "fallback" means the router call failed and diagnosis decided.
+          responded: job.routing_source !== "fallback",
           totalTokens: job.routing_total_tokens,
           cost: job.routing_cost,
         }),
         ...(job.routing_profile ? [attr("profile", job.routing_profile)] : []),
         ...(job.routing_mode ? [attr("mode", job.routing_mode)] : []),
       ],
+      status:
+        job.routing_source === "fallback"
+          ? { code: STATUS_CODE_ERROR, message: "router model call failed" }
+          : { code: STATUS_CODE_OK },
     });
     cursor = Math.max(cursor, cursor + job.routing_duration_ms);
   }
@@ -209,6 +219,7 @@ export function jobTrace(
         ...genAiAttrs({
           provider: run.provider,
           model: run.model,
+          responded: run.state === "done",
           promptName: run.role,
           promptTokens: run.prompt_tokens,
           completionTokens: run.completion_tokens,
@@ -252,11 +263,18 @@ export function jobTrace(
           ? genAiAttrs({
               provider: job.aggregator_provider,
               model: job.aggregator_model,
+              responded: job.aggregator_fallback !== 1,
               totalTokens: job.aggregator_total_tokens,
               cost: job.aggregator_cost,
             })
           : []),
       ],
+      // Model-failure fallback = attempted LLM call that failed; budget
+      // degradation is a successful deterministic result, not an error.
+      status:
+        ranLlm && job.aggregator_fallback === 1
+          ? { code: STATUS_CODE_ERROR, message: "aggregator model call failed" }
+          : { code: STATUS_CODE_OK },
     });
     cursor = Math.max(cursor, end);
   }
@@ -279,10 +297,12 @@ export function jobTrace(
         ...genAiAttrs({
           provider: job.internal_escalation_provider,
           model: job.internal_escalation_model,
+          responded: job.internal_escalation_state === "done",
           totalTokens: job.internal_escalation_total_tokens,
           cost: job.internal_escalation_cost,
         }),
       ],
+      status: statusFor(job.internal_escalation_state ?? "done"),
     });
   }
 

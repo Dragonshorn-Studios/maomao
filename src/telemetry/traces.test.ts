@@ -170,6 +170,34 @@ describe("jobTrace", () => {
     expect(attrValue(agg, "fallback")).toEqual({ boolValue: true });
   });
 
+  it("does not fabricate gen_ai.response.model on failed stage calls", () => {
+    const store = makeStore();
+    const jobId = seedJob(store);
+    store.patchJob(jobId, {
+      started_at: "2026-10-01T08:00:00.000Z",
+      routing_state: "done",
+      routing_source: "fallback",
+      routing_duration_ms: 1200,
+      routing_model: "gpt-5",
+      aggregator_state: "done",
+      aggregator_started_at: "2026-10-01T08:00:10.000Z",
+      aggregator_finished_at: "2026-10-01T08:00:11.000Z",
+      aggregator_model: "gpt-5",
+      aggregator_duration_ms: 1000,
+      aggregator_fallback: 1,
+      internal_escalation_state: "failed",
+      internal_escalation_model: "gpt-5",
+      internal_escalation_duration_ms: 3000,
+    });
+    const spans = jobTrace(store.getJob(jobId)!, store.listReviewerRuns(jobId));
+    for (const name of ["maomao.stage.routing", "maomao.stage.aggregation", "maomao.stage.internal_escalation"]) {
+      const span = spans.find((s) => s.name === name)!;
+      expect(attrValue(span, "gen_ai.request.model")).toEqual({ stringValue: "gpt-5" });
+      expect(attrValue(span, "gen_ai.response.model")).toBeUndefined();
+      expect(span.status?.code).toBe(2);
+    }
+  });
+
   it("emits aggregation and internal-escalation spans in stage order", () => {
     const store = makeStore();
     const jobId = seedJob(store);
