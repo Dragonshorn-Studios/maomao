@@ -39,6 +39,7 @@ export class JobQueue {
       this.metricsConfig(),
       this.metricsShared(),
       this.logsConfig(),
+      this.emitAppLogs,
     );
   }
 

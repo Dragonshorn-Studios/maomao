@@ -1,7 +1,31 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { openDb } from "../db.js";
 import { JobStore } from "./store.js";
 import { JobQueue } from "./queue.js";
+import { setAppLogSink } from "../telemetry/app-log.js";
+import { flushIngestPosts } from "../telemetry/ingest.js";
+
+const appLogLines: string[] = [];
+const captureAppLog = (line: string) => {
+  appLogLines.push(line);
+};
+
+beforeEach(() => {
+  // Keep ambient telemetry env out: queue mutations export gauges and
+  // app-log events against whatever resolves — no real POSTs in tests.
+  vi.stubEnv("OPENOBSERVE_LOGS_URL", "");
+  vi.stubEnv("OPENOBSERVE_METRICS_URL", "");
+  vi.stubEnv("OPENOBSERVE_TRACES_URL", "");
+});
+
+afterEach(async () => {
+  appLogLines.length = 0;
+  setAppLogSink((line) => process.stdout.write(`${line}\n`));
+  await flushIngestPosts();
+  vi.unstubAllGlobals();
+  vi.unstubAllEnvs();
+  vi.restoreAllMocks();
+});
 
 function makeStore() {
   return new JobStore(openDb(":memory:"));
@@ -158,5 +182,48 @@ describe("JobQueue cancellation", () => {
     expect(store.listLogs(cancelledJob).some((line) => line.message.includes("Re-queued"))).toBe(false);
     // The interrupted control job was reset, re-enqueued, and ran.
     expect(store.getJob(interruptedJob)?.state).toBe("queued");
+  });
+});
+
+describe("job_started app-log events", () => {
+  it("emits maomao.job_started on claim with job and queue fields", async () => {
+    vi.stubEnv("OPENOBSERVE_LOGS_URL", "");
+    setAppLogSink(captureAppLog);
+    const store = makeStore();
+    const jobId = seedJob(store, 4, "deadbeef01");
+    const ran: number[] = [];
+    const queue = new JobQueue(store, 1, async (id) => {
+      ran.push(id);
+    });
+    queue.start();
+    await vi.waitFor(() => expect(ran).toEqual([jobId]));
+    const events = appLogLines.map((line) => JSON.parse(line) as Record<string, unknown>);
+    expect(events).toEqual([
+      expect.objectContaining({
+        event: "maomao.job_started",
+        job_id: jobId,
+        job_type: "pr_review",
+        repo: "acme/widgets",
+        pr: 4,
+        head_sha: "deadbeef01",
+        attempt: 1,
+        queue_depth: 0,
+        slots_in_use: 1,
+      }),
+    ]);
+  });
+
+  it("emitAppLogs=false suppresses job_started events", async () => {
+    vi.stubEnv("OPENOBSERVE_LOGS_URL", "");
+    setAppLogSink(captureAppLog);
+    const store = makeStore();
+    const jobId = seedJob(store);
+    const ran: number[] = [];
+    const queue = new JobQueue(store, 1, async (id) => {
+      ran.push(id);
+    }, undefined, false);
+    queue.start();
+    await vi.waitFor(() => expect(ran).toEqual([jobId]));
+    expect(appLogLines).toHaveLength(0);
   });
 });

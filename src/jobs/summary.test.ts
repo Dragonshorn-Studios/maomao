@@ -78,8 +78,11 @@ function payloadLines(): JobSummaryPayload[] {
 
 beforeEach(() => {
   // Keep the ambient environment out of store-driven emits: a developer or
-  // CI box with OPENOBSERVE_LOGS_URL exported must not produce real POSTs.
+  // CI box with any OPENOBSERVE_*_URL exported must not produce real POSTs
+  // or flip telemetry_unconfigured assertions.
   vi.stubEnv("OPENOBSERVE_LOGS_URL", "");
+  vi.stubEnv("OPENOBSERVE_METRICS_URL", "");
+  vi.stubEnv("OPENOBSERVE_TRACES_URL", "");
 });
 
 afterEach(async () => {
@@ -1181,11 +1184,16 @@ describe("emitJobSummary", () => {
   it("flags telemetry channels with no resolvable endpoint on the summary line", async () => {
     // Only the logs channel is wired — metrics/traces silently no-op their
     // exports; the summary line must say so instead of hiding it.
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true, status: 200 });
+    vi.stubGlobal("fetch", fetchMock);
     vi.stubEnv("OPENOBSERVE_LOGS_URL", "https://oo.example.com/api/default/maomao/_json");
     setJobSummarySink(capture);
     const store = makeStore();
     const jobId = seedJob(store);
     store.setJobState(jobId, "completed");
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
+    const posted = JSON.parse((fetchMock.mock.calls[0][1] as RequestInit).body as string) as Record<string, unknown>[];
+    expect(posted[0].telemetry_unconfigured).toEqual(["metrics", "traces"]);
     expect(payloadLines()).toEqual([
       expect.objectContaining({
         job_id: jobId,

@@ -14,6 +14,8 @@ import {
   type OtlpMetric,
   type OtlpSpan,
 } from "./otlp.js";
+import { setAppLogSink } from "./app-log.js";
+import { flushIngestPosts } from "./ingest.js";
 
 function makeSpan(overrides?: Partial<OtlpSpan>): OtlpSpan {
   return {
@@ -49,12 +51,23 @@ beforeEach(() => {
   vi.stubEnv("OPENOBSERVE_METRICS_TOKEN", "");
   vi.stubEnv("OTEL_SERVICE_NAME", "");
   vi.stubEnv("OTEL_RESOURCE_ATTRIBUTES", "");
+  // App-log events on export failure also resolve the logs channel — keep
+  // ambient env out of it.
+  vi.stubEnv("OPENOBSERVE_LOGS_URL", "");
 });
 
+const appLogLines: string[] = [];
+const captureAppLog = (line: string) => {
+  appLogLines.push(line);
+};
+
 afterEach(async () => {
-  // Drain the serialized export queue so a test's queued POST can't bleed
-  // fetch calls into the next test's stubs.
+  // Drain the serialized export + ingest queues so a test's queued POST
+  // can't bleed fetch calls into the next test's stubs.
   await flushOtlpExports();
+  await flushIngestPosts();
+  appLogLines.length = 0;
+  setAppLogSink((line) => process.stdout.write(`${line}\n`));
   vi.unstubAllGlobals();
   vi.unstubAllEnvs();
   vi.restoreAllMocks();
@@ -313,5 +326,66 @@ describe("exportTraces/exportMetrics", () => {
     exportMetrics([makeGauge()]);
     await flushOtlpExports();
     expect(err).not.toHaveBeenCalled();
+  });
+
+  it("emits a telemetry_export_failed app-log event on a non-ok export", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({ ok: false, status: 502 });
+    vi.stubGlobal("fetch", fetchMock);
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    setAppLogSink(captureAppLog);
+    vi.stubEnv("OPENOBSERVE_METRICS_URL", METRICS_URL);
+    exportMetrics([makeGauge()]);
+    await flushOtlpExports();
+    await flushIngestPosts();
+    const events = appLogLines.map((line) => JSON.parse(line) as Record<string, unknown>);
+    expect(events).toEqual([
+      expect.objectContaining({
+        event: "maomao.telemetry_export_failed",
+        level: "error",
+        signal: "metrics",
+        status: 502,
+        url: METRICS_URL,
+      }),
+    ]);
+  });
+
+  it("posts failure events to the logs channel config, not the failed channel's", async () => {
+    // Stored metrics endpoint fails while a stored logs endpoint is healthy:
+    // the app-log event must land on the logs ingest, not the OTLP endpoint.
+    const fetchMock = vi.fn().mockImplementation(async (url: string) =>
+      url.includes("logs.test") ? { ok: true, status: 200 } : { ok: false, status: 500 },
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    setAppLogSink(captureAppLog);
+    const logsStored = { url: "https://logs.test/api/default/maomao/_json", email: "ops@oo.test", token: "o2oi_x" };
+    exportMetrics(
+      [makeGauge()],
+      {} as NodeJS.ProcessEnv,
+      { url: "https://metrics.test/api/default/v1/metrics" },
+      undefined,
+      logsStored,
+    );
+    await flushOtlpExports();
+    await flushIngestPosts();
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    const [otlpUrl] = fetchMock.mock.calls[0] as [string, RequestInit];
+    const [logsUrl, logsInit] = fetchMock.mock.calls[1] as [string, RequestInit];
+    expect(otlpUrl).toBe("https://metrics.test/api/default/v1/metrics");
+    expect(logsUrl).toBe("https://logs.test/api/default/maomao/_json");
+    const posted = JSON.parse(logsInit.body as string) as Record<string, unknown>[];
+    expect(posted[0].event).toBe("maomao.telemetry_export_failed");
+  });
+
+  it("appLogs=false silences failure events but keeps the stderr log", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({ ok: false, status: 503 });
+    vi.stubGlobal("fetch", fetchMock);
+    const err = vi.spyOn(console, "error").mockImplementation(() => {});
+    setAppLogSink(captureAppLog);
+    vi.stubEnv("OPENOBSERVE_METRICS_URL", METRICS_URL);
+    exportMetrics([makeGauge()], process.env, undefined, undefined, undefined, false);
+    await flushOtlpExports();
+    expect(appLogLines).toHaveLength(0);
+    expect(err).toHaveBeenCalledWith(expect.stringContaining("metrics export returned 503"));
   });
 });

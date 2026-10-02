@@ -241,16 +241,19 @@ function queueExport(
   env: NodeJS.ProcessEnv,
   logsStored?: TelemetryChannelConfig,
   shared?: TelemetrySharedConfig,
+  appLogs = true,
 ): void {
   if (pendingExports >= MAX_PENDING_EXPORTS) {
     console.error(`otlp: dropping ${signal} export: queue full`);
-    emitAppLog(
-      "telemetry_export_dropped",
-      { level: "warn", signal, reason: "queue full", url: maskUrlCredentials(endpoint.url) },
-      env,
-      logsStored,
-      shared,
-    );
+    if (appLogs) {
+      emitAppLog(
+        "telemetry_export_dropped",
+        { level: "warn", signal, reason: "queue full", url: maskUrlCredentials(endpoint.url) },
+        env,
+        logsStored,
+        shared,
+      );
+    }
     return;
   }
   if (endpoint.headers.authorization && endpoint.url.startsWith("http://") && !insecureEndpointWarned.has(endpoint.url)) {
@@ -270,25 +273,29 @@ function queueExport(
       });
       if (!response.ok) {
         console.error(`otlp: ${signal} export returned ${response.status}`);
-        emitAppLog(
-          "telemetry_export_failed",
-          { level: "error", signal, status: response.status, url: maskUrlCredentials(endpoint.url) },
-          env,
-          logsStored,
-          shared,
-        );
+        if (appLogs) {
+          emitAppLog(
+            "telemetry_export_failed",
+            { level: "error", signal, status: response.status, url: maskUrlCredentials(endpoint.url) },
+            env,
+            logsStored,
+            shared,
+          );
+        }
       }
     } catch (error) {
       const raw = error instanceof Error ? error.message : String(error);
       const safe = redactEndpointError(raw, endpoint.url);
       console.error(`otlp: ${signal} export failed: ${safe}`);
-      emitAppLog(
-        "telemetry_export_failed",
-        { level: "error", signal, error: safe, url: maskUrlCredentials(endpoint.url) },
-        env,
-        logsStored,
-        shared,
-      );
+      if (appLogs) {
+        emitAppLog(
+          "telemetry_export_failed",
+          { level: "error", signal, error: safe, url: maskUrlCredentials(endpoint.url) },
+          env,
+          logsStored,
+          shared,
+        );
+      }
     } finally {
       pendingExports -= 1;
     }
@@ -312,12 +319,13 @@ export function exportTraces(
   stored?: TelemetryChannelConfig,
   shared?: TelemetrySharedConfig,
   logsStored?: TelemetryChannelConfig,
+  appLogs = true,
 ): void {
   try {
     if (spans.length === 0) return;
     const endpoint = otlpEndpoint("traces", env, stored, shared);
     if (!endpoint) return;
-    queueExport("traces", endpoint, JSON.stringify(tracesEnvelope(spans, env)), env, logsStored, shared);
+    queueExport("traces", endpoint, JSON.stringify(tracesEnvelope(spans, env)), env, logsStored, shared, appLogs);
   } catch (error) {
     console.error(
       `otlp: traces export failed: ${error instanceof Error ? error.message : String(error)}`,
@@ -335,12 +343,13 @@ export function exportMetrics(
   stored?: TelemetryChannelConfig,
   shared?: TelemetrySharedConfig,
   logsStored?: TelemetryChannelConfig,
+  appLogs = true,
 ): void {
   try {
     if (metrics.length === 0) return;
     const endpoint = otlpEndpoint("metrics", env, stored, shared);
     if (!endpoint) return;
-    queueExport("metrics", endpoint, JSON.stringify(metricsEnvelope(metrics, env)), env, logsStored, shared);
+    queueExport("metrics", endpoint, JSON.stringify(metricsEnvelope(metrics, env)), env, logsStored, shared, appLogs);
   } catch (error) {
     console.error(
       `otlp: metrics export failed: ${error instanceof Error ? error.message : String(error)}`,
