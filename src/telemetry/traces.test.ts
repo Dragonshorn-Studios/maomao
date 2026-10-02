@@ -175,9 +175,10 @@ describe("jobTrace", () => {
     const store = makeStore();
     const jobId = seedJob(store);
     const run = store.listReviewerRuns(jobId)[0];
-    // Degrade-mode skip: state=failed + finished_at only, no model/tokens/cost.
+    // Degrade-mode skip keeps the enqueue-time configured model — only
+    // state/finished_at are written, so model can't be the discriminator.
     store["db"]
-      .prepare(`UPDATE reviewer_runs SET state = 'failed', finished_at = ? WHERE id = ?`)
+      .prepare(`UPDATE reviewer_runs SET state = 'failed', model = 'gpt-5', finished_at = ? WHERE id = ?`)
       .run("2026-10-01T08:00:02.000Z", run.id);
     const reviewer = jobTrace(store.getJob(jobId)!, store.listReviewerRuns(jobId)).find(
       (s) => s.name === "maomao.stage.reviewer",

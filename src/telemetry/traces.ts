@@ -203,9 +203,10 @@ export function jobTrace(
     if (run.started_at == null && run.finished_at == null && run.duration_ms == null) return;
     const runStart = msOf(run.started_at) ?? cursor;
     const runEnd = msOf(run.finished_at) ?? (run.duration_ms != null ? runStart + run.duration_ms : runStart);
-    // Budget-skipped runs get only state=failed + finished_at — no model,
-    // tokens or cost. Same gate as aggregation: no LLM call, no CLIENT/chat.
-    const ranLlm = run.model != null || run.total_tokens != null || run.cost != null;
+    // started_at is stamped when the model call begins; budget-skipped runs
+    // get only state=failed + finished_at (model is seeded at enqueue, so it
+    // can't discriminate). Same gate as aggregation: no call, no CLIENT/chat.
+    const ranLlm = run.started_at != null || run.total_tokens != null || run.cost != null;
     spans.push({
       traceId,
       spanId: spanIdForStage(job.id, `reviewer-${run.id}`),
