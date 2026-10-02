@@ -342,6 +342,8 @@ OPENOBSERVE_LOGS_TOKEN=...              # o2oi_… — sent as the Basic passwor
 # or (legacy user/password):
 OPENOBSERVE_LOGS_USER=...               # Authorization: Basic (user:password)
 OPENOBSERVE_LOGS_PASSWORD=...
+# generic OPENOBSERVE_EMAIL/TOKEN/USER/PASSWORD fall back for all channels,
+# including logs — same precedence the shared credentials on /config/telemetry use
 ```
 
 Unset `OPENOBSERVE_LOGS_URL` means stdout-only; a failing or slow endpoint never affects jobs (POSTs are fire-and-forget and serialized to one in-flight request, errors are logged without credentials, and the pending queue is capped — overflow drops and logs rather than backlogs, since the stdout line is the durable copy). Emission is **at-most-once**: it happens in-process right after the terminal-state commit, so a crash in between permanently loses that job's line — there is no durable outbox. If exact-once accounting ever matters, the recovery path is a startup backfill over terminal rows; until then treat the stream as best-effort telemetry. In OpenObserve, filter a stream on e.g. `event='maomao.job_summary' AND job_type='pr_review'` or `repo='owner/name'` for per-repo dashboards. One line is emitted **per terminal transition**: for per-job totals take the latest `attempt` line, which mirrors the UI's own rollup (a retry discards attempt-1 run/aggregation usage the same way the UI does); summing every attempt re-counts the `routing`/`internal_escalation` stages that retries don't reset. `duration_ms` is measured from `started_at` (the claim timestamp) and falls back to `created_at` only when `started_at` was never stamped — i.e. still-queued jobs terminated by the raw-UPDATE cancel/stale-sweep paths. A queued job failed via `setJobState` gets `started_at` stamped at the transition itself, so it reports ~0 rather than creation-to-finish. For a retried job terminating while still queued the same split applies: on the raw-UPDATE cancel/sweep paths it measures from the original `created_at` (the retry nulled `started_at` and nothing re-stamps it) — a whole-lifetime span, not the attempt's — while through `setJobState` it reports ~0 like any queued transition.
@@ -391,6 +393,19 @@ With `OPENOBSERVE_TRACES_URL` set, each terminal job run emits one trace (`src/t
 Stack linkage is by **shared trace, not runtime context**: trace and span ids are deterministic hashes of the job id, so a member `pr_review` emits its whole span tree (root + stage spans) inside the `stack_review` job's trace, parented directly to the stack root — OpenObserve shows `stack_review → member pr_review → specialist steps` in one trace. A member job belonging to several stack runs joins the latest one.
 
 Operator-side setup (endpoints, credentials, dashboarding semantics, troubleshooting): [docs/telemetry/openobserve-setup.md](docs/telemetry/openobserve-setup.md).
+
+### App events
+
+Operational events are emitted on the same stdout-line + logs-channel transport as job summaries (`src/telemetry/app-log.ts`), as `maomao.<event>` records with `level` (`info`/`warn`/`error`) where relevant:
+
+| Event | Fields | Emitted |
+|---|---|---|
+| `maomao.app_boot` | `port`, `job_concurrency`, `telemetry` (per-channel config source) | once at startup |
+| `maomao.job_started` | `job_id`, `job_type`, `repo`, `pr`, `provider`, `provider_instance`, `head_sha`, `attempt`, `queue_depth`, `slots_in_use` | each job claim |
+| `maomao.telemetry_export_failed` | `signal`, HTTP `status` or `error` (redacted), `url` (credentials masked) | an OTLP export fails |
+| `maomao.telemetry_export_dropped` | `signal`, `reason`, `url` | the export queue is full |
+
+Separately, when **some** telemetry channels are configured but not all, each `maomao.job_summary` line carries `telemetry_unconfigured: [...]` naming the channels whose exports silently no-op'd — a partial setup is visible in the same stream instead of only on stderr. A deployment with no channels configured at all stays quiet.
 
 ## Run locally
 

@@ -69,8 +69,10 @@ export function exportQueueMetrics(
   env: NodeJS.ProcessEnv = process.env,
   stored?: TelemetryChannelConfig,
   shared?: TelemetrySharedConfig,
+  logsStored?: TelemetryChannelConfig,
+  appLogs = true,
 ): void {
-  exportMetrics(queueMetrics(pending, active, slots), env, stored, shared);
+  exportMetrics(queueMetrics(pending, active, slots), env, stored, shared, logsStored, appLogs);
 }
 
 /** Metrics for one terminal job transition, from the same snapshot the summary line uses. */
@@ -161,11 +163,13 @@ export function exportTerminalJobMetrics(
   opts?: JobSummaryOptions,
   stored?: TelemetryChannelConfig,
   shared?: TelemetrySharedConfig,
+  logsStored?: TelemetryChannelConfig,
+  appLogs = true,
 ): void {
   try {
     const job = opts?.job ?? store.getJob(jobId);
     if (!job) return;
-    exportMetrics(terminalJobMetrics(job, opts?.runs ?? store.listReviewerRuns(jobId), opts), env, stored, shared);
+    exportMetrics(terminalJobMetrics(job, opts?.runs ?? store.listReviewerRuns(jobId), opts), env, stored, shared, logsStored, appLogs);
   } catch (error) {
     console.error(
       `otlp: terminal metrics failed for job ${jobId}: ${error instanceof Error ? error.message : String(error)}`,

@@ -93,17 +93,14 @@ OTEL_RESOURCE_ATTRIBUTES=deployment.environment=prod,fleet=<name>
 - `JOB_SUMMARIES=false` turns off **all** terminal-state telemetry (logs,
   metrics, and traces emit from the same seam). Queue gauges are unaffected —
   they emit on queue mutations regardless.
-- Auth resolution: OTLP signals take `OPENOBSERVE_<SIGNAL>_TOKEN ??
-  OPENOBSERVE_TOKEN` + `OPENOBSERVE_<SIGNAL>_EMAIL ?? OPENOBSERVE_EMAIL`
-  (Basic `email:ingestion-token`) or `OPENOBSERVE_<SIGNAL>_USER ??
-  OPENOBSERVE_USER` + the matching `_PASSWORD` (Basic), `<SIGNAL>` = `TRACES`
-  or `METRICS`. The logs channel reads only `OPENOBSERVE_LOGS_TOKEN` /
-  `OPENOBSERVE_LOGS_EMAIL` / `OPENOBSERVE_LOGS_USER` /
-  `OPENOBSERVE_LOGS_PASSWORD` — no generic fallback. A token without an
-  email cannot authenticate — set both.
-  Stored shared credentials from `/config/telemetry` do reach the logs
-  channel (the page's own layer), so saving credentials once there covers
-  all three.
+- Auth resolution is the same for all three channels:
+  `OPENOBSERVE_<CH>_TOKEN ?? OPENOBSERVE_TOKEN` +
+  `OPENOBSERVE_<CH>_EMAIL ?? OPENOBSERVE_EMAIL`
+  (Basic `email:ingestion-token`) or `OPENOBSERVE_<CH>_USER ??
+  OPENOBSERVE_USER` + the matching `_PASSWORD` (Basic), `<CH>` = `TRACES`,
+  `METRICS`, or `LOGS`. A token without an email cannot authenticate — set
+  both. Stored shared credentials from `/config/telemetry` resolve the same
+  way, so saving credentials once there covers all three channels.
 
 ## 3. Verify
 
@@ -117,7 +114,12 @@ Enqueue a review (or dequeue/requeue to move the queue), then:
   `maomao.queue.slots_in_use`, `maomao.queue.slots`, `maomao.jobs`,
   `maomao.job.tokens`, `maomao.job.cost_usd`, `maomao.job.duration_ms`.
 - **Logs**: Logs tab → stream `maomao`, filter
-  `event='maomao.job_summary'`.
+  `event='maomao.job_summary'`. The same stream also carries operational
+  events: `maomao.app_boot` (startup, with each channel's config source),
+  `maomao.job_started`, `maomao.telemetry_export_failed` and
+  `maomao.telemetry_export_dropped`. If metrics or traces are missing,
+  check `maomao.job_summary` lines for `telemetry_unconfigured` — it lists
+  channels that resolved no endpoint and silently no-op'd.
 
 ## 4. Semantics worth knowing when dashboarding
 
