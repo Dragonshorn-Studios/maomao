@@ -349,6 +349,31 @@ describe("exportTraces/exportMetrics", () => {
     ]);
   });
 
+  it("carries the sanitized upstream error body into the failure event", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: false,
+      status: 400,
+      text: async () => `invalid envelope: expected resourceSpans — see ${TRACES_URL}\nignored`,
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const err = vi.spyOn(console, "error").mockImplementation(() => {});
+    setAppLogSink(captureAppLog);
+    vi.stubEnv("OPENOBSERVE_TRACES_URL", TRACES_URL);
+    exportTraces([makeSpan()]);
+    await flushOtlpExports();
+    await flushIngestPosts();
+    const [event] = appLogLines.map((line) => JSON.parse(line) as Record<string, unknown>);
+    expect(event).toEqual(
+      expect.objectContaining({
+        event: "maomao.telemetry_export_failed",
+        signal: "traces",
+        status: 400,
+        response: "invalid envelope: expected resourceSpans — see <otlp-url> ignored",
+      }),
+    );
+    expect(err).toHaveBeenCalledWith(expect.stringContaining("invalid envelope"));
+  });
+
   it("posts failure events to the logs channel config, not the failed channel's", async () => {
     // Stored metrics endpoint fails while a stored logs endpoint is healthy:
     // the app-log event must land on the logs ingest, not the OTLP endpoint.

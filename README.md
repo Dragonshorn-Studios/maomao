@@ -402,8 +402,20 @@ Operational events are emitted on the same stdout-line + logs-channel transport 
 |---|---|---|
 | `maomao.app_boot` | `port`, `job_concurrency`, `telemetry` (per-channel config source) | once at startup |
 | `maomao.job_started` | `job_id`, `job_type`, `repo`, `pr`, `provider`, `provider_instance`, `head_sha`, `attempt`, `queue_depth`, `slots_in_use` | each job claim |
-| `maomao.telemetry_export_failed` | `signal`, HTTP `status` or `error` (redacted), `url` (credentials masked) | an OTLP export fails |
+| `maomao.telemetry_export_failed` | `signal`, HTTP `status` or `error` (redacted), `url` (credentials masked), `response` (sanitized upstream error body, ≤300 chars) | an OTLP export fails |
 | `maomao.telemetry_export_dropped` | `signal`, `reason`, `url` | the export queue is full |
+
+LLM-call stage spans (`maomao.stage.reviewer`, `.routing`, `.aggregation`,
+`.internal_escalation`) also carry the OTel `gen_ai.*` semantic attributes
+(`gen_ai.operation.name`=`chat`, `gen_ai.provider.name`,
+`gen_ai.request/response.model`, `gen_ai.usage.*_tokens`,
+`gen_ai.usage.cost`, `gen_ai.prompt.name` = reviewer role) with
+`span_kind` CLIENT, so OpenObserve's AI observability picks them up. Costs
+emit `cost_usd`/`gen_ai.usage.cost` plus an exact integer
+`cost_usd_micros` twin — OpenObserve's strict traces decoder rejects
+fractional `doubleValue` (`invalid type: map, expected f64`), so
+fractional costs go out as strings while `_micros` stays numerically
+summable.
 
 Separately, when **some** telemetry channels are configured but not all, each `maomao.job_summary` line carries `telemetry_unconfigured: [...]` naming the channels whose exports silently no-op'd — a partial setup is visible in the same stream instead of only on stderr. A deployment with no channels configured at all stays quiet.
 

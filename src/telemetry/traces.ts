@@ -1,7 +1,18 @@
 import { createHash } from "node:crypto";
 import type { JobRow, JobStore, ReviewerRunRow, StackMemberRow } from "../jobs/store.js";
 import { buildJobSummary, type JobSummaryOptions } from "../jobs/summary.js";
-import { attr, exportTraces, nanoTime, type OtlpAttribute, type OtlpSpan } from "./otlp.js";
+import {
+  attr,
+  compatDoubleAttr,
+  exportTraces,
+  nanoTime,
+  SPAN_KIND_CLIENT,
+  SPAN_KIND_INTERNAL,
+  STATUS_CODE_ERROR,
+  STATUS_CODE_OK,
+  type OtlpAttribute,
+  type OtlpSpan,
+} from "./otlp.js";
 import type { TelemetryChannelConfig, TelemetrySharedConfig } from "./settings.js";
 
 /**
@@ -46,12 +57,56 @@ const usageAttrs = (model: string | null, totalTokens: number | null, cost: numb
   const attrs: OtlpAttribute[] = [];
   if (model) attrs.push(attr("model", model));
   if (totalTokens != null) attrs.push(attr("total_tokens", totalTokens));
-  if (cost != null) attrs.push(attr("cost_usd", cost));
+  if (cost != null) {
+    attrs.push(compatDoubleAttr("cost_usd", cost), attr("cost_usd_micros", Math.round(cost * 1e6)));
+  }
+  return attrs;
+};
+
+/**
+ * OTel gen_ai semantic attributes — OpenObserve's AI observability reads
+ * these server-side off any LLM-call span (model, provider, token usage,
+ * cost, cache hits). Emitted alongside our own usage attrs; usage metadata
+ * only, never prompt content.
+ */
+const genAiAttrs = (opts: {
+  provider?: string | null;
+  model?: string | null;
+  promptName?: string | null;
+  promptTokens?: number | null;
+  completionTokens?: number | null;
+  totalTokens?: number | null;
+  cacheRead?: number | null;
+  cacheWrite?: number | null;
+  cost?: number | null;
+}): OtlpAttribute[] => {
+  const attrs: OtlpAttribute[] = [attr("gen_ai.operation.name", "chat")];
+  if (opts.provider) attrs.push(attr("gen_ai.provider.name", opts.provider));
+  if (opts.model) {
+    attrs.push(attr("gen_ai.request.model", opts.model), attr("gen_ai.response.model", opts.model));
+  }
+  if (opts.promptName) attrs.push(attr("gen_ai.prompt.name", opts.promptName));
+  if (opts.promptTokens != null) {
+    attrs.push(
+      attr("gen_ai.usage.prompt_tokens", opts.promptTokens),
+      attr("gen_ai.usage.input_tokens", opts.promptTokens),
+    );
+  }
+  if (opts.completionTokens != null) {
+    attrs.push(
+      attr("gen_ai.usage.completion_tokens", opts.completionTokens),
+      attr("gen_ai.usage.output_tokens", opts.completionTokens),
+    );
+  }
+  if (opts.totalTokens != null) attrs.push(attr("gen_ai.usage.total_tokens", opts.totalTokens));
+  if (opts.cacheRead != null) attrs.push(attr("gen_ai.usage.cache_read_tokens", opts.cacheRead));
+  if (opts.cacheWrite != null) attrs.push(attr("gen_ai.usage.cache_write_tokens", opts.cacheWrite));
+  if (opts.cost != null) attrs.push(compatDoubleAttr("gen_ai.usage.cost", opts.cost));
   return attrs;
 };
 
 const statusFor = (state: string): { code: number; message?: string } =>
-  state === "completed" || state === "done" ? { code: 1 } : { code: 2, message: state };
+  state === "completed" || state === "done" ? { code: STATUS_CODE_OK } : { code: STATUS_CODE_ERROR, message: state };
 
 /**
  * All spans for one terminal job run. `membership` is the stack run this job
@@ -96,7 +151,7 @@ export function jobTrace(
       spanId: rootId,
       ...(membership ? { parentSpanId: spanIdForJob(membership.stackJobId) } : {}),
       name: `maomao.job.${job.job_type}`,
-      kind: 1,
+      kind: SPAN_KIND_INTERNAL,
       startTimeUnixNano: nanoTime(startMs),
       endTimeUnixNano: nanoTime(Math.max(endMs, startMs)),
       attributes: rootAttrs,
@@ -116,9 +171,16 @@ export function jobTrace(
       name: "maomao.stage.routing",
       startTimeUnixNano: nanoTime(cursor),
       endTimeUnixNano: nanoTime(cursor + job.routing_duration_ms),
+      kind: SPAN_KIND_CLIENT,
       attributes: [
         attr("state", job.routing_state ?? "done"),
         ...usageAttrs(job.routing_model, job.routing_total_tokens, job.routing_cost),
+        ...genAiAttrs({
+          provider: job.routing_provider,
+          model: job.routing_model,
+          totalTokens: job.routing_total_tokens,
+          cost: job.routing_cost,
+        }),
         ...(job.routing_profile ? [attr("profile", job.routing_profile)] : []),
         ...(job.routing_mode ? [attr("mode", job.routing_mode)] : []),
       ],
@@ -136,6 +198,7 @@ export function jobTrace(
       spanId: spanIdForStage(job.id, `reviewer-${run.id}`),
       parentSpanId: rootId,
       name: "maomao.stage.reviewer",
+      kind: SPAN_KIND_CLIENT,
       startTimeUnixNano: nanoTime(runStart),
       endTimeUnixNano: nanoTime(Math.max(runEnd, runStart)),
       attributes: [
@@ -143,6 +206,18 @@ export function jobTrace(
         attr("state", run.state),
         attr("attempt", run.attempt),
         ...usageAttrs(run.model, run.total_tokens, run.cost),
+        ...genAiAttrs({
+          provider: run.provider,
+          model: run.model,
+          promptName: run.role,
+          promptTokens: run.prompt_tokens,
+          completionTokens: run.completion_tokens,
+          totalTokens: run.total_tokens,
+          cacheRead: run.cache_read_tokens,
+          cacheWrite: run.cache_write_tokens,
+          cost: run.cost,
+        }),
+        ...(run.state !== "done" ? [attr("error.type", run.state)] : []),
       ],
       status: statusFor(run.state),
     });
@@ -159,12 +234,19 @@ export function jobTrace(
       spanId: spanIdForStage(job.id, "aggregation"),
       parentSpanId: rootId,
       name: "maomao.stage.aggregation",
+      kind: SPAN_KIND_CLIENT,
       startTimeUnixNano: nanoTime(start),
       endTimeUnixNano: nanoTime(Math.max(end, start)),
       attributes: [
         attr("state", job.aggregator_state),
         ...(job.aggregator_fallback ? [attr("fallback", true)] : []),
         ...usageAttrs(job.aggregator_model, job.aggregator_total_tokens, job.aggregator_cost),
+        ...genAiAttrs({
+          provider: job.aggregator_provider,
+          model: job.aggregator_model,
+          totalTokens: job.aggregator_total_tokens,
+          cost: job.aggregator_cost,
+        }),
       ],
     });
     cursor = Math.max(cursor, end);
@@ -176,6 +258,7 @@ export function jobTrace(
       spanId: spanIdForStage(job.id, "internal-escalation"),
       parentSpanId: rootId,
       name: "maomao.stage.internal_escalation",
+      kind: SPAN_KIND_CLIENT,
       startTimeUnixNano: nanoTime(cursor),
       endTimeUnixNano: nanoTime(cursor + job.internal_escalation_duration_ms),
       attributes: [
@@ -184,6 +267,12 @@ export function jobTrace(
           ? [attr("alert_cleared", job.internal_escalation_alert_cleared === 1)]
           : []),
         ...usageAttrs(job.internal_escalation_model, job.internal_escalation_total_tokens, job.internal_escalation_cost),
+        ...genAiAttrs({
+          provider: job.internal_escalation_provider,
+          model: job.internal_escalation_model,
+          totalTokens: job.internal_escalation_total_tokens,
+          cost: job.internal_escalation_cost,
+        }),
       ],
     });
   }

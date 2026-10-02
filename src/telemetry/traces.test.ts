@@ -118,6 +118,38 @@ describe("jobTrace", () => {
     expect(reviewer.status).toEqual({ code: 1 });
   });
 
+  it("marks LLM-call spans with gen_ai attributes for OpenObserve AI observability", () => {
+    const store = makeStore();
+    const jobId = seedJob(store);
+    const run = store.listReviewerRuns(jobId)[0];
+    store["db"]
+      .prepare(
+        `UPDATE reviewer_runs SET state = 'done', model = 'gpt-5', provider = 'openai', started_at = ?, finished_at = ?, prompt_tokens = 70, completion_tokens = 30, total_tokens = 100, cost = 0.01, cache_read_tokens = 5 WHERE id = ?`,
+      )
+      .run("2026-10-01T08:00:01.000Z", "2026-10-01T08:00:02.000Z", run.id);
+    store.setJobState(jobId, "completed");
+    const reviewer = jobTrace(store.getJob(jobId)!, store.listReviewerRuns(jobId)).find(
+      (s) => s.name === "maomao.stage.reviewer",
+    )!;
+    expect(reviewer.kind).toBe(3);
+    expect(attrValue(reviewer, "gen_ai.operation.name")).toEqual({ stringValue: "chat" });
+    expect(attrValue(reviewer, "gen_ai.provider.name")).toEqual({ stringValue: "openai" });
+    expect(attrValue(reviewer, "gen_ai.request.model")).toEqual({ stringValue: "gpt-5" });
+    expect(attrValue(reviewer, "gen_ai.usage.prompt_tokens")).toEqual({ intValue: "70" });
+    expect(attrValue(reviewer, "gen_ai.usage.completion_tokens")).toEqual({ intValue: "30" });
+    expect(attrValue(reviewer, "gen_ai.usage.input_tokens")).toEqual({ intValue: "70" });
+    expect(attrValue(reviewer, "gen_ai.usage.output_tokens")).toEqual({ intValue: "30" });
+    expect(attrValue(reviewer, "gen_ai.usage.total_tokens")).toEqual({ intValue: "100" });
+    expect(attrValue(reviewer, "gen_ai.usage.cache_read_tokens")).toEqual({ intValue: "5" });
+    // Fractional doubles go out as strings — OO's strict decoder 400s the
+    // whole envelope on {"doubleValue":0.01}; cost_usd_micros keeps it numeric.
+    expect(attrValue(reviewer, "gen_ai.usage.cost")).toEqual({ stringValue: "0.01" });
+    expect(attrValue(reviewer, "cost_usd")).toEqual({ stringValue: "0.01" });
+    expect(attrValue(reviewer, "cost_usd_micros")).toEqual({ intValue: "10000" });
+    expect(attrValue(reviewer, "gen_ai.prompt.name")).toEqual({ stringValue: "correctness" });
+    expect(attrValue(reviewer, "error.type")).toBeUndefined();
+  });
+
   it("emits aggregation and internal-escalation spans in stage order", () => {
     const store = makeStore();
     const jobId = seedJob(store);
