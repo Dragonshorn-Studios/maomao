@@ -77,6 +77,8 @@ const genAiAttrs = (opts: {
   responded?: boolean;
   /** Session id grouping a job's model calls for OO AI Observability Sessions. */
   conversationId?: string | null;
+  /** Session owner for the Sessions user column (the PR author). */
+  userId?: string | null;
   /** Agent node identity for OO Agent Graph/Insights rollups. */
   agentName?: string | null;
   agentId?: string | null;
@@ -90,7 +92,16 @@ const genAiAttrs = (opts: {
 }): OtlpAttribute[] => {
   const attrs: OtlpAttribute[] = [attr("gen_ai.operation.name", "chat")];
   if (opts.provider) attrs.push(attr("gen_ai.provider.name", opts.provider));
-  if (opts.conversationId) attrs.push(attr("gen_ai.conversation.id", opts.conversationId));
+  if (opts.conversationId) {
+    attrs.push(
+      attr("gen_ai.conversation.id", opts.conversationId),
+      // OTel session.id is the first key OO's session-id extractor checks and
+      // canonicalizes to gen_ai_conversation_id; emitting both covers builds
+      // whose extractor predates the gen_ai key.
+      attr("session.id", opts.conversationId),
+    );
+  }
+  if (opts.userId) attrs.push(attr("user.id", opts.userId));
   if (opts.agentName) attrs.push(attr("gen_ai.agent.name", opts.agentName));
   if (opts.agentId) attrs.push(attr("gen_ai.agent.id", opts.agentId));
   if (opts.model) {
@@ -188,6 +199,10 @@ export function jobTrace(
     attr("attempt", summary.attempt),
     attr("usage_complete", summary.usage_complete),
     attr("head_sha", job.head_sha),
+    // The whole trace is the session — tag the root too, not just LLM spans.
+    attr("session.id", conversationId),
+    attr("gen_ai.conversation.id", conversationId),
+    attr("user.id", job.pr_author),
   ];
   const createdMs = msOf(job.created_at);
   if (createdMs != null && msOf(job.started_at) != null) {
@@ -237,6 +252,7 @@ export function jobTrace(
           // "fallback" means the router call failed and diagnosis decided.
           responded: job.routing_source !== "fallback",
           conversationId,
+          userId: job.pr_author,
           agentName: "maomao-router",
           agentId: "maomao-router",
           totalTokens: job.routing_total_tokens,
@@ -285,6 +301,7 @@ export function jobTrace(
               model: run.model,
               responded: run.state === "done",
               conversationId,
+              userId: job.pr_author,
               agentName: run.role,
               agentId: `reviewer.${run.role}`,
               promptName: run.role,
@@ -339,6 +356,7 @@ export function jobTrace(
               // both left no model response; only "done" + no fallback did.
               responded: job.aggregator_state === "done" && job.aggregator_fallback !== 1,
               conversationId,
+              userId: job.pr_author,
               agentName: "maomao-aggregator",
               agentId: "maomao-aggregator",
               totalTokens: job.aggregator_total_tokens,
@@ -381,6 +399,7 @@ export function jobTrace(
           model: job.internal_escalation_model,
           responded: job.internal_escalation_state === "done",
           conversationId,
+          userId: job.pr_author,
           agentName: "maomao-internal-escalation",
           agentId: "maomao-internal-escalation",
           totalTokens: job.internal_escalation_total_tokens,

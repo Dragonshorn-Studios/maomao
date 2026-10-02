@@ -154,9 +154,15 @@ describe("jobTrace", () => {
     expect(attrValue(reviewer, "cost_usd_micros")).toEqual({ intValue: "10000" });
     expect(attrValue(reviewer, "gen_ai.prompt.name")).toEqual({ stringValue: "correctness" });
     expect(attrValue(reviewer, "gen_ai.conversation.id")).toEqual({ stringValue: `maomao-job-${jobId}` });
+    expect(attrValue(reviewer, "session.id")).toEqual({ stringValue: `maomao-job-${jobId}` });
+    expect(attrValue(reviewer, "user.id")).toEqual({ stringValue: "dev" });
     expect(attrValue(reviewer, "gen_ai.agent.name")).toEqual({ stringValue: "correctness" });
     expect(attrValue(reviewer, "gen_ai.agent.id")).toEqual({ stringValue: "reviewer.correctness" });
     expect(attrValue(reviewer, "error.type")).toBeUndefined();
+    const root = jobTrace(store.getJob(jobId)!, store.listReviewerRuns(jobId))[0];
+    expect(attrValue(root, "gen_ai.conversation.id")).toEqual({ stringValue: `maomao-job-${jobId}` });
+    expect(attrValue(root, "session.id")).toEqual({ stringValue: `maomao-job-${jobId}` });
+    expect(attrValue(root, "user.id")).toEqual({ stringValue: "dev" });
   });
 
   it("marks a failed reviewer run with an exception event, not first_output", () => {
