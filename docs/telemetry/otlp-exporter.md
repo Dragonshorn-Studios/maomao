@@ -44,7 +44,7 @@ OTEL_RESOURCE_ATTRIBUTES=deployment.environment=prod,fleet=szefowo
 
 ## Hard rules carried from #139
 
-- Usage metadata only: ids, states, durations, token counts — **no** secrets, PII, diff text, webhook URLs, or review bodies in attributes. Sole identity carve-out: `user.id` carries the PR author's forge login (already public on the pull request) for OpenObserve's Sessions user column.
+- Usage metadata only: ids, states, durations, token counts — **no** secrets, PII, diff text, webhook URLs, or review bodies in attributes. Sole identity carve-out: `user.id` carries the PR author's forge login (already public on the pull request) for OpenObserve's Sessions user column; `TELEMETRY_USER_ID=false` omits it everywhere.
 - Credentials live in env only and are never logged; fetch/endpoint errors are redacted before printing; plain-`http` endpoints with credentials warn once.
 - Exports are serialized, depth-capped, 10s-bounded, and never throw — a broken endpoint cannot affect job flow.
 

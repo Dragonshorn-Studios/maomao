@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import type { JobRow, JobStore, ReviewerRunRow, StackMemberRow } from "../jobs/store.js";
 import { buildJobSummary, type JobSummaryOptions } from "../jobs/summary.js";
+import { parseBoolean } from "../util.js";
 import {
   attr,
   compatDoubleAttr,
@@ -181,6 +182,7 @@ export function jobTrace(
   opts?: JobSummaryOptions,
   membership: { stackJobId: number; position: number } | null = null,
   members: Pick<StackMemberRow, "position" | "pr_number" | "member_job_id" | "state">[] = [],
+  includeUserId = true,
 ): OtlpSpan[] {
   const summary = buildJobSummary(job, runs, opts);
   const startMs = msOf(job.started_at) ?? msOf(job.created_at) ?? Date.now();
@@ -190,6 +192,9 @@ export function jobTrace(
   // The job is the session: every LLM-call span in this trace shares it so
   // OpenObserve Sessions/Insights group a job's model calls as one conversation.
   const conversationId = `maomao-job-${job.id}`;
+  // TELEMETRY_USER_ID=false strips the one identity attribute for deployments
+  // whose data-governance policy bars author logins at the OO endpoint.
+  const userId = includeUserId ? job.pr_author : null;
 
   const rootAttrs: OtlpAttribute[] = [
     attr("job_id", job.id),
@@ -205,7 +210,7 @@ export function jobTrace(
     attr("session.id", conversationId),
     attr("gen_ai.conversation.id", conversationId),
     // Same falsy gate as genAiAttrs' userId — no empty-string user.id.
-    ...(job.pr_author ? [attr("user.id", job.pr_author)] : []),
+    ...(userId ? [attr("user.id", userId)] : []),
   ];
   const createdMs = msOf(job.created_at);
   if (createdMs != null && msOf(job.started_at) != null) {
@@ -255,7 +260,7 @@ export function jobTrace(
           // "fallback" means the router call failed and diagnosis decided.
           responded: job.routing_source !== "fallback",
           conversationId,
-          userId: job.pr_author,
+          userId,
           agentName: "maomao-router",
           agentId: "maomao-router",
           totalTokens: job.routing_total_tokens,
@@ -304,7 +309,7 @@ export function jobTrace(
               model: run.model,
               responded: run.state === "done",
               conversationId,
-              userId: job.pr_author,
+              userId,
               agentName: run.role,
               agentId: `reviewer.${run.role}`,
               promptName: run.role,
@@ -359,7 +364,7 @@ export function jobTrace(
               // both left no model response; only "done" + no fallback did.
               responded: job.aggregator_state === "done" && job.aggregator_fallback !== 1,
               conversationId,
-              userId: job.pr_author,
+              userId,
               agentName: "maomao-aggregator",
               agentId: "maomao-aggregator",
               totalTokens: job.aggregator_total_tokens,
@@ -402,7 +407,7 @@ export function jobTrace(
           model: job.internal_escalation_model,
           responded: job.internal_escalation_state === "done",
           conversationId,
-          userId: job.pr_author,
+          userId,
           agentName: "maomao-internal-escalation",
           agentId: "maomao-internal-escalation",
           totalTokens: job.internal_escalation_total_tokens,
@@ -463,7 +468,14 @@ export function exportTerminalJobTraces(
     const membership = store.stackMembershipForJobs([job.id]).get(job.id) ?? null;
     const members = job.job_type === "stack_review" ? store.listStackMembers(job.id) : [];
     exportTraces(
-      jobTrace(job, opts?.runs ?? store.listReviewerRuns(job.id), opts, membership, members),
+      jobTrace(
+        job,
+        opts?.runs ?? store.listReviewerRuns(job.id),
+        opts,
+        membership,
+        members,
+        parseBoolean(env.TELEMETRY_USER_ID, true),
+      ),
       env,
       stored,
       shared,

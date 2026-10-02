@@ -273,6 +273,34 @@ describe("jobTrace", () => {
     }
   });
 
+  it("omits user.id everywhere when includeUserId is false (TELEMETRY_USER_ID=false)", () => {
+    const store = makeStore();
+    const jobId = seedJob(store);
+    const run = store.listReviewerRuns(jobId)[0];
+    store["db"]
+      .prepare(
+        `UPDATE reviewer_runs SET state = 'done', model = 'gpt-5', started_at = ?, finished_at = ?, total_tokens = 5 WHERE id = ?`,
+      )
+      .run("2026-10-01T08:00:01.000Z", "2026-10-01T08:00:02.000Z", run.id);
+    const spans = jobTrace(
+      store.getJob(jobId)!,
+      store.listReviewerRuns(jobId),
+      undefined,
+      null,
+      [],
+      false,
+    );
+    expect(spans.some((s) => s.name === "maomao.stage.reviewer")).toBe(true);
+    for (const span of spans) {
+      expect(attrValue(span, "user.id")).toBeUndefined();
+    }
+    // The session grouping itself is unaffected — only the identity attr.
+    expect(attrValue(spans[0], "session.id")).toEqual({ stringValue: `maomao-job-${jobId}` });
+    expect(attrValue(spans[0], "gen_ai.conversation.id")).toEqual({
+      stringValue: `maomao-job-${jobId}`,
+    });
+  });
+
   it("caps exception.message at 500 chars", () => {
     const store = makeStore();
     const jobId = seedJob(store);
