@@ -1354,6 +1354,7 @@ function renderEffectiveConfigSection(entries: EffectiveConfigEntry[]): string {
     const detail = entry.sourceDetail ? ` ${escapeHtml(entry.sourceDetail)}` : "";
     if (entry.source === "profile") return `<span class="config-source config-source-profile">Profile ${detail}</span>`;
     if (entry.source === "environment") return `<span class="config-source">Environment</span>`;
+    if (entry.source === "stored") return `<span class="config-source">Stored</span>`;
     return `<span class="config-source">Default</span>`;
   };
   /** Where an operator goes to change this value, derived from its source. */
@@ -1363,6 +1364,9 @@ function renderEffectiveConfigSection(entries: EffectiveConfigEntry[]): string {
     }
     if (entry.source === "environment") {
       return `Set by environment — change ${entry.envKey ? `<code>${escapeHtml(entry.envKey)}</code>` : "the variable"} in .env / service config and restart.`;
+    }
+    if (entry.source === "stored") {
+      return `Saved on the Telemetry page — change it at <a href="/config/telemetry">/config/telemetry</a>${entry.envKey ? ` or set <code>${escapeHtml(entry.envKey)}</code> (environment wins)` : ""}.`;
     }
     return `Built-in default — override via ${entry.envKey ? `<code>${escapeHtml(entry.envKey)}</code> or a ` : "an env var or a "}<a href="/config/profiles">profile</a>.`;
   };

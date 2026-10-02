@@ -1796,6 +1796,7 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
           ctx.config,
           ctx.env ?? process.env,
           ctx.store.configs.getActiveRevision("default") ?? null,
+          telemetrySettings(),
         ),
       }),
     );
