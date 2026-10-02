@@ -45,6 +45,17 @@ import type { TelemetryChannelConfig, TelemetrySharedConfig } from "./settings.j
  * itself), emitted for OpenObserve's Sessions user column.
  */
 
+/**
+ * Whether trace spans may carry `user.id` (the PR author's forge login).
+ * Unset = enabled (the Sessions user column the attribute exists for). Once
+ * the variable is set the parse is fail-closed: a typo like `flase` strips
+ * the identity attr rather than silently re-enabling identity egress.
+ */
+export const telemetryUserIdEnabled = (env: NodeJS.ProcessEnv): boolean =>
+  env.TELEMETRY_USER_ID == null || env.TELEMETRY_USER_ID.trim() === ""
+    ? true
+    : parseBoolean(env.TELEMETRY_USER_ID, false);
+
 /** Deterministic ids let a member job join its stack's trace without storage. */
 const hexId = (seed: string, len: number): string => createHash("sha256").update(seed).digest("hex").slice(0, len);
 export const traceIdForJob = (jobId: number): string => hexId(`maomao-job-${jobId}`, 32);
@@ -474,7 +485,7 @@ export function exportTerminalJobTraces(
         opts,
         membership,
         members,
-        parseBoolean(env.TELEMETRY_USER_ID, true),
+        telemetryUserIdEnabled(env),
       ),
       env,
       stored,

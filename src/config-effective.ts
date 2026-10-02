@@ -1,6 +1,6 @@
 import type { Config } from "./config.js";
 import type { ProfileRevisionRow } from "./config-revisions.js";
-import { parseBoolean } from "./util.js";
+import { telemetryUserIdEnabled } from "./telemetry/traces.js";
 
 /**
  * Read-only, non-sensitive effective-configuration view for the /config page.
@@ -316,7 +316,7 @@ export function effectiveConfigEntries(
     "Telemetry",
     "Session user attribute (PR author login)",
     "TELEMETRY_USER_ID",
-    boolLabel(parseBoolean(env.TELEMETRY_USER_ID, true)),
+    boolLabel(telemetryUserIdEnabled(env)),
   );
   row(
     "Telemetry",

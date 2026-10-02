@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { openDb } from "../db.js";
 import { JobStore } from "../jobs/store.js";
-import { exportTerminalJobTraces, jobTrace, traceIdForJob } from "./traces.js";
+import { exportTerminalJobTraces, jobTrace, telemetryUserIdEnabled, traceIdForJob } from "./traces.js";
 import { flushOtlpExports, nanoTime, type OtlpAttribute, type OtlpSpan } from "./otlp.js";
 
 const TRACES_URL = "https://oo.example.com/api/default/v1/traces";
@@ -619,6 +619,15 @@ describe("exportTerminalJobTraces", () => {
         { key: "gen_ai.conversation.id", value: { stringValue: `maomao-job-${jobId}` } },
       ]),
     );
+  });
+
+  it("telemetryUserIdEnabled fails closed on set-but-unparseable values", () => {
+    expect(telemetryUserIdEnabled({})).toBe(true);
+    expect(telemetryUserIdEnabled({ TELEMETRY_USER_ID: "true" })).toBe(true);
+    expect(telemetryUserIdEnabled({ TELEMETRY_USER_ID: "false" })).toBe(false);
+    expect(telemetryUserIdEnabled({ TELEMETRY_USER_ID: "0" })).toBe(false);
+    // A typo'd opt-out strips the identity attr rather than silently emitting.
+    expect(telemetryUserIdEnabled({ TELEMETRY_USER_ID: "flase" })).toBe(false);
   });
 
   it("emits user.id = pr_author by default through the export path", async () => {
