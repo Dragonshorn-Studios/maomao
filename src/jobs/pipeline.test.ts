@@ -385,6 +385,81 @@ describe("pipeline", () => {
     expect(job?.state).toBe("completed");
   });
 
+  it("persists first_output_ms on every LLM-call stage", async () => {
+    const config = loadConfig({
+      REVIEWER_ROUTING: "model",
+      REVIEWER_ROLES: "correctness",
+      OPENCODE_REVIEWER_MODEL: "test/model",
+      OPENCODE_ROUTER_MODEL: "test/router",
+      POST_EMPTY_REVIEW: "true",
+      POISON_ALERT_INTERNAL_ENABLED: "true",
+      POISON_ALERT_INTERNAL_MODEL: "test/lab",
+      POISON_ALERT_POLICY: "internal_and_external",
+    });
+    const store = new JobStore(openDb(":memory:"));
+    const created = store.enqueue({
+      repoFullName: "acme/widgets",
+      repoOwner: "acme",
+      repoName: "widgets",
+      installationId: 9,
+      prNumber: 4,
+      prTitle: "Change example",
+      prBody: "",
+      prHtmlUrl: "",
+      prAuthor: "dev",
+      baseSha: "base",
+      headSha: "cafebabe",
+      baseRef: "main",
+      headRef: "feat",
+      // Empty reviewer list keeps routing unpreslected so the model router runs.
+      reviewers: [],
+    });
+    const ok = (text: string, firstOutputMs: number) => ({
+      stdout: text,
+      stderr: "",
+      exitCode: 0,
+      text,
+      firstOutputMs,
+      usage: { promptTokens: 1, completionTokens: 1 },
+    });
+    await createPipeline({
+      config,
+      store,
+      github: githubPort({
+        getPullDiff: async () => "diff",
+        listReviews: async () => [],
+        createCommentReview: async () => ({ id: "1", url: "u" }),
+      }),
+      checkout: await fixtureCheckout(),
+      opencode: {
+        async run(input) {
+          if (input.title?.includes("maomao-router")) {
+            return ok(JSON.stringify({ profile: "poison-alert", reviewers: ["correctness"], reason: "r", confidence: 1 }), 11);
+          }
+          if (input.model === "test/lab") {
+            return ok(
+              JSON.stringify({ schema_version: 1, confirmed: true, alert_cleared: false, summary: "s", findings: [] }),
+              44,
+            );
+          }
+          const specialist = input.prompt.includes("Role id:");
+          return ok(
+            specialist
+              ? reviewerJson("correctness")
+              : JSON.stringify({ schema_version: 1, verdict: "comment", summary: "ok", findings: [] }),
+            specialist ? 22 : 33,
+          );
+        },
+      },
+    }).run(created.job.id);
+
+    const job = store.getJob(created.job.id);
+    expect(job?.routing_first_output_ms).toBe(11);
+    expect(store.listReviewerRuns(created.job.id)[0]?.first_output_ms).toBe(22);
+    expect(job?.aggregator_first_output_ms).toBe(33);
+    expect(job?.internal_escalation_first_output_ms).toBe(44);
+  });
+
   it("does not publish after a job is marked stale", async () => {
     const config = loadConfig({
       REVIEWER_ROLES: "correctness",

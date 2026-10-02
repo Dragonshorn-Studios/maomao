@@ -35,6 +35,10 @@ function attrValue(span: OtlpSpan, key: string) {
   return span.attributes?.find((a) => a.key === key)?.value;
 }
 
+function eventAttr(event: NonNullable<OtlpSpan["events"]>[number], key: string) {
+  return event.attributes?.find((a) => a.key === key)?.value;
+}
+
 beforeEach(() => {
   vi.stubEnv("OPENOBSERVE_TRACES_URL", "");
   vi.stubEnv("OPENOBSERVE_TOKEN", "");
@@ -124,7 +128,7 @@ describe("jobTrace", () => {
     const run = store.listReviewerRuns(jobId)[0];
     store["db"]
       .prepare(
-        `UPDATE reviewer_runs SET state = 'done', model = 'gpt-5', provider = 'openai', started_at = ?, finished_at = ?, prompt_tokens = 70, completion_tokens = 30, total_tokens = 100, cost = 0.01, cache_read_tokens = 5 WHERE id = ?`,
+        `UPDATE reviewer_runs SET state = 'done', model = 'gpt-5', provider = 'openai', started_at = ?, finished_at = ?, prompt_tokens = 70, completion_tokens = 30, total_tokens = 100, cost = 0.01, cache_read_tokens = 5, cache_write_tokens = 3 WHERE id = ?`,
       )
       .run("2026-10-01T08:00:01.000Z", "2026-10-01T08:00:02.000Z", run.id);
     store.setJobState(jobId, "completed");
@@ -135,19 +139,178 @@ describe("jobTrace", () => {
     expect(attrValue(reviewer, "gen_ai.operation.name")).toEqual({ stringValue: "chat" });
     expect(attrValue(reviewer, "gen_ai.provider.name")).toEqual({ stringValue: "openai" });
     expect(attrValue(reviewer, "gen_ai.request.model")).toEqual({ stringValue: "gpt-5" });
+    expect(attrValue(reviewer, "gen_ai.response.model")).toEqual({ stringValue: "gpt-5" });
     expect(attrValue(reviewer, "gen_ai.usage.prompt_tokens")).toEqual({ intValue: "70" });
     expect(attrValue(reviewer, "gen_ai.usage.completion_tokens")).toEqual({ intValue: "30" });
     expect(attrValue(reviewer, "gen_ai.usage.input_tokens")).toEqual({ intValue: "70" });
     expect(attrValue(reviewer, "gen_ai.usage.output_tokens")).toEqual({ intValue: "30" });
     expect(attrValue(reviewer, "gen_ai.usage.total_tokens")).toEqual({ intValue: "100" });
     expect(attrValue(reviewer, "gen_ai.usage.cache_read_tokens")).toEqual({ intValue: "5" });
+    expect(attrValue(reviewer, "gen_ai.usage.cache_write_tokens")).toEqual({ intValue: "3" });
     // Fractional doubles go out as strings — OO's strict decoder 400s the
     // whole envelope on {"doubleValue":0.01}; cost_usd_micros keeps it numeric.
     expect(attrValue(reviewer, "gen_ai.usage.cost")).toEqual({ stringValue: "0.01" });
     expect(attrValue(reviewer, "cost_usd")).toEqual({ stringValue: "0.01" });
     expect(attrValue(reviewer, "cost_usd_micros")).toEqual({ intValue: "10000" });
     expect(attrValue(reviewer, "gen_ai.prompt.name")).toEqual({ stringValue: "correctness" });
+    expect(attrValue(reviewer, "gen_ai.conversation.id")).toEqual({ stringValue: `maomao-job-${jobId}` });
+    expect(attrValue(reviewer, "gen_ai.agent.name")).toEqual({ stringValue: "correctness" });
+    expect(attrValue(reviewer, "gen_ai.agent.id")).toEqual({ stringValue: "reviewer.correctness" });
     expect(attrValue(reviewer, "error.type")).toBeUndefined();
+  });
+
+  it("marks a failed reviewer run with an exception event, not first_output", () => {
+    const store = makeStore();
+    const jobId = seedJob(store);
+    const run = store.listReviewerRuns(jobId)[0];
+    store["db"]
+      .prepare(
+        `UPDATE reviewer_runs SET state = 'failed', model = 'gpt-5', started_at = ?, finished_at = ?, duration_ms = 1000, first_output_ms = 120, validation_error = 'boom' WHERE id = ?`,
+      )
+      .run("2026-10-01T08:00:01.000Z", "2026-10-01T08:00:02.000Z", run.id);
+    const reviewer = jobTrace(store.getJob(jobId)!, store.listReviewerRuns(jobId)).find(
+      (s) => s.name === "maomao.stage.reviewer",
+    )!;
+    expect(reviewer.status?.code).toBe(2);
+    expect(reviewer.events).toHaveLength(1);
+    const [event] = reviewer.events!;
+    expect(event.name).toBe("exception");
+    expect(eventAttr(event, "exception.type")).toEqual({ stringValue: "failed" });
+    expect(eventAttr(event, "exception.message")).toEqual({ stringValue: "boom" });
+    expect(event.timeUnixNano).toBe(reviewer.endTimeUnixNano);
+  });
+
+  it("emits an opencode.first_output event from first_output_ms", () => {
+    const store = makeStore();
+    const jobId = seedJob(store);
+    const run = store.listReviewerRuns(jobId)[0];
+    store["db"]
+      .prepare(
+        `UPDATE reviewer_runs SET state = 'done', model = 'gpt-5', started_at = ?, finished_at = ?, duration_ms = 1000, first_output_ms = 250 WHERE id = ?`,
+      )
+      .run("2026-10-01T08:00:01.000Z", "2026-10-01T08:00:02.000Z", run.id);
+    const reviewer = jobTrace(store.getJob(jobId)!, store.listReviewerRuns(jobId)).find(
+      (s) => s.name === "maomao.stage.reviewer",
+    )!;
+    const [event] = reviewer.events!;
+    expect(event.name).toBe("opencode.first_output");
+    expect(eventAttr(event, "elapsed_ms")).toEqual({ intValue: "250" });
+    expect(event.timeUnixNano).toBe(nanoTime(Date.parse("2026-10-01T08:00:01.000Z") + 250));
+  });
+
+  it("reports stale and cancelled states as UNSET, not errors", () => {
+    const store = makeStore();
+    const jobId = seedJob(store);
+    const run = store.listReviewerRuns(jobId)[0];
+    store["db"]
+      .prepare(`UPDATE reviewer_runs SET state = 'stale', finished_at = ? WHERE id = ?`)
+      .run("2026-10-01T08:00:02.000Z", run.id);
+    store["db"]
+      .prepare(`INSERT INTO reviewer_runs (job_id, role, title, state, finished_at) VALUES (?, 'perf', 'Perf', 'cancelled', ?)`)
+      .run(jobId, "2026-10-01T08:00:02.000Z");
+    const spans = jobTrace(store.getJob(jobId)!, store.listReviewerRuns(jobId));
+    const reviewers = spans.filter((s) => s.name === "maomao.stage.reviewer");
+    expect(reviewers).toHaveLength(2);
+    for (const reviewer of reviewers) {
+      expect(reviewer.status).toEqual({ code: 0 });
+      expect(attrValue(reviewer, "error.type")).toBeUndefined();
+      expect(reviewer.events).toBeUndefined();
+    }
+  });
+
+  it("marks routing, aggregation, and escalation spans with gen_ai agent + conversation ids", () => {
+    const store = makeStore();
+    const jobId = seedJob(store);
+    store.patchJob(jobId, {
+      started_at: "2026-10-01T08:00:00.000Z",
+      routing_state: "done",
+      routing_duration_ms: 120,
+      routing_model: "m7",
+      aggregator_state: "done",
+      aggregator_started_at: "2026-10-01T08:00:10.000Z",
+      aggregator_finished_at: "2026-10-01T08:00:12.000Z",
+      aggregator_model: "m-agg",
+      internal_escalation_state: "done",
+      internal_escalation_model: "m-esc",
+      internal_escalation_duration_ms: 500,
+    });
+    const spans = jobTrace(store.getJob(jobId)!, store.listReviewerRuns(jobId));
+    const expectations: [string, string][] = [
+      ["maomao.stage.routing", "maomao-router"],
+      ["maomao.stage.aggregation", "maomao-aggregator"],
+      ["maomao.stage.internal_escalation", "maomao-internal-escalation"],
+    ];
+    for (const [name, agent] of expectations) {
+      const span = spans.find((s) => s.name === name)!;
+      expect(attrValue(span, "gen_ai.conversation.id")).toEqual({ stringValue: `maomao-job-${jobId}` });
+      expect(attrValue(span, "gen_ai.agent.name")).toEqual({ stringValue: agent });
+      expect(attrValue(span, "gen_ai.agent.id")).toEqual({ stringValue: agent });
+    }
+  });
+
+  it("caps exception.message at 500 chars", () => {
+    const store = makeStore();
+    const jobId = seedJob(store);
+    const reason = "x".repeat(600);
+    store.setJobState(jobId, "failed", { failure_reason: reason });
+    const root = jobTrace(store.getJob(jobId)!, store.listReviewerRuns(jobId))[0];
+    const [event] = root.events!;
+    expect(eventAttr(event, "exception.message")).toEqual({ stringValue: reason.slice(0, 500) });
+  });
+
+  it("marks a stale job's root span UNSET rather than error", () => {
+    const store = makeStore();
+    const jobId = seedJob(store);
+    store["db"].prepare(`UPDATE jobs SET state = 'stale', finished_at = ? WHERE id = ?`).run("2026-10-01T08:05:00.000Z", jobId);
+    const root = jobTrace(store.getJob(jobId)!, store.listReviewerRuns(jobId))[0];
+    expect(root.status).toEqual({ code: 0 });
+    expect(root.events).toBeUndefined();
+  });
+
+  it("marks a failed job's root span with an exception event", () => {
+    const store = makeStore();
+    const jobId = seedJob(store);
+    store.setJobState(jobId, "failed", { failure_reason: "boom" });
+    const root = jobTrace(store.getJob(jobId)!, store.listReviewerRuns(jobId))[0];
+    expect(root.status).toEqual({ code: 2, message: "failed" });
+    const [event] = root.events!;
+    expect(event.name).toBe("exception");
+    expect(eventAttr(event, "exception.message")).toEqual({ stringValue: "boom" });
+  });
+
+  it("marks a failed reviewer run as an errored call without response.model", () => {
+    const store = makeStore();
+    const jobId = seedJob(store);
+    const run = store.listReviewerRuns(jobId)[0];
+    store["db"]
+      .prepare(
+        `UPDATE reviewer_runs SET state = 'failed', model = 'gpt-5', provider = 'openai', started_at = ?, finished_at = ?, duration_ms = 1000 WHERE id = ?`,
+      )
+      .run("2026-10-01T08:00:01.000Z", "2026-10-01T08:00:02.000Z", run.id);
+    const reviewer = jobTrace(store.getJob(jobId)!, store.listReviewerRuns(jobId)).find(
+      (s) => s.name === "maomao.stage.reviewer",
+    )!;
+    expect(reviewer.kind).toBe(3);
+    expect(attrValue(reviewer, "gen_ai.request.model")).toEqual({ stringValue: "gpt-5" });
+    expect(attrValue(reviewer, "gen_ai.response.model")).toBeUndefined();
+    expect(attrValue(reviewer, "error.type")).toEqual({ stringValue: "failed" });
+    expect(reviewer.status?.code).toBe(2);
+  });
+
+  it("reports a budget-skipped reviewer run as INTERNAL, not an LLM call", () => {
+    const store = makeStore();
+    const jobId = seedJob(store);
+    const run = store.listReviewerRuns(jobId)[0];
+    // Degrade-mode skip keeps the enqueue-time configured model — only
+    // state/finished_at are written, so model can't be the discriminator.
+    store["db"]
+      .prepare(`UPDATE reviewer_runs SET state = 'failed', model = 'gpt-5', finished_at = ? WHERE id = ?`)
+      .run("2026-10-01T08:00:02.000Z", run.id);
+    const reviewer = jobTrace(store.getJob(jobId)!, store.listReviewerRuns(jobId)).find(
+      (s) => s.name === "maomao.stage.reviewer",
+    )!;
+    expect(reviewer.kind).toBe(1);
+    expect(attrValue(reviewer, "gen_ai.operation.name")).toBeUndefined();
   });
 
   it("reports a budget-degraded aggregation as INTERNAL, not an LLM call", () => {
@@ -313,6 +476,67 @@ describe("exportTerminalJobTraces", () => {
     expect(body.resourceSpans[0].resource.attributes).toEqual(
       expect.arrayContaining([{ key: "service.name", value: { stringValue: "maomao" } }]),
     );
+  });
+
+  it("carries span events through the OTLP envelope", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true, status: 200 });
+    vi.stubGlobal("fetch", fetchMock);
+    vi.stubEnv("OPENOBSERVE_TRACES_URL", TRACES_URL);
+    const store = makeStore();
+    const jobId = seedJob(store);
+    store.setJobState(jobId, "failed", { failure_reason: "boom" });
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
+    const body = JSON.parse((fetchMock.mock.calls[0] as [string, RequestInit])[1].body as string);
+    const root = body.resourceSpans[0].scopeSpans[0].spans.find(
+      (s: OtlpSpan) => s.name === "maomao.job.pr_review",
+    ) as OtlpSpan;
+    expect(root.events?.[0]?.name).toBe("exception");
+    expect(root.events?.[0]?.attributes).toEqual(
+      expect.arrayContaining([{ key: "exception.message", value: { stringValue: "boom" } }]),
+    );
+  });
+
+  it("emits a staled in-flight run as 'stale', not still 'running'", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true, status: 200 });
+    vi.stubGlobal("fetch", fetchMock);
+    vi.stubEnv("OPENOBSERVE_TRACES_URL", TRACES_URL);
+    const store = makeStore();
+    const jobId = seedJob(store);
+    const run = store.listReviewerRuns(jobId)[0];
+    store["db"]
+      .prepare(`UPDATE reviewer_runs SET state = 'running', started_at = ? WHERE id = ?`)
+      .run("2026-10-01T08:00:01.000Z", run.id);
+    store["db"].prepare(`UPDATE jobs SET state = 'reviewing', started_at = ? WHERE id = ?`).run("2026-10-01T08:00:00.000Z", jobId);
+    // A new head SHA stales the in-flight job; the emitted trace must carry
+    // the post-retirement run state, not the pre-sweep 'running' snapshot.
+    store.enqueue({
+      repoFullName: "acme/widgets",
+      repoOwner: "acme",
+      repoName: "widgets",
+      installationId: 9,
+      prNumber: 4,
+      prTitle: "t",
+      prBody: "body",
+      prHtmlUrl: "https://github.com/acme/widgets/pull/4",
+      prAuthor: "dev",
+      baseSha: "base",
+      headSha: "newhead",
+      baseRef: "main",
+      headRef: "feat",
+      jobType: "pr_review",
+      reviewers: [{ role: "correctness", title: "Correctness" }],
+    });
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalled());
+    const envelope = fetchMock.mock.calls.find((call) =>
+      (call[1] as RequestInit).body?.toString().includes("maomao.stage.reviewer"),
+    );
+    expect(envelope).toBeTruthy();
+    const body = JSON.parse((envelope![1] as RequestInit).body as string);
+    const reviewer = body.resourceSpans[0].scopeSpans[0].spans.find(
+      (s: OtlpSpan) => s.name === "maomao.stage.reviewer",
+    ) as OtlpSpan;
+    expect(attrValue(reviewer, "state")).toEqual({ stringValue: "stale" });
+    expect(reviewer.status).toEqual({ code: 0 });
   });
 
   it("never throws when the store lookup fails", () => {

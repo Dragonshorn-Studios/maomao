@@ -10,6 +10,7 @@ import {
   SPAN_KIND_INTERNAL,
   STATUS_CODE_ERROR,
   STATUS_CODE_OK,
+  STATUS_CODE_UNSET,
   type OtlpAttribute,
   type OtlpSpan,
 } from "./otlp.js";
@@ -74,6 +75,11 @@ const genAiAttrs = (opts: {
   model?: string | null;
   /** Whether the stage actually got a model response back — controls response.model. */
   responded?: boolean;
+  /** Session id grouping a job's model calls for OO AI Observability Sessions. */
+  conversationId?: string | null;
+  /** Agent node identity for OO Agent Graph/Insights rollups. */
+  agentName?: string | null;
+  agentId?: string | null;
   promptName?: string | null;
   promptTokens?: number | null;
   completionTokens?: number | null;
@@ -84,6 +90,9 @@ const genAiAttrs = (opts: {
 }): OtlpAttribute[] => {
   const attrs: OtlpAttribute[] = [attr("gen_ai.operation.name", "chat")];
   if (opts.provider) attrs.push(attr("gen_ai.provider.name", opts.provider));
+  if (opts.conversationId) attrs.push(attr("gen_ai.conversation.id", opts.conversationId));
+  if (opts.agentName) attrs.push(attr("gen_ai.agent.name", opts.agentName));
+  if (opts.agentId) attrs.push(attr("gen_ai.agent.id", opts.agentId));
   if (opts.model) {
     attrs.push(attr("gen_ai.request.model", opts.model));
     // response.model is only honest when the call returned something.
@@ -109,8 +118,44 @@ const genAiAttrs = (opts: {
   return attrs;
 };
 
+// `stale`/`cancelled` are retirement outcomes, not failures — UNSET keeps the
+// span out of error rollups; anything else non-terminal is a real failure.
 const statusFor = (state: string): { code: number; message?: string } =>
-  state === "completed" || state === "done" ? { code: STATUS_CODE_OK } : { code: STATUS_CODE_ERROR, message: state };
+  state === "completed" || state === "done"
+    ? { code: STATUS_CODE_OK }
+    : state === "stale" || state === "cancelled"
+      ? { code: STATUS_CODE_UNSET }
+      : { code: STATUS_CODE_ERROR, message: state };
+
+const exceptionEvent = (
+  type: string,
+  message: string | null | undefined,
+  timeUnixNano: string,
+): OtlpSpan["events"] => [
+  {
+    name: "exception",
+    timeUnixNano,
+    attributes: [
+      attr("exception.type", type),
+      ...(message ? [attr("exception.message", message.slice(0, 500))] : []),
+    ],
+  },
+];
+
+/** Spawn → first OpenCode stdout event marker (cold start + TTFT). */
+const firstOutputEvent = (
+  firstOutputMs: number | null,
+  startMs: number,
+): OtlpSpan["events"] =>
+  firstOutputMs == null
+    ? undefined
+    : [
+        {
+          name: "opencode.first_output",
+          timeUnixNano: nanoTime(startMs + firstOutputMs),
+          attributes: [attr("elapsed_ms", firstOutputMs)],
+        },
+      ];
 
 /**
  * All spans for one terminal job run. `membership` is the stack run this job
@@ -129,6 +174,9 @@ export function jobTrace(
   const endMs = msOf(job.finished_at) ?? Date.now();
   const traceId = traceIdForJob(membership ? membership.stackJobId : job.id);
   const rootId = spanIdForJob(job.id);
+  // The job is the session: every LLM-call span in this trace shares it so
+  // OpenObserve Sessions/Insights group a job's model calls as one conversation.
+  const conversationId = `maomao-job-${job.id}`;
 
   const rootAttrs: OtlpAttribute[] = [
     attr("job_id", job.id),
@@ -160,6 +208,10 @@ export function jobTrace(
       endTimeUnixNano: nanoTime(Math.max(endMs, startMs)),
       attributes: rootAttrs,
       status: statusFor(job.state),
+      events:
+        job.state === "failed"
+          ? exceptionEvent("failed", job.failure_reason, nanoTime(Math.max(endMs, startMs)))
+          : undefined,
     },
   ];
 
@@ -184,6 +236,9 @@ export function jobTrace(
           model: job.routing_model,
           // "fallback" means the router call failed and diagnosis decided.
           responded: job.routing_source !== "fallback",
+          conversationId,
+          agentName: "maomao-router",
+          agentId: "maomao-router",
           totalTokens: job.routing_total_tokens,
           cost: job.routing_cost,
         }),
@@ -194,6 +249,10 @@ export function jobTrace(
         job.routing_source === "fallback"
           ? { code: STATUS_CODE_ERROR, message: "router model call failed" }
           : { code: STATUS_CODE_OK },
+      events:
+        job.routing_source === "fallback"
+          ? exceptionEvent("model_call_failed", "router model call failed", nanoTime(cursor + job.routing_duration_ms))
+          : firstOutputEvent(job.routing_first_output_ms, cursor),
     });
     cursor = Math.max(cursor, cursor + job.routing_duration_ms);
   }
@@ -203,12 +262,16 @@ export function jobTrace(
     if (run.started_at == null && run.finished_at == null && run.duration_ms == null) return;
     const runStart = msOf(run.started_at) ?? cursor;
     const runEnd = msOf(run.finished_at) ?? (run.duration_ms != null ? runStart + run.duration_ms : runStart);
+    // started_at is stamped when the model call begins; budget-skipped runs
+    // get only state=failed + finished_at (model is seeded at enqueue, so it
+    // can't discriminate). Same gate as aggregation: no call, no CLIENT/chat.
+    const ranLlm = run.started_at != null || run.total_tokens != null || run.cost != null;
     spans.push({
       traceId,
       spanId: spanIdForStage(job.id, `reviewer-${run.id}`),
       parentSpanId: rootId,
       name: "maomao.stage.reviewer",
-      kind: SPAN_KIND_CLIENT,
+      kind: ranLlm ? SPAN_KIND_CLIENT : SPAN_KIND_INTERNAL,
       startTimeUnixNano: nanoTime(runStart),
       endTimeUnixNano: nanoTime(Math.max(runEnd, runStart)),
       attributes: [
@@ -216,21 +279,30 @@ export function jobTrace(
         attr("state", run.state),
         attr("attempt", run.attempt),
         ...usageAttrs(run.model, run.total_tokens, run.cost),
-        ...genAiAttrs({
-          provider: run.provider,
-          model: run.model,
-          responded: run.state === "done",
-          promptName: run.role,
-          promptTokens: run.prompt_tokens,
-          completionTokens: run.completion_tokens,
-          totalTokens: run.total_tokens,
-          cacheRead: run.cache_read_tokens,
-          cacheWrite: run.cache_write_tokens,
-          cost: run.cost,
-        }),
-        ...(run.state !== "done" ? [attr("error.type", run.state)] : []),
+        ...(ranLlm
+          ? genAiAttrs({
+              provider: run.provider,
+              model: run.model,
+              responded: run.state === "done",
+              conversationId,
+              agentName: run.role,
+              agentId: `reviewer.${run.role}`,
+              promptName: run.role,
+              promptTokens: run.prompt_tokens,
+              completionTokens: run.completion_tokens,
+              totalTokens: run.total_tokens,
+              cacheRead: run.cache_read_tokens,
+              cacheWrite: run.cache_write_tokens,
+              cost: run.cost,
+            })
+          : []),
+        ...(run.state === "failed" ? [attr("error.type", run.state)] : []),
       ],
       status: statusFor(run.state),
+      events:
+        run.state === "failed"
+          ? exceptionEvent("failed", run.validation_error, nanoTime(Math.max(runEnd, runStart)))
+          : firstOutputEvent(run.first_output_ms, runStart),
     });
     cursor = Math.max(cursor, runEnd);
   });
@@ -266,6 +338,9 @@ export function jobTrace(
               // Model-failure fallback and a job that died mid-aggregation
               // both left no model response; only "done" + no fallback did.
               responded: job.aggregator_state === "done" && job.aggregator_fallback !== 1,
+              conversationId,
+              agentName: "maomao-aggregator",
+              agentId: "maomao-aggregator",
               totalTokens: job.aggregator_total_tokens,
               cost: job.aggregator_cost,
             })
@@ -278,6 +353,10 @@ export function jobTrace(
         ranLlm && (job.aggregator_fallback === 1 || job.aggregator_state !== "done")
           ? { code: STATUS_CODE_ERROR, message: "aggregator model call failed" }
           : { code: STATUS_CODE_OK },
+      events:
+        ranLlm && (job.aggregator_fallback === 1 || job.aggregator_state !== "done")
+          ? exceptionEvent("model_call_failed", "aggregator model call failed", nanoTime(Math.max(end, start)))
+          : firstOutputEvent(job.aggregator_first_output_ms, start),
     });
     cursor = Math.max(cursor, end);
   }
@@ -301,11 +380,22 @@ export function jobTrace(
           provider: job.internal_escalation_provider,
           model: job.internal_escalation_model,
           responded: job.internal_escalation_state === "done",
+          conversationId,
+          agentName: "maomao-internal-escalation",
+          agentId: "maomao-internal-escalation",
           totalTokens: job.internal_escalation_total_tokens,
           cost: job.internal_escalation_cost,
         }),
       ],
       status: statusFor(job.internal_escalation_state ?? "done"),
+      events:
+        job.internal_escalation_state != null && job.internal_escalation_state !== "done"
+          ? exceptionEvent(
+              job.internal_escalation_state,
+              "internal escalation model call failed",
+              nanoTime(cursor + job.internal_escalation_duration_ms),
+            )
+          : firstOutputEvent(job.internal_escalation_first_output_ms, cursor),
     });
   }
 

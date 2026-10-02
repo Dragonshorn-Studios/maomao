@@ -76,9 +76,12 @@ export function createOpenCodeRunner(defaultBin = "opencode"): OpenCodePort {
           stdio: ["pipe", "pipe", "pipe"],
         });
         child.stdin?.end();
+        const spawnedAt = Date.now();
         let stdout = "";
         let stderr = "";
+        let firstOutputMs: number | undefined;
         child.stdout.on("data", (chunk: Buffer) => {
+          firstOutputMs ??= Date.now() - spawnedAt;
           const text = chunk.toString("utf8");
           stdout += text;
           input.onStdout?.(text);
@@ -109,6 +112,7 @@ export function createOpenCodeRunner(defaultBin = "opencode"): OpenCodePort {
             exitCode: code ?? 1,
             text: parsed.text,
             usage: parsed.usage,
+            firstOutputMs,
           });
         });
       });

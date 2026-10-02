@@ -64,6 +64,7 @@ export function attr(key: string, value: string | number | boolean): OtlpAttribu
 /** Span kind / status as int enum values — OpenObserve's JSON decoder requires the i32 form. */
 export const SPAN_KIND_INTERNAL = 1;
 export const SPAN_KIND_CLIENT = 3;
+export const STATUS_CODE_UNSET = 0;
 export const STATUS_CODE_OK = 1;
 export const STATUS_CODE_ERROR = 2;
 
@@ -94,6 +95,7 @@ export interface OtlpSpan {
   attributes?: OtlpAttribute[];
   /** status.code: 0=unset, 1=ok, 2=error. */
   status?: { code: number; message?: string };
+  events?: { name: string; timeUnixNano: string; attributes?: OtlpAttribute[] }[];
   links?: { traceId: string; spanId: string; attributes?: OtlpAttribute[] }[];
 }
 

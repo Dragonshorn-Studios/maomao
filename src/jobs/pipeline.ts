@@ -1945,6 +1945,7 @@ async function routeSpecialists(
         routing_usage_complete: usage.usage_complete,
         routing_usage_warning: usage.usage_warning,
         routing_duration_ms: Date.now() - started,
+        routing_first_output_ms: result.firstOutputMs ?? null,
         routing_raw: truncate(result.text || result.stdout, 20_000),
       });
       profileBudget?.record(result.usage.cost, result.usage.totalTokens);
@@ -2152,6 +2153,7 @@ async function runReviewer(
         exit_code: result.exitCode,
         finished_at: nowIso(),
         duration_ms: Date.now() - started,
+        first_output_ms: result.firstOutputMs ?? null,
         ...usagePersistence(result.usage),
         validation_error: null,
       });
@@ -2181,6 +2183,7 @@ async function runReviewer(
         exit_code: result?.exitCode ?? null,
         finished_at: nowIso(),
         duration_ms: Date.now() - started,
+        first_output_ms: result?.firstOutputMs ?? null,
         ...(result ? usagePersistence(result.usage) : {}),
       });
       deps.store.log(
@@ -2248,6 +2251,7 @@ async function runAggregator(
       aggregator_fallback: 0,
       aggregator_finished_at: nowIso(),
       aggregator_duration_ms: Date.now() - started,
+      aggregator_first_output_ms: result.firstOutputMs ?? null,
       ...aggregatorUsagePersistence(result.usage),
     });
     profileBudget?.record(result.usage.cost, result.usage.totalTokens);
@@ -2343,6 +2347,7 @@ async function runInternalEscalation(
         internal_escalation_usage_complete: usage.usage_complete,
         internal_escalation_usage_warning: over ?? usage.usage_warning,
         internal_escalation_duration_ms: Date.now() - started,
+        internal_escalation_first_output_ms: result.firstOutputMs ?? null,
         internal_escalation_model: internal.model,
         internal_escalation_provider: internal.model.includes("/") ? internal.model.split("/")[0] : null,
       });

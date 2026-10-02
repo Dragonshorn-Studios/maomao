@@ -71,6 +71,7 @@ export interface JobRow {
   aggregator_started_at: string | null;
   aggregator_finished_at: string | null;
   aggregator_duration_ms: number | null;
+  aggregator_first_output_ms: number | null;
   aggregator_prompt_tokens: number | null;
   aggregator_completion_tokens: number | null;
   aggregator_cost: number | null;
@@ -105,6 +106,7 @@ export interface JobRow {
   routing_usage_complete: number | null;
   routing_usage_warning: string | null;
   routing_duration_ms: number | null;
+  routing_first_output_ms: number | null;
   internal_escalation_state: string | null;
   internal_escalation_reason: string | null;
   internal_escalation_model: string | null;
@@ -118,6 +120,7 @@ export interface JobRow {
   internal_escalation_usage_complete: number | null;
   internal_escalation_usage_warning: string | null;
   internal_escalation_duration_ms: number | null;
+  internal_escalation_first_output_ms: number | null;
   internal_escalation_alert_cleared: number | null;
   external_dispatch_status: string | null;
   external_dispatch_reason: string | null;
@@ -159,6 +162,8 @@ export interface ReviewerRunRow {
   usage_complete: number | null;
   prompt_revision_id: number | null;
   usage_warning: string | null;
+  /** Spawn → first OpenCode stdout event (cold start + TTFT), null if never emitted. */
+  first_output_ms: number | null;
 }
 
 export interface JobLogRow {
@@ -371,6 +376,7 @@ const JOB_PATCH_KEYS = new Set<string>([
   "aggregator_started_at",
   "aggregator_finished_at",
   "aggregator_duration_ms",
+  "aggregator_first_output_ms",
   "aggregator_prompt_tokens",
   "aggregator_completion_tokens",
   "aggregator_cost",
@@ -398,6 +404,7 @@ const JOB_PATCH_KEYS = new Set<string>([
   "routing_usage_complete",
   "routing_usage_warning",
   "routing_duration_ms",
+  "routing_first_output_ms",
   "internal_escalation_state",
   "internal_escalation_reason",
   "internal_escalation_model",
@@ -411,6 +418,7 @@ const JOB_PATCH_KEYS = new Set<string>([
   "internal_escalation_usage_complete",
   "internal_escalation_usage_warning",
   "internal_escalation_duration_ms",
+  "internal_escalation_first_output_ms",
   "internal_escalation_alert_cleared",
   "external_dispatch_status",
   "external_dispatch_reason",
@@ -502,6 +510,9 @@ export class JobStore {
         // Only rows the guarded UPDATE actually transitioned get aborted/emitted.
         const transitionedIds = new Set(staled.map((row) => row.id));
         staleJobIds.push(...transitionedIds);
+        // Retire before snapshotting so emitted runs carry their post-retirement
+        // state — a run mid-flight at stale time must not read as still running.
+        this.retireReviewerRuns([...transitionedIds], "stale");
         for (const row of stale) {
           staleRows.set(row.id, row);
           if (transitionedIds.has(row.id) && ACTIVE_JOB_STATES.includes(row.state)) {
@@ -541,6 +552,8 @@ export class JobStore {
           : new Set<number>();
         // Only rows the guarded UPDATE actually transitioned get aborted/emitted.
         staleJobIds.push(...staledIds);
+        // Retire before snapshotting (same reason as the stack branch above).
+        this.retireReviewerRuns([...staledIds], "stale");
         for (const row of stale) {
           if (staledIds.has(row.id)) {
             this.resolveStackMemberCoverage(row.id, "stale");
@@ -549,7 +562,6 @@ export class JobStore {
           staleRows.set(row.id, row);
         }
       }
-      this.retireReviewerRuns(staleJobIds, "stale");
 
       const existing = this.db
         .prepare(
