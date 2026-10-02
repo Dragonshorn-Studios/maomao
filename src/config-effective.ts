@@ -1,5 +1,6 @@
 import type { Config } from "./config.js";
 import type { ProfileRevisionRow } from "./config-revisions.js";
+import { parseBoolean } from "./util.js";
 
 /**
  * Read-only, non-sensitive effective-configuration view for the /config page.
@@ -311,6 +312,12 @@ export function effectiveConfigEntries(
   row("Publishing", "Post empty reviews", "POST_EMPTY_REVIEW", boolLabel(config.postEmptyReview));
   row("Publishing", "Review drafts", "REVIEW_DRAFTS", boolLabel(config.reviewDrafts));
   row("Telemetry", "Job summaries (stdout/OpenObserve)", "JOB_SUMMARIES", boolLabel(config.jobSummaries));
+  row(
+    "Telemetry",
+    "Session user attribute (PR author login)",
+    "TELEMETRY_USER_ID",
+    boolLabel(parseBoolean(env.TELEMETRY_USER_ID, true)),
+  );
   row(
     "Telemetry",
     "OpenObserve ingest URL",

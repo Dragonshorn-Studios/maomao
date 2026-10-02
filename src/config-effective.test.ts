@@ -260,6 +260,7 @@ describe("env-var to entry mapping (table)", () => {
     ["GITHUB_REVIEW_ALLOW_REQUEST_CHANGES", "Allow REQUEST_CHANGES verdicts"],
     ["REVIEW_DRAFTS", "Review drafts"],
     ["JOB_SUMMARIES", "Job summaries (stdout/OpenObserve)"],
+    ["TELEMETRY_USER_ID", "Session user attribute (PR author login)"],
     ["OPENOBSERVE_LOGS_URL", "OpenObserve ingest URL"],
     ["MAX_INLINE_COMMENTS", "Max inline comments"],
     ["MAOMAO_OVERRIDE_AUTHORS", "Comment override authors"],
@@ -282,6 +283,7 @@ describe("env-var to entry mapping (table)", () => {
     GITHUB_REVIEW_ALLOW_REQUEST_CHANGES: "true",
     REVIEW_DRAFTS: "true",
     JOB_SUMMARIES: "false",
+    TELEMETRY_USER_ID: "false",
     OPENOBSERVE_LOGS_URL: "https://oo.example.com/api/x/_json",
     MAX_INLINE_COMMENTS: "9",
     POISON_ALERT_INTERNAL_MAX_COST_USD: "0.5",
@@ -296,6 +298,7 @@ describe("env-var to entry mapping (table)", () => {
     GITHUB_REVIEW_ALLOW_REQUEST_CHANGES: "enabled",
     REVIEW_DRAFTS: "enabled",
     JOB_SUMMARIES: "disabled",
+    TELEMETRY_USER_ID: "disabled",
     OPENOBSERVE_LOGS_URL: "configured",
     POISON_ALERT_INTERNAL_MAX_COST_USD: "$0.50",
   };

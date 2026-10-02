@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { openDb } from "../db.js";
 import { JobStore } from "../jobs/store.js";
 import { exportTerminalJobTraces, jobTrace, traceIdForJob } from "./traces.js";
-import { flushOtlpExports, nanoTime, type OtlpSpan } from "./otlp.js";
+import { flushOtlpExports, nanoTime, type OtlpAttribute, type OtlpSpan } from "./otlp.js";
 
 const TRACES_URL = "https://oo.example.com/api/default/v1/traces";
 
@@ -590,6 +590,52 @@ describe("exportTerminalJobTraces", () => {
     ) as OtlpSpan;
     expect(attrValue(reviewer, "state")).toEqual({ stringValue: "stale" });
     expect(reviewer.status).toEqual({ code: 0 });
+  });
+
+  it("TELEMETRY_USER_ID=false strips user.id through the export path", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true, status: 200 });
+    vi.stubGlobal("fetch", fetchMock);
+    vi.stubEnv("OPENOBSERVE_TRACES_URL", TRACES_URL);
+    vi.stubEnv("TELEMETRY_USER_ID", "false");
+    const store = makeStore();
+    const jobId = seedJob(store);
+    const run = store.listReviewerRuns(jobId)[0];
+    store["db"]
+      .prepare(
+        `UPDATE reviewer_runs SET state = 'done', model = 'gpt-5', started_at = ?, finished_at = ?, total_tokens = 5 WHERE id = ?`,
+      )
+      .run("2026-10-01T08:00:01.000Z", "2026-10-01T08:00:02.000Z", run.id);
+    store.setJobState(jobId, "completed");
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
+    const body = JSON.parse((fetchMock.mock.calls[0] as [string, RequestInit])[1].body as string);
+    const spans = body.resourceSpans[0].scopeSpans[0].spans;
+    for (const span of spans) {
+      expect(span.attributes.find((a: OtlpAttribute) => a.key === "user.id")).toBeUndefined();
+    }
+    const root = spans.find((s: OtlpSpan) => s.name === "maomao.job.pr_review") as OtlpSpan;
+    expect(root.attributes).toEqual(
+      expect.arrayContaining([
+        { key: "session.id", value: { stringValue: `maomao-job-${jobId}` } },
+        { key: "gen_ai.conversation.id", value: { stringValue: `maomao-job-${jobId}` } },
+      ]),
+    );
+  });
+
+  it("emits user.id = pr_author by default through the export path", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true, status: 200 });
+    vi.stubGlobal("fetch", fetchMock);
+    vi.stubEnv("OPENOBSERVE_TRACES_URL", TRACES_URL);
+    const store = makeStore();
+    const jobId = seedJob(store);
+    store.setJobState(jobId, "completed");
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
+    const body = JSON.parse((fetchMock.mock.calls[0] as [string, RequestInit])[1].body as string);
+    const root = body.resourceSpans[0].scopeSpans[0].spans.find(
+      (s: OtlpSpan) => s.name === "maomao.job.pr_review",
+    ) as OtlpSpan;
+    expect(root.attributes).toEqual(
+      expect.arrayContaining([{ key: "user.id", value: { stringValue: "dev" } }]),
+    );
   });
 
   it("never throws when the store lookup fails", () => {
