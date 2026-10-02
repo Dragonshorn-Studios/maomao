@@ -174,15 +174,15 @@ function urlEnvVars(channel: TelemetryChannel): string[] {
  * Env auth for one channel — the same precedence the OTLP exporter used
  * before stored settings existed: any TOKEN (per-signal then generic) wins,
  * then any USER; password and email resolve across both prefixes
- * independently. Traces/metrics fall back to the generic OPENOBSERVE_* names;
- * logs has no generic fallback.
+ * independently. Every channel falls back to the generic OPENOBSERVE_*
+ * names — the same way the shared stored credentials apply to all three.
  */
 function envAuth(
   channel: TelemetryChannel,
   env: NodeJS.ProcessEnv,
 ): { email?: string; token?: string; user?: string; password?: string; envVar: string } | null {
   const prefix = `OPENOBSERVE_${channel.toUpperCase()}`;
-  const names = channel === "logs" ? [prefix] : [prefix, "OPENOBSERVE"];
+  const names = [prefix, "OPENOBSERVE"];
   const firstSet = (suffix: string): { value: string; envVar: string } | null => {
     for (const name of names) {
       const value = env[`${name}_${suffix}`]?.trim();

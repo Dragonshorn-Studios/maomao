@@ -114,12 +114,15 @@ describe("channel resolution", () => {
     expect(telemetryAuthHeader({})).toEqual({});
   });
 
-  it("generic OPENOBSERVE_* auth falls back for otlp signals but not logs", () => {
+  it("generic OPENOBSERVE_* auth falls back for every channel, including logs", () => {
     const env = { OPENOBSERVE_USER: "u", OPENOBSERVE_PASSWORD: "p" };
     expect(resolveChannelAuth("metrics", env).user).toBe("u");
-    expect(resolveChannelAuth("logs", env)).toEqual({ email: undefined, token: undefined, user: undefined, password: undefined });
-    // Stored creds fill the gap for logs when no per-signal env exists.
-    expect(resolveChannelAuth("logs", env, { user: "su", password: "sp" }).user).toBe("su");
+    // Logs resolves from env-derived base URLs already — generic env creds
+    // must authenticate it too, like the shared stored creds do.
+    expect(resolveChannelAuth("logs", env)).toEqual({ email: undefined, token: undefined, user: "u", password: "p" });
+    // Per-channel env still wins over the generic names.
+    const env2 = { ...env, OPENOBSERVE_LOGS_TOKEN: "log-tok", OPENOBSERVE_LOGS_EMAIL: "l@x" };
+    expect(resolveChannelAuth("logs", env2).token).toBe("log-tok");
   });
 
   it("status reports per-field sources and fingerprints stored auth", () => {
@@ -182,7 +185,7 @@ describe("shared connection", () => {
     expect(resolveChannelUrl("traces", {}, undefined, storedShared)).toBe("https://stored-oo.test/api/default/v1/traces");
   });
 
-  it("shared stored auth fills the gap — including logs, which has no generic env", () => {
+  it("shared stored auth fills the gap when no env credentials resolve", () => {
     const shared = { token: "shared-token-1234" };
     expect(resolveChannelAuth("traces", {}, undefined, shared)).toEqual({ email: undefined, token: "shared-token-1234", user: undefined, password: undefined });
     expect(resolveChannelAuth("logs", {}, undefined, shared).token).toBe("shared-token-1234");
