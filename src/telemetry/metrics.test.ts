@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { openDb } from "../db.js";
 import { JobStore } from "../jobs/store.js";
 import { JobQueue } from "../jobs/queue.js";
-import { exportTerminalJobMetrics, queueMetrics, terminalJobMetrics, exportQueueMetrics } from "./metrics.js";
+import { exportTerminalJobMetrics, queueMetrics, terminalJobMetrics, exportQueueMetrics, eventCounterMetric, exportEventCounter } from "./metrics.js";
 import { flushOtlpExports, type OtlpMetric } from "./otlp.js";
 
 const METRICS_URL = "https://oo.example.com/api/default/v1/metrics";
@@ -241,5 +241,37 @@ describe("exportQueueMetrics + JobQueue", () => {
     const body = JSON.parse((fetchMock.mock.calls[0][1] as RequestInit).body as string);
     const names = body.resourceMetrics[0].scopeMetrics[0].metrics.map((m: OtlpMetric) => m.name);
     expect(names).toEqual(["maomao.queue.depth", "maomao.queue.slots_in_use", "maomao.queue.slots"]);
+  });
+});
+
+describe("eventCounterMetric / exportEventCounter", () => {
+  it("builds one DELTA +1 point with the given attributes", () => {
+    const metric = eventCounterMetric("maomao.webhook.skips", { reason: "global_pause" }, "Skips", "1000");
+    expect(metric.name).toBe("maomao.webhook.skips");
+    if (!("sum" in metric)) throw new Error("event counter is not a sum");
+    expect(metric.sum.aggregationTemporality).toBe(1);
+    expect(metric.sum.isMonotonic).toBe(true);
+    expect(metric.sum.dataPoints).toHaveLength(1);
+    expect(metric.sum.dataPoints[0].asInt).toBe("1");
+    expect(attrValue(metric.sum.dataPoints[0].attributes, "reason")).toEqual({ stringValue: "global_pause" });
+  });
+
+  it("exports the counter when a metrics URL is configured", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true, status: 200 });
+    vi.stubGlobal("fetch", fetchMock);
+    vi.stubEnv("OPENOBSERVE_METRICS_URL", METRICS_URL);
+    exportEventCounter("maomao.forge.writes", { op: "review", outcome: "posted" });
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
+    const body = JSON.parse((fetchMock.mock.calls[0][1] as RequestInit).body as string);
+    const names = body.resourceMetrics[0].scopeMetrics[0].metrics.map((m: OtlpMetric) => m.name);
+    expect(names).toEqual(["maomao.forge.writes"]);
+  });
+
+  it("does not fetch when no metrics URL resolves", async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+    exportEventCounter("maomao.forge.writes", { op: "review", outcome: "posted" });
+    await flushOtlpExports();
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 });
