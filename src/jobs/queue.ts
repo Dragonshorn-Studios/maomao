@@ -67,6 +67,33 @@ export class JobQueue {
     );
   }
 
+  /**
+   * Emitted when a job joins the pending list — the first telemetry touch of
+   * a job's life, closing the gap between "webhook accepted the work" and
+   * `job_started` at claim time. Includes interrupted jobs re-queued on boot.
+   */
+  private logJobEnqueued(jobId: number): void {
+    if (!this.emitAppLogs) return;
+    const job = this.store.getJob(jobId);
+    if (!job) return;
+    emitAppLog(
+      "job_enqueued",
+      {
+        job_id: job.id,
+        job_type: job.job_type,
+        repo: job.repo_full_name,
+        pr: job.pr_number > 0 ? job.pr_number : null,
+        provider: job.provider,
+        provider_instance: job.provider_instance,
+        head_sha: job.head_sha,
+        queue_depth: this.pending.length,
+      },
+      process.env,
+      this.logsConfig(),
+      this.metricsShared(),
+    );
+  }
+
   start(): void {
     this.started = true;
     for (const job of this.store.listInterruptedJobs()) {
@@ -80,6 +107,7 @@ export class JobQueue {
   enqueue(jobId: number): void {
     if (this.pending.includes(jobId) || this.active.has(jobId)) return;
     this.pending.push(jobId);
+    this.logJobEnqueued(jobId);
     // Gauge on change: depth grows even when no slot is free for pump to act.
     this.exportMetrics();
     if (this.started) this.pump();

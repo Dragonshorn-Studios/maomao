@@ -894,7 +894,7 @@ describe("gitlab app-log events", () => {
     appLogLines.push(line);
   };
 
-  it("emits job_skipped with global_pause on the previously silent pause path", async () => {
+  it("emits job_skipped with global_pause and a boundary webhook_handled record", async () => {
     const { setAppLogSink } = await import("../telemetry/app-log.js");
     setAppLogSink(captureAppLog);
     const connections = newConnections();
@@ -914,6 +914,14 @@ describe("gitlab app-log events", () => {
         reason: "global_pause",
         repo: "acme/widgets",
         pr: 7,
+      }),
+    );
+    expect(events).toContainEqual(
+      expect.objectContaining({
+        event: "maomao.webhook_handled",
+        provider: "gitlab",
+        outcome: "ignored",
+        reason: "reviews paused globally",
       }),
     );
     appLogLines.length = 0;
