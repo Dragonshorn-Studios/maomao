@@ -30,6 +30,7 @@ import {
   mentionsReviewCommand,
 } from "../routing/escalation.js";
 import { enqueueClaimResult, recordWebhookDelivery } from "../forge/deliveries.js";
+import { logForgeWrite } from "../telemetry/forge-log.js";
 
 export interface WebhookRequest {
   event: string;
@@ -671,15 +672,29 @@ const STACK_USAGE =
 
 async function stackReply(ctx: StackCommandContext, text: string): Promise<void> {
   try {
-    await ctx.input.github?.createIssueComment?.({
+    const posted = await ctx.input.github?.createIssueComment?.({
       installationId: ctx.installationId,
       owner: ctx.repoOwner,
       repo: ctx.repoName,
       pullNumber: ctx.prNumber,
       body: text,
     });
+    logForgeWrite(ctx.input.store, {
+      op: "reply",
+      outcome: "posted",
+      repo: ctx.repoFullName,
+      pr: ctx.prNumber,
+      id: posted?.id ?? null,
+      url: posted?.url || null,
+    });
   } catch (error) {
-    console.warn(`stack command: could not post reply on ${ctx.repoFullName}#${ctx.prNumber}: ${error instanceof Error ? error.message : error}`);
+    logForgeWrite(ctx.input.store, {
+      op: "reply",
+      outcome: "failed",
+      repo: ctx.repoFullName,
+      pr: ctx.prNumber,
+      error: error instanceof Error ? error.message : String(error),
+    });
   }
 }
 
@@ -748,16 +763,30 @@ async function handleReviewCommand(
 
   const reply = async (text: string): Promise<void> => {
     try {
-      await input.github?.createIssueComment?.({
+      const posted = await input.github?.createIssueComment?.({
         installationId,
         owner: repoOwner,
         repo: repoName,
         pullNumber: prNumber,
         body: text,
       });
+      logForgeWrite(input.store, {
+        op: "reply",
+        outcome: "posted",
+        repo: repoFullName,
+        pr: prNumber,
+        id: posted?.id ?? null,
+        url: posted?.url || null,
+      });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      console.warn(`re-review reply failed for ${repoFullName}#${prNumber}: ${message}`);
+      logForgeWrite(input.store, {
+        op: "reply",
+        outcome: "failed",
+        repo: repoFullName,
+        pr: prNumber,
+        error: message,
+      });
     }
   };
 
@@ -980,7 +1009,13 @@ async function refreshStackComments(
         members,
       });
     } catch (error) {
-      console.warn(`stack command: could not update stack comment on ${ctx.repoFullName}#${member.prNumber}: ${error instanceof Error ? error.message : error}`);
+      logForgeWrite(ctx.input.store, {
+        op: "stack_comment",
+        outcome: "failed",
+        repo: ctx.repoFullName,
+        pr: member.prNumber,
+        error: error instanceof Error ? error.message : String(error),
+      });
     }
   }
 }
@@ -1240,7 +1275,13 @@ async function runStackStart(ctx: StackCommandContext, stackId?: string): Promis
         pending: true,
       });
     } catch (error) {
-      console.warn(`stack command: could not update stack comment on ${ctx.repoFullName}#${ctx.prNumber}: ${error instanceof Error ? error.message : error}`);
+      logForgeWrite(ctx.input.store, {
+        op: "stack_comment",
+        outcome: "failed",
+        repo: ctx.repoFullName,
+        pr: ctx.prNumber,
+        error: error instanceof Error ? error.message : String(error),
+      });
     }
   }
   return ctx.finish(start.created ? "start-recorded" : "start-duplicate", {
@@ -1622,7 +1663,13 @@ async function handleStackBodyMarker(
           stackId: marker.stackId,
         });
       } catch (error) {
-        console.warn(`stack marker: could not post suppression note on ${ctx.repoFullName}#${ctx.prNumber}: ${error instanceof Error ? error.message : error}`);
+        logForgeWrite(ctx.input.store, {
+          op: "stack_comment",
+          outcome: "failed",
+          repo: ctx.repoFullName,
+          pr: ctx.prNumber,
+          error: error instanceof Error ? error.message : String(error),
+        });
       }
     }
     return finish("member-marker", {
