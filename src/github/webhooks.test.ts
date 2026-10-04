@@ -3429,3 +3429,61 @@ describe("job_skipped app-log events", () => {
     expect(appLogLines).toHaveLength(0);
   });
 });
+
+describe("forge message app-log events (webhooks)", () => {
+  const appLogLines: string[] = [];
+  const captureAppLog = (line: string) => {
+    appLogLines.push(line);
+  };
+
+  afterEach(async () => {
+    appLogLines.length = 0;
+    setAppLogSink((line) => process.stdout.write(`${line}\n`));
+    await flushIngestPosts();
+    vi.unstubAllGlobals();
+    vi.unstubAllEnvs();
+    vi.restoreAllMocks();
+  });
+
+  it("emits maomao.forge_message_failed when a command reply cannot post", async () => {
+    vi.stubEnv("OPENOBSERVE_LOGS_URL", "");
+    vi.stubEnv("OPENOBSERVE_METRICS_URL", "");
+    setAppLogSink(captureAppLog);
+    const secret = "s3cret";
+    const config = loadConfig({
+      GITHUB_WEBHOOK_SECRET: secret,
+      GITHUB_APP_ID: "1",
+      GITHUB_APP_PRIVATE_KEY: "k",
+      REVIEWER_ROLES: "correctness",
+    });
+    const store = new JobStore(openDb(":memory:"), [], { emitJobSummaries: true });
+    const { github } = stackGithub({ pulls: {} });
+    // Every reply path funnels through createIssueComment; a rejected post
+    // must surface as a forge_message_failed record, not just the old
+    // console.warn.
+    (github as unknown as Record<string, unknown>).createIssueComment = async () => {
+      throw new Error("403 Resource not accessible by integration");
+    };
+    const body = JSON.stringify(
+      commentPayload({ comment: { ...commentPayload().comment, body: "@maomao review" } }),
+    );
+    await handleGithubWebhook({
+      config,
+      store,
+      github,
+      request: { event: "issue_comment", deliveryId: "fm1", signature: sign(secret, body), rawBody: body },
+    });
+    const events = appLogLines.map((line) => JSON.parse(line) as Record<string, unknown>);
+    expect(events).toContainEqual(
+      expect.objectContaining({
+        event: "maomao.forge_message_failed",
+        level: "error",
+        op: "reply",
+        outcome: "failed",
+        repo: "acme/widgets",
+        pr: 42,
+        error: "403 Resource not accessible by integration",
+      }),
+    );
+  });
+});

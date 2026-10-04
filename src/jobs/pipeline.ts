@@ -8,6 +8,7 @@ import { ForgeRegistry } from "../forge/registry.js";
 import type { ForgeConnectionStore } from "../forge/connections.js";
 import type { ForgeDiscussion, ForgeInlineComment, ForgeRepoTarget, ForgeSummary, ForgeVerdict } from "../forge/types.js";
 import { forgeTargetOf, scopeOf } from "../forge/types.js";
+import { logForgeWrite } from "../telemetry/forge-log.js";
 import { stackIdFromDedupKey } from "../stacks/commands.js";
 import { publish } from "../events.js";
 import { buildReviewBody, findExistingReview, selectInlineComments, inlineCommentFingerprints } from "../forge/review-text.js";
@@ -1592,15 +1593,34 @@ async function postStackComment(deps: PipelineDeps, job: JobRow, prNumber: numbe
     throw new Error("stack review cannot publish: GitHub client has no issue-comment port");
   }
   try {
-    await deps.github.createIssueComment({
+    const posted = await deps.github.createIssueComment({
       installationId: job.installation_id,
       owner: job.repo_owner,
       repo: job.repo_name,
       pullNumber: prNumber,
       body,
     });
+    logForgeWrite(deps.store, {
+      op: "stack_comment",
+      outcome: "posted",
+      provider: job.provider,
+      repo: job.repo_full_name,
+      pr: prNumber,
+      jobId: job.id,
+      id: posted?.id ?? null,
+      url: posted?.url || null,
+    });
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
+    logForgeWrite(deps.store, {
+      op: "stack_comment",
+      outcome: "failed",
+      provider: job.provider,
+      repo: job.repo_full_name,
+      pr: prNumber,
+      jobId: job.id,
+      error: message,
+    });
     deps.store.log(job.id, `Stack comment for #${prNumber} failed: ${message}`, "error");
     throw new Error(`failed to publish stack review on #${prNumber}: ${message}`);
   }
@@ -2504,12 +2524,48 @@ async function publishReview(
   });
   // Re-check staleness after the decision: an APPROVE must never land on a superseded SHA.
   throwIfStale(deps.store, job.id, signal);
-  const posted = await forge.publishReview({
-    target,
-    commitId: job.head_sha,
-    body,
-    comments,
-    verdict: decision.event satisfies ForgeVerdict,
+  let posted: Awaited<ReturnType<ForgePort["publishReview"]>>;
+  try {
+    posted = await forge.publishReview({
+      target,
+      commitId: job.head_sha,
+      body,
+      comments,
+      verdict: decision.event satisfies ForgeVerdict,
+    });
+  } catch (error) {
+    logForgeWrite(deps.store, {
+      op: "review",
+      outcome: "failed",
+      provider: job.provider,
+      repo: job.repo_full_name,
+      pr: job.pr_number,
+      jobId: job.id,
+      error: error instanceof Error ? error.message : String(error),
+    });
+    throw error;
+  }
+  // The forge silently degrades a review to body-only when inline locations
+  // are rejected; surface that loss instead of letting it look like the
+  // findings were never selected. A missing postedComments field means the
+  // port predates the field and posted everything.
+  const inlineDemoted = comments.length > 0 && (posted.postedComments ?? comments).length === 0;
+  if (inlineDemoted) {
+    deps.store.log(
+      job.id,
+      `Forge rejected all ${comments.length} inline comment location(s); review posted body-only`,
+      "warn",
+    );
+  }
+  logForgeWrite(deps.store, {
+    op: "review",
+    outcome: inlineDemoted ? "demoted" : "posted",
+    provider: job.provider,
+    repo: job.repo_full_name,
+    pr: job.pr_number,
+    jobId: job.id,
+    id: posted.id,
+    url: posted.url || null,
   });
   // Record the event only after the forge accepted the review, so a recorded event
   // always corresponds to a delivered one.
@@ -2719,12 +2775,35 @@ async function dispatchExternalEscalation(
           body: lines.join("\n"),
         });
         deps.store.updateDispatch(claimed.row.id, "dispatched", posted.url || posted.id);
+        logForgeWrite(deps.store, {
+          op: "escalation_comment",
+          outcome: "posted",
+          provider: latest.provider,
+          repo: latest.repo_full_name,
+          pr: latest.pr_number,
+          jobId: latest.id,
+          id: posted.id,
+          url: posted.url || null,
+        });
         anySuccess = true;
       }
     } catch (error) {
       const message = formatError(error);
       errors.push(`${target.type}: ${message}`);
       deps.store.updateDispatch(claimed.row.id, "dispatch_failed", message);
+      // Webhook targets are signed POSTs, not forge messages — only the
+      // mention/comment paths belong on the forge-write stream.
+      if (target.type !== "webhook") {
+        logForgeWrite(deps.store, {
+          op: "escalation_comment",
+          outcome: "failed",
+          provider: latest.provider,
+          repo: latest.repo_full_name,
+          pr: latest.pr_number,
+          jobId: latest.id,
+          error: message,
+        });
+      }
     }
   }
 
