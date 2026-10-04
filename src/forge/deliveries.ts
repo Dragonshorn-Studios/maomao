@@ -123,3 +123,48 @@ export function webhookDeliveryContext(rawBody: string): WebhookDeliveryContext 
     return {};
   }
 }
+
+/**
+ * One structured `maomao.webhook_handled` record plus a
+ * `maomao.webhook.deliveries` counter point per delivery that reached the
+ * handler — including signature failures (status 401), which the DB row
+ * deliberately never records. This is the total-volume baseline the skip
+ * and enqueue records are measured against. The delivery's event name rides
+ * as `webhook_event`: the bare `event` key would collide with the app-log
+ * line's own `event: maomao.webhook_handled` name.
+ */
+export function emitWebhookHandled(
+  store: { appLog(event: string, fields?: Record<string, unknown>): void; appCounter(name: string, attributes: Record<string, string | number | boolean>): void },
+  input: {
+    provider: string;
+    event: string;
+    deliveryId: string;
+    result: { status: number; body: Record<string, unknown>; enqueue?: unknown };
+    durationMs: number;
+  },
+): void {
+  const { status, body } = input.result;
+  const error = status >= 500 || body.error != null;
+  // `created` covers the plain enqueue paths; stack triggers carry the
+  // EnqueueResult on `result.enqueue` and only count when a job was made.
+  const enqueue = input.result.enqueue as { created?: boolean } | undefined;
+  const enqueued = body.created === true || enqueue?.created === true || body.dispatchJobId != null;
+  const outcome = error
+    ? "error"
+    : body.ignored === true
+      ? "ignored"
+      : enqueued
+        ? "enqueued"
+        : "handled";
+  store.appLog("webhook_handled", {
+    level: error ? "error" : "info",
+    provider: input.provider,
+    webhook_event: input.event,
+    delivery_id: input.deliveryId || null,
+    status,
+    outcome,
+    reason: firstString(body.error) ?? firstString(body.reason) ?? firstString(body.skippedReason),
+    duration_ms: input.durationMs,
+  });
+  store.appCounter("maomao.webhook.deliveries", { provider: input.provider, event: input.event, outcome });
+}

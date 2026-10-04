@@ -3487,3 +3487,110 @@ describe("forge message app-log events (webhooks)", () => {
     );
   });
 });
+
+describe("stack command + webhook boundary app-log events", () => {
+  const appLogLines: string[] = [];
+  const captureAppLog = (line: string) => {
+    appLogLines.push(line);
+  };
+
+  afterEach(async () => {
+    appLogLines.length = 0;
+    setAppLogSink((line) => process.stdout.write(`${line}\n`));
+    await flushIngestPosts();
+    vi.unstubAllGlobals();
+    vi.unstubAllEnvs();
+    vi.restoreAllMocks();
+  });
+
+  function chainPulls() {
+    return [
+      resolvedStackPull(41, { baseRef: "main", headRef: "feat-a", baseSha: "m0", headSha: "h41" }),
+      resolvedStackPull(42, { baseRef: "feat-a", headRef: "feat-b", baseSha: "h41", headSha: "h42" }),
+      resolvedStackPull(43, { baseRef: "feat-b", headRef: "feat-c", baseSha: "h42", headSha: "h43" }),
+    ];
+  }
+
+  it("emits maomao.stack_command and maomao.webhook_handled when an end trigger enqueues", async () => {
+    vi.stubEnv("OPENOBSERVE_LOGS_URL", "");
+    vi.stubEnv("OPENOBSERVE_METRICS_URL", "");
+    setAppLogSink(captureAppLog);
+    const secret = "s3cret";
+    const config = loadConfig({
+      GITHUB_WEBHOOK_SECRET: secret,
+      GITHUB_APP_ID: "1",
+      GITHUB_APP_PRIVATE_KEY: "k",
+      REVIEWER_ROLES: "correctness",
+    });
+    const store = new JobStore(openDb(":memory:"), [], { emitJobSummaries: true });
+    store.upsertStackStart({ repoFullName: "acme/widgets", stackId: "u1", prNumber: 41, actor: "alice" });
+    const { github } = stackGithub({ openPulls: chainPulls() });
+    const body = JSON.stringify(
+      commentPayload({
+        issue: { number: 43, pull_request: { url: "https://github.com/acme/widgets/pull/43" } },
+        comment: { id: 9100, body: "end of stack u1", user: { login: "alice", type: "User" }, author_association: "OWNER" },
+      }),
+    );
+    const result = await handleGithubWebhook({
+      config,
+      store,
+      github,
+      request: { event: "issue_comment", deliveryId: "sc1", signature: sign(secret, body), rawBody: body },
+    });
+    expect(result.body.enqueued).toBe(true);
+    const events = appLogLines.map((line) => JSON.parse(line) as Record<string, unknown>);
+    expect(events).toContainEqual(
+      expect.objectContaining({
+        event: "maomao.stack_command",
+        level: "info",
+        provider: "github",
+        result: "end-enqueued",
+        command: "end",
+        stack_id: "u1",
+        repo: "acme/widgets",
+        pr: 43,
+        actor: "alice",
+        webhook_event: "issue_comment",
+        member_count: 3,
+        job_id: result.body.jobId,
+        enqueued: true,
+      }),
+    );
+    expect(events).toContainEqual(
+      expect.objectContaining({
+        event: "maomao.webhook_handled",
+        provider: "github",
+        webhook_event: "issue_comment",
+        delivery_id: "sc1",
+        status: 200,
+        outcome: "enqueued",
+      }),
+    );
+    expect(events).not.toContainEqual(expect.objectContaining({ event: "maomao.job_skipped" }));
+  });
+
+  it("records signature failures on the boundary event with an error outcome", async () => {
+    vi.stubEnv("OPENOBSERVE_LOGS_URL", "");
+    vi.stubEnv("OPENOBSERVE_METRICS_URL", "");
+    setAppLogSink(captureAppLog);
+    const config = loadConfig({ GITHUB_WEBHOOK_SECRET: "s3cret", REVIEWER_ROLES: "correctness" });
+    const store = new JobStore(openDb(":memory:"), [], { emitJobSummaries: true });
+    await handleGithubWebhook({
+      config,
+      store,
+      request: { event: "pull_request", deliveryId: "bad1", signature: "sha256=deadbeef", rawBody: "{}" },
+    });
+    const events = appLogLines.map((line) => JSON.parse(line) as Record<string, unknown>);
+    expect(events).toContainEqual(
+      expect.objectContaining({
+        event: "maomao.webhook_handled",
+        level: "error",
+        provider: "github",
+        webhook_event: "pull_request",
+        delivery_id: "bad1",
+        status: 401,
+        outcome: "error",
+      }),
+    );
+  });
+});

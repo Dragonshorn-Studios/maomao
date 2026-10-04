@@ -22,7 +22,7 @@ import { cancelJobsForPull } from "../jobs/cancel.js";
 import type { ForgeConnectionStore, OpenedConnection } from "../forge/connections.js";
 import { commentLooksLikeMaomaoEscalation, mentionsEscalateCommand } from "../routing/escalation.js";
 import type { RepoRateLimiter } from "../github/rate-limit.js";
-import { enqueueClaimResult, recordWebhookDelivery } from "../forge/deliveries.js";
+import { enqueueClaimResult, emitWebhookHandled, recordWebhookDelivery } from "../forge/deliveries.js";
 
 export interface GitLabWebhookRequest {
   event: string;
@@ -568,6 +568,7 @@ export async function handleGitLabWebhook(input: GitLabWebhookInput): Promise<Gi
     request.event,
     `${connection.row.id}:${request.rawBody}`,
   );
+  const startedAt = Date.now();
   const result = await handleGitLabWebhookRequest(input, connection, deliveryId);
   // Boundary bookkeeping mirroring the GitHub path: records verified
   // deliveries the inner handler left unclaimed (ignored events, non-command
@@ -581,6 +582,13 @@ export async function handleGitLabWebhook(input: GitLabWebhookInput): Promise<Gi
     rawBody: request.rawBody,
     result,
     scope: { provider: "gitlab", instance: connection.instance.hostname },
+  });
+  emitWebhookHandled(input.store, {
+    provider: "gitlab",
+    event: request.event,
+    deliveryId,
+    result,
+    durationMs: Date.now() - startedAt,
   });
   return result;
 }
