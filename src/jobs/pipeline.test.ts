@@ -1,7 +1,7 @@
 import { mkdtemp, writeFile, mkdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { loadConfig } from "../config.js";
 import { openDb } from "../db.js";
 import type { GithubPort } from "../github/client.js";
@@ -13,6 +13,7 @@ import { createPipeline } from "./pipeline.js";
 import { parseBriefPayload } from "./brief.js";
 import { JobStore } from "./store.js";
 import { DiffTooLargeError } from "../github/diff-limit.js";
+import { setAppLogSink } from "../telemetry/app-log.js";
 
 async function fixtureCheckout(): Promise<CheckoutPort> {
   return {
@@ -6948,5 +6949,174 @@ describe("global pause claim guard", () => {
     expect(job?.state).toBe("cancelled");
     expect(job?.cancelled_reason).toBe("reviews_paused");
     expect(store.listLogs(created.job.id).map((l) => l.message).join("\n")).toMatch(/paused globally/);
+  });
+});
+
+describe("forge write app-log events", () => {
+  const appLogLines: string[] = [];
+  const captureAppLog = (line: string) => {
+    appLogLines.push(line);
+  };
+
+  function emittingStore() {
+    return new JobStore(openDb(":memory:"), [], { emitJobSummaries: true });
+  }
+
+  function publishConfig() {
+    return loadConfig({
+      REVIEWER_ROLES: "correctness",
+      OPENCODE_REVIEWER_MODEL: "test/model",
+      POST_EMPTY_REVIEW: "true",
+    });
+  }
+
+  function findingOpencode(): OpenCodePort {
+    return {
+      async run(input) {
+        const roleMatch = input.prompt.match(/Role id: (\w+)/);
+        const text = roleMatch
+          ? reviewerJson(roleMatch[1])
+          : JSON.stringify({
+              schema_version: 1,
+              verdict: "comment",
+              summary: "Please fix the high finding.",
+              findings: [
+                {
+                  severity: "high",
+                  confidence: 0.8,
+                  category: "correctness",
+                  file: "example.ts",
+                  line: 1,
+                  summary: "bug",
+                  body: "details",
+                },
+              ],
+            });
+        return { stdout: text, stderr: "", exitCode: 0, text, usage: { promptTokens: 3, completionTokens: 2 } };
+      },
+    };
+  }
+
+  function enqueueReview(store: JobStore) {
+    return store.enqueue({
+      repoFullName: "acme/widgets",
+      repoOwner: "acme",
+      repoName: "widgets",
+      installationId: 9,
+      prNumber: 4,
+      prTitle: "Change example",
+      prBody: "",
+      prHtmlUrl: "",
+      prAuthor: "dev",
+      baseSha: "base",
+      headSha: "cafebabe",
+      baseRef: "main",
+      headRef: "feat",
+      reviewers: [{ role: "correctness", title: "Correctness" }],
+    }).job.id;
+  }
+
+  afterEach(async () => {
+    appLogLines.length = 0;
+    setAppLogSink((line) => process.stdout.write(`${line}\n`));
+    vi.unstubAllEnvs();
+  });
+
+  it("emits maomao.forge_message_posted when a review lands", async () => {
+    vi.stubEnv("OPENOBSERVE_LOGS_URL", "");
+    setAppLogSink(captureAppLog);
+    const store = emittingStore();
+    const pipeline = createPipeline({
+      config: publishConfig(),
+      store,
+      github: githubPort({
+        createCommentReview: async () => ({ id: "99", url: "https://example.test/reviews/99" }),
+      }),
+      checkout: await fixtureCheckout(),
+      opencode: findingOpencode(),
+    });
+    const jobId = enqueueReview(store);
+    await pipeline.run(jobId);
+    const events = appLogLines.map((line) => JSON.parse(line) as Record<string, unknown>);
+    expect(events).toContainEqual(
+      expect.objectContaining({
+        event: "maomao.forge_message_posted",
+        level: "info",
+        op: "review",
+        outcome: "posted",
+        repo: "acme/widgets",
+        pr: 4,
+        job_id: jobId,
+        id: "99",
+      }),
+    );
+  });
+
+  it("marks the review demoted when the forge posts body-only", async () => {
+    vi.stubEnv("OPENOBSERVE_LOGS_URL", "");
+    setAppLogSink(captureAppLog);
+    const store = emittingStore();
+    // A real hunk so the finding anchors inline — the degrade only counts
+    // when an inline comment was actually selected and then rejected.
+    const diff = [
+      "diff --git a/example.ts b/example.ts",
+      "--- a/example.ts",
+      "+++ b/example.ts",
+      "@@ -0,0 +1 @@",
+      "+export const n = 1;",
+      "",
+    ].join("\n");
+    const pipeline = createPipeline({
+      config: publishConfig(),
+      store,
+      github: githubPort({
+        getPullDiff: async () => diff,
+        createCommentReview: async () => ({ id: "99", url: "", postedComments: [] }),
+      }),
+      checkout: await fixtureCheckout(),
+      opencode: findingOpencode(),
+    });
+    const jobId = enqueueReview(store);
+    await pipeline.run(jobId);
+    const events = appLogLines.map((line) => JSON.parse(line) as Record<string, unknown>);
+    expect(events).toContainEqual(
+      expect.objectContaining({
+        event: "maomao.forge_message_posted",
+        op: "review",
+        outcome: "demoted",
+        job_id: jobId,
+      }),
+    );
+  });
+
+  it("emits maomao.forge_message_failed when the forge rejects the review", async () => {
+    vi.stubEnv("OPENOBSERVE_LOGS_URL", "");
+    setAppLogSink(captureAppLog);
+    const store = emittingStore();
+    const pipeline = createPipeline({
+      config: publishConfig(),
+      store,
+      github: githubPort({
+        createCommentReview: async () => {
+          throw new Error("422 diff line not in range");
+        },
+      }),
+      checkout: await fixtureCheckout(),
+      opencode: findingOpencode(),
+    });
+    const jobId = enqueueReview(store);
+    await pipeline.run(jobId);
+    expect(store.getJob(jobId)?.state).toBe("failed");
+    const events = appLogLines.map((line) => JSON.parse(line) as Record<string, unknown>);
+    expect(events).toContainEqual(
+      expect.objectContaining({
+        event: "maomao.forge_message_failed",
+        level: "error",
+        op: "review",
+        outcome: "failed",
+        job_id: jobId,
+        error: "422 diff line not in range",
+      }),
+    );
   });
 });
