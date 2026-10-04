@@ -167,6 +167,19 @@ Enqueue a review (or dequeue/requeue to move the queue), then:
   traces before. Fractional costs therefore emit `cost_usd` as a string
   plus an exact integer `cost_usd_micros` twin; `gen_ai.usage.cost`
   strings are coerced back to numbers by OO server-side.
+- **Webhook and forge-write records are per-event, not per-job**:
+  `maomao.webhook_handled` (one per delivery, including 401 signature
+  failures the DB never records), `maomao.job_skipped` (a delivery seen but
+  no work produced), `maomao.stack_command` (each stack lifecycle terminal
+  point) and `maomao.forge_message_posted`/`_failed` (every review, comment
+  or reply write, with `outcome: demoted` flagging body-only fallbacks) all
+  emit at the moment they happen — useful for live-tailing an operator
+  action that never reaches a terminal job. On the metrics channel,
+  `maomao.webhook.deliveries{outcome}` is the volume baseline,
+  `maomao.webhook.skips{reason}` answers "how much work did a pause/rate
+  limit swallow?" as a group-by, and `maomao.forge.writes{op,outcome}`
+  tracks forge write success rates. These ride the same
+  `JOB_SUMMARIES`/logs-channel gates as the other app-log events.
 
 ## 5. Troubleshooting
 

@@ -198,7 +198,17 @@ describe("job_started app-log events", () => {
     queue.start();
     await vi.waitFor(() => expect(ran).toEqual([jobId]));
     const events = appLogLines.map((line) => JSON.parse(line) as Record<string, unknown>);
+    // The enqueue lands first (depth 1), then the claim (depth 0, slot in use).
     expect(events).toEqual([
+      expect.objectContaining({
+        event: "maomao.job_enqueued",
+        job_id: jobId,
+        job_type: "pr_review",
+        repo: "acme/widgets",
+        pr: 4,
+        head_sha: "deadbeef01",
+        queue_depth: 1,
+      }),
       expect.objectContaining({
         event: "maomao.job_started",
         job_id: jobId,

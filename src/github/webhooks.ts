@@ -28,7 +28,7 @@ import {
   mentionsEscalateCommand,
   mentionsReviewCommand,
 } from "../routing/escalation.js";
-import { enqueueClaimResult, recordWebhookDelivery } from "../forge/deliveries.js";
+import { enqueueClaimResult, emitWebhookHandled, recordWebhookDelivery } from "../forge/deliveries.js";
 import { logForgeWrite } from "../telemetry/forge-log.js";
 
 export interface WebhookRequest {
@@ -73,6 +73,40 @@ function logJobSkipped(
     ...(input.expiresAt ? { expires_at: input.expiresAt } : {}),
   });
   store.appCounter("maomao.webhook.skips", { provider: "github", reason: input.reason });
+}
+
+// One structured `maomao.stack_command` record per stack lifecycle terminal
+// point — declared, started, triggered, rechecked, deduped, refused — keyed
+// by the same result string the delivery row claims. Called from the shared
+// finish closures so every command path (comment and PR-body alike) emits
+// exactly one record without the run* functions each having to remember to.
+function emitStackCommandLog(
+  store: JobStore,
+  input: {
+    repo: string;
+    pr: number;
+    actor: string;
+    webhookEvent: string;
+    result: string;
+    body: Record<string, unknown>;
+  },
+): void {
+  const body = input.body;
+  store.appLog("stack_command", {
+    level: body.error != null ? "warn" : "info",
+    provider: "github",
+    result: input.result,
+    command: body.command ?? null,
+    stack_id: body.stackId ?? null,
+    repo: input.repo,
+    pr: input.pr,
+    actor: input.actor,
+    webhook_event: input.webhookEvent,
+    member_count: body.memberCount ?? null,
+    job_id: body.jobId ?? null,
+    enqueued: body.enqueued ?? null,
+    error: body.error ?? null,
+  });
 }
 
 export interface IssueCommentWebhookPayload {
@@ -313,6 +347,7 @@ export interface GithubWebhookInput {
 }
 
 export async function handleGithubWebhook(input: GithubWebhookInput): Promise<WebhookHandleResult> {
+  const startedAt = Date.now();
   const result = await handleGithubWebhookRequest(input);
   // Boundary bookkeeping: record verified deliveries the inner handlers left
   // unclaimed — every `ignored` answer (unsupported events, non-command
@@ -324,6 +359,13 @@ export async function handleGithubWebhook(input: GithubWebhookInput): Promise<We
     event: input.request.event,
     rawBody: input.request.rawBody,
     result,
+  });
+  emitWebhookHandled(input.store, {
+    provider: "github",
+    event: input.request.event,
+    deliveryId: input.request.deliveryId,
+    result,
+    durationMs: Date.now() - startedAt,
   });
   return result;
 }
@@ -1206,6 +1248,7 @@ async function runStackEnqueue(
     stackId,
     enqueued: enqueue.created,
     rechecked,
+    memberCount: members.length,
     jobId: enqueue.job.id,
     staleJobIds: enqueue.staleJobIds,
   });
@@ -1439,6 +1482,7 @@ async function handleStackCommand(
   const finish = (result: string, body: Record<string, unknown>): WebhookHandleResult => {
     input.store.claimWebhookDelivery(input.request.deliveryId, input.request.event, result);
     if (commentId != null) input.store.claimReviewCommand(String(commentId), input.request.deliveryId, "stack-command", result);
+    emitStackCommandLog(input.store, { repo: repoFullName, pr: prNumber, actor: actorLogin, webhookEvent: "issue_comment", result, body });
     return { status: 200, body };
   };
   // enforceSpendControls stays unset here on purpose: comment commands are
@@ -1565,6 +1609,14 @@ async function handleStackBodyMarker(
   }
   const finish = (result: string, body: Record<string, unknown>): WebhookHandleResult => {
     input.store.claimWebhookDelivery(input.request.deliveryId, input.request.event, result);
+    emitStackCommandLog(input.store, {
+      repo: parsed.repoFullName,
+      pr: parsed.prNumber,
+      actor: parsed.prAuthor,
+      webhookEvent: `pull_request.${payload.action}`,
+      result,
+      body,
+    });
     return { status: 200, body };
   };
   const ctx: StackCommandContext = {

@@ -401,9 +401,23 @@ Operational events are emitted on the same stdout-line + logs-channel transport 
 | Event | Fields | Emitted |
 |---|---|---|
 | `maomao.app_boot` | `port`, `job_concurrency`, `telemetry` (per-channel config source) | once at startup |
+| `maomao.job_enqueued` | `job_id`, `job_type`, `repo`, `pr`, `provider`, `provider_instance`, `head_sha`, `queue_depth` | a job joins the queue (webhook enqueues, manual triggers, interrupted jobs re-queued on boot) |
 | `maomao.job_started` | `job_id`, `job_type`, `repo`, `pr`, `provider`, `provider_instance`, `head_sha`, `attempt`, `queue_depth`, `slots_in_use` | each job claim |
+| `maomao.job_skipped` | `reason` (`global_pause`, `repo_pause`, `rate_limited`, `merged`, `draft`, `in_flight`, `dedup`, …), `provider`, `repo`, `pr`, `webhook_event`, `delivery_id`, `expires_at` (timed pauses) | a delivery was seen but produced no work — pause skips, rate limits, merged/dedup skips, stack quiet-denies |
+| `maomao.stack_command` | `result` (the delivery-claim string, e.g. `end-enqueued`), `command`, `stack_id`, `repo`, `pr`, `actor`, `webhook_event`, `member_count`, `job_id`, `enqueued`, `error` | every stack command terminal point (comment and PR-body paths) |
+| `maomao.webhook_handled` | `provider`, `webhook_event`, `delivery_id`, `status`, `outcome` (`enqueued`\|`handled`\|`ignored`\|`error`), `reason`, `duration_ms` | once per delivery reaching the handler, including 401s the DB never records |
+| `maomao.forge_message_posted` | `op` (`review`, `comment`, `escalation_comment`, `stack_comment`, `reply`), `outcome` (`posted`\|`demoted`), `provider`, `repo`, `pr`, `job_id`, `id`, `url` | a review/comment/reply landed; `demoted` = the forge rejected the inline locations and the review posted body-only |
+| `maomao.forge_message_failed` | `op`, `outcome: failed`, `provider`, `repo`, `pr`, `job_id`, `error` | the forge rejected a message write |
 | `maomao.telemetry_export_failed` | `signal`, HTTP `status` or `error` (redacted), `url` (credentials masked), `response` (sanitized upstream error body, ≤300 chars) | an OTLP export fails |
 | `maomao.telemetry_export_dropped` | `signal`, `reason`, `url` | the export queue is full |
+
+Three counters ride along on the metrics channel: `maomao.webhook.deliveries`
+(attrs `provider`, `event`, `outcome`) as the total-volume baseline,
+`maomao.webhook.skips` (attrs `provider`, `reason`) — "how many jobs did a
+pause swallow?" is a group-by on `reason` — and `maomao.forge.writes` (attrs
+`op`, `outcome`) for forge write success/failure rates. All event fields are
+usage metadata only: ids, outcomes, and reasons — never bodies, diffs, or
+secrets.
 
 LLM-call stage spans (`maomao.stage.reviewer`, `.routing`, `.aggregation`,
 `.internal_escalation`) also carry the OTel `gen_ai.*` semantic attributes
