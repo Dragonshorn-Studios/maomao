@@ -1,5 +1,6 @@
 import { createHmac } from "node:crypto";
-import { EventEmitter } from "node:events";
+import { serve } from "@hono/node-server";
+import { EventEmitter, once } from "node:events";
 import { PassThrough } from "node:stream";
 import type { ChildProcess } from "node:child_process";
 import { describe, expect, it, vi } from "vitest";
@@ -981,6 +982,60 @@ describe("oauth operator login", () => {
     const blocked = await app.request(`/login/github/callback?code=good-code&state=bogus`);
     expect(blocked.status).toBe(429);
     warn.mockRestore();
+  });
+
+  it.each([
+    ["/login/github", 30, 302],
+    ["/login/github/callback?state=bogus", 10, 403],
+  ])("ignores rotating forwarded headers by default on %s", async (path, limit, status) => {
+    const { app } = testApp(oauthEnv);
+    const env = { incoming: { socket: { remoteAddress: "192.0.2.10" } } };
+    for (let i = 0; i < limit; i += 1) {
+      expect((await app.request(path, { headers: { "x-forwarded-for": `198.51.100.${i}` } }, env)).status).toBe(status);
+    }
+    expect((await app.request(path, { headers: { "x-forwarded-for": "203.0.113.1" } }, env)).status).toBe(429);
+    expect((await app.request(path, {}, { incoming: { socket: { remoteAddress: "192.0.2.11" } } })).status).toBe(status);
+  });
+
+  it.each([
+    ["/login/github", 30, 302],
+    ["/login/github/callback?state=bogus", 10, 403],
+  ])("uses the rightmost forwarded client behind one trusted proxy on %s", async (path, limit, status) => {
+    const { app } = testApp({ ...oauthEnv, TRUST_PROXY_HOPS: "1" });
+    const env = { incoming: { socket: { remoteAddress: "192.0.2.10" } } };
+    for (let i = 0; i < limit; i += 1) {
+      expect((await app.request(path, { headers: { "x-forwarded-for": `198.51.100.${i}, 203.0.113.1` } }, env)).status).toBe(status);
+    }
+    expect((await app.request(path, { headers: { "x-forwarded-for": "198.51.100.99, 203.0.113.1" } }, env)).status).toBe(429);
+    expect((await app.request(path, { headers: { "x-forwarded-for": "203.0.113.2" } }, env)).status).toBe(status);
+  });
+
+  it("uses real node-server socket bindings without trusting forwarded headers", async () => {
+    const { app } = testApp(oauthEnv);
+    const server = serve({ fetch: app.fetch, hostname: "127.0.0.1", port: 0 });
+    try {
+      if (!server.listening) await once(server, "listening");
+      const address = server.address();
+      if (!address || typeof address === "string") throw new Error("missing TCP address");
+      const url = `http://127.0.0.1:${address.port}/login/github/callback?state=bogus`;
+      for (let i = 0; i < 11; i += 1) {
+        const response = await fetch(url, { headers: { "x-forwarded-for": `198.51.100.${i}` } });
+        expect(response.status).toBe(i < 10 ? 403 : 429);
+        await response.text();
+      }
+    } finally {
+      await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+    }
+  });
+
+  it("falls back to the socket for missing, malformed, or short proxy chains", async () => {
+    const { app } = testApp({ ...oauthEnv, TRUST_PROXY_HOPS: "2" });
+    const env = { incoming: { socket: { remoteAddress: "192.0.2.10" } } };
+    for (let i = 0; i < 30; i += 1) {
+      const headers: Record<string, string> = i % 3 === 0 ? {} : { "x-forwarded-for": i % 3 === 1 ? `198.51.100.${i}` : `not-an-ip-${i}, 203.0.113.1` };
+      expect((await app.request("/login/github", { headers }, env)).status).toBe(302);
+    }
+    expect((await app.request("/login/github", {}, env)).status).toBe(429);
   });
 
   it("revokes live sessions as soon as the id leaves the allowlist", async () => {
