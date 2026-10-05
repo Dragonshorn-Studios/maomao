@@ -506,6 +506,8 @@ Behavior and boundaries:
 - Logins, logouts, denials, and state rejections all emit credential-free audit lines; password logins (when the emergency path is enabled) do the same.
 - Org/team membership policies are not inferred, and repository visibility grants no UI access.
 
+**Proxy trust for OAuth rate limits.** By default, limits use the connection's socket address and ignore `X-Forwarded-For`. Set `TRUST_PROXY_HOPS=1` behind one trusted reverse proxy (or the exact fixed number of trusted hops). The client address is selected from the right of `X-Forwarded-For`; missing, malformed, or shorter chains fall back to the socket address. Only enable this when Maomao is reachable exclusively through those proxies and each proxy appends the actual peer address or overwrites the header. Direct access or paths with fewer proxies can let clients spoof their rate-limit identity. Unset or `0` keeps proxy trust disabled.
+
 **Emergency local login.** The shared-password form is hidden while OAuth is enabled. Set `UI_LOCAL_LOGIN=true` (plus `UI_PASSWORD`/`UI_SESSION_SECRET`) to show it as a recovery path; it stays off by default.
 
 ## Security / trust boundary
