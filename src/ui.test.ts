@@ -72,6 +72,13 @@ describe("theme tokens", () => {
     expect(THEME_CSS).toContain("textarea:not(.chat-composer-input)");
     expect(THEME_CSS).toContain(".forge-mark");
     expect(THEME_CSS).toContain(".brand-mark");
+    // Responsive guards: the queue grid must cap its track at the container
+    // and let items shrink below min-content, or one wide card (stack member
+    // rows) stretches every card and forces a page-level horizontal scroll.
+    expect(THEME_CSS).toContain("grid-template-columns: minmax(0, 1fr)");
+    expect(THEME_CSS).toContain(".queue > li { min-width: 0; }");
+    expect(THEME_CSS).toContain(".run-board {");
+    expect(THEME_CSS).toContain("overflow-x: auto");
     expect(THEME_CSS).toContain(".chat-toolbar");
     expect(THEME_CSS).toContain(".chat-transcript[hidden]");
     expect(THEME_CSS).toContain(".prompt-role");
