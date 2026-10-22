@@ -9,8 +9,9 @@ import { nowIso } from "../util.js";
 import { stackDedupPrefix } from "../stacks/commands.js";
 import { publish } from "../events.js";
 import { emitJobSummary, type JobSummaryOptions } from "./summary.js";
-import { exportTerminalJobMetrics } from "../telemetry/metrics.js";
+import { exportEventCounter, exportTerminalJobMetrics } from "../telemetry/metrics.js";
 import { exportTerminalJobTraces } from "../telemetry/traces.js";
+import { emitAppLog, type AppLogFields } from "../telemetry/app-log.js";
 import type { TelemetrySettingsStore, TelemetrySharedConfig } from "../telemetry/settings.js";
 import { resolveChannelUrl } from "../telemetry/settings.js";
 import { ReviewConfigStore } from "../config-revisions.js";
@@ -1639,6 +1640,36 @@ export class JobStore {
     emitJobSummary(this, jobId, env, summaryOpts, logsStored, shared);
     exportTerminalJobMetrics(this, jobId, env, opts, telemetry?.get("metrics"), shared, logsStored);
     exportTerminalJobTraces(this, jobId, env, opts, telemetry?.get("traces"), shared, logsStored);
+  }
+
+  /**
+   * Structured operational app-log line (`maomao.<event>`) for paths outside
+   * the job lifecycle: webhook skips, forge message writes, stack commands.
+   * Same gate and channel resolution as the terminal summary — synthetic and
+   * fixture stores (emitJobSummaries unset) stay silent so tests never POST.
+   */
+  appLog(event: string, fields: AppLogFields = {}): void {
+    if (this.opts.emitJobSummaries !== true) return;
+    const telemetry = this.opts.telemetry;
+    emitAppLog(event, fields, process.env, telemetry?.get("logs"), telemetry?.shared());
+  }
+
+  /**
+   * One DELTA +1 counter point for an operational event that never reaches a
+   * terminal job transition (webhook outcomes, forge writes). Same gate as
+   * appLog; no-ops unless a metrics endpoint is configured.
+   */
+  appCounter(name: string, attributes: Record<string, string | number | boolean>): void {
+    if (this.opts.emitJobSummaries !== true) return;
+    const telemetry = this.opts.telemetry;
+    exportEventCounter(
+      name,
+      attributes,
+      process.env,
+      telemetry?.get("metrics"),
+      telemetry?.shared(),
+      telemetry?.get("logs"),
+    );
   }
 
   patchJob(id: number, extra: Partial<JobRow>): void {

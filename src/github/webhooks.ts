@@ -44,6 +44,36 @@ export type WebhookHandleResult = {
   dispatchJobId?: number;
 };
 
+// Structured skip record for a delivery that was seen but produced no work —
+// the machine-readable replacement for the old free-text console.warns. One
+// `maomao.job_skipped` line plus a reason-keyed counter point, so "how many
+// jobs did a pause swallow?" is a group-by in OpenObserve.
+function logJobSkipped(
+  store: JobStore,
+  input: {
+    reason: string;
+    repo: string;
+    pr?: number | null;
+    event: string;
+    deliveryId?: string;
+    expiresAt?: string;
+  },
+): void {
+  store.appLog("job_skipped", {
+    level: "warn",
+    provider: "github",
+    reason: input.reason,
+    repo: input.repo,
+    pr: input.pr ?? null,
+    // Not `event`: that key would collide with the app-log line's own
+    // `event: maomao.job_skipped` name in appLogPayload's spread.
+    webhook_event: input.event,
+    delivery_id: input.deliveryId || null,
+    ...(input.expiresAt ? { expires_at: input.expiresAt } : {}),
+  });
+  store.appCounter("maomao.webhook.skips", { provider: "github", reason: input.reason });
+}
+
 export interface IssueCommentWebhookPayload {
   action?: string;
   installation?: { id?: number; account?: { id?: number } };
@@ -356,9 +386,13 @@ async function handleGithubWebhookRequest(input: GithubWebhookInput): Promise<We
     // zero active jobs) and merged pulls cannot be reopened, so the gate is
     // permanent. Keyed by repo full name, so a rename slips past it.
     if (input.store.hasMergedPull(parsed.repoFullName, parsed.prNumber)) {
-      console.warn(
-        `webhook: ignoring ${input.request.event}.${payload.action} for merged ${parsed.repoFullName}#${parsed.prNumber} (delivery ${input.request.deliveryId || "unknown"})`,
-      );
+      logJobSkipped(input.store, {
+        reason: "merged",
+        repo: parsed.repoFullName,
+        pr: parsed.prNumber,
+        event: `${input.request.event}.${payload.action}`,
+        deliveryId: input.request.deliveryId,
+      });
       return ignored("pull request already merged; not enqueueing");
     }
 
@@ -394,10 +428,13 @@ async function handleGithubWebhookRequest(input: GithubWebhookInput): Promise<We
         input.request.event,
         "paused (global)",
       );
-      console.warn(
-        `webhook: skipped ${input.request.event}.${payload.action} for ${parsed.repoFullName} ` +
-          `(reviews paused globally since ${globalPause.created_at}, delivery ${input.request.deliveryId || "unknown"})`,
-      );
+      logJobSkipped(input.store, {
+        reason: "global_pause",
+        repo: parsed.repoFullName,
+        pr: parsed.prNumber,
+        event: `${input.request.event}.${payload.action}`,
+        deliveryId: input.request.deliveryId,
+      });
       return ignored("reviews paused globally");
     }
 
@@ -413,10 +450,14 @@ async function handleGithubWebhookRequest(input: GithubWebhookInput): Promise<We
         input.request.event,
         `paused (expires ${pause.expires_at})`,
       );
-      console.warn(
-        `webhook: skipped ${input.request.event}.${payload.action} for paused ${parsed.repoFullName} ` +
-          `(pause expires ${pause.expires_at}, delivery ${input.request.deliveryId || "unknown"})`,
-      );
+      logJobSkipped(input.store, {
+        reason: "repo_pause",
+        repo: parsed.repoFullName,
+        pr: parsed.prNumber,
+        event: `${input.request.event}.${payload.action}`,
+        deliveryId: input.request.deliveryId,
+        expiresAt: pause.expires_at,
+      });
       return ignored(`automatic reviews paused until ${pause.expires_at}`);
     }
 
@@ -437,6 +478,13 @@ async function handleGithubWebhookRequest(input: GithubWebhookInput): Promise<We
           input.config.repoRateWindowMs,
         )
       ) {
+        logJobSkipped(input.store, {
+          reason: "rate_limited",
+          repo: parsed.repoFullName,
+          pr: parsed.prNumber,
+          event: `${input.request.event}.${payload.action}`,
+          deliveryId: input.request.deliveryId,
+        });
         logRateLimited({
           installationId: parsed.installationId,
           repositoryId: parsed.githubRepositoryId,
@@ -734,10 +782,24 @@ async function handleReviewCommand(
   }
   if (input.store.hasMergedPull(repoFullName, prNumber)) {
     await reply("Not re-reviewing — this pull request is already merged.");
+    logJobSkipped(input.store, {
+      reason: "merged",
+      repo: repoFullName,
+      pr: prNumber,
+      event: input.request.event,
+      deliveryId: input.request.deliveryId,
+    });
     return finish("review-merged", { ok: true, ignored: true, reason: "pull request already merged" });
   }
   if (pull.draft && !input.config.reviewDrafts) {
     await reply("Not re-reviewing — this pull request is a draft.");
+    logJobSkipped(input.store, {
+      reason: "draft",
+      repo: repoFullName,
+      pr: prNumber,
+      event: input.request.event,
+      deliveryId: input.request.deliveryId,
+    });
     return finish("review-draft", { ok: true, ignored: true, reason: "draft pull request" });
   }
 
@@ -751,12 +813,26 @@ async function handleReviewCommand(
       return finish("review-upgraded", { ok: true, jobId: occupant.id, dispatchJobId: occupant.id });
     }
     await reply(`A review is already ${occupant.state} at this head — job ${occupant.id}.`);
+    logJobSkipped(input.store, {
+      reason: "in_flight",
+      repo: repoFullName,
+      pr: prNumber,
+      event: input.request.event,
+      deliveryId: input.request.deliveryId,
+    });
     return finish("review-in-flight", { ok: true, jobId: occupant.id, reason: `job already ${occupant.state} for this SHA` });
   }
   if (occupant) {
     const retired = input.store.retireJobDedupKey(occupant.id, `rereview:${occupant.id}`);
     if (!retired) {
       await reply(`Could not re-review — job ${occupant.id} still holds this head's review slot.`);
+      logJobSkipped(input.store, {
+        reason: "retire_failed",
+        repo: repoFullName,
+        pr: prNumber,
+        event: input.request.event,
+        deliveryId: input.request.deliveryId,
+      });
       return finish("review-retire-failed", { ok: false, error: "could not retire dedup slot", jobId: occupant.id });
     }
   }
@@ -783,6 +859,13 @@ async function handleReviewCommand(
   });
   if (!enqueue.created) {
     await reply(`Re-review not queued — ${mdInline(enqueue.skippedReason ?? "a job already exists for this head")}.`);
+    logJobSkipped(input.store, {
+      reason: "dedup",
+      repo: repoFullName,
+      pr: prNumber,
+      event: input.request.event,
+      deliveryId: input.request.deliveryId,
+    });
     return finish("review-skipped", { ok: true, created: false, skippedReason: enqueue.skippedReason, jobId: enqueue.job.id });
   }
   await reply(`Queued a full re-review of ${mdInline(pull.headSha.slice(0, 8))} — job ${enqueue.job.id}.`);
@@ -905,20 +988,24 @@ async function runStackEnqueue(
   via: "top" | "end",
 ): Promise<WebhookHandleResult> {
   // Automatic stack triggers share the quiet deny path with pr_review: a
-  // spend-control refusal claims the delivery and logs, but leaves no PR
-  // comment — tip thrash must not flood the thread (issue #130). Manual
-  // comment commands still get the actionable reply.
-  const quietDeny = (message: string): void => {
-    console.warn(
-      `stack: skipped automatic "${stackId}" trigger in ${ctx.repoFullName} — ${message} ` +
-        `(delivery ${ctx.input.request.deliveryId || "unknown"})`,
-    );
+  // spend-control refusal claims the delivery and emits a structured skip
+  // record, but leaves no PR comment — tip thrash must not flood the thread
+  // (issue #130). Manual comment commands still get the actionable reply.
+  const quietDeny = (reason: string, expiresAt?: string): void => {
+    logJobSkipped(ctx.input.store, {
+      reason,
+      repo: ctx.repoFullName,
+      pr: ctx.prNumber,
+      event: ctx.webhookEvent,
+      deliveryId: ctx.input.request.deliveryId,
+      expiresAt,
+    });
   };
   // A stack run is reviews: the global pause blocks it like any other
   // enqueue. Checked after validation so the reply is still a useful error.
   if (ctx.input.store.getGlobalPause()) {
     if (ctx.enforceSpendControls) {
-      quietDeny("reviews paused globally");
+      quietDeny("global_pause");
     } else {
       await stackReply(ctx, `Could not run stack "${stackId}": reviews are paused globally — resume on /pause.`);
     }
@@ -939,11 +1026,11 @@ async function runStackEnqueue(
   if (ctx.enforceSpendControls) {
     const repoPause = ctx.input.store.getActivePause(ctx.repoFullName);
     if (repoPause) {
-      quietDeny(`reviews paused until ${repoPause.expires_at}`);
+      quietDeny("repo_pause", repoPause.expires_at);
       return ctx.finish(`${via}-paused`, { ok: true, command: via, stackId, enqueued: false, error: `paused until ${repoPause.expires_at}` });
     }
     if (rateOn && ctx.githubRepositoryId == null) {
-      quietDeny("missing repository id for rate limiting");
+      quietDeny("missing_repository_id");
       logAuthorizationRejection({ installationId: ctx.installationId, reason: "missing repository id" });
       return ctx.finish(`${via}-rate-limited`, { ok: true, command: via, stackId, enqueued: false, error: "missing repository id" });
     }
@@ -958,7 +1045,7 @@ async function runStackEnqueue(
         ctx.input.config.repoRateWindowMs,
       )
     ) {
-      quietDeny("rate limited");
+      quietDeny("rate_limited");
       logRateLimited({ installationId: ctx.installationId, repositoryId: ctx.githubRepositoryId });
       return ctx.finish(`${via}-rate-limited`, { ok: true, command: via, stackId, enqueued: false, error: "rate limited" });
     }
