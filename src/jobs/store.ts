@@ -268,6 +268,10 @@ export interface NewJobInput {
   scanBranch?: string | null;
   /** Dedup discriminator inside the jobs UNIQUE; repo_brief overrides this with a nonce. */
   dedupKey?: string;
+  /** stack_review members, inserted in the same transaction as the job row so
+   * the queue worker can never claim a member-less stack job and a concurrent
+   * repin of the same job can never duplicate the member rows. */
+  stackMembers?: { position: number; prNumber: number; baseRef: string; headRef: string; baseSha: string; headSha: string }[];
 }
 
 /**
@@ -628,6 +632,13 @@ export class JobStore {
       );
       for (const reviewer of input.reviewers) {
         reviewerInsert.run(jobId, reviewer.role, reviewer.title, reviewer.model ?? null);
+      }
+      // Same transaction as the job INSERT: a stack job row must never be
+      // visible without its members (the queue worker fails it as member-less)
+      // and a concurrent repin of this job can never race a separate insert
+      // into duplicated stack_run_members rows.
+      if (jobType === "stack_review" && input.stackMembers?.length) {
+        this.insertStackMembers(jobId, input.stackMembers);
       }
 
       const job = this.getJob(jobId);

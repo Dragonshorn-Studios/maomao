@@ -1019,6 +1019,11 @@ async function runStackEnqueue(
     reviewers: [{ role: "stack_cumulative", title: "Stack cumulative" }],
     jobType: "stack_review",
     dedupKey,
+    // Inserted inside enqueue's own transaction: a separate insert after the
+    // awaited comment refresh could interleave with a concurrent delivery's
+    // repin (DELETE+INSERT) and leave the members duplicated (issue: stack
+    // cards showed ×6 for a 3-PR stack).
+    stackMembers: members,
   });
   await refreshStackComments(
     ctx,
@@ -1042,7 +1047,7 @@ async function runStackEnqueue(
   }
   let rechecked = false;
   if (enqueue.created) {
-    ctx.input.store.insertStackMembers(enqueue.job.id, members);
+    // Members went in with the job row (see the enqueue call above).
     ctx.input.store.log(
       enqueue.job.id,
       `Stack "${stackId}" of ${members.length} triggered by ${ctx.actorLogin}: ` +
