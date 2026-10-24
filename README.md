@@ -32,7 +32,7 @@ The service is a single Node.js process:
 - **SQLite** for durable job / reviewer / log state (survives restarts)
 - **in-process queue** with bounded job and reviewer concurrency (no Redis)
 - **git fetch** of `refs/pull/<n>/head` plus the job SHA into a per-job workspace
-- **OpenCode CLI** spawned as a worker (`opencode run`), not forked or vendored
+- **OpenCode CLI** spawned as a worker (`opencode run`), not forked or vendored. Both OpenCode 1.x and 2.x CLIs are supported — the major version is detected per binary (`opencode --version`) and the invocation adapts: v2 runs with `--standalone` (no shared background service) and receives the reviewer deny-list as a workspace-level `opencode.json` (v2 dropped the `OPENCODE_PERMISSION`/`OPENCODE_CONFIG_CONTENT` env channel).
 
 Job states: `queued` → `preparing` → `reconciling` → `reviewing` → `aggregating` → `publishing` → `completed`, plus `failed`, `stale`, `cancelled`.
 

@@ -7,6 +7,7 @@ import { openDb } from "../db.js";
 import type { GithubPort } from "../github/client.js";
 import type { CheckoutPort } from "../checkout.js";
 import type { OpenCodePort } from "../opencode/parse.js";
+import { OpenCodeTimeoutError } from "../opencode/spawn.js";
 import { profileBudgetExceeded } from "../routing/policy.js";
 import { findingMarker, fingerprintFinding } from "../findings/identity.js";
 import { createPipeline } from "./pipeline.js";
@@ -383,6 +384,67 @@ describe("pipeline", () => {
     expect(job?.aggregator_total_tokens).toBe(11);
     expect(job?.aggregator_usage_complete).toBe(1);
     expect(job?.state).toBe("completed");
+  });
+
+  it("persists a timed-out reviewer's captured output and first-output timing", async () => {
+    const config = loadConfig({
+      REVIEWER_ROLES: "correctness",
+      OPENCODE_REVIEWER_MODEL: "test/model",
+      OPENCODE_MAX_RETRIES: "0",
+      POST_EMPTY_REVIEW: "true",
+    });
+    const store = new JobStore(openDb(":memory:"));
+    const created = store.enqueue({
+      repoFullName: "acme/widgets",
+      repoOwner: "acme",
+      repoName: "widgets",
+      installationId: 9,
+      prNumber: 4,
+      prTitle: "Change example",
+      prBody: "",
+      prHtmlUrl: "",
+      prAuthor: "dev",
+      baseSha: "base",
+      headSha: "cafebabe",
+      baseRef: "main",
+      headRef: "feat",
+      reviewers: [{ role: "correctness", title: "Correctness" }],
+    });
+    const clean = JSON.stringify({ schema_version: 1, verdict: "clean", summary: "", findings: [] });
+    await createPipeline({
+      config,
+      store,
+      github: githubPort({
+        getPullDiff: async () => "diff",
+        listReviews: async () => [],
+        createCommentReview: async () => ({ id: "1", url: "u" }),
+      }),
+      checkout: await fixtureCheckout(),
+      opencode: {
+        async run(input) {
+          if (input.prompt.includes("Role id:")) {
+            // The rejection shape createOpenCodeRunner produces on a timeout:
+            // the process's captured output rides on the error.
+            throw new OpenCodeTimeoutError(input.timeoutMs, {
+              stdout: '{"type":"text","text":"partial thin',
+              stderr: "provider stalled mid-generation",
+              firstOutputMs: 1200,
+            });
+          }
+          return { stdout: clean, stderr: "", exitCode: 0, text: clean, usage: { promptTokens: 1, completionTokens: 1 } };
+        },
+      },
+    }).run(created.job.id);
+    const run = store.listReviewerRuns(created.job.id).find((entry) => entry.role === "correctness");
+    expect(run?.state).toBe("failed");
+    expect(run?.validation_error).toContain("OpenCode timed out");
+    // The partial output lands on the run row exactly like a failed run's.
+    expect(run?.stdout).toContain("partial thin");
+    expect(run?.stderr).toBe("provider stalled mid-generation");
+    expect(run?.first_output_ms).toBe(1200);
+    const logs = store.listLogs(created.job.id).map((entry) => entry.message).join("\n");
+    expect(logs).toContain("first output 1200ms after start");
+    expect(logs).toContain("provider stalled mid-generation");
   });
 
   it("persists first_output_ms on every LLM-call stage", async () => {
