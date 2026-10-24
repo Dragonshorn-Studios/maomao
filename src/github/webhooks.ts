@@ -1019,10 +1019,9 @@ async function runStackEnqueue(
     reviewers: [{ role: "stack_cumulative", title: "Stack cumulative" }],
     jobType: "stack_review",
     dedupKey,
-    // Inserted inside enqueue's own transaction: a separate insert after the
+    // Members ride enqueue's own transaction: a separate insert after the
     // awaited comment refresh could interleave with a concurrent delivery's
-    // repin (DELETE+INSERT) and leave the members duplicated (issue: stack
-    // cards showed ×6 for a 3-PR stack).
+    // repin (DELETE+INSERT) and double every member row.
     stackMembers: members,
   });
   await refreshStackComments(

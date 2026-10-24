@@ -268,9 +268,10 @@ export interface NewJobInput {
   scanBranch?: string | null;
   /** Dedup discriminator inside the jobs UNIQUE; repo_brief overrides this with a nonce. */
   dedupKey?: string;
-  /** stack_review members, inserted in the same transaction as the job row so
-   * the queue worker can never claim a member-less stack job and a concurrent
-   * repin of the same job can never duplicate the member rows. */
+  /** stack_review members. When provided, they are inserted in the same
+   * transaction as the job row, so a stack job is never claimable without
+   * its members. Ignored when enqueue dedups onto an existing queued job —
+   * callers repin those instead (repinQueuedStackJob). */
   stackMembers?: { position: number; prNumber: number; baseRef: string; headRef: string; baseSha: string; headSha: string }[];
 }
 

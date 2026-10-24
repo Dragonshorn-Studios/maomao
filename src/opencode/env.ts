@@ -113,8 +113,8 @@ export function reviewerPermissionConfig(): Record<string, unknown> {
  * permission actions (bash→shell, task→subagent, write/patch→edit) into a
  * `permissions` rule list read from config files; the runner pins this as a
  * project-level opencode.json inside the job workspace. Verified against
- * opencode v2.1.4: `execute`/shell is blocked while `read`, `glob`, and
- * `grep` keep working.
+ * opencode v2.1.4: the shell action (v2's execute tool) is blocked while
+ * `read`, `glob`, and `grep` keep working.
  */
 export function reviewerPermissionsV2Config(): Record<string, unknown> {
   const allow = (action: string) => ({ action, resource: "*", effect: "allow" });

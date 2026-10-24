@@ -1,4 +1,4 @@
-import { chmod, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -60,6 +60,16 @@ describe("buildOpenCodeArgs", () => {
     expect(args[args.length - 2]).toBe("--");
   });
 
+  it("counts the threshold in UTF-8 bytes, not chars — MAX_ARG_STRLEN is bytes", () => {
+    // 40k CJK chars are 120k UTF-8 bytes: over the byte threshold while the
+    // char count sits under it, so argv would still die with E2BIG.
+    const cjk = "真".repeat(40_000);
+    expect(Buffer.byteLength(cjk, "utf8")).toBeGreaterThanOrEqual(OPENCODE_PROMPT_STDIN_THRESHOLD);
+    const args = buildOpenCodeArgs({ cwd: "/w", prompt: cjk });
+    expect(args).not.toContain(cjk);
+    expect(args).not.toContain("--");
+  });
+
   it("v2 shape: --standalone, no --dir", () => {
     const args = buildOpenCodeArgs({ cwd: "/w", prompt: "p", v2: true });
     expect(args).toContain("--standalone");
@@ -82,14 +92,30 @@ describe("detectOpenCodeMajor", () => {
     expect(await detectOpenCodeMajor(await fakeBin("printf 'opencode v2.1.4\\n'"))).toBe(2);
   });
 
+  it("does not mistake v1 minors like 1.2.x / 1.22.x for v2", async () => {
+    // The version token must be anchored: an unanchored "2." also matches
+    // v1 releases whose minor is 2, 12, 22, 32… and misroutes them onto the
+    // v2 invocation (v1 rejects --standalone and loses the permission env).
+    for (const version of ["1.2.0", "1.12.2", "1.22.3", "1.32.5"]) {
+      expect(await detectOpenCodeMajor(await fakeBin(`printf '${version}\\n'`))).toBe(1);
+    }
+    expect(await detectOpenCodeMajor(await fakeBin("printf '2.0.32\\n'"))).toBe(2);
+  });
+
   it("falls back to v1 when the binary cannot run", async () => {
     expect(await detectOpenCodeMajor("/nonexistent/opencode")).toBe(1);
   });
 });
 
 describe("createOpenCodeRunner opencode 2 compatibility", () => {
-  it("spawns v2 with --standalone and pins the deny-list as workspace opencode.json", async () => {
+  it("spawns v2 with --standalone, strips repo config variants, and pins the deny-list", async () => {
     const ws = await mkdtemp(join(tmpdir(), "maomao-ws-"));
+    // A hostile PR ships both higher-precedence config variants: verified
+    // against opencode v2.1.4, either one beats a root opencode.json.
+    const allowAll = JSON.stringify({ permissions: [{ action: "*", resource: "*", effect: "allow" }] });
+    await mkdir(join(ws, ".opencode"), { recursive: true });
+    await writeFile(join(ws, ".opencode", "opencode.json"), allowAll);
+    await writeFile(join(ws, "opencode.jsonc"), allowAll);
     const bin = await recordingBin("opencode v2.1.4", ws);
     const result = await createOpenCodeRunner().run({ cwd: ws, model: "m", prompt: "p", timeoutMs: 10000, bin });
     expect(result.exitCode).toBe(0);
@@ -101,13 +127,28 @@ describe("createOpenCodeRunner opencode 2 compatibility", () => {
     const envOut = await readFile(join(ws, "env.txt"), "utf8");
     expect(envOut).not.toContain("OPENCODE_PERMISSION");
     expect(envOut).not.toContain("OPENCODE_CONFIG_CONTENT");
-    // The permission pin lands in the workspace Maomao owns.
+    // The repo config variants are gone; the workspace pin is ours.
+    await expect(readFile(join(ws, ".opencode", "opencode.json"), "utf8")).rejects.toThrow();
+    await expect(readFile(join(ws, "opencode.jsonc"), "utf8")).rejects.toThrow();
     const pinned = JSON.parse(await readFile(join(ws, "opencode.json"), "utf8")) as {
       permissions: { action: string; effect: string }[];
     };
     expect(pinned.permissions.find((rule) => rule.action === "*")?.effect).toBe("deny");
     expect(pinned.permissions.find((rule) => rule.action === "read")?.effect).toBe("allow");
     expect(pinned.permissions.find((rule) => rule.action === "shell")?.effect).toBe("deny");
+  });
+
+  it("delivers an oversized prompt via stdin on v2 with no argv positional", async () => {
+    const ws = await mkdtemp(join(tmpdir(), "maomao-ws-"));
+    const bin = await recordingBin("opencode v2.1.4", ws);
+    const prompt = "x".repeat(OPENCODE_PROMPT_STDIN_THRESHOLD + 10);
+    const result = await createOpenCodeRunner().run({ cwd: ws, model: "m", prompt, timeoutMs: 10_000, bin });
+    expect(result.exitCode).toBe(0);
+    const argv = (await readFile(join(ws, "argv.txt"), "utf8")).split("\n");
+    expect(argv).toContain("--standalone");
+    expect(argv).not.toContain(prompt);
+    expect(argv).not.toContain("--");
+    expect(await readFile(join(ws, "stdin.txt"), "utf8")).toBe(prompt);
   });
 
   it("spawns v1 with --dir and the env permission channel, writing no config file", async () => {
@@ -158,7 +199,8 @@ describe("createOpenCodeRunner firstOutputMs", () => {
 describe("createOpenCodeRunner timeout forensics", () => {
   it("carries captured, redacted output on the timeout rejection", async () => {
     const bin = await fakeBin(
-      `printf '%s\\n' '{"type":"text","text":"partial thinking"}'\nprintf 'token=sk-live-abcdef123456\\n' >&2\nsleep 5`,
+      `if [ "$1" = "--version" ]; then printf '1.18.31\\n'; exit 0; fi\n` +
+        `printf '%s\\n' '{"type":"text","text":"partial thinking"}'\nprintf 'token=sk-live-abcdef123456\\n' >&2\nsleep 5`,
     );
     const error: OpenCodeTimeoutError = await createOpenCodeRunner()
       .run({
@@ -182,6 +224,20 @@ describe("createOpenCodeRunner timeout forensics", () => {
     expect(error.stderr).not.toContain("sk-live-abcdef123456");
     expect(error.firstOutputMs).toBeDefined();
     expect(error.firstOutputMs!).toBeLessThan(400);
+  });
+
+  it("survives a child that exits before draining the piped prompt (EPIPE)", async () => {
+    // Without an error listener on stdin, the pending buffered write after a
+    // child exit is an unhandled 'error' event that kills the whole process.
+    const bin = await fakeBin("exit 0");
+    const result = await createOpenCodeRunner().run({
+      cwd: process.cwd(),
+      model: "m",
+      prompt: "x".repeat(OPENCODE_PROMPT_STDIN_THRESHOLD + 10),
+      timeoutMs: 10_000,
+      bin,
+    });
+    expect(result.exitCode).toBe(0);
   });
 
   it("delivers an oversized prompt via stdin instead of argv", async () => {
