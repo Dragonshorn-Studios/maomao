@@ -18,6 +18,7 @@ import {
   type OpenCodePort,
   type OpenCodeRunResult,
 } from "../opencode/parse.js";
+import { OpenCodeTimeoutError } from "../opencode/spawn.js";
 import {
   buildAggregatorPrompt,
   buildBriefPrompt,
@@ -1678,20 +1679,30 @@ async function runStackCumulativeRun(
       return calibrated;
     } catch (error) {
       lastError = formatError(error);
+      // Timeouts reject before `result` exists; keep the error-carried partial
+      // output on the run row. This pass inlines every member diff, so its
+      // prompts are exactly the ones that cross OPENCODE_PROMPT_STDIN_THRESHOLD.
+      const timedOut = timeoutDiagnostics(error);
+      const output = failureOutput(result, error);
       if (run) {
         deps.store.patchReviewer(run.id, {
           state: "failed",
           validation_error: lastError,
-          raw_output: result ? truncate(result.text || result.stdout, 200_000) : null,
-          stdout: result ? truncate(result.stdout, 80_000) : null,
-          stderr: result ? truncate(result.stderr, 20_000) : null,
+          raw_output: output ? truncate(result ? result.text || result.stdout : output.stdout, 200_000) : null,
+          stdout: output ? truncate(output.stdout, 80_000) : null,
+          stderr: output ? truncate(output.stderr, 20_000) : null,
           exit_code: result?.exitCode ?? null,
           finished_at: nowIso(),
           duration_ms: Date.now() - started,
           ...(result ? usagePersistence(result.usage) : {}),
         });
       }
-      deps.store.log(job.id, `Stack cumulative attempt ${attempt} failed: ${lastError}`, "warn", run?.id);
+      deps.store.log(
+        job.id,
+        `Stack cumulative attempt ${attempt} failed: ${lastError}${timedOut.tail ? ` (${timedOut.firstOutput}${timedOut.tail})` : ""}`,
+        "warn",
+        run?.id,
+      );
       if (attempt <= retries) await sleep(500 * attempt, signal);
     }
   }
@@ -1764,13 +1775,17 @@ async function runBriefRun(
       return parsed;
     } catch (error) {
       lastError = formatError(error);
-      const cliDump = result ? truncate(result.stderr.trim() || result.stdout.trim(), 500) : "";
+      // Timeouts reject before `result` exists; keep the error-carried partial
+      // output on the run row for the same post-mortem as reviewer runs.
+      const timedOut = timeoutDiagnostics(error);
+      const output = failureOutput(result, error);
+      const cliDump = output ? truncate((output.stderr || output.stdout).trim(), 500) : "";
       deps.store.patchReviewer(run.id, {
         state: "failed",
         validation_error: lastError,
-        raw_output: result ? truncate(result.text || result.stdout, 200_000) : null,
-        stdout: result ? truncate(result.stdout, 80_000) : null,
-        stderr: result ? truncate(result.stderr, 20_000) : null,
+        raw_output: output ? truncate(result ? result.text || result.stdout : output.stdout, 200_000) : null,
+        stdout: output ? truncate(output.stdout, 80_000) : null,
+        stderr: output ? truncate(output.stderr, 20_000) : null,
         exit_code: result?.exitCode ?? null,
         finished_at: nowIso(),
         duration_ms: Date.now() - started,
@@ -1778,7 +1793,7 @@ async function runBriefRun(
       });
       deps.store.log(
         job.id,
-        `Repo brief attempt ${attempt} failed: ${lastError}${cliDump ? ` — ${cliDump}` : ""}`,
+        `Repo brief attempt ${attempt} failed: ${lastError}${timedOut.tail ? ` (${timedOut.firstOutput}${timedOut.tail})` : ""}${cliDump ? ` — ${cliDump}` : ""}`,
         "warn",
         run.id,
       );
@@ -1951,7 +1966,12 @@ async function routeSpecialists(
       profileBudget?.record(result.usage.cost, result.usage.totalTokens);
     } catch (error) {
       const message = formatError(error);
-      store.log(job.id, `Router model failed (${message}); falling back to diagnosis`, "warn");
+      const timedOut = timeoutDiagnostics(error);
+      store.log(
+        job.id,
+        `Router model failed (${message})${timedOut.tail ? ` (${timedOut.firstOutput}${timedOut.tail})` : ""}; falling back to diagnosis`,
+        "warn",
+      );
       decision = diagnosisFallback(signals, allowlist, config.routing, `Router failed: ${message}`);
       store.patchJob(job.id, {
         routing_model: routerModel,
@@ -2170,25 +2190,30 @@ async function runReviewer(
       return;
     } catch (error) {
       lastError = formatError(error);
-      const cliDump = result ? truncate(result.stderr.trim() || result.stdout.trim(), 500) : "";
+      // A timeout rejects before `result` is ever set — the captured process
+      // output rides on the error instead, and is persisted exactly like a
+      // failed run's output so the job page shows how far opencode got.
+      const timedOut = timeoutDiagnostics(error);
+      const output = failureOutput(result, error);
+      const cliDump = output ? truncate((output.stderr || output.stdout).trim(), 500) : "";
       // Failed attempts still spent tokens/cost; on a later retry the run row
       // is overwritten, so the tracker must absorb partial usage per attempt.
       if (result) profileBudget?.record(result.usage.cost, result.usage.totalTokens);
       deps.store.patchReviewer(run.id, {
         state: "failed",
         validation_error: lastError,
-        raw_output: result ? truncate(result.text || result.stdout, 200_000) : null,
-        stdout: result ? truncate(result.stdout, 80_000) : null,
-        stderr: result ? truncate(result.stderr, 20_000) : null,
+        raw_output: output ? truncate(result ? result.text || result.stdout : output.stdout, 200_000) : null,
+        stdout: output ? truncate(output.stdout, 80_000) : null,
+        stderr: output ? truncate(output.stderr, 20_000) : null,
         exit_code: result?.exitCode ?? null,
         finished_at: nowIso(),
         duration_ms: Date.now() - started,
-        first_output_ms: result?.firstOutputMs ?? null,
+        first_output_ms: output?.firstOutputMs ?? null,
         ...(result ? usagePersistence(result.usage) : {}),
       });
       deps.store.log(
         job.id,
-        `Reviewer ${run.role} attempt ${attempt} failed: ${lastError}${cliDump ? ` — ${cliDump}` : ""}`,
+        `Reviewer ${run.role} attempt ${attempt} failed: ${lastError}${timedOut.tail ? ` (${timedOut.firstOutput}${timedOut.tail})` : ""}${cliDump ? ` — ${cliDump}` : ""}`,
         "warn",
         run.id,
       );
@@ -2258,7 +2283,12 @@ async function runAggregator(
     return parsed;
   } catch (error) {
     const message = formatError(error);
-    deps.store.log(job.id, `Aggregator OpenCode run failed (${message}); using deterministic fallback`, "warn");
+    const timedOut = timeoutDiagnostics(error);
+    deps.store.log(
+      job.id,
+      `Aggregator OpenCode run failed (${message})${timedOut.tail ? ` (${timedOut.firstOutput}${timedOut.tail})` : ""}; using deterministic fallback`,
+      "warn",
+    );
     // A run that executed but failed to parse still spent usage; the columns are
     // not persisted on this path, so account the spend straight from the result.
     if (result) profileBudget?.record(result.usage.cost, result.usage.totalTokens);
@@ -2268,7 +2298,8 @@ async function runAggregator(
       model || null,
       reviewers,
       // Preserve the model's output for debugging; the reason is in the log above.
-      truncate(result?.text || result?.stdout || "", 200_000),
+      // A timeout's partial output rides on the error since `result` is never set.
+      truncate(result?.text || result?.stdout || timedOut.stdout || timedOut.stderr || "", 200_000),
       Date.now() - started,
     );
   }
@@ -2379,7 +2410,25 @@ async function runInternalEscalation(
       // The attempt executed and may have spent on the profile budget even
       // though its output was unusable.
       if (result) profileBudget?.record(result.usage.cost, result.usage.totalTokens);
-      deps.store.log(job.id, `Internal poison-alert attempt ${attempt} failed: ${lastError}`, "warn");
+      const timedOut = timeoutDiagnostics(error);
+      const partialRaw = timedOut.stdout || timedOut.stderr;
+      if (partialRaw) {
+        // Append beneath a full raw from an earlier attempt instead of
+        // clobbering it — the schema failure that caused the retry stays
+        // visible next to the hang's partial output.
+        const previous = deps.store.getJob(job.id)?.internal_escalation_raw;
+        const marked = `\n\n[attempt ${attempt} timed out — ${timedOut.firstOutput}]\n${partialRaw}`;
+        deps.store.patchJob(job.id, {
+          internal_escalation_raw: previous
+            ? truncate(previous + marked, 200_000)
+            : truncate(partialRaw, 200_000),
+        });
+      }
+      deps.store.log(
+        job.id,
+        `Internal poison-alert attempt ${attempt} failed: ${lastError}${timedOut.tail ? ` (${timedOut.firstOutput}${timedOut.tail})` : ""}`,
+        "warn",
+      );
       if (attempt <= retries) await sleep(500 * attempt, signal);
     }
   }
@@ -2767,6 +2816,47 @@ function formatError(error: unknown): string {
   // ZodError.message is an unbounded multi-line JSON dump; formatSchemaError
   // keeps validation_error/failure_reason to bounded field paths.
   return formatSchemaError(error);
+}
+
+/** Diagnostics for a timed-out opencode run: what it printed before the kill
+ * and when it first spoke. `firstOutputMs === undefined` means the process
+ * never wrote to stdout (stderr-only output still leaves it undefined) — the
+ * strongest hint the hang predates the model (spawn, env, credentials)
+ * rather than a stalled generation. */
+function timeoutDiagnostics(error: unknown): {
+  tail: string;
+  firstOutput: string;
+  stdout: string;
+  stderr: string;
+  firstOutputMs?: number;
+} {
+  if (!(error instanceof OpenCodeTimeoutError)) return { tail: "", firstOutput: "", stdout: "", stderr: "" };
+  const source = (error.stderr || error.stdout).trim();
+  return {
+    // firstOutput's "no output ever produced" already covers the empty case.
+    tail: source ? ` — last output: ${truncate(source.slice(-500), 500)}` : "",
+    firstOutput:
+      error.firstOutputMs != null
+        ? `first output ${error.firstOutputMs}ms after start`
+        : "no output ever produced",
+    stdout: error.stdout,
+    stderr: error.stderr,
+    firstOutputMs: error.firstOutputMs,
+  };
+}
+
+/** Output to persist for a failed run: the resolved result's when the run
+ * executed, else the partial output a timeout rejection carries. Undefined
+ * when there is nothing to keep (e.g. a timeout that captured no output). */
+function failureOutput(
+  result: OpenCodeRunResult | undefined,
+  error: unknown,
+): { stdout: string; stderr: string; firstOutputMs?: number } | undefined {
+  if (result) return result;
+  if (error instanceof OpenCodeTimeoutError && (error.stdout || error.stderr)) {
+    return { stdout: error.stdout, stderr: error.stderr, firstOutputMs: error.firstOutputMs };
+  }
+  return undefined;
 }
 
 async function loadHumanOverrides(

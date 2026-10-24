@@ -599,6 +599,27 @@ function migrate(db: SqliteDb): void {
     CREATE INDEX IF NOT EXISTS idx_jobs_state ON jobs(state);
   `);
 
+    // stack_run_members had no (job_id, position) uniqueness, and a webhook
+    // race — a member insert that ran after an awaited comment refresh
+    // interleaving with a concurrent delivery's repin — left stacks with
+    // doubled member rows: the queue card read "Stack ×6" for a 3-PR stack
+    // and member jobs listed twice. Heal duplicates (keeping the row that
+    // carries the member-job linkage), then hold the invariant with a
+    // unique index so the same race can never corrupt silently again.
+    db.exec(`
+    DELETE FROM stack_run_members WHERE id IN (
+      SELECT id FROM (
+        SELECT id, ROW_NUMBER() OVER (
+          PARTITION BY job_id, position
+          ORDER BY (member_job_id IS NOT NULL) DESC, id ASC
+        ) AS rn
+        FROM stack_run_members
+      ) WHERE rn > 1
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_stack_run_members_job_position
+      ON stack_run_members(job_id, position);
+  `);
+
     const findingColumns: [string, string][] = [
       ["diff_hunk", "TEXT"],
       ["diff_note", "TEXT"],

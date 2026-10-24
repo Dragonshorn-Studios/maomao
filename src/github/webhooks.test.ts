@@ -1754,6 +1754,8 @@ describe("stack commands (issue #99)", () => {
     });
     expect(again.body.enqueued).toBe(false);
     expect(store.listJobs(10).filter((j) => j.job_type === "stack_review")).toHaveLength(1);
+    // The dedup path must not touch the member rows either.
+    expect(store.listStackMembers(job.id).map((m) => m.pr_number)).toEqual([41, 42]);
     const commentCountAfter = comments.length;
 
     // A redelivery of the SAME trigger comment is deduped by comment id: no

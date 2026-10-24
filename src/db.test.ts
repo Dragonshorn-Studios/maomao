@@ -540,6 +540,91 @@ describe("repo pauses and stack state (issue #99)", () => {
     expect(store.getJob(live.job.id)?.dedup_key).toBe(`stack-retired:${live.job.id}`);
   });
 
+  it("inserts stack members inside the enqueue transaction and forbids duplicated positions", () => {
+    const store = new JobStore(openDb(":memory:"));
+    const members = [
+      { position: 1, prNumber: 41, baseRef: "main", headRef: "a", baseSha: "b1", headSha: "h1" },
+      { position: 2, prNumber: 42, baseRef: "a", headRef: "b", baseSha: "h1", headSha: "h2" },
+    ];
+    const job = store.enqueue({
+      repoFullName: "acme/widgets", repoOwner: "acme", repoName: "widgets", installationId: 42,
+      prNumber: 42, prTitle: "top", prBody: "", prHtmlUrl: "u", prAuthor: "alice",
+      baseSha: "b", headSha: "h", baseRef: "main", headRef: "feat",
+      reviewers: [{ role: "stack_cumulative", title: "Stack cumulative" }],
+      jobType: "stack_review", dedupKey: "stack:s1", stackMembers: members,
+    });
+    expect(job.created).toBe(true);
+    // The job row is never visible without its members, and the queue worker
+    // can never claim a member-less stack job.
+    expect(store.listStackMembers(job.job.id).map((m) => m.pr_number)).toEqual([41, 42]);
+    // A same-key re-trigger dedups onto the queued job and must IGNORE the
+    // passed members — only a repin refreshes them, so no UNIQUE conflict.
+    const dedupHit = store.enqueue({
+      repoFullName: "acme/widgets", repoOwner: "acme", repoName: "widgets", installationId: 42,
+      prNumber: 42, prTitle: "top", prBody: "", prHtmlUrl: "u", prAuthor: "alice",
+      baseSha: "b", headSha: "h", baseRef: "main", headRef: "feat",
+      reviewers: [], jobType: "stack_review", dedupKey: "stack:s1", stackMembers: members,
+    });
+    expect(dedupHit.created).toBe(false);
+    expect(store.listStackMembers(job.job.id)).toHaveLength(2);
+    // The (job_id, position) unique index turns the old webhook race — a
+    // creator's member insert interleaving with a concurrent repin — into a
+    // loud failure instead of silent duplication (queue cards that read
+    // "Stack ×6" for a 3-PR stack).
+    expect(() => store.insertStackMembers(job.job.id, members)).toThrow(/UNIQUE/);
+  });
+
+  it("heals duplicated stack run members left behind before the unique index", () => {
+    const dir = mkdtempSync(join(tmpdir(), "maomao-heal-"));
+    const path = join(dir, "heal.db");
+    const store = new JobStore(openDb(path));
+    const job = store.enqueue({
+      repoFullName: "acme/widgets", repoOwner: "acme", repoName: "widgets", installationId: 42,
+      prNumber: 43, prTitle: "top", prBody: "", prHtmlUrl: "u", prAuthor: "alice",
+      baseSha: "b", headSha: "h", baseRef: "main", headRef: "feat",
+      reviewers: [{ role: "stack_cumulative", title: "Stack cumulative" }],
+      jobType: "stack_review", dedupKey: "stack:s1",
+      stackMembers: [
+        { position: 1, prNumber: 41, baseRef: "main", headRef: "a", baseSha: "b1", headSha: "h1" },
+        { position: 2, prNumber: 42, baseRef: "a", headRef: "b", baseSha: "h1", headSha: "h2" },
+        { position: 3, prNumber: 43, baseRef: "b", headRef: "c", baseSha: "h2", headSha: "h3" },
+      ],
+    });
+    // A live run had linked position 2 to its member job.
+    store.patchStackMember(store.listStackMembers(job.job.id)[1]!.id, { memberJobId: 460, state: "reviewing" });
+    // Reproduce the corrupted table the race produced: drop the index and
+    // double every row with no member-job linkage, like the creator's late
+    // insert that arrived after a concurrent repin had already inserted.
+    const raw = new Database(path);
+    raw.exec("DROP INDEX idx_stack_run_members_job_position");
+    raw.prepare(
+      `INSERT INTO stack_run_members (job_id, position, pr_number, base_ref, head_ref, base_sha, head_sha, member_job_id, state)
+       SELECT job_id, position, pr_number, base_ref, head_ref, base_sha, head_sha, NULL, 'queued' FROM stack_run_members`,
+    ).run();
+    // Put the linkage on the HIGHER-id duplicate: the heal must prefer the
+    // linked row even though a pure lowest-id tiebreak would drop it.
+    raw.prepare(
+      `UPDATE stack_run_members SET member_job_id = NULL WHERE job_id = ? AND position = 2`,
+    ).run(job.job.id);
+    raw.prepare(
+      `UPDATE stack_run_members SET member_job_id = 460
+       WHERE id = (SELECT MAX(id) FROM stack_run_members WHERE job_id = ? AND position = 2)`,
+    ).run(job.job.id);
+    raw.close();
+    // Reopen: migrate dedupes per (job_id, position) — preferring the row
+    // that carries the member-job linkage — and restores the index.
+    const healed = new JobStore(openDb(path));
+    const members = healed.listStackMembers(job.job.id);
+    expect(members.map((m) => m.pr_number)).toEqual([41, 42, 43]);
+    expect(members.find((m) => m.position === 2)?.member_job_id).toBe(460);
+    expect(() =>
+      healed.insertStackMembers(job.job.id, [
+        { position: 1, prNumber: 41, baseRef: "main", headRef: "a", baseSha: "b1", headSha: "h1" },
+      ]),
+    ).toThrow(/UNIQUE/);
+    rmSync(dir, { recursive: true, force: true });
+  });
+
   it("retires live reviewer runs to their job's stale/cancelled outcome", () => {
     const store = new JobStore(openDb(":memory:"));
     const jobInput = (prNumber: number, headSha: string) => ({
