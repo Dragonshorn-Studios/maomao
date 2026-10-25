@@ -634,21 +634,27 @@ export class ReviewConfigStore {
  * the value the pipeline would compute without a profile.
  */
 export function envProfileDefinition(config: Config): ProfileDefinition {
+  // Env-sourced values that would fail profile validation are omitted rather
+  // than clamped: the runtime falls back to the env value when the profile
+  // field is unset, so activating the seed stays an exact behavior no-op.
+  const catalog = new Set(config.modelCatalog);
+  const catalogModel = (model: string | undefined) =>
+    model && (catalog.size === 0 || catalog.has(model)) ? model : undefined;
   const reviewers = config.reviewers.map((role) => {
-    const model = role.model || config.opencode.reviewerModel || undefined;
+    const model = catalogModel(role.model || config.opencode.reviewerModel || undefined);
     return model ? { role: role.id, model } : { role: role.id };
   });
-  const routerModel = config.routing.model || config.opencode.reviewerModel || undefined;
+  const routerModel = catalogModel(config.routing.model || config.opencode.reviewerModel || undefined);
   // OPENCODE_VERIFIER_TIMEOUT_MS is unbounded while the profile schema caps at
   // PROFILE_MAX_TIMEOUT_MS — omit an out-of-cap value so the seed still
-  // validates; the runtime falls back to the env value when the field is unset.
+  // validates.
   const verifierTimeoutMs = config.opencode.verifierTimeoutMs;
   return {
     name: "default",
     reviewers,
     ...(routerModel ? { routerModel } : {}),
     verifier: {
-      ...(config.opencode.verifierModel ? { model: config.opencode.verifierModel } : {}),
+      ...(catalogModel(config.opencode.verifierModel || undefined) ? { model: config.opencode.verifierModel } : {}),
       ...(verifierTimeoutMs > 0 && verifierTimeoutMs <= PROFILE_MAX_TIMEOUT_MS
         ? { timeoutMs: verifierTimeoutMs }
         : {}),

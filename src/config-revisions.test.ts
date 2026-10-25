@@ -439,6 +439,26 @@ describe("default profile seed", () => {
     expect(inCap.verifier?.timeoutMs).toBe(240_000);
   });
 
+  it("omits env models outside the catalog so seeding still validates", () => {
+    const env = {
+      MODEL_CATALOG: "openai/gpt-4.1",
+      OPENCODE_REVIEWER_MODEL: "acme/custom-reviewer",
+      OPENCODE_VERIFIER_MODEL: "acme/custom-verifier",
+      ROUTER_MODEL: "acme/custom-router",
+    };
+    const def = envProfileDefinition(loadConfig(env));
+    expect(def.verifier?.model).toBeUndefined();
+    expect(def.routerModel).toBeUndefined();
+    expect(def.reviewers.every((reviewer) => reviewer.model === undefined)).toBe(true);
+    const configs = store();
+    expect(seedDefaultProfileRevision(configs, loadConfig(env))).toBe(true);
+    // Catalog-listed env models still stamp.
+    const inCatalog = envProfileDefinition(
+      loadConfig({ MODEL_CATALOG: "openai/gpt-4.1", OPENCODE_VERIFIER_MODEL: "openai/gpt-4.1" }),
+    );
+    expect(inCatalog.verifier?.model).toBe("openai/gpt-4.1");
+  });
+
   it("activating the untouched v0 revision leaves reviewer specs unchanged", () => {
     const jobs = new JobStore(openDb(":memory:"));
     const config = loadConfig({ OPENCODE_REVIEWER_MODEL: "env/model" });

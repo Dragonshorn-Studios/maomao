@@ -3726,6 +3726,76 @@ describe("repository health scan", () => {
     expect(store.listFindings(created_repo(), 0)).toHaveLength(1);
   });
 
+  it("routes the active profile's verifier settings on the scan reconcile path", async () => {
+    const config = loadConfig({
+      REVIEWER_ROUTING: "fixed",
+      REVIEWER_ROLES: "correctness",
+      OPENCODE_REVIEWER_MODEL: "test/model",
+      POST_EMPTY_REVIEW: "true",
+      GITHUB_APP_ID: "1",
+      GITHUB_WEBHOOK_SECRET: "s",
+      GITHUB_APP_PRIVATE_KEY: "k",
+    });
+    const store = new JobStore(openDb(":memory:"));
+    const draft = store.configs.createDraft({
+      definition: {
+        name: "default",
+        reviewers: [{ role: "correctness" }],
+        verifier: { model: "test/scan-verifier", timeoutMs: 45_000 },
+        minPublishableSeverity: "info",
+      },
+      createdBy: "octocat",
+    });
+    if (!("revision" in draft)) throw new Error("draft failed");
+    store.configs.activateRevision(draft.revision.id, "octocat");
+
+    const scanJob = async (sha: string) => {
+      const created = store.enqueue({
+        ...jobInput(sha),
+        reviewers: [],
+        jobType: "health_scan",
+        prNumber: 0,
+        headSha: sha,
+      });
+      return created.job.id;
+    };
+    await createPipeline({ config, store, github: scanGithub(), checkout: await fixtureCheckout(), opencode: scanOpencode() }).run(
+      await scanJob("scanv001scanv001scanv001scanv001"),
+    );
+    const prior = store.listFindings("acme/widgets", 0)[0];
+    if (!prior) throw new Error("first scan produced no finding");
+
+    const verifierCalls: { model?: string; timeoutMs?: number }[] = [];
+    const opencode: OpenCodePort = {
+      async run(input) {
+        if (input.prompt.includes("finding verifier")) {
+          verifierCalls.push({ model: input.model, timeoutMs: input.timeoutMs });
+          return {
+            stdout: "",
+            stderr: "",
+            exitCode: 0,
+            text: JSON.stringify({
+              classifications: [{ fingerprint: prior.fingerprint, status: "still_valid", confidence: 0.9, reason: "still there" }],
+            }),
+            usage: {},
+          };
+        }
+        const roleMatch = input.prompt.match(/Role id: (\w+)/);
+        const text = roleMatch
+          ? JSON.stringify({ schema_version: 1, reviewer: roleMatch[1], verdict: "clean", findings: [] })
+          : JSON.stringify({ schema_version: 1, verdict: "clean", summary: "clean", findings: [] });
+        return { stdout: text, stderr: "", exitCode: 0, text, usage: {} };
+      },
+    };
+    await createPipeline({ config, store, github: scanGithub(), checkout: await fixtureCheckout(), opencode }).run(
+      await scanJob("scanv002scanv002scanv002scanv002"),
+    );
+
+    expect(verifierCalls).toHaveLength(1);
+    expect(verifierCalls[0]?.model).toBe("test/scan-verifier");
+    expect(verifierCalls[0]?.timeoutMs).toBe(45_000);
+  });
+
   it("fails closed without any GitHub work when the allowlists were revoked after enqueue", async () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     const config = loadConfig({
@@ -5711,6 +5781,79 @@ describe("profile budget ceilings and per-reviewer timeouts", () => {
     expect(verifierCalls).toHaveLength(1);
     expect(verifierCalls[0]?.model).toBe("test/verifier-model");
     expect(verifierCalls[0]?.timeoutMs).toBe(60_000);
+    expect(store.getJob(created.job.id)?.state).toBe("completed");
+  });
+
+  it("falls back to the env value for each verifier field the profile leaves unset", async () => {
+    const config = loadConfig({
+      REVIEWER_ROUTING: "fixed",
+      REVIEWER_ROLES: "correctness,security",
+      OPENCODE_REVIEWER_CONCURRENCY: "1",
+      OPENCODE_REVIEWER_MODEL: "test/model",
+      OPENCODE_VERIFIER_MODEL: "test/env-verifier",
+      OPENCODE_VERIFIER_TIMEOUT_MS: "330000",
+      OPENCODE_TIMEOUT_MS: "5000",
+      POST_EMPTY_REVIEW: "true",
+      GITHUB_APP_ID: "1",
+      GITHUB_WEBHOOK_SECRET: "s",
+      GITHUB_APP_PRIVATE_KEY: "k",
+    });
+    const store = new JobStore(openDb(":memory:"));
+    // Only the model is pinned — the timeout must still come from the env.
+    await activateProfile(store, {
+      name: "default",
+      reviewers: [{ role: "correctness" }, { role: "security" }],
+      verifier: { model: "test/verifier-model" },
+      minPublishableSeverity: "medium",
+    });
+    const priorFinding = {
+      severity: "high" as const,
+      confidence: 0.9,
+      category: "correctness",
+      file: "example.ts",
+      line: 1,
+      summary: "bug",
+    };
+    const fingerprint = fingerprintFinding(priorFinding);
+    const verifierCalls: { model?: string; timeoutMs?: number }[] = [];
+    const opencode: OpenCodePort = {
+      async run(input) {
+        if (input.prompt.includes("finding verifier")) {
+          verifierCalls.push({ model: input.model, timeoutMs: input.timeoutMs });
+          return {
+            stdout: "",
+            stderr: "",
+            exitCode: 0,
+            text: JSON.stringify({
+              classifications: [{ fingerprint, status: "still_valid", confidence: 0.9, reason: "still there" }],
+            }),
+            usage: {},
+          };
+        }
+        const roleMatch = input.prompt.match(/Role id: (\w+)/);
+        const text = roleMatch
+          ? reviewerJson(roleMatch[1], "clean")
+          : JSON.stringify({ schema_version: 1, verdict: "clean", summary: "clean", findings: [] });
+        return { stdout: text, stderr: "", exitCode: 0, text, usage: {} };
+      },
+    };
+    const created = store.enqueue({ ...jobInput("partialverifiersha"), reviewers: [] });
+    await createPipeline({
+      config,
+      store,
+      github: githubPort({
+        getPullDiff: async () =>
+          "diff --git a/example.ts b/example.ts\n--- a/example.ts\n+++ b/example.ts\n@@ -8,1 +8,1 @@\n-old line\n+new line\n",
+        listReviewThreads: async () => [threadFor(fingerprint)],
+        createCommentReview: async () => ({ id: "2", url: "u" }),
+      }),
+      checkout: await fixtureCheckout(),
+      opencode,
+    }).run(created.job.id);
+
+    expect(verifierCalls).toHaveLength(1);
+    expect(verifierCalls[0]?.model).toBe("test/verifier-model");
+    expect(verifierCalls[0]?.timeoutMs).toBe(330_000);
     expect(store.getJob(created.job.id)?.state).toBe("completed");
   });
 });

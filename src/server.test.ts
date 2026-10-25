@@ -2041,6 +2041,84 @@ describe("config page IA", () => {
     log.mockRestore();
   });
 
+  it("deletes a retired revision through the card's Delete form and audits it", async () => {
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    const { app, store } = testApp(
+      {
+        UI_SESSION_SECRET: "session-secret-for-tests",
+        GITHUB_OAUTH_CLIENT_ID: "cid",
+        GITHUB_OAUTH_CLIENT_SECRET: "csecret",
+        MAOMAO_ADMIN_GITHUB_IDS: "1001",
+        MAOMAO_PUBLIC_URL: "https://maomao.example",
+      },
+      undefined,
+      mockOauthFetch({ id: 1001, login: "octocat" }),
+    );
+    const session = await operatorSession(app);
+    const created = store.configs.createDraft({
+      definition: {
+        name: "default",
+        reviewers: [{ role: "correctness" }],
+        verifier: { model: "test/verifier", timeoutMs: 45_000 },
+        minPublishableSeverity: "info",
+      },
+      createdBy: "system",
+    });
+    if ("error" in created) throw new Error(created.issues.join("; "));
+    const revision = created.revision;
+    store.configs.activateRevision(revision.id, "system");
+    store.configs.deactivateRevision(revision.id, "system");
+
+    const page = await app.request("/config/profiles", { headers: { cookie: session } });
+    const { html, csrfCookie, csrfToken } = await csrfArtifacts(page);
+    // Retired card: Delete form present, verifier segment in the summary line.
+    expect(html).toContain(`action="/config/revisions/${revision.id}/delete"`);
+    expect(html).toContain("verifier test/verifier ≤ 45s");
+
+    // Status guards: a draft must be discarded, an active revision deactivated.
+    const draft = store.configs.createDraft({
+      definition: { name: "guarded", reviewers: [{ role: "correctness" }], minPublishableSeverity: "info" },
+      createdBy: "system",
+    });
+    if ("error" in draft) throw new Error(draft.issues.join("; "));
+    const draftDenied = await app.request(`/config/revisions/${draft.revision.id}/delete`, {
+      method: "POST",
+      headers: { cookie: `${session}; ${csrfCookie}`, "content-type": "application/x-www-form-urlencoded" },
+      body: `csrf_token=${encodeURIComponent(csrfToken)}`,
+    });
+    expect(draftDenied.status).toBe(400);
+    expect(await draftDenied.text()).toContain("Discard drafts instead of deleting them");
+
+    const active = store.configs.createDraft({
+      definition: { name: "guarded", reviewers: [{ role: "correctness" }], minPublishableSeverity: "info" },
+      createdBy: "system",
+    });
+    if ("error" in active) throw new Error(active.issues.join("; "));
+    expect(store.configs.activateRevision(active.revision.id, "system")).not.toHaveProperty("error");
+    const page2 = await app.request("/config/profiles", { headers: { cookie: session } });
+    const artifacts2 = await csrfArtifacts(page2);
+    const activeDenied = await app.request(`/config/revisions/${active.revision.id}/delete`, {
+      method: "POST",
+      headers: { cookie: `${session}; ${artifacts2.csrfCookie}`, "content-type": "application/x-www-form-urlencoded" },
+      body: `csrf_token=${encodeURIComponent(artifacts2.csrfToken)}`,
+    });
+    expect(activeDenied.status).toBe(400);
+    expect(await activeDenied.text()).toContain("Deactivate the revision before deleting it");
+
+    const deleted = await app.request(`/config/revisions/${revision.id}/delete`, {
+      method: "POST",
+      headers: { cookie: `${session}; ${artifacts2.csrfCookie}`, "content-type": "application/x-www-form-urlencoded" },
+      body: `csrf_token=${encodeURIComponent(artifacts2.csrfToken)}`,
+    });
+    expect(deleted.status).toBe(302);
+    expect(deleted.headers.get("location")).toBe("/config/profiles?notice=revision-deleted");
+    expect(store.configs.getRevision(revision.id)).toBeUndefined();
+    const audit = store.configs.listAudit().find((entry) => entry.action === "revision_deleted");
+    expect(audit?.revision_id).toBe(revision.id);
+    expect(audit?.actor).toBe("octocat");
+    log.mockRestore();
+  });
+
   it("adds and removes repo routing rules and forks an active revision for editing", async () => {
     const log = vi.spyOn(console, "log").mockImplementation(() => {});
     const { app, store } = testApp(
@@ -5021,6 +5099,9 @@ describe("structured profile editor", () => {
     expect(html).toContain('name="editor" value="structured"');
     expect(html).toContain("Minimum publishable severity");
     expect(html).toContain('name="budget_behavior"');
+    expect(html).toContain("Verifier (reconciliation pass — optional)");
+    expect(html).toContain('name="verifier_model"');
+    expect(html).toContain('name="verifier_timeout"');
     expect(html).toContain("Create a draft");
   });
 
