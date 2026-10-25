@@ -171,7 +171,16 @@ export function createPipeline(deps: PipelineDeps) {
 
 /** Definition of the profile revision snapshotted onto the job, if any. */
 function profileDefinitionForJob(store: JobStore, job: JobRow): ProfileDefinition | null {
-  return job.profile_revision_id ? store.configs.getRevision(job.profile_revision_id)?.definition ?? null : null;
+  if (!job.profile_revision_id) return null;
+  const definition = store.configs.getRevision(job.profile_revision_id)?.definition ?? null;
+  if (!definition) {
+    store.log(
+      job.id,
+      `Job references profile revision #${job.profile_revision_id}, which no longer exists — falling back to env config`,
+      "warn",
+    );
+  }
+  return definition;
 }
 
 /** Per-role timeout overrides from a profile definition. */

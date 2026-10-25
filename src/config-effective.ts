@@ -246,12 +246,17 @@ export function effectiveConfigEntries(
 
   // --- Limits ---
   row("Limits", "Reviewer timeout", "OPENCODE_TIMEOUT_MS", `${Math.round(config.opencode.timeoutMs / 1000)}s`);
-  row(
-    "Limits",
-    "Verifier timeout",
-    "OPENCODE_VERIFIER_TIMEOUT_MS",
-    `${Math.round(config.opencode.verifierTimeoutMs / 1000)}s`,
-  );
+  const verifierTimeoutShadowed = activeRevision?.definition.verifier?.timeoutMs != null;
+  add({
+    group: "Limits",
+    label: "Verifier timeout",
+    value: `${Math.round(config.opencode.verifierTimeoutMs / 1000)}s`,
+    source: src("OPENCODE_VERIFIER_TIMEOUT_MS"),
+    envKey: "OPENCODE_VERIFIER_TIMEOUT_MS",
+    sourceDetail: verifierTimeoutShadowed
+      ? `not in effect — overridden by profile #${activeRevision!.id}`
+      : undefined,
+  });
   row("Limits", "Router timeout", "ROUTER_TIMEOUT_MS", `${Math.round(config.routing.timeoutMs / 1000)}s`);
   row(
     "Limits",

@@ -639,13 +639,19 @@ export function envProfileDefinition(config: Config): ProfileDefinition {
     return model ? { role: role.id, model } : { role: role.id };
   });
   const routerModel = config.routing.model || config.opencode.reviewerModel || undefined;
+  // OPENCODE_VERIFIER_TIMEOUT_MS is unbounded while the profile schema caps at
+  // PROFILE_MAX_TIMEOUT_MS — omit an out-of-cap value so the seed still
+  // validates; the runtime falls back to the env value when the field is unset.
+  const verifierTimeoutMs = config.opencode.verifierTimeoutMs;
   return {
     name: "default",
     reviewers,
     ...(routerModel ? { routerModel } : {}),
     verifier: {
       ...(config.opencode.verifierModel ? { model: config.opencode.verifierModel } : {}),
-      timeoutMs: config.opencode.verifierTimeoutMs,
+      ...(verifierTimeoutMs > 0 && verifierTimeoutMs <= PROFILE_MAX_TIMEOUT_MS
+        ? { timeoutMs: verifierTimeoutMs }
+        : {}),
     },
     minPublishableSeverity: "info",
     onBudgetExceeded: "degrade",

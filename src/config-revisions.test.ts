@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { openDb } from "./db.js";
 import { loadConfig } from "./config.js";
 import {
+  PROFILE_MAX_TIMEOUT_MS,
   ReviewConfigStore,
   envProfileDefinition,
   seedDefaultProfileRevision,
@@ -424,6 +425,18 @@ describe("default profile seed", () => {
     expect(def.reviewers.length).toBeGreaterThan(0);
     expect(def.reviewers.every((reviewer) => reviewer.model === undefined)).toBe(true);
     expect(def.routerModel).toBeUndefined();
+  });
+
+  it("omits an env verifier timeout that exceeds the profile cap so seeding still validates", () => {
+    const overCap = envProfileDefinition(
+      loadConfig({ OPENCODE_VERIFIER_TIMEOUT_MS: String(PROFILE_MAX_TIMEOUT_MS + 60_000) }),
+    );
+    expect(overCap.verifier?.timeoutMs).toBeUndefined();
+    const configs = store();
+    const config = loadConfig({ OPENCODE_VERIFIER_TIMEOUT_MS: String(PROFILE_MAX_TIMEOUT_MS + 60_000) });
+    expect(seedDefaultProfileRevision(configs, config)).toBe(true);
+    const inCap = envProfileDefinition(loadConfig({ OPENCODE_VERIFIER_TIMEOUT_MS: "240000" }));
+    expect(inCap.verifier?.timeoutMs).toBe(240_000);
   });
 
   it("activating the untouched v0 revision leaves reviewer specs unchanged", () => {
