@@ -1353,9 +1353,12 @@ function renderEffectiveConfigSection(entries: EffectiveConfigEntry[]): string {
   const sourceBadge = (entry: EffectiveConfigEntry): string => {
     const detail = entry.sourceDetail ? ` ${escapeHtml(entry.sourceDetail)}` : "";
     if (entry.source === "profile") return `<span class="config-source config-source-profile">Profile ${detail}</span>`;
-    if (entry.source === "environment") return `<span class="config-source">Environment</span>`;
-    if (entry.source === "stored") return `<span class="config-source">Stored</span>`;
-    return `<span class="config-source">Default</span>`;
+    // The detail belongs on every source's badge — "inherited from
+    // OPENCODE_REVIEWER_MODEL", "not in effect — overridden by profile #N",
+    // telemetry's stored note all explain a non-profile row's real origin.
+    if (entry.source === "environment") return `<span class="config-source">Environment${detail}</span>`;
+    if (entry.source === "stored") return `<span class="config-source">Stored${detail}</span>`;
+    return `<span class="config-source">Default${detail}</span>`;
   };
   /** Where an operator goes to change this value, derived from its source. */
   const changeHint = (entry: EffectiveConfigEntry): string => {

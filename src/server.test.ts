@@ -4802,7 +4802,8 @@ describe("effective configuration summary", () => {
     for (const canary of ["o2oi_STORED-CANARY", "ops@example.com"]) {
       expect(html, `telemetry canary ${canary} leaked into /config`).not.toContain(canary);
     }
-    expect(sectionFor(html, "OpenObserve base URL")).toContain(">Stored</span>");
+    // The badge carries the row's source detail ("saved on /config/telemetry").
+    expect(sectionFor(html, "OpenObserve base URL")).toContain(">Stored saved on /config/telemetry</span>");
     expect(sectionFor(html, "OpenObserve traces endpoint")).toContain(
       "https://oo.example.com/api/default/v1/traces",
     );
