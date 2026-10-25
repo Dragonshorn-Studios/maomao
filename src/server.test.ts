@@ -5092,17 +5092,20 @@ describe("profile model test", () => {
         reviewer_role_2: "maintainability",
         reviewer_model_2: "",
         router_model: "openai/gpt-5",
+        verifier_model: "google/gemini-3-pro",
       }),
     });
     expect(response.status).toBe(200);
     const html = await response.text();
-    expect(html).toContain("2 models reachable");
+    expect(html).toContain("3 models reachable");
     expect(html).toContain("anthropic/claude-4.5-sonnet");
     expect(html).toContain("openai/gpt-5");
+    expect(html).toContain("google/gemini-3-pro");
     // Dedupe by provider/model; sequential order router-then-reviewers isn't
     // guaranteed — only dedupe and full coverage are.
     expect(calls.map((call) => call.model).sort()).toEqual([
       "anthropic/claude-4.5-sonnet",
+      "google/gemini-3-pro",
       "openai/gpt-5",
     ]);
     expect(calls[0].prompt).toContain("Reply with exactly the word: ok");

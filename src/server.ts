@@ -1712,7 +1712,7 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
     }
     const models = [
       ...new Set(
-        [values.routerModel, ...values.reviewers.map((row) => row.model)]
+        [values.routerModel, values.verifierModel, ...values.reviewers.map((row) => row.model)]
           .map((model) => model.trim())
           .filter((model) => model !== ""),
       ),
