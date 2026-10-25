@@ -31,6 +31,7 @@ import {
 import { applyProfileToSpecs, enqueuePullJob, reviewerSpecs } from "./enqueue.js";
 import { jobSpend } from "./summary.js";
 import type { ProfileDefinition } from "../config-revisions.js";
+import { PROFILE_MAX_TIMEOUT_MS } from "../config-revisions.js";
 import {
   fallbackAggregator,
   capMissingTestSeverity,
@@ -435,7 +436,7 @@ async function runJob(deps: PipelineDeps, forge: ForgeRegistry, jobId: number, s
     const profileDefinition = profileDefinitionForJob(store, job);
     const reviewerTimeouts = profileReviewerTimeouts(profileDefinition);
     const profileBudget = createProfileBudget(profileDefinition);
-    const snapshot = await reconcileAndRoute(deps, provider, job, workspace.repoDir, workspace.dir, diff, signal, profileBudget);
+    const snapshot = await reconcileAndRoute(deps, provider, job, workspace.repoDir, workspace.dir, diff, signal, profileBudget, profileDefinition);
     throwIfStale(store, jobId, signal);
 
     // Verify-first (issue #123): the reconciler already re-checked every open
@@ -804,6 +805,7 @@ async function runScanJob(deps: PipelineDeps, forge: ForgeRegistry, jobId: numbe
       signal,
       budgetBlock: () => profileBudget.check(),
       onVerifierUsage: (usage) => profileBudget.record(usage.cost, usage.totalTokens),
+      verifier: profileDefinition?.verifier,
     });
     for (const item of items) {
       store.log(
@@ -2042,6 +2044,7 @@ async function reconcileAndRoute(
   diff: string,
   signal: AbortSignal,
   profileBudget?: ProfileBudget,
+  profileDefinition?: ProfileDefinition | null,
 ): Promise<ReconciliationSnapshot> {
   deps.store.setJobState(job.id, "reconciling");
   const threads = await forge.listDiscussions(forgeTargetOf(job));
@@ -2073,6 +2076,7 @@ async function reconcileAndRoute(
     onVerifierUsage: profileBudget
       ? (usage) => profileBudget.record(usage.cost, usage.totalTokens)
       : undefined,
+    verifier: profileDefinition?.verifier,
   });
   const snapshot: ReconciliationSnapshot = { headSha: job.head_sha, items, humanOverrides };
   for (const item of items) {
@@ -2118,6 +2122,11 @@ async function runReviewer(
   }
   const retries = Math.max(0, deps.config.opencode.maxRetries);
   let lastError = "unknown error";
+  // A custom role's own timeout is the fallback between the profile entry's
+  // override and the global default. A timed-out attempt that still produced
+  // output was making progress, so its retry gets double the budget (capped
+  // at the profile schema's system cap).
+  let attemptTimeoutMs = profileTimeoutMs ?? customRole?.timeout_ms ?? deps.config.opencode.timeoutMs;
 
   for (let attempt = 1; attempt <= retries + 1; attempt++) {
     throwIfStale(deps.store, job.id, signal);
@@ -2129,7 +2138,7 @@ async function runReviewer(
       provider: model.includes("/") ? model.split("/")[0] : null,
       started_at: nowIso(),
     });
-    deps.store.log(job.id, `Reviewer ${run.role} attempt ${attempt}/${retries + 1} model=${model || "(default)"}`, "info", run.id);
+    deps.store.log(job.id, `Reviewer ${run.role} attempt ${attempt}/${retries + 1} model=${model || "(default)"} timeout=${Math.round(attemptTimeoutMs / 1000)}s`, "info", run.id);
 
     let result: OpenCodeRunResult | undefined;
     try {
@@ -2150,9 +2159,7 @@ async function runReviewer(
         model,
         prompt,
         files,
-        // A custom role's own timeout is the fallback between the profile
-        // entry's override and the global default.
-        timeoutMs: profileTimeoutMs ?? customRole?.timeout_ms ?? deps.config.opencode.timeoutMs,
+        timeoutMs: attemptTimeoutMs,
         extraArgs: deps.config.opencode.extraArgs,
         bin: deps.config.opencode.bin,
         title: `maomao-${run.role}-${job.id}`,
@@ -2218,6 +2225,18 @@ async function runReviewer(
         run.id,
       );
       if (attempt <= retries) {
+        if (error instanceof OpenCodeTimeoutError && (error.firstOutputMs != null || (error.stdout + error.stderr).trim() !== "")) {
+          const doubled = Math.min(attemptTimeoutMs * 2, PROFILE_MAX_TIMEOUT_MS);
+          if (doubled > attemptTimeoutMs) {
+            attemptTimeoutMs = doubled;
+            deps.store.log(
+              job.id,
+              `Reviewer ${run.role} timed out with partial output — retrying with doubled timeout ${Math.round(doubled / 1000)}s`,
+              "info",
+              run.id,
+            );
+          }
+        }
         await sleep(500 * attempt, signal);
         // A spent attempt may have tripped the ceiling; do not respend.
         const over = profileBudget?.check();

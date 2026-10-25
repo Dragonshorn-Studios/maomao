@@ -173,6 +173,7 @@ export function effectiveConfigEntries(
       ? inheritedDetail
       : undefined,
   });
+  const verifierShadowed = Boolean(activeRevision?.definition.verifier?.model);
   add({
     group: "Models",
     label: "Verifier model",
@@ -183,10 +184,30 @@ export function effectiveConfigEntries(
       : envSet(env.OPENCODE_REVIEWER_MODEL)
         ? "environment"
         : "default",
-    sourceDetail: !envSet(env.OPENCODE_VERIFIER_MODEL) && envSet(env.OPENCODE_REVIEWER_MODEL)
-      ? inheritedDetail
-      : undefined,
+    sourceDetail: verifierShadowed
+      ? `not in effect — overridden by profile #${activeRevision!.id}`
+      : !envSet(env.OPENCODE_VERIFIER_MODEL) && envSet(env.OPENCODE_REVIEWER_MODEL)
+        ? inheritedDetail
+        : undefined,
   });
+  if (activeRevision?.definition.verifier?.model) {
+    add({
+      group: "Models",
+      label: "Profile verifier model",
+      value: activeRevision.definition.verifier.model,
+      source: "profile",
+      sourceDetail: `#${activeRevision.id} (${activeRevision.name})`,
+    });
+  }
+  if (activeRevision?.definition.verifier?.timeoutMs != null) {
+    add({
+      group: "Limits",
+      label: "Profile verifier timeout",
+      value: `${Math.round(activeRevision.definition.verifier.timeoutMs / 1000)}s`,
+      source: "profile",
+      sourceDetail: `#${activeRevision.id} (${activeRevision.name})`,
+    });
+  }
   // The pipeline resolves profileRouterModel || routing.model || reviewerModel.
   const routerEnvSet = envSet(env.OPENCODE_ROUTER_MODEL) || envSet(env.OPENCODE_REVIEWER_MODEL);
   const routerShadowed = Boolean(activeRevision?.definition.routerModel);

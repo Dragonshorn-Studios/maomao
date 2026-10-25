@@ -121,6 +121,8 @@ export async function classifyPriorFindings(input: {
   budgetBlock?: () => string | undefined;
   /** Receives the verifier run's usage so the pipeline can count it against the profile budget. */
   onVerifierUsage?: (usage: OpenCodeUsage) => void;
+  /** Profile-stamped verifier overrides; unset fields fall back to the env config. */
+  verifier?: { model?: string; timeoutMs?: number };
 }): Promise<ClassifiedFinding[]> {
   const classified: ClassifiedFinding[] = [];
   const toVerify: PriorFinding[] = [];
@@ -256,6 +258,7 @@ async function runVerifier(
     onVerifierError?: (message: string) => void;
     budgetBlock?: () => string | undefined;
     onVerifierUsage?: (usage: OpenCodeUsage) => void;
+    verifier?: { model?: string; timeoutMs?: number };
   },
   priors: PriorFinding[],
 ): Promise<Array<{ fingerprint: string; status: FindingClassification; confidence: number; reason: string; file?: string; line?: number }>> {
@@ -269,7 +272,10 @@ async function runVerifier(
       reason: `verifier skipped: ${budgetMessage}`,
     }));
   }
-  if (!input.config.opencode.verifierModel) {
+  // A profile-stamped verifier entry wins over the env config per field.
+  const verifierModel = input.verifier?.model ?? input.config.opencode.verifierModel;
+  const verifierTimeoutMs = input.verifier?.timeoutMs ?? input.config.opencode.verifierTimeoutMs;
+  if (!verifierModel) {
     return priors.map((prior) => ({
       fingerprint: prior.fingerprint,
       status: "uncertain" as const,
@@ -305,7 +311,7 @@ async function runVerifier(
   try {
     const result = await input.opencode.run({
       cwd: input.repoDir,
-      model: input.config.opencode.verifierModel,
+      model: verifierModel,
       prompt: buildVerifierPrompt({
         repoFullName: input.job.repo_full_name,
         prNumber: input.job.pr_number,
@@ -314,7 +320,7 @@ async function runVerifier(
         findings: payload,
       }),
       files: [contextPath],
-      timeoutMs: input.config.opencode.verifierTimeoutMs,
+      timeoutMs: verifierTimeoutMs,
       extraArgs: input.config.opencode.extraArgs,
       bin: input.config.opencode.bin,
       title: `maomao-verifier-${input.job.id}`,

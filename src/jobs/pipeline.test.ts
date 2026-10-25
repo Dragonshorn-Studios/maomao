@@ -5573,6 +5573,146 @@ describe("profile budget ceilings and per-reviewer timeouts", () => {
     expect(job?.state).toBe("failed");
     expect(job?.failure_reason).toContain("profile budget exceeded — profile total cost 0.6 exceeded cap 0.5");
   });
+
+  function retryConfig() {
+    return loadConfig({
+      REVIEWER_ROUTING: "fixed",
+      REVIEWER_ROLES: "correctness",
+      OPENCODE_REVIEWER_CONCURRENCY: "1",
+      OPENCODE_REVIEWER_MODEL: "test/model",
+      OPENCODE_TIMEOUT_MS: "5000",
+      OPENCODE_MAX_RETRIES: "1",
+      POST_EMPTY_REVIEW: "true",
+      GITHUB_APP_ID: "1",
+      GITHUB_WEBHOOK_SECRET: "s",
+      GITHUB_APP_PRIVATE_KEY: "k",
+    });
+  }
+
+  it("doubles the reviewer timeout on the retry after a timeout that still produced output", async () => {
+    const config = retryConfig();
+    const store = new JobStore(openDb(":memory:"));
+    const timeouts: number[] = [];
+    const opencode: OpenCodePort = {
+      async run(input) {
+        const roleMatch = input.prompt.match(/Role id: (\w+)/);
+        if (roleMatch) {
+          timeouts.push(input.timeoutMs ?? -1);
+          if (timeouts.length === 1) {
+            // Made progress, then stalled: output present, first byte seen.
+            throw new OpenCodeTimeoutError(input.timeoutMs, {
+              stdout: '{"type":"text","text":"partial',
+              stderr: "stalled",
+              firstOutputMs: 900,
+            });
+          }
+          const text = reviewerJson(roleMatch[1], "clean");
+          return { stdout: text, stderr: "", exitCode: 0, text, usage: {} };
+        }
+        const text = JSON.stringify({ schema_version: 1, verdict: "clean", summary: "clean", findings: [] });
+        return { stdout: text, stderr: "", exitCode: 0, text, usage: {} };
+      },
+    };
+    const github = githubPort({
+      getPullDiff: async () => "diff --git a/example.ts b/example.ts\n",
+      listReviews: async () => [],
+      createCommentReview: async () => ({ id: "5", url: "u" }),
+    });
+    const created = store.enqueue({ ...jobInput("doublingsha"), reviewers: [] });
+    await createPipeline({ config, store, github, checkout: await fixtureCheckout(), opencode }).run(created.job.id);
+
+    expect(timeouts).toEqual([5_000, 10_000]);
+    const logs = store.listLogs(created.job.id).map((entry) => entry.message).join("\n");
+    expect(logs).toContain("timed out with partial output — retrying with doubled timeout 10s");
+    expect(store.getJob(created.job.id)?.state).toBe("completed");
+  });
+
+  it("keeps the same timeout on retry when the timed-out attempt produced nothing", async () => {
+    const config = retryConfig();
+    const store = new JobStore(openDb(":memory:"));
+    const timeouts: number[] = [];
+    const opencode: OpenCodePort = {
+      async run(input) {
+        const roleMatch = input.prompt.match(/Role id: (\w+)/);
+        if (roleMatch) {
+          timeouts.push(input.timeoutMs ?? -1);
+          // A hard stall with no output at all: doubling only buys more stall.
+          throw new OpenCodeTimeoutError(input.timeoutMs, { stdout: "", stderr: "" });
+        }
+        const text = JSON.stringify({ schema_version: 1, verdict: "clean", summary: "clean", findings: [] });
+        return { stdout: text, stderr: "", exitCode: 0, text, usage: {} };
+      },
+    };
+    const github = githubPort({
+      getPullDiff: async () => "diff --git a/example.ts b/example.ts\n",
+      listReviews: async () => [],
+      createCommentReview: async () => ({ id: "5", url: "u" }),
+    });
+    const created = store.enqueue({ ...jobInput("nodoublesha"), reviewers: [] });
+    await createPipeline({ config, store, github, checkout: await fixtureCheckout(), opencode }).run(created.job.id);
+
+    expect(timeouts).toEqual([5_000, 5_000]);
+  });
+
+  it("routes the profile's verifier model and timeout to the reconciliation verifier", async () => {
+    const config = profileConfig();
+    const store = new JobStore(openDb(":memory:"));
+    await activateProfile(store, {
+      name: "default",
+      reviewers: [{ role: "correctness" }, { role: "security" }],
+      verifier: { model: "test/verifier-model", timeoutMs: 60_000 },
+      minPublishableSeverity: "medium",
+    });
+    const priorFinding = {
+      severity: "high" as const,
+      confidence: 0.9,
+      category: "correctness",
+      file: "example.ts",
+      line: 1,
+      summary: "bug",
+    };
+    const fingerprint = fingerprintFinding(priorFinding);
+    const verifierCalls: { model?: string; timeoutMs?: number }[] = [];
+    const opencode: OpenCodePort = {
+      async run(input) {
+        if (input.prompt.includes("finding verifier")) {
+          verifierCalls.push({ model: input.model, timeoutMs: input.timeoutMs });
+          return {
+            stdout: "",
+            stderr: "",
+            exitCode: 0,
+            text: JSON.stringify({
+              classifications: [{ fingerprint, status: "still_valid", confidence: 0.9, reason: "still there" }],
+            }),
+            usage: {},
+          };
+        }
+        const roleMatch = input.prompt.match(/Role id: (\w+)/);
+        const text = roleMatch
+          ? reviewerJson(roleMatch[1], "clean")
+          : JSON.stringify({ schema_version: 1, verdict: "clean", summary: "clean", findings: [] });
+        return { stdout: text, stderr: "", exitCode: 0, text, usage: {} };
+      },
+    };
+    const created = store.enqueue({ ...jobInput("verifierprofilesha"), reviewers: [] });
+    await createPipeline({
+      config,
+      store,
+      github: githubPort({
+        getPullDiff: async () =>
+          "diff --git a/example.ts b/example.ts\n--- a/example.ts\n+++ b/example.ts\n@@ -8,1 +8,1 @@\n-old line\n+new line\n",
+        listReviewThreads: async () => [threadFor(fingerprint)],
+        createCommentReview: async () => ({ id: "2", url: "u" }),
+      }),
+      checkout: await fixtureCheckout(),
+      opencode,
+    }).run(created.job.id);
+
+    expect(verifierCalls).toHaveLength(1);
+    expect(verifierCalls[0]?.model).toBe("test/verifier-model");
+    expect(verifierCalls[0]?.timeoutMs).toBe(60_000);
+    expect(store.getJob(created.job.id)?.state).toBe("completed");
+  });
 });
 describe("forge scope listing and filtering", () => {
   function jobInput(overrides: Record<string, unknown> = {}) {
