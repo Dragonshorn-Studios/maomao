@@ -182,6 +182,16 @@ export interface GithubPort {
     pullNumber: number;
     body: string;
   }): Promise<{ id: string; url: string }>;
+  /** App slug for the bot login (`<slug>[bot]`); env GITHUB_APP_SLUG wins when set. */
+  getAppSlug?(): Promise<string>;
+  /** Request reviewers on a pull request (opt-in queue badge; needs Pull requests write). */
+  requestReviewers?(input: {
+    installationId: number;
+    owner: string;
+    repo: string;
+    pullNumber: number;
+    reviewers: string[];
+  }): Promise<void>;
   updateIssueComment?(input: {
     installationId: number;
     owner: string;
@@ -264,6 +274,9 @@ function toResolvedPull(
 }
 
 export class GithubClient implements GithubPort, ManualTriggerPort {
+  /** Cached app slug from `GET /app` — resolved once, reused for every bot login. */
+  private cachedAppSlug: string | null = null;
+
   constructor(private readonly config: Config) {}
 
   private appOctokit(): Octokit {
@@ -636,6 +649,32 @@ export class GithubClient implements GithubPort, ManualTriggerPort {
       body: input.body,
     });
     return { id: String(response.data.id), url: response.data.html_url ?? "" };
+  }
+
+  async getAppSlug(): Promise<string> {
+    if (this.config.github.appSlug) return this.config.github.appSlug;
+    if (this.cachedAppSlug) return this.cachedAppSlug;
+    const response = await this.appOctokit().rest.apps.getAuthenticated();
+    const slug = response.data?.slug ?? "";
+    if (!slug) throw new Error("GitHub App lookup returned no slug; set GITHUB_APP_SLUG");
+    this.cachedAppSlug = slug;
+    return slug;
+  }
+
+  async requestReviewers(input: {
+    installationId: number;
+    owner: string;
+    repo: string;
+    pullNumber: number;
+    reviewers: string[];
+  }): Promise<void> {
+    const octokit = this.installationOctokit(input.installationId);
+    await octokit.rest.pulls.requestReviewers({
+      owner: input.owner,
+      repo: input.repo,
+      pull_number: input.pullNumber,
+      reviewers: input.reviewers,
+    });
   }
 
   async updateIssueComment(input: {

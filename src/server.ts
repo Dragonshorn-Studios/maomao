@@ -15,6 +15,7 @@ import { ChatBudgetError } from "./chat/service.js";
 import type { ManualTriggerPort, GithubPort } from "./github/client.js";
 import type { OpenCodePort } from "./opencode/parse.js";
 import { authorizeGithubAccount, authorizeGithubRepository, authorizeGithubTarget, logAuthorizationRejection, logRateLimited, rejectUnauthorized } from "./github/authorize.js";
+import { registerQueuedReviewer } from "./github/reviewer-request.js";
 import { repoRateLimitActive, RepoRateLimiter, WindowRateLimiter } from "./github/rate-limit.js";
 import { parseGithubPullUrl, PullUrlError } from "./github/pull-url.js";
 import { dispatchEnqueue, enqueuePullJob } from "./jobs/enqueue.js";
@@ -807,6 +808,14 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
       });
       if (enqueue.created && rateOn && resolvedRepoId != null) {
         rateLimiter.record(resolvedRepoId, ctx.config.repoRateLimitPerWindow, ctx.config.repoRateWindowMs);
+      }
+      if (enqueue.created && ctx.github) {
+        await registerQueuedReviewer({
+          github: ctx.github,
+          config: ctx.config,
+          store: ctx.store,
+          job: enqueue.job,
+        });
       }
       dispatchEnqueue(ctx.queue, enqueue);
       const notice = enqueue.created ? "queued" : "exists";
