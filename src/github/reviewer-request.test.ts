@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { openDb } from "../db.js";
 import { JobStore } from "../jobs/store.js";
 import { loadConfig } from "../config.js";
@@ -13,7 +13,7 @@ interface RequestedCall {
   reviewers: string[];
 }
 
-function badgeGithub(overrides: { slug?: string; failWith?: Error; omitRequest?: boolean } = {}) {
+function badgeGithub(overrides: { slug?: string; failWith?: Error; omitRequest?: boolean; hangRequest?: boolean } = {}) {
   const requested: RequestedCall[] = [];
   const slugCalls: number[] = [];
   const github = {
@@ -32,6 +32,7 @@ function badgeGithub(overrides: { slug?: string; failWith?: Error; omitRequest?:
             reviewers: string[];
           }) => {
             if (overrides.failWith) throw overrides.failWith;
+            if (overrides.hangRequest) return new Promise<void>(() => {});
             requested.push({ ...input, reviewers: [...input.reviewers] });
           },
         }),
@@ -125,7 +126,87 @@ describe("registerQueuedReviewer", () => {
     expect(last?.message).toContain("422 Validation Failed");
   });
 
-  it("skips silently when the port cannot request reviewers (demo/test clients)", async () => {
+  it("warns when no app slug is available from env or the App API", async () => {
+    const store = new JobStore(openDb(":memory:"));
+    const job = enqueuedJob(store);
+    const { github, requested } = badgeGithub({ slug: "" });
+    await registerQueuedReviewer({
+      github,
+      config: configWith({ GITHUB_REQUEST_REVIEWER_ON_ENQUEUE: "true" }),
+      store,
+      job,
+    });
+    expect(requested).toEqual([]);
+    const last = store.listLogs(job.id).at(-1);
+    expect(last?.level).toBe("warn");
+    expect(last?.message).toContain("GITHUB_APP_SLUG");
+  });
+
+  it("warns when the App API slug lookup itself fails", async () => {
+    const store = new JobStore(openDb(":memory:"));
+    const job = enqueuedJob(store);
+    const github = {
+      getAppSlug: async () => {
+        throw new Error("App API down");
+      },
+      requestReviewers: async () => {},
+    };
+    await expect(
+      registerQueuedReviewer({
+        github,
+        config: configWith({ GITHUB_REQUEST_REVIEWER_ON_ENQUEUE: "true" }),
+        store,
+        job,
+      }),
+    ).resolves.toBeUndefined();
+    const last = store.listLogs(job.id).at(-1);
+    expect(last?.level).toBe("warn");
+    expect(last?.message).toContain("App API down");
+  });
+
+  it("bounds the whole attempt — a hung request times out into a warn log", async () => {
+    const store = new JobStore(openDb(":memory:"));
+    const job = enqueuedJob(store);
+    const { github } = badgeGithub({ hangRequest: true });
+    await registerQueuedReviewer({
+      github,
+      config: configWith({ GITHUB_REQUEST_REVIEWER_ON_ENQUEUE: "true", GITHUB_APP_SLUG: "maomao" }),
+      store,
+      job,
+      timeoutMs: 10,
+    });
+    const last = store.listLogs(job.id).at(-1);
+    expect(last?.level).toBe("warn");
+    expect(last?.message).toContain("timed out after 10ms");
+  });
+
+  it("still never throws when even the compensating job-log write fails", async () => {
+    const store = new JobStore(openDb(":memory:"));
+    const job = enqueuedJob(store);
+    const { github } = badgeGithub({ failWith: new Error("422 Validation Failed") });
+    const brokenLogStore = {
+      log: () => {
+        throw new Error("database is locked");
+      },
+    } as unknown as JobStore;
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      await expect(
+        registerQueuedReviewer({
+          github,
+          config: configWith({ GITHUB_REQUEST_REVIEWER_ON_ENQUEUE: "true", GITHUB_APP_SLUG: "maomao" }),
+          store: brokenLogStore,
+          job,
+        }),
+      ).resolves.toBeUndefined();
+      expect(warn).toHaveBeenCalledTimes(1);
+      expect(String(warn.mock.calls[0])).toContain("database is locked");
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it("skips silently when the port cannot request reviewers (partial ports in tests)", async () => {
     const store = new JobStore(openDb(":memory:"));
     const job = enqueuedJob(store);
     const { github } = badgeGithub({ omitRequest: true });

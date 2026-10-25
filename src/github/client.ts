@@ -274,8 +274,13 @@ function toResolvedPull(
 }
 
 export class GithubClient implements GithubPort, ManualTriggerPort {
-  /** Cached app slug from `GET /app` — resolved once, reused for every bot login. */
-  private cachedAppSlug: string | null = null;
+  /**
+   * Cached app-slug lookup from `GET /app` — the promise is cached (not the
+   * value) so concurrent first callers share one request, and a failure
+   * clears it so the next call retries. Resolved once, reused for every
+   * bot login.
+   */
+  private appSlugPromise: Promise<string> | null = null;
 
   constructor(private readonly config: Config) {}
 
@@ -653,12 +658,22 @@ export class GithubClient implements GithubPort, ManualTriggerPort {
 
   async getAppSlug(): Promise<string> {
     if (this.config.github.appSlug) return this.config.github.appSlug;
-    if (this.cachedAppSlug) return this.cachedAppSlug;
-    const response = await this.appOctokit().rest.apps.getAuthenticated();
-    const slug = response.data?.slug ?? "";
-    if (!slug) throw new Error("GitHub App lookup returned no slug; set GITHUB_APP_SLUG");
-    this.cachedAppSlug = slug;
-    return slug;
+    if (!this.appSlugPromise) {
+      const promise = this.appOctokit()
+        .rest.apps.getAuthenticated()
+        .then((response) => {
+          const slug = response.data?.slug ?? "";
+          if (!slug) throw new Error("GitHub App lookup returned no slug; set GITHUB_APP_SLUG");
+          return slug;
+        });
+      // A failed lookup must not latch: clear so the next call retries. The
+      // handler also marks the rejection handled for the stored promise.
+      promise.catch(() => {
+        this.appSlugPromise = null;
+      });
+      this.appSlugPromise = promise;
+    }
+    return this.appSlugPromise;
   }
 
   async requestReviewers(input: {

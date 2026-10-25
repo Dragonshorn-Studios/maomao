@@ -809,6 +809,9 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
       if (enqueue.created && rateOn && resolvedRepoId != null) {
         rateLimiter.record(resolvedRepoId, ctx.config.repoRateLimitPerWindow, ctx.config.repoRateWindowMs);
       }
+      // Dispatch before the badge: the review must enter the queue without
+      // waiting on GitHub's reviewer API (the badge is best-effort).
+      dispatchEnqueue(ctx.queue, enqueue);
       if (enqueue.created && ctx.github) {
         await registerQueuedReviewer({
           github: ctx.github,
@@ -817,7 +820,6 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
           job: enqueue.job,
         });
       }
-      dispatchEnqueue(ctx.queue, enqueue);
       const notice = enqueue.created ? "queued" : "exists";
       return c.redirect(`/jobs/${enqueue.job.id}?notice=${notice}`, 302);
     } catch (error) {

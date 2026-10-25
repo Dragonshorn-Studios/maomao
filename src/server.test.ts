@@ -375,6 +375,54 @@ describe("manual review trigger", () => {
     expect(await detail.text()).toContain("Queued a review");
   });
 
+  it("requests the bot reviewer on the paste-URL enqueue when the queue badge is on", async () => {
+    interface BadgeCall {
+      owner: string;
+      repo: string;
+      pullNumber: number;
+      reviewers: string[];
+    }
+    const badgeGithub = (failWith?: Error) => {
+      const requested: BadgeCall[] = [];
+      const github = {
+        ...mockGithub(),
+        getAppSlug: async () => "maomao",
+        requestReviewers: async (input: { owner: string; repo: string; pullNumber: number; reviewers: string[] }) => {
+          if (failWith) throw failWith;
+          requested.push({ ...input, reviewers: [...input.reviewers] });
+        },
+      } as unknown as ManualTriggerPort;
+      return { github, requested };
+    };
+    const badgeEnv = { GITHUB_REQUEST_REVIEWER_ON_ENQUEUE: "true", GITHUB_APP_SLUG: "maomao" };
+
+    const ok = badgeGithub();
+    const first = testApp(badgeEnv, ok.github);
+    const created = await first.app.request("/reviews", {
+      method: "POST",
+      headers: { "content-type": "application/x-www-form-urlencoded" },
+      body: "url=https%3A%2F%2Fgithub.com%2Facme%2Fwidgets%2Fpull%2F12",
+    });
+    expect(created.status).toBe(302);
+    expect(first.enqueued).toEqual([1]);
+    expect(ok.requested).toEqual([
+      { installationId: 42, owner: "acme", repo: "widgets", pullNumber: 12, reviewers: ["maomao[bot]"] },
+    ]);
+    expect(first.store.listLogs(1).some((line) => line.message.includes("maomao[bot]"))).toBe(true);
+
+    // A GitHub refusal must never fail the form or strand the job.
+    const refused = badgeGithub(new Error("422 Validation Failed"));
+    const second = testApp(badgeEnv, refused.github);
+    const still = await second.app.request("/reviews", {
+      method: "POST",
+      headers: { "content-type": "application/x-www-form-urlencoded" },
+      body: "url=https%3A%2F%2Fgithub.com%2Facme%2Fwidgets%2Fpull%2F12",
+    });
+    expect(still.status).toBe(302);
+    expect(second.enqueued).toEqual([1]);
+    expect(second.store.listLogs(1).some((line) => line.level === "warn" && line.message.includes("422 Validation Failed"))).toBe(true);
+  });
+
   it("rejects a non-GitHub URL without touching the queue", async () => {
     const github = mockGithub();
     const { app, enqueued } = testApp({}, github);

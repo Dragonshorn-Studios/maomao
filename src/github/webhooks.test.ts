@@ -3466,4 +3466,34 @@ describe("reviewer registration on enqueue (queue badge)", () => {
     expect(result.body.created).toBe(true);
     expect(requested).toEqual([{ owner: "acme", repo: "widgets", pullNumber: 42, reviewers: ["maomao[bot]"] }]);
   });
+
+  it("badges only the top PR of a stack trigger", async () => {
+    const config = badgeConfig({
+      GITHUB_APP_SLUG: "maomao",
+      GITHUB_REQUEST_REVIEWER_ON_ENQUEUE: "true",
+    });
+    const store = new JobStore(openDb(":memory:"));
+    store.upsertStackDeclaration({ repoFullName: "acme/widgets", stackId: "ship-it", prNumber: 41, position: 1, expectedCount: 2, actor: "alice" });
+    store.upsertStackDeclaration({ repoFullName: "acme/widgets", stackId: "ship-it", prNumber: 42, position: 2, expectedCount: 2, actor: "alice" });
+    const base = stackGithub({
+      pulls: {
+        41: resolvedStackPull(41, { baseRef: "main", headRef: "feat-a", baseSha: "m0", headSha: "h41" }),
+        42: resolvedStackPull(42, { baseRef: "feat-a", headRef: "feat-b", baseSha: "h41", headSha: "h42" }),
+      },
+    });
+    const { github, requested } = badgeGithub(base);
+    const rawBody = JSON.stringify(
+      commentPayload({ comment: { id: 9101, body: "@maomao top of stack ship-it: #41, #42", user: { login: "alice", type: "User" }, author_association: "OWNER" } }),
+    );
+    const result = await handleGithubWebhook({
+      config,
+      store,
+      github,
+      request: { event: "issue_comment", deliveryId: "b5", signature: sign(secret, rawBody), rawBody },
+    });
+    expect(result.status).toBe(200);
+    expect(result.body.enqueued).toBe(true);
+    // Exactly one badge, on the stack job's PR — the top member, not one per member.
+    expect(requested).toEqual([{ owner: "acme", repo: "widgets", pullNumber: 42, reviewers: ["maomao[bot]"] }]);
+  });
 });
