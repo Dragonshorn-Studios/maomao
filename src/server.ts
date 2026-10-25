@@ -1712,7 +1712,7 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
     }
     const models = [
       ...new Set(
-        [values.routerModel, ...values.reviewers.map((row) => row.model)]
+        [values.routerModel, values.verifierModel, ...values.reviewers.map((row) => row.model)]
           .map((model) => model.trim())
           .filter((model) => model !== ""),
       ),
@@ -1809,6 +1809,7 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
     "rolled-back": "Revision rolled back.",
     deactivated: "Revision deactivated.",
     "draft-discarded": "Draft discarded.",
+    "revision-deleted": "Revision deleted.",
     "route-added": "Repo route added.",
     "route-removed": "Repo route removed.",
     imported: "Configuration imported as drafts.",
@@ -2148,6 +2149,15 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
     const result = ctx.store.configs.discardDraft(Number(c.req.param("id")), actor.login);
     if ("error" in result) return renderProfilesWithError(c, result.error, 400);
     return c.redirect("/config/profiles?notice=draft-discarded", 302);
+  });
+
+  app.post("/config/revisions/:id/delete", (c) => {
+    if (!gateOn) return c.redirect("/", 302);
+    const actor = configActor(c);
+    if (!actor) return configWriteDenied(c);
+    const result = ctx.store.configs.deleteRevision(Number(c.req.param("id")), actor.login);
+    if ("error" in result) return renderProfilesWithError(c, result.error, 400);
+    return c.redirect("/config/profiles?notice=revision-deleted", 302);
   });
 
   /**

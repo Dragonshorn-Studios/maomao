@@ -175,6 +175,29 @@ describe("effectiveConfigEntries", () => {
     expect(envRouter.sourceDetail).toContain("not in effect");
   });
 
+  it("lists profile verifier rows and marks the env verifier rows as shadowed", () => {
+    const env = { OPENCODE_VERIFIER_MODEL: "test/env-verifier", OPENCODE_VERIFIER_TIMEOUT_MS: "90000" };
+    const config = loadConfig(env);
+    const revision = fakeRevision({ verifier: { model: "test/profile-verifier", timeoutMs: 45_000 } });
+    const entries = effectiveConfigEntries(config, env, revision, telemetryStore());
+    expect(find(entries, "Profile verifier model")).toMatchObject({
+      source: "profile",
+      value: "test/profile-verifier",
+      sourceDetail: "#12 (strict)",
+    });
+    expect(find(entries, "Profile verifier timeout")).toMatchObject({
+      source: "profile",
+      value: "45s",
+      sourceDetail: "#12 (strict)",
+    });
+    expect(find(entries, "Verifier model").sourceDetail).toContain("not in effect — overridden by profile #12");
+    expect(find(entries, "Verifier timeout").sourceDetail).toContain("not in effect — overridden by profile #12");
+    // A profile pinning only the model leaves the env timeout row unmarked.
+    const partial = effectiveConfigEntries(config, env, fakeRevision({ verifier: { model: "test/profile-verifier" } }), telemetryStore());
+    expect(find(partial, "Verifier timeout").sourceDetail).toBeUndefined();
+    expect(find(partial, "Verifier model").sourceDetail).toContain("not in effect");
+  });
+
   it("never embeds credential values — presence only", () => {
     const config = loadConfig({
       GITHUB_APP_ID: "1",
