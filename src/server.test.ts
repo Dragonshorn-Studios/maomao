@@ -375,6 +375,54 @@ describe("manual review trigger", () => {
     expect(await detail.text()).toContain("Queued a review");
   });
 
+  it("requests the bot reviewer on the paste-URL enqueue when the queue badge is on", async () => {
+    interface BadgeCall {
+      owner: string;
+      repo: string;
+      pullNumber: number;
+      reviewers: string[];
+    }
+    const badgeGithub = (failWith?: Error) => {
+      const requested: BadgeCall[] = [];
+      const github = {
+        ...mockGithub(),
+        getAppSlug: async () => "maomao",
+        requestReviewers: async (input: { owner: string; repo: string; pullNumber: number; reviewers: string[] }) => {
+          if (failWith) throw failWith;
+          requested.push({ ...input, reviewers: [...input.reviewers] });
+        },
+      } as unknown as ManualTriggerPort;
+      return { github, requested };
+    };
+    const badgeEnv = { GITHUB_REQUEST_REVIEWER_ON_ENQUEUE: "true", GITHUB_APP_SLUG: "maomao" };
+
+    const ok = badgeGithub();
+    const first = testApp(badgeEnv, ok.github);
+    const created = await first.app.request("/reviews", {
+      method: "POST",
+      headers: { "content-type": "application/x-www-form-urlencoded" },
+      body: "url=https%3A%2F%2Fgithub.com%2Facme%2Fwidgets%2Fpull%2F12",
+    });
+    expect(created.status).toBe(302);
+    expect(first.enqueued).toEqual([1]);
+    expect(ok.requested).toEqual([
+      { installationId: 42, owner: "acme", repo: "widgets", pullNumber: 12, reviewers: ["maomao[bot]"] },
+    ]);
+    expect(first.store.listLogs(1).some((line) => line.message.includes("maomao[bot]"))).toBe(true);
+
+    // A GitHub refusal must never fail the form or strand the job.
+    const refused = badgeGithub(new Error("422 Validation Failed"));
+    const second = testApp(badgeEnv, refused.github);
+    const still = await second.app.request("/reviews", {
+      method: "POST",
+      headers: { "content-type": "application/x-www-form-urlencoded" },
+      body: "url=https%3A%2F%2Fgithub.com%2Facme%2Fwidgets%2Fpull%2F12",
+    });
+    expect(still.status).toBe(302);
+    expect(second.enqueued).toEqual([1]);
+    expect(second.store.listLogs(1).some((line) => line.level === "warn" && line.message.includes("422 Validation Failed"))).toBe(true);
+  });
+
   it("rejects a non-GitHub URL without touching the queue", async () => {
     const github = mockGithub();
     const { app, enqueued } = testApp({}, github);
@@ -2038,6 +2086,84 @@ describe("config page IA", () => {
       body: `csrf_token=${encodeURIComponent(artifacts2.csrfToken)}`,
     });
     expect(again.status).toBe(400);
+    log.mockRestore();
+  });
+
+  it("deletes a retired revision through the card's Delete form and audits it", async () => {
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    const { app, store } = testApp(
+      {
+        UI_SESSION_SECRET: "session-secret-for-tests",
+        GITHUB_OAUTH_CLIENT_ID: "cid",
+        GITHUB_OAUTH_CLIENT_SECRET: "csecret",
+        MAOMAO_ADMIN_GITHUB_IDS: "1001",
+        MAOMAO_PUBLIC_URL: "https://maomao.example",
+      },
+      undefined,
+      mockOauthFetch({ id: 1001, login: "octocat" }),
+    );
+    const session = await operatorSession(app);
+    const created = store.configs.createDraft({
+      definition: {
+        name: "default",
+        reviewers: [{ role: "correctness" }],
+        verifier: { model: "test/verifier", timeoutMs: 45_000 },
+        minPublishableSeverity: "info",
+      },
+      createdBy: "system",
+    });
+    if ("error" in created) throw new Error(created.issues.join("; "));
+    const revision = created.revision;
+    store.configs.activateRevision(revision.id, "system");
+    store.configs.deactivateRevision(revision.id, "system");
+
+    const page = await app.request("/config/profiles", { headers: { cookie: session } });
+    const { html, csrfCookie, csrfToken } = await csrfArtifacts(page);
+    // Retired card: Delete form present, verifier segment in the summary line.
+    expect(html).toContain(`action="/config/revisions/${revision.id}/delete"`);
+    expect(html).toContain("verifier test/verifier ≤ 45s");
+
+    // Status guards: a draft must be discarded, an active revision deactivated.
+    const draft = store.configs.createDraft({
+      definition: { name: "guarded", reviewers: [{ role: "correctness" }], minPublishableSeverity: "info" },
+      createdBy: "system",
+    });
+    if ("error" in draft) throw new Error(draft.issues.join("; "));
+    const draftDenied = await app.request(`/config/revisions/${draft.revision.id}/delete`, {
+      method: "POST",
+      headers: { cookie: `${session}; ${csrfCookie}`, "content-type": "application/x-www-form-urlencoded" },
+      body: `csrf_token=${encodeURIComponent(csrfToken)}`,
+    });
+    expect(draftDenied.status).toBe(400);
+    expect(await draftDenied.text()).toContain("Discard drafts instead of deleting them");
+
+    const active = store.configs.createDraft({
+      definition: { name: "guarded", reviewers: [{ role: "correctness" }], minPublishableSeverity: "info" },
+      createdBy: "system",
+    });
+    if ("error" in active) throw new Error(active.issues.join("; "));
+    expect(store.configs.activateRevision(active.revision.id, "system")).not.toHaveProperty("error");
+    const page2 = await app.request("/config/profiles", { headers: { cookie: session } });
+    const artifacts2 = await csrfArtifacts(page2);
+    const activeDenied = await app.request(`/config/revisions/${active.revision.id}/delete`, {
+      method: "POST",
+      headers: { cookie: `${session}; ${artifacts2.csrfCookie}`, "content-type": "application/x-www-form-urlencoded" },
+      body: `csrf_token=${encodeURIComponent(artifacts2.csrfToken)}`,
+    });
+    expect(activeDenied.status).toBe(400);
+    expect(await activeDenied.text()).toContain("Deactivate the revision before deleting it");
+
+    const deleted = await app.request(`/config/revisions/${revision.id}/delete`, {
+      method: "POST",
+      headers: { cookie: `${session}; ${artifacts2.csrfCookie}`, "content-type": "application/x-www-form-urlencoded" },
+      body: `csrf_token=${encodeURIComponent(artifacts2.csrfToken)}`,
+    });
+    expect(deleted.status).toBe(302);
+    expect(deleted.headers.get("location")).toBe("/config/profiles?notice=revision-deleted");
+    expect(store.configs.getRevision(revision.id)).toBeUndefined();
+    const audit = store.configs.listAudit().find((entry) => entry.action === "revision_deleted");
+    expect(audit?.revision_id).toBe(revision.id);
+    expect(audit?.actor).toBe("octocat");
     log.mockRestore();
   });
 
@@ -4802,7 +4928,8 @@ describe("effective configuration summary", () => {
     for (const canary of ["o2oi_STORED-CANARY", "ops@example.com"]) {
       expect(html, `telemetry canary ${canary} leaked into /config`).not.toContain(canary);
     }
-    expect(sectionFor(html, "OpenObserve base URL")).toContain(">Stored</span>");
+    // The badge carries the row's source detail ("saved on /config/telemetry").
+    expect(sectionFor(html, "OpenObserve base URL")).toContain(">Stored saved on /config/telemetry</span>");
     expect(sectionFor(html, "OpenObserve traces endpoint")).toContain(
       "https://oo.example.com/api/default/v1/traces",
     );
@@ -5020,6 +5147,9 @@ describe("structured profile editor", () => {
     expect(html).toContain('name="editor" value="structured"');
     expect(html).toContain("Minimum publishable severity");
     expect(html).toContain('name="budget_behavior"');
+    expect(html).toContain("Verifier (reconciliation pass — optional)");
+    expect(html).toContain('name="verifier_model"');
+    expect(html).toContain('name="verifier_timeout"');
     expect(html).toContain("Create a draft");
   });
 
@@ -5091,17 +5221,20 @@ describe("profile model test", () => {
         reviewer_role_2: "maintainability",
         reviewer_model_2: "",
         router_model: "openai/gpt-5",
+        verifier_model: "google/gemini-3-pro",
       }),
     });
     expect(response.status).toBe(200);
     const html = await response.text();
-    expect(html).toContain("2 models reachable");
+    expect(html).toContain("3 models reachable");
     expect(html).toContain("anthropic/claude-4.5-sonnet");
     expect(html).toContain("openai/gpt-5");
+    expect(html).toContain("google/gemini-3-pro");
     // Dedupe by provider/model; sequential order router-then-reviewers isn't
     // guaranteed — only dedupe and full coverage are.
     expect(calls.map((call) => call.model).sort()).toEqual([
       "anthropic/claude-4.5-sonnet",
+      "google/gemini-3-pro",
       "openai/gpt-5",
     ]);
     expect(calls[0].prompt).toContain("Reply with exactly the word: ok");

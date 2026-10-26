@@ -222,6 +222,47 @@ describe("profileFormToDefinition", () => {
     if (!tooBig.ok) expect(tooBig.errors.reviewer_timeout_0).toBeTruthy();
   });
 
+  it("encodes verifier overrides and maps verifier issues to their fields", () => {
+    const ok = profileFormToDefinition(
+      decodeProfileForm(formBody({ verifier_model: "test/verifier", verifier_timeout: "90" })),
+    );
+    expect(ok).toMatchObject({ ok: true });
+    if (!ok.ok) return;
+    expect(ok.definition).toMatchObject({ verifier: { model: "test/verifier", timeoutMs: 90_000 } });
+
+    const bad = profileFormToDefinition(
+      decodeProfileForm(formBody({ verifier_model: "no slash", verifier_timeout: "-3" })),
+    );
+    expect(bad.ok).toBe(false);
+    if (bad.ok) return;
+    expect(bad.errors.verifier_model).toContain("provider/model");
+    expect(bad.errors.verifier_timeout).toContain("positive number of seconds");
+  });
+
+  it("round-trips verifier fields exactly (definition → form → definition)", () => {
+    const definition = {
+      name: "default",
+      reviewers: [{ role: "correctness" }],
+      verifier: { model: "test/verifier", timeoutMs: 90_500 },
+      minPublishableSeverity: "info",
+      onBudgetExceeded: "degrade",
+    };
+    const form = profileFormValuesFromDefinition(definition, null);
+    expect(form.verifierModel).toBe("test/verifier");
+    expect(form.verifierTimeoutSeconds).toBe("90.5");
+    const back = profileFormToDefinition(form);
+    expect(back).toMatchObject({ ok: true });
+    if (!back.ok) return;
+    expect(back.definition).toEqual(definition);
+  });
+
+  it("keeps verifier optional: blank fields leave no verifier key", () => {
+    const result = profileFormToDefinition(decodeProfileForm(formBody({})));
+    expect(result).toMatchObject({ ok: true });
+    if (!result.ok) return;
+    expect(result.definition).not.toHaveProperty("verifier");
+  });
+
   it("maps the budget behavior select onto the schema (unknown values degrade)", () => {
     const fail = profileFormToDefinition(decodeProfileForm(formBody({ budget_behavior: "fail" })));
     expect(fail).toMatchObject({ ok: true });

@@ -20,6 +20,7 @@ import { upsertStackComment, upsertStackSuppressionNote } from "../stacks/commen
 import type { ResolvedPull } from "./client.js";
 import { cancelJobsForPull } from "../jobs/cancel.js";
 import { logAuthorizationRejection, logRateLimited, positiveGithubId, rejectUnauthorized } from "./authorize.js";
+import { registerQueuedReviewer } from "./reviewer-request.js";
 import { describeThreadResolveError } from "./errors.js";
 import { repoRateLimitActive, type RepoRateLimiter } from "./rate-limit.js";
 import {
@@ -510,6 +511,14 @@ async function handleGithubWebhookRequest(input: GithubWebhookInput): Promise<We
         input.config.repoRateWindowMs,
       );
     }
+    if (enqueue.created && input.github) {
+      await registerQueuedReviewer({
+        github: input.github,
+        config: input.config,
+        store: input.store,
+        job: enqueue.job,
+      });
+    }
     input.store.claimWebhookDelivery(
       input.request.deliveryId,
       input.request.event,
@@ -868,6 +877,12 @@ async function handleReviewCommand(
     });
     return finish("review-skipped", { ok: true, created: false, skippedReason: enqueue.skippedReason, jobId: enqueue.job.id });
   }
+  await registerQueuedReviewer({
+    github: input.github,
+    config: input.config,
+    store: input.store,
+    job: enqueue.job,
+  });
   await reply(`Queued a full re-review of ${mdInline(pull.headSha.slice(0, 8))} — job ${enqueue.job.id}.`);
   return finish("review", { ok: true, created: true, jobId: enqueue.job.id, enqueue });
 }
@@ -1106,6 +1121,10 @@ async function runStackEnqueue(
     reviewers: [{ role: "stack_cumulative", title: "Stack cumulative" }],
     jobType: "stack_review",
     dedupKey,
+    // Members ride enqueue's own transaction: a separate insert after the
+    // awaited comment refresh could interleave with a concurrent delivery's
+    // repin (DELETE+INSERT) and double every member row.
+    stackMembers: members,
   });
   await refreshStackComments(
     ctx,
@@ -1117,6 +1136,14 @@ async function runStackEnqueue(
       expectedCount: members.length,
     })),
   );
+  if (enqueue.created && ctx.input.github) {
+    await registerQueuedReviewer({
+      github: ctx.input.github,
+      config: ctx.input.config,
+      store: ctx.input.store,
+      job: enqueue.job,
+    });
+  }
   if (enqueue.created && ctx.enforceSpendControls && rateOn && ctx.githubRepositoryId != null && ctx.input.rateLimiter && !stackAlreadyCharged) {
     ctx.input.rateLimiter.record(
       ctx.githubRepositoryId,
@@ -1129,7 +1156,7 @@ async function runStackEnqueue(
   }
   let rechecked = false;
   if (enqueue.created) {
-    ctx.input.store.insertStackMembers(enqueue.job.id, members);
+    // Members went in with the job row (see the enqueue call above).
     ctx.input.store.log(
       enqueue.job.id,
       `Stack "${stackId}" of ${members.length} triggered by ${ctx.actorLogin}: ` +

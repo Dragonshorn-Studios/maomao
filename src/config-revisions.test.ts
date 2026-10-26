@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { openDb } from "./db.js";
 import { loadConfig } from "./config.js";
 import {
+  PROFILE_MAX_TIMEOUT_MS,
   ReviewConfigStore,
   envProfileDefinition,
   seedDefaultProfileRevision,
@@ -205,6 +206,70 @@ describe("draft editing and conflicts", () => {
   });
 });
 
+describe("retired revision deletion", () => {
+  function retireFirst(configs: ReviewConfigStore): number {
+    const first = configs.createDraft({ definition, createdBy: "octocat" });
+    if (!("revision" in first)) throw new Error("draft failed");
+    configs.activateRevision(first.revision.id, "octocat");
+    const second = configs.createDraft({ definition, createdBy: "octocat" });
+    if (!("revision" in second)) throw new Error("second draft failed");
+    configs.activateRevision(second.revision.id, "octocat");
+    return first.revision.id; // retired by the second activation
+  }
+
+  it("deletes a retired revision and audits revision_deleted", () => {
+    const configs = store();
+    const id = retireFirst(configs);
+    expect(configs.deleteRevision(id, "octocat")).toEqual({ ok: true });
+    expect(configs.getRevision(id)).toBeUndefined();
+    expect(configs.listAudit().some((entry) => entry.action === "revision_deleted")).toBe(true);
+  });
+
+  it("refuses drafts and the active revision", () => {
+    const configs = store();
+    const draft = configs.createDraft({ definition, createdBy: "octocat" });
+    if (!("revision" in draft)) throw new Error("draft failed");
+    expect(configs.deleteRevision(draft.revision.id, "octocat")).toEqual({
+      error: "Discard drafts instead of deleting them.",
+    });
+    configs.activateRevision(draft.revision.id, "octocat");
+    expect(configs.deleteRevision(draft.revision.id, "octocat")).toEqual({
+      error: "Deactivate the revision before deleting it.",
+    });
+    expect(configs.deleteRevision(9999, "octocat")).toEqual({ error: "Revision not found." });
+  });
+
+  it("blocks while an unfinished job still resolves the revision live", () => {
+    const db = openDb(":memory:");
+    const configs = new ReviewConfigStore(db);
+    const jobs = new JobStore(db);
+    const id = retireFirst(configs);
+    const enq = jobs.enqueue({
+      repoFullName: "acme/widgets",
+      repoOwner: "acme",
+      repoName: "widgets",
+      installationId: 1,
+      prNumber: 7,
+      prTitle: "t",
+      prBody: "",
+      prHtmlUrl: "https://github.com/acme/widgets/pull/7",
+      prAuthor: "a",
+      baseSha: "b",
+      baseRef: "main",
+      headRef: "f",
+      headSha: "h",
+      reviewers: [{ role: "correctness", title: "Correctness" }],
+      profileRevisionId: id,
+    });
+    expect(enq.created).toBe(true);
+    const blocked = configs.deleteRevision(id, "octocat");
+    expect("error" in blocked && blocked.error).toContain("unfinished job");
+    // Once the job is terminal the revision is free to go.
+    db.prepare(`UPDATE jobs SET state = 'completed' WHERE id = ?`).run(enq.job.id);
+    expect(configs.deleteRevision(id, "octocat")).toEqual({ ok: true });
+  });
+});
+
 describe("repo profile routing", () => {
   function activateNamed(configs: ReviewConfigStore, name: string) {
     const draft = configs.createDraft({
@@ -304,6 +369,14 @@ describe("profile validation and caps", () => {
     expect(validateModelCatalog(definition, ["anthropic/claude-sonnet-4-5"])).toHaveLength(1);
     expect(validateModelCatalog(definition, ["openai/gpt-4.1"])).toHaveLength(0);
     expect(validateModelCatalog(definition, [])).toHaveLength(0);
+
+    // The verifier model rides the same catalog.
+    const withVerifier = {
+      ...definition,
+      verifier: { model: "openai/gpt-4.1-mini", timeoutMs: 60_000 },
+    };
+    expect(validateModelCatalog(withVerifier, ["openai/gpt-4.1"])).toHaveLength(1);
+    expect(validateModelCatalog(withVerifier, ["openai/gpt-4.1", "openai/gpt-4.1-mini"])).toHaveLength(0);
   });
 
   it("rejects an invalid severity", () => {
@@ -352,6 +425,38 @@ describe("default profile seed", () => {
     expect(def.reviewers.length).toBeGreaterThan(0);
     expect(def.reviewers.every((reviewer) => reviewer.model === undefined)).toBe(true);
     expect(def.routerModel).toBeUndefined();
+  });
+
+  it("omits an env verifier timeout that exceeds the profile cap so seeding still validates", () => {
+    const overCap = envProfileDefinition(
+      loadConfig({ OPENCODE_VERIFIER_TIMEOUT_MS: String(PROFILE_MAX_TIMEOUT_MS + 60_000) }),
+    );
+    expect(overCap.verifier?.timeoutMs).toBeUndefined();
+    const configs = store();
+    const config = loadConfig({ OPENCODE_VERIFIER_TIMEOUT_MS: String(PROFILE_MAX_TIMEOUT_MS + 60_000) });
+    expect(seedDefaultProfileRevision(configs, config)).toBe(true);
+    const inCap = envProfileDefinition(loadConfig({ OPENCODE_VERIFIER_TIMEOUT_MS: "240000" }));
+    expect(inCap.verifier?.timeoutMs).toBe(240_000);
+  });
+
+  it("omits env models outside the catalog so seeding still validates", () => {
+    const env = {
+      MODEL_CATALOG: "openai/gpt-4.1",
+      OPENCODE_REVIEWER_MODEL: "acme/custom-reviewer",
+      OPENCODE_VERIFIER_MODEL: "acme/custom-verifier",
+      ROUTER_MODEL: "acme/custom-router",
+    };
+    const def = envProfileDefinition(loadConfig(env));
+    expect(def.verifier?.model).toBeUndefined();
+    expect(def.routerModel).toBeUndefined();
+    expect(def.reviewers.every((reviewer) => reviewer.model === undefined)).toBe(true);
+    const configs = store();
+    expect(seedDefaultProfileRevision(configs, loadConfig(env))).toBe(true);
+    // Catalog-listed env models still stamp.
+    const inCatalog = envProfileDefinition(
+      loadConfig({ MODEL_CATALOG: "openai/gpt-4.1", OPENCODE_VERIFIER_MODEL: "openai/gpt-4.1" }),
+    );
+    expect(inCatalog.verifier?.model).toBe("openai/gpt-4.1");
   });
 
   it("activating the untouched v0 revision leaves reviewer specs unchanged", () => {

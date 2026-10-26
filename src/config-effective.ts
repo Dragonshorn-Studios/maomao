@@ -173,6 +173,7 @@ export function effectiveConfigEntries(
       ? inheritedDetail
       : undefined,
   });
+  const verifierShadowed = Boolean(activeRevision?.definition.verifier?.model);
   add({
     group: "Models",
     label: "Verifier model",
@@ -183,10 +184,30 @@ export function effectiveConfigEntries(
       : envSet(env.OPENCODE_REVIEWER_MODEL)
         ? "environment"
         : "default",
-    sourceDetail: !envSet(env.OPENCODE_VERIFIER_MODEL) && envSet(env.OPENCODE_REVIEWER_MODEL)
-      ? inheritedDetail
-      : undefined,
+    sourceDetail: verifierShadowed
+      ? `not in effect — overridden by profile #${activeRevision!.id}`
+      : !envSet(env.OPENCODE_VERIFIER_MODEL) && envSet(env.OPENCODE_REVIEWER_MODEL)
+        ? inheritedDetail
+        : undefined,
   });
+  if (activeRevision?.definition.verifier?.model) {
+    add({
+      group: "Models",
+      label: "Profile verifier model",
+      value: activeRevision.definition.verifier.model,
+      source: "profile",
+      sourceDetail: `#${activeRevision.id} (${activeRevision.name})`,
+    });
+  }
+  if (activeRevision?.definition.verifier?.timeoutMs != null) {
+    add({
+      group: "Limits",
+      label: "Profile verifier timeout",
+      value: `${Math.round(activeRevision.definition.verifier.timeoutMs / 1000)}s`,
+      source: "profile",
+      sourceDetail: `#${activeRevision.id} (${activeRevision.name})`,
+    });
+  }
   // The pipeline resolves profileRouterModel || routing.model || reviewerModel.
   const routerEnvSet = envSet(env.OPENCODE_ROUTER_MODEL) || envSet(env.OPENCODE_REVIEWER_MODEL);
   const routerShadowed = Boolean(activeRevision?.definition.routerModel);
@@ -225,12 +246,17 @@ export function effectiveConfigEntries(
 
   // --- Limits ---
   row("Limits", "Reviewer timeout", "OPENCODE_TIMEOUT_MS", `${Math.round(config.opencode.timeoutMs / 1000)}s`);
-  row(
-    "Limits",
-    "Verifier timeout",
-    "OPENCODE_VERIFIER_TIMEOUT_MS",
-    `${Math.round(config.opencode.verifierTimeoutMs / 1000)}s`,
-  );
+  const verifierTimeoutShadowed = activeRevision?.definition.verifier?.timeoutMs != null;
+  add({
+    group: "Limits",
+    label: "Verifier timeout",
+    value: `${Math.round(config.opencode.verifierTimeoutMs / 1000)}s`,
+    source: src("OPENCODE_VERIFIER_TIMEOUT_MS"),
+    envKey: "OPENCODE_VERIFIER_TIMEOUT_MS",
+    sourceDetail: verifierTimeoutShadowed
+      ? `not in effect — overridden by profile #${activeRevision!.id}`
+      : undefined,
+  });
   row("Limits", "Router timeout", "ROUTER_TIMEOUT_MS", `${Math.round(config.routing.timeoutMs / 1000)}s`);
   row(
     "Limits",
@@ -313,6 +339,12 @@ export function effectiveConfigEntries(
     boolLabel(config.reviewAllowRequestChanges),
   );
   row("Publishing", "Post empty reviews", "POST_EMPTY_REVIEW", boolLabel(config.postEmptyReview));
+  row(
+    "Publishing",
+    "Register as reviewer on enqueue",
+    "GITHUB_REQUEST_REVIEWER_ON_ENQUEUE",
+    boolLabel(config.requestReviewerOnEnqueue),
+  );
   row("Publishing", "Review drafts", "REVIEW_DRAFTS", boolLabel(config.reviewDrafts));
   row("Telemetry", "Job summaries (stdout/OpenObserve)", "JOB_SUMMARIES", boolLabel(config.jobSummaries));
   row(

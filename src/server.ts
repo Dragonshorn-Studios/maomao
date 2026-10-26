@@ -15,6 +15,7 @@ import { ChatBudgetError } from "./chat/service.js";
 import type { ManualTriggerPort, GithubPort } from "./github/client.js";
 import type { OpenCodePort } from "./opencode/parse.js";
 import { authorizeGithubAccount, authorizeGithubRepository, authorizeGithubTarget, logAuthorizationRejection, logRateLimited, rejectUnauthorized } from "./github/authorize.js";
+import { registerQueuedReviewer } from "./github/reviewer-request.js";
 import { repoRateLimitActive, RepoRateLimiter, WindowRateLimiter } from "./github/rate-limit.js";
 import { parseGithubPullUrl, PullUrlError } from "./github/pull-url.js";
 import { dispatchEnqueue, enqueuePullJob } from "./jobs/enqueue.js";
@@ -808,7 +809,17 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
       if (enqueue.created && rateOn && resolvedRepoId != null) {
         rateLimiter.record(resolvedRepoId, ctx.config.repoRateLimitPerWindow, ctx.config.repoRateWindowMs);
       }
+      // Dispatch before the badge: the review must enter the queue without
+      // waiting on GitHub's reviewer API (the badge is best-effort).
       dispatchEnqueue(ctx.queue, enqueue);
+      if (enqueue.created && ctx.github) {
+        await registerQueuedReviewer({
+          github: ctx.github,
+          config: ctx.config,
+          store: ctx.store,
+          job: enqueue.job,
+        });
+      }
       const notice = enqueue.created ? "queued" : "exists";
       return c.redirect(`/jobs/${enqueue.job.id}?notice=${notice}`, 302);
     } catch (error) {
@@ -1712,7 +1723,7 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
     }
     const models = [
       ...new Set(
-        [values.routerModel, ...values.reviewers.map((row) => row.model)]
+        [values.routerModel, values.verifierModel, ...values.reviewers.map((row) => row.model)]
           .map((model) => model.trim())
           .filter((model) => model !== ""),
       ),
@@ -1809,6 +1820,7 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
     "rolled-back": "Revision rolled back.",
     deactivated: "Revision deactivated.",
     "draft-discarded": "Draft discarded.",
+    "revision-deleted": "Revision deleted.",
     "route-added": "Repo route added.",
     "route-removed": "Repo route removed.",
     imported: "Configuration imported as drafts.",
@@ -2148,6 +2160,15 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
     const result = ctx.store.configs.discardDraft(Number(c.req.param("id")), actor.login);
     if ("error" in result) return renderProfilesWithError(c, result.error, 400);
     return c.redirect("/config/profiles?notice=draft-discarded", 302);
+  });
+
+  app.post("/config/revisions/:id/delete", (c) => {
+    if (!gateOn) return c.redirect("/", 302);
+    const actor = configActor(c);
+    if (!actor) return configWriteDenied(c);
+    const result = ctx.store.configs.deleteRevision(Number(c.req.param("id")), actor.login);
+    if ("error" in result) return renderProfilesWithError(c, result.error, 400);
+    return c.redirect("/config/profiles?notice=revision-deleted", 302);
   });
 
   /**

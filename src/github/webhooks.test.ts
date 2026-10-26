@@ -1756,6 +1756,8 @@ describe("stack commands (issue #99)", () => {
     });
     expect(again.body.enqueued).toBe(false);
     expect(store.listJobs(10).filter((j) => j.job_type === "stack_review")).toHaveLength(1);
+    // The dedup path must not touch the member rows either.
+    expect(store.listStackMembers(job.id).map((m) => m.pr_number)).toEqual([41, 42]);
     const commentCountAfter = comments.length;
 
     // A redelivery of the SAME trigger comment is deduped by comment id: no
@@ -3427,5 +3429,184 @@ describe("job_skipped app-log events", () => {
       request: { event: "pull_request", deliveryId: "skip-quiet", signature: sign("s3cret", body), rawBody: body },
     });
     expect(appLogLines).toHaveLength(0);
+  });
+});
+
+describe("reviewer registration on enqueue (queue badge)", () => {
+  const secret = "s3cret";
+
+  interface BadgeCall {
+    owner: string;
+    repo: string;
+    pullNumber: number;
+    reviewers: string[];
+  }
+
+  /** Port carrying only the badge surface, optionally layered over stackGithub for command tests. */
+  function badgeGithub(base?: { github: GithubPort }) {
+    const requested: BadgeCall[] = [];
+    const github = {
+      ...(base?.github ?? {}),
+      getAppSlug: async () => "fetched-slug",
+      requestReviewers: async (input: { owner: string; repo: string; pullNumber: number; reviewers: string[] }) => {
+        requested.push({ owner: input.owner, repo: input.repo, pullNumber: input.pullNumber, reviewers: [...input.reviewers] });
+      },
+    };
+    return { github: github as unknown as GithubPort, requested };
+  }
+
+  function badgeConfig(env: Record<string, string> = {}) {
+    return loadConfig({
+      GITHUB_WEBHOOK_SECRET: secret,
+      GITHUB_APP_ID: "1",
+      GITHUB_APP_PRIVATE_KEY: "k",
+      REVIEWER_ROLES: "correctness",
+      ...env,
+    });
+  }
+
+  it("requests the bot reviewer when a job is created and the flag is on", async () => {
+    const config = badgeConfig({
+      GITHUB_APP_SLUG: "maomao",
+      GITHUB_REQUEST_REVIEWER_ON_ENQUEUE: "true",
+    });
+    const store = new JobStore(openDb(":memory:"));
+    const { github, requested } = badgeGithub();
+    const rawBody = JSON.stringify(prPayload());
+    const result = await handleGithubWebhook({
+      config,
+      store,
+      github,
+      request: { event: "pull_request", deliveryId: "b1", signature: sign(secret, rawBody), rawBody },
+    });
+    expect(result.status).toBe(202);
+    expect(result.body.created).toBe(true);
+    expect(requested).toEqual([
+      { owner: "acme", repo: "widgets", pullNumber: 7, reviewers: ["maomao[bot]"] },
+    ]);
+    const jobId = Number(result.body.jobId);
+    expect(store.listLogs(jobId).at(-1)?.message).toContain("maomao[bot]");
+
+    // A duplicate delivery never created a job — no second request either.
+    const dup = await handleGithubWebhook({
+      config,
+      store,
+      github,
+      request: { event: "pull_request", deliveryId: "b1b", signature: sign(secret, rawBody), rawBody },
+    });
+    expect(dup.body.created).toBe(false);
+    expect(requested).toHaveLength(1);
+  });
+
+  it("never requests when the flag is off", async () => {
+    const config = badgeConfig({ GITHUB_APP_SLUG: "maomao" });
+    const store = new JobStore(openDb(":memory:"));
+    const { github, requested } = badgeGithub();
+    const rawBody = JSON.stringify(prPayload());
+    await handleGithubWebhook({
+      config,
+      store,
+      github,
+      request: { event: "pull_request", deliveryId: "b2", signature: sign(secret, rawBody), rawBody },
+    });
+    expect(requested).toEqual([]);
+  });
+
+  it("keeps the enqueue green when GitHub refuses the reviewer request", async () => {
+    const config = badgeConfig({
+      GITHUB_APP_SLUG: "maomao",
+      GITHUB_REQUEST_REVIEWER_ON_ENQUEUE: "true",
+    });
+    const store = new JobStore(openDb(":memory:"));
+    const github = {
+      getAppSlug: async () => "maomao",
+      requestReviewers: async () => {
+        throw new Error("422 Validation Failed");
+      },
+    } as unknown as GithubPort;
+    const rawBody = JSON.stringify(prPayload());
+    const result = await handleGithubWebhook({
+      config,
+      store,
+      github,
+      request: { event: "pull_request", deliveryId: "b3", signature: sign(secret, rawBody), rawBody },
+    });
+    expect(result.status).toBe(202);
+    expect(result.body.created).toBe(true);
+    const last = store.listLogs(Number(result.body.jobId)).at(-1);
+    expect(last?.level).toBe("warn");
+    expect(last?.message).toContain("422 Validation Failed");
+  });
+
+  it("registers on the fresh job from an authorized @maomao review", async () => {
+    const config = badgeConfig({
+      GITHUB_APP_SLUG: "maomao",
+      GITHUB_REQUEST_REVIEWER_ON_ENQUEUE: "true",
+      REVIEWER_ROUTING: "fixed",
+      POISON_ALERT_POLICY: "manual",
+    });
+    const store = new JobStore(openDb(":memory:"));
+    const prior = store.enqueue({
+      repoFullName: "acme/widgets",
+      repoOwner: "acme",
+      repoName: "widgets",
+      installationId: 42,
+      prNumber: 42,
+      prTitle: "Stack member",
+      prBody: "",
+      prHtmlUrl: "https://github.com/acme/widgets/pull/42",
+      prAuthor: "alice",
+      baseSha: "base42",
+      headSha: "head42",
+      baseRef: "main",
+      headRef: "feat-42",
+      reviewers: [],
+      reviewMode: "verify",
+    }).job;
+    store.setJobState(prior.id, "completed");
+
+    const base = stackGithub({ pulls: { 42: resolvedStackPull(42) } });
+    const { github, requested } = badgeGithub(base);
+    const rawBody = JSON.stringify(
+      commentPayload({ comment: { ...commentPayload().comment, id: 9100, body: "@maomao review" } }),
+    );
+    const result = await handleGithubWebhook({
+      config,
+      store,
+      github,
+      request: { event: "issue_comment", deliveryId: "b4", signature: sign(secret, rawBody), rawBody },
+    });
+    expect(result.body.created).toBe(true);
+    expect(requested).toEqual([{ owner: "acme", repo: "widgets", pullNumber: 42, reviewers: ["maomao[bot]"] }]);
+  });
+
+  it("badges only the top PR of a stack trigger", async () => {
+    const config = badgeConfig({
+      GITHUB_APP_SLUG: "maomao",
+      GITHUB_REQUEST_REVIEWER_ON_ENQUEUE: "true",
+    });
+    const store = new JobStore(openDb(":memory:"));
+    store.upsertStackDeclaration({ repoFullName: "acme/widgets", stackId: "ship-it", prNumber: 41, position: 1, expectedCount: 2, actor: "alice" });
+    store.upsertStackDeclaration({ repoFullName: "acme/widgets", stackId: "ship-it", prNumber: 42, position: 2, expectedCount: 2, actor: "alice" });
+    const base = stackGithub({
+      pulls: {
+        41: resolvedStackPull(41, { baseRef: "main", headRef: "feat-a", baseSha: "m0", headSha: "h41" }),
+        42: resolvedStackPull(42, { baseRef: "feat-a", headRef: "feat-b", baseSha: "h41", headSha: "h42" }),
+      },
+    });
+    const { github, requested } = badgeGithub(base);
+    const rawBody = JSON.stringify(
+      commentPayload({ comment: { id: 9101, body: "@maomao top of stack ship-it: #41, #42", user: { login: "alice", type: "User" }, author_association: "OWNER" } }),
+    );
+    const result = await handleGithubWebhook({
+      config,
+      store,
+      github,
+      request: { event: "issue_comment", deliveryId: "b5", signature: sign(secret, rawBody), rawBody },
+    });
+    expect(result.status).toBe(200);
+    expect(result.body.enqueued).toBe(true);
+    // Exactly one badge, on the stack job's PR — the top member, not one per member.
+    expect(requested).toEqual([{ owner: "acme", repo: "widgets", pullNumber: 42, reviewers: ["maomao[bot]"] }]);
   });
 });

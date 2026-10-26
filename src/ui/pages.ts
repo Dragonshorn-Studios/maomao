@@ -1353,9 +1353,12 @@ function renderEffectiveConfigSection(entries: EffectiveConfigEntry[]): string {
   const sourceBadge = (entry: EffectiveConfigEntry): string => {
     const detail = entry.sourceDetail ? ` ${escapeHtml(entry.sourceDetail)}` : "";
     if (entry.source === "profile") return `<span class="config-source config-source-profile">Profile ${detail}</span>`;
-    if (entry.source === "environment") return `<span class="config-source">Environment</span>`;
-    if (entry.source === "stored") return `<span class="config-source">Stored</span>`;
-    return `<span class="config-source">Default</span>`;
+    // The detail belongs on every source's badge — "inherited from
+    // OPENCODE_REVIEWER_MODEL", "not in effect — overridden by profile #N",
+    // telemetry's stored note all explain a non-profile row's real origin.
+    if (entry.source === "environment") return `<span class="config-source">Environment${detail}</span>`;
+    if (entry.source === "stored") return `<span class="config-source">Stored${detail}</span>`;
+    return `<span class="config-source">Default${detail}</span>`;
   };
   /** Where an operator goes to change this value, derived from its source. */
   const changeHint = (entry: EffectiveConfigEntry): string => {
@@ -1417,6 +1420,11 @@ function profileSummary(definition: ProfileDefinition): string {
   const parts: string[] = [];
   parts.push(`${definition.reviewers.length} reviewer${definition.reviewers.length === 1 ? "" : "s"}: ${reviewers || "none"}`);
   if (definition.routerModel) parts.push(`router ${definition.routerModel}`);
+  if (definition.verifier?.model || definition.verifier?.timeoutMs) {
+    parts.push(
+      `verifier ${definition.verifier.model ?? "default model"}${definition.verifier.timeoutMs ? ` ≤ ${Math.round(definition.verifier.timeoutMs / 1000)}s` : ""}`,
+    );
+  }
   parts.push(`publish ≥ ${definition.minPublishableSeverity}`);
   if (definition.maxTotalCostUsd) parts.push(`≤ $${definition.maxTotalCostUsd}`);
   if (definition.maxTotalTokens) parts.push(`≤ ${definition.maxTotalTokens.toLocaleString("en-US")} tokens`);
@@ -1463,6 +1471,10 @@ function revisionCard(revision: ConfigRevisionView, data: ConfigPageData): strin
     actions.push(`<form method="post" action="/config/revisions/${revision.id}/rollback" class="inline-form">
       ${csrf}
       <button type="submit" class="btn-secondary">Roll back to this revision</button>
+    </form>`);
+    actions.push(`<form method="post" action="/config/revisions/${revision.id}/delete" class="inline-form">
+      ${csrf}
+      <button type="submit" class="btn-secondary">Delete</button>
     </form>`);
   }
   if (data.canWrite) {
@@ -1677,6 +1689,26 @@ export function renderProfileForm(
         ${alertRoleGroup("Observation", "alert_observation", values.alertObservation)}
         ${alertRoleGroup("Diagnosis", "alert_diagnosis", values.alertDiagnosis)}
         ${alertRoleGroup("Poison alert", "alert_poison", values.alertPoison)}
+      </fieldset>
+      <fieldset>
+        <legend>Verifier (reconciliation pass — optional)</legend>
+        <p class="hint">Re-checks prior findings against the new head before specialists run. Blank fields fall back to <code>OPENCODE_VERIFIER_MODEL</code> / <code>OPENCODE_VERIFIER_TIMEOUT_MS</code>.</p>
+        <label>Verifier model override (optional; provider/model)
+          ${modelPicker({
+            name: "verifier_model",
+            value: values.verifierModel,
+            models: options.modelCatalog,
+            emptyLabel: "— default —",
+            allowCustom: !options.catalogEnforced,
+            attrs: `${invalidAttr("verifier_model")} ${describedBy("verifier_model")}`.trim(),
+            buttonAttrs: invalidAttr("verifier_model"),
+          })}
+        </label>
+        ${err("verifier_model")}
+        <label>Verifier timeout in seconds (optional, decimals allowed)
+          <input type="number" step="any" min="0" name="verifier_timeout" value="${escapeHtml(values.verifierTimeoutSeconds)}" ${invalidAttr("verifier_timeout")} ${describedBy("verifier_timeout")}/>
+        </label>
+        ${err("verifier_timeout")}
       </fieldset>
       <fieldset>
         <legend>Publishing</legend>

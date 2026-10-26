@@ -2,6 +2,7 @@ import type { SqliteDb } from "./db.js";
 import { nowIso } from "./util.js";
 import { KNOWN_REVIEWER_ROLES } from "./prompts.js";
 import type { Config } from "./config.js";
+import { TERMINAL_JOB_STATES } from "./config.js";
 import type { Severity } from "./schema.js";
 import { severitySchema } from "./schema.js";
 import { z } from "zod";
@@ -31,6 +32,18 @@ export const profileDefinitionSchema = z
       )
       .max(PROFILE_MAX_REVIEWERS),
     routerModel: z.string().regex(/^[\w./:-]+$/).max(120).optional(),
+    /**
+     * Reconciliation verifier overrides: the pass that re-checks prior
+     * findings against the new head. Unset fields keep the env values
+     * (OPENCODE_VERIFIER_MODEL / OPENCODE_VERIFIER_TIMEOUT_MS).
+     */
+    verifier: z
+      .object({
+        model: z.string().regex(/^[\w./:-]+$/, "model must be provider/model").max(120).optional(),
+        timeoutMs: z.number().int().positive().max(PROFILE_MAX_TIMEOUT_MS).optional(),
+      })
+      .strict()
+      .optional(),
     /** Findings below this severity are not published. */
     minPublishableSeverity: severitySchema.default("info"),
     maxTotalCostUsd: z.number().positive().max(PROFILE_MAX_TOTAL_COST_USD).optional(),
@@ -130,6 +143,7 @@ export type ConfigAuditAction =
   | "retired"
   | "route_added"
   | "route_removed"
+  | "revision_deleted"
   | "role_created"
   | "role_updated"
   | "role_deleted"
@@ -287,6 +301,44 @@ export class ReviewConfigStore {
     this.db.prepare(`DELETE FROM profile_revisions WHERE id = ?`).run(id);
     this.audit("draft_discarded", actor, id, `draft ${revision.name} discarded`);
     return { ok: true };
+  }
+
+  /**
+   * Permanently removes a retired revision — the only status safe to drop:
+   * drafts go through discardDraft, an active revision must be deactivated
+   * first, and a revision still referenced by an unfinished job would leave
+   * that job resolving env fallbacks mid-run. The audit row keeps the
+   * revision id so deletion stays traceable after the row is gone.
+   */
+  deleteRevision(id: number, actor: string): { ok: true } | { error: string } {
+    const revision = this.getRevision(id);
+    if (!revision) return { error: "Revision not found." };
+    if (revision.status === "active") return { error: "Deactivate the revision before deleting it." };
+    if (revision.status === "draft") return { error: "Discard drafts instead of deleting them." };
+    const inFlight = this.unfinishedJobsOnRevision(id);
+    if (inFlight > 0) {
+      return {
+        error: `Revision #${id} still backs ${inFlight} unfinished job(s) — wait for them to finish first.`,
+      };
+    }
+    this.db.prepare(`DELETE FROM profile_revisions WHERE id = ?`).run(id);
+    this.audit("revision_deleted", actor, id, `${revision.name} revision #${id} deleted`);
+    return { ok: true };
+  }
+
+  /** Jobs not yet in a terminal state still resolving this revision (the jobs
+   * table shares this db via JobStore; a standalone store reports zero). */
+  private unfinishedJobsOnRevision(id: number): number {
+    try {
+      const row = this.db
+        .prepare(
+          `SELECT COUNT(*) AS count FROM jobs WHERE profile_revision_id = ? AND state NOT IN (${TERMINAL_JOB_STATES.map(() => "?").join(", ")})`,
+        )
+        .get(id, ...TERMINAL_JOB_STATES) as { count: number };
+      return Number(row.count);
+    } catch {
+      return 0;
+    }
   }
 
   /** Rollback re-activates a previous retired revision of the same name rather than editing history. */
@@ -582,15 +634,31 @@ export class ReviewConfigStore {
  * the value the pipeline would compute without a profile.
  */
 export function envProfileDefinition(config: Config): ProfileDefinition {
+  // Env-sourced values that would fail profile validation are omitted rather
+  // than clamped: the runtime falls back to the env value when the profile
+  // field is unset, so activating the seed stays an exact behavior no-op.
+  const catalog = new Set(config.modelCatalog);
+  const catalogModel = (model: string | undefined) =>
+    model && (catalog.size === 0 || catalog.has(model)) ? model : undefined;
   const reviewers = config.reviewers.map((role) => {
-    const model = role.model || config.opencode.reviewerModel || undefined;
+    const model = catalogModel(role.model || config.opencode.reviewerModel || undefined);
     return model ? { role: role.id, model } : { role: role.id };
   });
-  const routerModel = config.routing.model || config.opencode.reviewerModel || undefined;
+  const routerModel = catalogModel(config.routing.model || config.opencode.reviewerModel || undefined);
+  // OPENCODE_VERIFIER_TIMEOUT_MS is unbounded while the profile schema caps at
+  // PROFILE_MAX_TIMEOUT_MS — omit an out-of-cap value so the seed still
+  // validates.
+  const verifierTimeoutMs = config.opencode.verifierTimeoutMs;
   return {
     name: "default",
     reviewers,
     ...(routerModel ? { routerModel } : {}),
+    verifier: {
+      ...(catalogModel(config.opencode.verifierModel || undefined) ? { model: config.opencode.verifierModel } : {}),
+      ...(verifierTimeoutMs > 0 && verifierTimeoutMs <= PROFILE_MAX_TIMEOUT_MS
+        ? { timeoutMs: verifierTimeoutMs }
+        : {}),
+    },
     minPublishableSeverity: "info",
     onBudgetExceeded: "degrade",
   };
@@ -628,6 +696,9 @@ export function validateModelCatalog(definition: ProfileDefinition, catalog: str
   }
   if (definition.routerModel && !allowed.has(definition.routerModel)) {
     issues.push(`router model ${definition.routerModel} is not in the approved catalog`);
+  }
+  if (definition.verifier?.model && !allowed.has(definition.verifier.model)) {
+    issues.push(`verifier model ${definition.verifier.model} is not in the approved catalog`);
   }
   return issues;
 }

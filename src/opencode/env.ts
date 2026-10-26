@@ -106,3 +106,33 @@ export function reviewerPermissionConfig(): Record<string, unknown> {
     },
   };
 }
+
+/**
+ * OpenCode 2's copy of the reviewer deny-list. v2 dropped the
+ * OPENCODE_PERMISSION / OPENCODE_CONFIG_CONTENT env channel and renamed the
+ * permission actions (bash→shell, task→subagent, write/patch→edit) into a
+ * `permissions` rule list read from config files; the runner pins this as a
+ * project-level opencode.json inside the job workspace. Verified against
+ * opencode v2.1.4: the shell action (v2's execute tool) is blocked while
+ * `read`, `glob`, and `grep` keep working.
+ */
+export function reviewerPermissionsV2Config(): Record<string, unknown> {
+  const allow = (action: string) => ({ action, resource: "*", effect: "allow" });
+  const deny = (action: string) => ({ action, resource: "*", effect: "deny" });
+  return {
+    $schema: "https://opencode.ai/config.json",
+    permissions: [
+      { action: "*", resource: "*", effect: "deny" },
+      allow("read"),
+      allow("glob"),
+      allow("grep"),
+      deny("edit"),
+      deny("shell"),
+      deny("webfetch"),
+      deny("websearch"),
+      deny("subagent"),
+      deny("skill"),
+      deny("question"),
+    ],
+  };
+}

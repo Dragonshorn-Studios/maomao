@@ -408,8 +408,16 @@ button, summary {
   margin: 0;
   padding: 0;
   display: grid;
+  /* A single auto column sizes to the widest card's min-content (e.g. a
+     stack card's nowrap member rows) and stretches every card past the
+     viewport; capping the track keeps each card at the container width. */
+  grid-template-columns: minmax(0, 1fr);
   gap: 0.85rem;
 }
+/* Grid items default to min-width: auto, so a card whose contents have a
+   large min-content (nowrap member rows) would still overflow the capped
+   track — let items shrink and leave truncation to the ellipsis styles. */
+.queue > li { min-width: 0; }
 
 .specimen {
   padding: 0.85rem 1rem 0.95rem;
@@ -769,6 +777,7 @@ h1 a.pr-external { font-size: 0.72em; }
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  min-width: 0;
 }
 .member-row .state { margin-left: auto; }
 .member-meta { font-size: 0.85em; }
@@ -782,6 +791,9 @@ h1 a.pr-external { font-size: 0.72em; }
   background: var(--surface);
   border: 1px solid var(--line);
   border-radius: var(--radius);
+  /* Dense rows can't reflow (nowrap meta pieces) — confine the scroll
+     to the board instead of letting it push the page wide. */
+  overflow-x: auto;
 }
 .run-row {
   display: flex;
@@ -1383,6 +1395,16 @@ details summary { cursor: pointer; color: var(--ink-muted); }
   .appearance button { padding: 0.22rem 0.38rem; font-size: 0.68rem; }
   .meta-grid { grid-template-columns: 1fr; }
   .account-name { max-width: 8rem; }
+  /* A member row's fixed pieces (id label + state badge) already eat most
+     of a phone-width card, crushing the nowrap title to a sliver — give
+     the title a full line so it truncates readable instead. */
+  .member-row { flex-wrap: wrap; }
+  .member-row .member-title { order: -1; flex: 1 1 100%; }
+  /* Same for dense reviewer runs: the title owns line one and the role,
+     owner, mode, sha and state flow onto the following lines. */
+  .run-row { flex-wrap: wrap; }
+  .run-row .run-title { order: -1; flex: 1 1 100%; }
+  .run-board { overflow-x: visible; }
 }
 
 @media (min-resolution: 1.4dppx) {

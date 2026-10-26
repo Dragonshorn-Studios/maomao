@@ -26,6 +26,8 @@ import {
  *   reviewer_timeout_<i>   optional timeout in SECONDS (decimals allowed;
  *                          the schema stores whole milliseconds)
  *   router_model           optional provider/model
+ *   verifier_model         optional provider/model (reconciliation verifier)
+ *   verifier_timeout       optional timeout in SECONDS (decimals allowed)
  *   min_severity           severity enum value
  *   max_cost_usd           optional positive number
  *   max_tokens             optional positive integer
@@ -47,6 +49,8 @@ export interface ProfileFormValues {
   note: string;
   reviewers: ReviewerRowValues[];
   routerModel: string;
+  verifierModel: string;
+  verifierTimeoutSeconds: string;
   minSeverity: string;
   maxCostUsd: string;
   maxTokens: string;
@@ -74,6 +78,8 @@ export type ProfileFieldKey =
   | `reviewer_role_${number}`
   | `reviewer_timeout_${number}`
   | "router_model"
+  | "verifier_model"
+  | "verifier_timeout"
   | "min_severity"
   | "max_cost_usd"
   | "max_tokens"
@@ -93,6 +99,8 @@ export function initialProfileFormValues(): ProfileFormValues {
     note: "",
     reviewers: [{ role: "correctness", model: "", timeoutSeconds: "" }],
     routerModel: "",
+    verifierModel: "",
+    verifierTimeoutSeconds: "",
     minSeverity: "info",
     maxCostUsd: "",
     maxTokens: "",
@@ -139,6 +147,8 @@ export function decodeProfileForm(body: Record<string, unknown>): ProfileFormVal
     note: asString(body.note),
     reviewers,
     routerModel: asString(body.router_model).trim(),
+    verifierModel: asString(body.verifier_model).trim(),
+    verifierTimeoutSeconds: asString(body.verifier_timeout),
     minSeverity: asString(body.min_severity) || "info",
     maxCostUsd: asString(body.max_cost_usd).trim(),
     maxTokens: asString(body.max_tokens).trim(),
@@ -278,6 +288,17 @@ export function profileFormToDefinition(
   };
   const routerModel = optionalString(values.routerModel);
   if (routerModel !== undefined) definition.routerModel = routerModel;
+  const verifierModel = optionalString(values.verifierModel);
+  const verifierTimeout = timeoutToMs(values.verifierTimeoutSeconds);
+  if (verifierTimeout === "invalid") {
+    errors.verifier_timeout = "timeout must be a positive number of seconds (max 30 minutes)";
+  }
+  if (verifierModel !== undefined || (verifierTimeout !== undefined && verifierTimeout !== "invalid")) {
+    const verifier: Record<string, unknown> = {};
+    if (verifierModel !== undefined) verifier.model = verifierModel;
+    if (verifierTimeout !== undefined && verifierTimeout !== "invalid") verifier.timeoutMs = verifierTimeout;
+    definition.verifier = verifier;
+  }
   const cost = optionalPositive(values.maxCostUsd);
   if (cost === "invalid") errors.max_cost_usd = "must be a positive number";
   else if (cost !== undefined) definition.maxTotalCostUsd = cost;
@@ -336,6 +357,10 @@ function zodPathToFieldKey(path: PropertyKey[], formIndices: readonly number[]):
   const [head, index, leaf] = path as [PropertyKey, PropertyKey?, PropertyKey?];
   if (head === "name") return "name";
   if (head === "routerModel") return "router_model";
+  if (head === "verifier") {
+    if (index === "model") return "verifier_model";
+    if (index === "timeoutMs") return "verifier_timeout";
+  }
   if (head === "minPublishableSeverity") return "min_severity";
   if (head === "maxTotalCostUsd") return "max_cost_usd";
   if (head === "maxTotalTokens") return "max_tokens";
@@ -367,6 +392,7 @@ export function profileFormValuesFromDefinition(
     name?: string;
     reviewers?: Array<{ role?: string; model?: string; timeoutMs?: number }>;
     routerModel?: string;
+    verifier?: { model?: string; timeoutMs?: number };
     minPublishableSeverity?: string;
     maxTotalCostUsd?: number;
     maxTotalTokens?: number;
@@ -383,6 +409,8 @@ export function profileFormValuesFromDefinition(
         timeoutSeconds: reviewer.timeoutMs != null ? String(reviewer.timeoutMs / 1000) : "",
       })) ?? [],
     routerModel: def.routerModel ?? "",
+    verifierModel: def.verifier?.model ?? "",
+    verifierTimeoutSeconds: def.verifier?.timeoutMs != null ? String(def.verifier.timeoutMs / 1000) : "",
     minSeverity: def.minPublishableSeverity ?? "info",
     maxCostUsd: def.maxTotalCostUsd != null ? String(def.maxTotalCostUsd) : "",
     maxTokens: def.maxTotalTokens != null ? String(def.maxTotalTokens) : "",
