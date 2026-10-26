@@ -1,4 +1,5 @@
 import { Hono, type Context } from "hono";
+import { isIP } from "node:net";
 import { streamSSE } from "hono/streaming";
 import { deleteCookie, getCookie, setCookie } from "hono/cookie";
 import type { Config } from "./config.js";
@@ -163,11 +164,21 @@ const OAUTH_WINDOW_MS = 10 * 60 * 1000;
 /** Global ceilings (10x per-IP) contain distributed abuse without letting one visitor lock everyone out. */
 const OAUTH_GLOBAL_MULTIPLIER = 10;
 
-type AppEnv = { Variables: { identity?: OAuthSession } };
+type AppEnv = {
+  Variables: { identity?: OAuthSession };
+  Bindings: { incoming?: { socket: { remoteAddress?: string } } };
+};
 
-function clientKey(c: Context<AppEnv>): string {
-  const first = c.req.header("x-forwarded-for")?.split(",")[0]?.trim();
-  return first || "local";
+function clientKey(c: Context<AppEnv>, trustedHops: number): string {
+  // @hono/node-server supplies the actual IncomingMessage, never a request header.
+  const socketAddress = c.env?.incoming?.socket.remoteAddress || "local";
+  if (trustedHops === 0) return socketAddress;
+  const forwarded = c.req.header("x-forwarded-for")?.split(",").map((ip) => ip.trim());
+  // Fail closed for missing/short chains or malformed addresses.
+  if (!forwarded || forwarded.length < trustedHops || forwarded.some((ip) => !isIP(ip))) {
+    return socketAddress;
+  }
+  return forwarded[forwarded.length - trustedHops];
 }
 
 // ---- Health-scan issue creation helpers ----
@@ -418,7 +429,7 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
 
   app.get("/login/github", (c) => {
     if (!oauthOn) return c.redirect("/login", 302);
-    const ip = clientKey(c);
+    const ip = clientKey(c, ctx.config.trustProxyHops);
     if (
       !authLimiter.wouldAllow(`start:${ip}`, OAUTH_START_LIMIT, OAUTH_WINDOW_MS) ||
       !authLimiter.wouldAllow("start:global", OAUTH_START_LIMIT * OAUTH_GLOBAL_MULTIPLIER, OAUTH_WINDOW_MS)
@@ -434,7 +445,7 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
 
   app.get("/login/github/callback", async (c) => {
     if (!oauthOn) return c.redirect("/login", 302);
-    const ip = clientKey(c);
+    const ip = clientKey(c, ctx.config.trustProxyHops);
     if (
       !authLimiter.wouldAllow(`fail:${ip}`, OAUTH_FAIL_LIMIT, OAUTH_WINDOW_MS) ||
       !authLimiter.wouldAllow("fail:global", OAUTH_FAIL_LIMIT * OAUTH_GLOBAL_MULTIPLIER, OAUTH_WINDOW_MS)
