@@ -1,10 +1,12 @@
 import { createHmac } from "node:crypto";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { openDb } from "../db.js";
 import { JobStore } from "../jobs/store.js";
 import { loadConfig } from "../config.js";
 import { handleGithubWebhook, parsePullRequestPayload, shouldHandlePullRequest } from "./webhooks.js";
 import { RepoRateLimiter } from "./rate-limit.js";
+import { setAppLogSink } from "../telemetry/app-log.js";
+import { flushIngestPosts } from "../telemetry/ingest.js";
 import type { GithubPort, RepoPermission, ReviewThread } from "./client.js";
 
 function sign(secret: string, body: string): string {
@@ -3316,6 +3318,117 @@ describe("webhook delivery log", () => {
     });
     expect(dup.body.created).toBe(false);
     expect(loggedDelivery(store, "enq-2")?.result).toMatch(/^skipped: /);
+  });
+});
+
+describe("job_skipped app-log events", () => {
+  const appLogLines: string[] = [];
+  const captureAppLog = (line: string) => {
+    appLogLines.push(line);
+  };
+
+  afterEach(async () => {
+    appLogLines.length = 0;
+    setAppLogSink((line) => process.stdout.write(`${line}\n`));
+    await flushIngestPosts();
+    vi.unstubAllGlobals();
+    vi.unstubAllEnvs();
+    vi.restoreAllMocks();
+  });
+
+  function emittingStore() {
+    // Same opt-in the production store gets in src/index.ts: app logs and
+    // counters only fire from stores that carry emitJobSummaries.
+    return new JobStore(openDb(":memory:"), [], { emitJobSummaries: true });
+  }
+
+  async function pauseConfig() {
+    return loadConfig({
+      GITHUB_WEBHOOK_SECRET: "s3cret",
+      GITHUB_APP_ID: "1",
+      GITHUB_APP_PRIVATE_KEY: "k",
+      REVIEWER_ROLES: "correctness",
+    });
+  }
+
+  it("emits maomao.job_skipped with repo_pause while a timed pause is active", async () => {
+    vi.stubEnv("OPENOBSERVE_LOGS_URL", "");
+    vi.stubEnv("OPENOBSERVE_METRICS_URL", "");
+    setAppLogSink(captureAppLog);
+    const config = await pauseConfig();
+    const store = emittingStore();
+    const pause = store.createPause({ repoFullName: "acme/widgets", actor: "alice", durationMs: 60_000 });
+    const body = JSON.stringify(prPayload());
+    const result = await handleGithubWebhook({
+      config,
+      store,
+      request: { event: "pull_request", deliveryId: "skip-r1", signature: sign("s3cret", body), rawBody: body },
+    });
+    expect(result.body.ignored).toBe(true);
+    const events = appLogLines.map((line) => JSON.parse(line) as Record<string, unknown>);
+    expect(events).toContainEqual(
+      expect.objectContaining({
+        event: "maomao.job_skipped",
+        level: "warn",
+        provider: "github",
+        reason: "repo_pause",
+        repo: "acme/widgets",
+        pr: 7,
+        webhook_event: "pull_request.opened",
+        delivery_id: "skip-r1",
+        expires_at: pause.expires_at,
+      }),
+    );
+  });
+
+  it("emits maomao.job_skipped with global_pause and merged reasons", async () => {
+    vi.stubEnv("OPENOBSERVE_LOGS_URL", "");
+    vi.stubEnv("OPENOBSERVE_METRICS_URL", "");
+    setAppLogSink(captureAppLog);
+    const config = await pauseConfig();
+    const store = emittingStore();
+    store.setGlobalPause("alice");
+    const body = JSON.stringify(prPayload());
+    await handleGithubWebhook({
+      config,
+      store,
+      request: { event: "pull_request", deliveryId: "skip-g1", signature: sign("s3cret", body), rawBody: body },
+    });
+
+    // A merged pull's late push skips with the merged reason.
+    store.endGlobalPause("alice");
+    store.markPullMerged("acme/widgets", 7, "merge-marker");
+    const mergedBody = JSON.stringify(
+      prPayload({ action: "synchronize", pull_request: { ...prPayload().pull_request, head: { sha: "late-push", ref: "feature" } } }),
+    );
+    await handleGithubWebhook({
+      config,
+      store,
+      request: { event: "pull_request", deliveryId: "skip-m1", signature: sign("s3cret", mergedBody), rawBody: mergedBody },
+    });
+
+    const events = appLogLines.map((line) => JSON.parse(line) as Record<string, unknown>);
+    const reasons = events
+      .filter((e) => e.event === "maomao.job_skipped")
+      .map((e) => e.reason);
+    expect(reasons).toEqual(["global_pause", "merged"]);
+    expect(events.filter((e) => e.event === "maomao.job_skipped")[0]).toMatchObject({ delivery_id: "skip-g1" });
+  });
+
+  it("stays silent on stores without the emitJobSummaries opt-in", async () => {
+    vi.stubEnv("OPENOBSERVE_LOGS_URL", "");
+    vi.stubEnv("OPENOBSERVE_METRICS_URL", "");
+    setAppLogSink(captureAppLog);
+    const config = await pauseConfig();
+    const store = new JobStore(openDb(":memory:"));
+    store.setGlobalPause("alice");
+    const body = JSON.stringify(prPayload());
+    await handleGithubWebhook({
+      config,
+      store,
+      request: { event: "pull_request", deliveryId: "skip-quiet", signature: sign("s3cret", body), rawBody: body },
+    });
+    expect(appLogLines).toHaveLength(0);
   });
 });
 

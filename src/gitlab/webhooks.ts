@@ -186,21 +186,57 @@ function enqueueMergeRequestJob(input: {
   const { store, config, connection, payload } = input;
   const scope = { provider: "gitlab", instance: connection.instance.hostname };
   // Instance-wide review pause: same gate as the GitHub path — automatic
-  // merge-request deliveries enqueue nothing while the switch is on.
+  // merge-request deliveries enqueue nothing while the switch is on. The skip
+  // is emitted as a structured `maomao.job_skipped` line + counter point (the
+  // GitHub path's logJobSkipped lives in github/webhooks.ts; this is the
+  // provider-tagged GitLab twin).
   const globalPause = store.getGlobalPause();
   if (globalPause) {
     store.claimWebhookDelivery(input.deliveryId, input.event, "paused (global)", {
       provider: "gitlab",
       instance: connection.instance.hostname,
     });
+    store.appLog("job_skipped", {
+      level: "warn",
+      provider: "gitlab",
+      instance: connection.instance.hostname,
+      reason: "global_pause",
+      repo: payload.projectPath,
+      pr: payload.mrIid,
+      webhook_event: input.event,
+      delivery_id: input.deliveryId || null,
+    });
+    store.appCounter("maomao.webhook.skips", { provider: "gitlab", reason: "global_pause" });
     return ignored("reviews paused globally");
   }
   if (store.hasMergedPull(payload.projectPath, payload.mrIid, scope)) {
+    store.appLog("job_skipped", {
+      level: "warn",
+      provider: "gitlab",
+      instance: connection.instance.hostname,
+      reason: "merged",
+      repo: payload.projectPath,
+      pr: payload.mrIid,
+      webhook_event: input.event,
+      delivery_id: input.deliveryId || null,
+    });
+    store.appCounter("maomao.webhook.skips", { provider: "gitlab", reason: "merged" });
     return ignored("merge request already merged; not enqueueing");
   }
   const rateOn = config.repoRateLimitPerWindow > 0 && config.repoRateWindowMs > 0;
   const rateKey = `gitlab:${connection.instance.hostname}:${payload.projectId}`;
   if (rateOn && input.rateLimiter && !input.rateLimiter.wouldAllowKey(rateKey, config.repoRateLimitPerWindow, config.repoRateWindowMs)) {
+    store.appLog("job_skipped", {
+      level: "warn",
+      provider: "gitlab",
+      instance: connection.instance.hostname,
+      reason: "rate_limited",
+      repo: payload.projectPath,
+      pr: payload.mrIid,
+      webhook_event: input.event,
+      delivery_id: input.deliveryId || null,
+    });
+    store.appCounter("maomao.webhook.skips", { provider: "gitlab", reason: "rate_limited" });
     return ignored("rate limited");
   }
   const enqueue = enqueuePullJob(store, config, {
