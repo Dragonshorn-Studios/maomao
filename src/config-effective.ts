@@ -339,6 +339,12 @@ export function effectiveConfigEntries(
     boolLabel(config.reviewAllowRequestChanges),
   );
   row("Publishing", "Post empty reviews", "POST_EMPTY_REVIEW", boolLabel(config.postEmptyReview));
+  row(
+    "Publishing",
+    "Register as reviewer on enqueue",
+    "GITHUB_REQUEST_REVIEWER_ON_ENQUEUE",
+    boolLabel(config.requestReviewerOnEnqueue),
+  );
   row("Publishing", "Review drafts", "REVIEW_DRAFTS", boolLabel(config.reviewDrafts));
   row("Telemetry", "Job summaries (stdout/OpenObserve)", "JOB_SUMMARIES", boolLabel(config.jobSummaries));
   row(

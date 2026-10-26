@@ -15,6 +15,7 @@ import { ChatBudgetError } from "./chat/service.js";
 import type { ManualTriggerPort, GithubPort } from "./github/client.js";
 import type { OpenCodePort } from "./opencode/parse.js";
 import { authorizeGithubAccount, authorizeGithubRepository, authorizeGithubTarget, logAuthorizationRejection, logRateLimited, rejectUnauthorized } from "./github/authorize.js";
+import { registerQueuedReviewer } from "./github/reviewer-request.js";
 import { repoRateLimitActive, RepoRateLimiter, WindowRateLimiter } from "./github/rate-limit.js";
 import { parseGithubPullUrl, PullUrlError } from "./github/pull-url.js";
 import { dispatchEnqueue, enqueuePullJob } from "./jobs/enqueue.js";
@@ -808,7 +809,17 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
       if (enqueue.created && rateOn && resolvedRepoId != null) {
         rateLimiter.record(resolvedRepoId, ctx.config.repoRateLimitPerWindow, ctx.config.repoRateWindowMs);
       }
+      // Dispatch before the badge: the review must enter the queue without
+      // waiting on GitHub's reviewer API (the badge is best-effort).
       dispatchEnqueue(ctx.queue, enqueue);
+      if (enqueue.created && ctx.github) {
+        await registerQueuedReviewer({
+          github: ctx.github,
+          config: ctx.config,
+          store: ctx.store,
+          job: enqueue.job,
+        });
+      }
       const notice = enqueue.created ? "queued" : "exists";
       return c.redirect(`/jobs/${enqueue.job.id}?notice=${notice}`, 302);
     } catch (error) {

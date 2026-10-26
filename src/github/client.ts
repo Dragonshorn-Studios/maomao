@@ -182,6 +182,16 @@ export interface GithubPort {
     pullNumber: number;
     body: string;
   }): Promise<{ id: string; url: string }>;
+  /** App slug for the bot login (`<slug>[bot]`); env GITHUB_APP_SLUG wins when set. */
+  getAppSlug?(): Promise<string>;
+  /** Request reviewers on a pull request (opt-in queue badge; needs Pull requests write). */
+  requestReviewers?(input: {
+    installationId: number;
+    owner: string;
+    repo: string;
+    pullNumber: number;
+    reviewers: string[];
+  }): Promise<void>;
   updateIssueComment?(input: {
     installationId: number;
     owner: string;
@@ -264,6 +274,14 @@ function toResolvedPull(
 }
 
 export class GithubClient implements GithubPort, ManualTriggerPort {
+  /**
+   * Cached app-slug lookup from `GET /app` — the promise is cached (not the
+   * value) so concurrent first callers share one request, and a failure
+   * clears it so the next call retries. Resolved once, reused for every
+   * bot login.
+   */
+  private appSlugPromise: Promise<string> | null = null;
+
   constructor(private readonly config: Config) {}
 
   private appOctokit(): Octokit {
@@ -636,6 +654,42 @@ export class GithubClient implements GithubPort, ManualTriggerPort {
       body: input.body,
     });
     return { id: String(response.data.id), url: response.data.html_url ?? "" };
+  }
+
+  async getAppSlug(): Promise<string> {
+    if (this.config.github.appSlug) return this.config.github.appSlug;
+    if (!this.appSlugPromise) {
+      const promise = this.appOctokit()
+        .rest.apps.getAuthenticated()
+        .then((response) => {
+          const slug = response.data?.slug ?? "";
+          if (!slug) throw new Error("GitHub App lookup returned no slug; set GITHUB_APP_SLUG");
+          return slug;
+        });
+      // A failed lookup must not latch: clear so the next call retries. The
+      // handler also marks the rejection handled for the stored promise.
+      promise.catch(() => {
+        this.appSlugPromise = null;
+      });
+      this.appSlugPromise = promise;
+    }
+    return this.appSlugPromise;
+  }
+
+  async requestReviewers(input: {
+    installationId: number;
+    owner: string;
+    repo: string;
+    pullNumber: number;
+    reviewers: string[];
+  }): Promise<void> {
+    const octokit = this.installationOctokit(input.installationId);
+    await octokit.rest.pulls.requestReviewers({
+      owner: input.owner,
+      repo: input.repo,
+      pull_number: input.pullNumber,
+      reviewers: input.reviewers,
+    });
   }
 
   async updateIssueComment(input: {

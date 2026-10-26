@@ -94,6 +94,8 @@ export interface Config {
   jobSummaries: boolean;
   reviewDrafts: boolean;
   postEmptyReview: boolean;
+  /** Opt-in: request the App bot as a PR reviewer at enqueue time (queue badge). */
+  requestReviewerOnEnqueue: boolean;
   pullRequestActions: PullRequestAction[];
   maxInlineComments: number;
   reconcileMinConfidence: number;
@@ -320,6 +322,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     jobSummaries: parseBoolean(env.JOB_SUMMARIES, true),
     reviewDrafts: parseBoolean(env.REVIEW_DRAFTS, false),
     postEmptyReview: parseBoolean(env.POST_EMPTY_REVIEW, false),
+    requestReviewerOnEnqueue: parseBoolean(env.GITHUB_REQUEST_REVIEWER_ON_ENQUEUE, false),
     pullRequestActions,
     maxInlineComments: Math.max(0, parseInteger(env.MAX_INLINE_COMMENTS, 12)),
     reconcileMinConfidence: clamp01(env.RECONCILE_MIN_CONFIDENCE, 0.7),

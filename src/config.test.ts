@@ -97,6 +97,12 @@ describe("loadConfig", () => {
     expect(loadConfig({ GITHUB_ISSUE_CREATION_ENABLED: "false" }).issueCreationEnabled).toBe(false);
   });
 
+  it("registers the queue-badge reviewer only when explicitly configured", () => {
+    expect(loadConfig({ GITHUB_REQUEST_REVIEWER_ON_ENQUEUE: "true" }).requestReviewerOnEnqueue).toBe(true);
+    expect(loadConfig({ GITHUB_REQUEST_REVIEWER_ON_ENQUEUE: "false" }).requestReviewerOnEnqueue).toBe(false);
+    expect(loadConfig({}).requestReviewerOnEnqueue).toBe(false);
+  });
+
   it("parses numeric GitHub allowlists and defense-in-depth limits", () => {
     const config = loadConfig({
       ALLOWED_GITHUB_ACCOUNT_IDS: "1001, 2002, 1001",
