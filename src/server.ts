@@ -1,4 +1,5 @@
 import { Hono, type Context } from "hono";
+import { getConnInfo } from "@hono/node-server/conninfo";
 import { streamSSE } from "hono/streaming";
 import { deleteCookie, getCookie, setCookie } from "hono/cookie";
 import type { Config } from "./config.js";
@@ -165,9 +166,28 @@ const OAUTH_GLOBAL_MULTIPLIER = 10;
 
 type AppEnv = { Variables: { identity?: OAuthSession } };
 
-function clientKey(c: Context<AppEnv>): string {
-  const first = c.req.header("x-forwarded-for")?.split(",")[0]?.trim();
-  return first || "local";
+/**
+ * Rate-limit identity for the OAuth login endpoints. `X-Forwarded-For` is a
+ * client-supplied header, so it is only consulted when the operator declares
+ * a trusted proxy (`TRUST_PROXY`); otherwise the socket peer keys the bucket
+ * and a spoofed header buys nothing. The conninfo binding only exists under
+ * @hono/node-server — direct `app.request` calls (tests) fall to "local".
+ */
+function clientKey(c: Context<AppEnv>, trustProxy: boolean): string {
+  if (trustProxy) {
+    const first = c.req.header("x-forwarded-for")?.split(",")[0]?.trim();
+    if (first) return first;
+  }
+  try {
+    return getConnInfo(c).remote.address || "local";
+  } catch {
+    return "local";
+  }
+}
+
+/** `X-Forwarded-Proto` is trusted only behind an operator-declared proxy. */
+function forwardedProto(c: Context, trustProxy: boolean): string | undefined {
+  return trustProxy ? c.req.header("x-forwarded-proto") : undefined;
 }
 
 // ---- Health-scan issue creation helpers ----
@@ -275,11 +295,11 @@ function scanIssueSelection(store: JobStore, job: JobRow, fingerprints: string[]
   return { selected, unknown };
 }
 
-function setSessionCookie(c: Context<AppEnv>, value: string): void {
+function setSessionCookie(c: Context<AppEnv>, value: string, trustProxy: boolean): void {
   setCookie(c, SESSION_COOKIE, value, {
     httpOnly: true,
     sameSite: "Lax",
-    secure: cookieSecure(c.req.url, c.req.header("x-forwarded-proto")),
+    secure: cookieSecure(c.req.url, forwardedProto(c, trustProxy)),
     path: "/",
     maxAge: Math.floor(SESSION_TTL_MS / 1000),
   });
@@ -363,7 +383,7 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
             ...loginPageOpts,
             error: "csrf",
             nextPath: safeNextPath(bodyNext ?? c.req.query("next")),
-            csrfToken: passwordLoginOn ? ensureCsrfToken(c, ctx.config.uiSessionSecret) : undefined,
+            csrfToken: passwordLoginOn ? ensureCsrfToken(c, ctx.config.uiSessionSecret, ctx.config.trustProxy) : undefined,
           }),
           403,
         );
@@ -384,7 +404,7 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
       renderLogin({
         ...loginPageOpts,
         nextPath,
-        csrfToken: passwordLoginOn ? ensureCsrfToken(c, ctx.config.uiSessionSecret) : undefined,
+        csrfToken: passwordLoginOn ? ensureCsrfToken(c, ctx.config.uiSessionSecret, ctx.config.trustProxy) : undefined,
       }),
     );
   });
@@ -406,19 +426,19 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
           ...loginPageOpts,
           error: "invalid",
           nextPath,
-          csrfToken: ensureCsrfToken(c, ctx.config.uiSessionSecret),
+          csrfToken: ensureCsrfToken(c, ctx.config.uiSessionSecret, ctx.config.trustProxy),
         }),
         401,
       );
     }
     console.log("auth: password login");
-    setSessionCookie(c, signSession(ctx.config.uiSessionSecret));
+    setSessionCookie(c, signSession(ctx.config.uiSessionSecret), ctx.config.trustProxy);
     return c.redirect(nextPath, 302);
   });
 
   app.get("/login/github", (c) => {
     if (!oauthOn) return c.redirect("/login", 302);
-    const ip = clientKey(c);
+    const ip = clientKey(c, ctx.config.trustProxy);
     if (
       !authLimiter.wouldAllow(`start:${ip}`, OAUTH_START_LIMIT, OAUTH_WINDOW_MS) ||
       !authLimiter.wouldAllow("start:global", OAUTH_START_LIMIT * OAUTH_GLOBAL_MULTIPLIER, OAUTH_WINDOW_MS)
@@ -434,7 +454,7 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
 
   app.get("/login/github/callback", async (c) => {
     if (!oauthOn) return c.redirect("/login", 302);
-    const ip = clientKey(c);
+    const ip = clientKey(c, ctx.config.trustProxy);
     if (
       !authLimiter.wouldAllow(`fail:${ip}`, OAUTH_FAIL_LIMIT, OAUTH_WINDOW_MS) ||
       !authLimiter.wouldAllow("fail:global", OAUTH_FAIL_LIMIT * OAUTH_GLOBAL_MULTIPLIER, OAUTH_WINDOW_MS)
@@ -477,6 +497,7 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
     setSessionCookie(
       c,
       signOAuthSession(ctx.config.uiSessionSecret, { id: user.id, login: user.login, avatarUrl: user.avatarUrl }),
+      ctx.config.trustProxy,
     );
     console.log(`auth: oauth login id=${user.id} login=${user.login}`);
     return c.redirect(safeNextPath(next), 302);
@@ -514,7 +535,7 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
             showLogout: gateOn && authed,
             identity,
             // Public probes must not mint CSRF cookies; reuse an existing session's token.
-            csrfToken: gateOn && authed ? ensureCsrfToken(c, ctx.config.uiSessionSecret) : undefined,
+            csrfToken: gateOn && authed ? ensureCsrfToken(c, ctx.config.uiSessionSecret, ctx.config.trustProxy) : undefined,
           },
         }),
       );
@@ -680,7 +701,7 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
   app.post("/reviews", async (c) => {
     const body = await c.req.parseBody();
     const rawUrl = typeof body.url === "string" ? body.url : "";
-    const csrfToken = gateOn ? ensureCsrfToken(c, ctx.config.uiSessionSecret) : undefined;
+    const csrfToken = gateOn ? ensureCsrfToken(c, ctx.config.uiSessionSecret, ctx.config.trustProxy) : undefined;
     const identity = c.get("identity");
     const homePage = ctx.store.listJobsPage({});
     const home = (extra: { error?: string; notice?: string; reviewUrl?: string } = {}) =>
@@ -870,7 +891,7 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
       renderHome(page.jobs, ctx.store, {
         ...pageOpts,
         identity: c.get("identity"),
-        csrfToken: gateOn ? ensureCsrfToken(c, ctx.config.uiSessionSecret) : undefined,
+        csrfToken: gateOn ? ensureCsrfToken(c, ctx.config.uiSessionSecret, ctx.config.trustProxy) : undefined,
         notice: noticeText(c.req.query("notice")) ?? staleCursorNotice,
         error: c.req.query("error") || undefined,
         pagination: { hasOlder: page.hasOlder, hasNewer: page.hasNewer },
@@ -900,7 +921,7 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
       renderReviewerBoard(board.rows, {
         ...pageOpts,
         identity: c.get("identity"),
-        csrfToken: gateOn ? ensureCsrfToken(c, ctx.config.uiSessionSecret) : undefined,
+        csrfToken: gateOn ? ensureCsrfToken(c, ctx.config.uiSessionSecret, ctx.config.trustProxy) : undefined,
         runFilters: { state },
         runPagination: { page, pageSize, total: board.total },
       }),
@@ -1040,7 +1061,7 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
         options: {
           ...pageOpts,
           identity: c.get("identity"),
-          csrfToken: gateOn ? ensureCsrfToken(c, ctx.config.uiSessionSecret) : undefined,
+          csrfToken: gateOn ? ensureCsrfToken(c, ctx.config.uiSessionSecret, ctx.config.trustProxy) : undefined,
           notice: chatNoticeText(c.req.query("notice")),
           error: chatErrorText(c.req.query("error"), ctx.config.chat),
         },
@@ -1060,7 +1081,7 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
       renderJob(job, ctx.store.listReviewerRuns(id), ctx.store.listLogs(id), {
         ...pageOpts,
         identity: c.get("identity"),
-        csrfToken: gateOn ? ensureCsrfToken(c, ctx.config.uiSessionSecret) : undefined,
+        csrfToken: gateOn ? ensureCsrfToken(c, ctx.config.uiSessionSecret, ctx.config.trustProxy) : undefined,
         prHeadSha: latest?.head_sha ?? job.head_sha,
         chatEnabled: ctx.config.chat.enabled && ctx.chat != null,
         notice: noticeText(c.req.query("notice"), job.repo_full_name, job.pr_number, job.head_sha),
@@ -1173,7 +1194,7 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
     profileRoutes: ctx.store.configs.listProfileRoutes(),
     audit: [],
     canWrite: opts.canWrite ?? gateOn,
-    csrfToken: gateOn ? ensureCsrfToken(c, ctx.config.uiSessionSecret) : undefined,
+    csrfToken: gateOn ? ensureCsrfToken(c, ctx.config.uiSessionSecret, ctx.config.trustProxy) : undefined,
     notice: opts.notice,
     error: opts.error,
     profileEditor: { ...profileEditorBase(), ...(opts.form ? { form: opts.form } : {}) },
@@ -1197,7 +1218,7 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
     return c.html(
       renderConnectionsPage({
         connections: rows,
-        csrfToken: gateOn ? ensureCsrfToken(c, ctx.config.uiSessionSecret) : undefined,
+        csrfToken: gateOn ? ensureCsrfToken(c, ctx.config.uiSessionSecret, ctx.config.trustProxy) : undefined,
         options: {
           ...pageOpts,
           identity: c.get("identity"),
@@ -1306,7 +1327,7 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
     c.html(
       renderProvidersPage({
         providers: providerCreds().list(),
-        csrfToken: gateOn ? ensureCsrfToken(c, ctx.config.uiSessionSecret) : undefined,
+        csrfToken: gateOn ? ensureCsrfToken(c, ctx.config.uiSessionSecret, ctx.config.trustProxy) : undefined,
         canWrite: gateOn,
         modelCatalog: mergedModelCatalog(),
         modelsFetchedAt: ctx.modelDiscovery?.snapshot().fetchedAt,
@@ -1460,7 +1481,7 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
       renderTelemetryPage({
         channels: telemetrySettings().status(telemetryEnv()),
         shared: telemetrySettings().sharedStatus(telemetryEnv()),
-        csrfToken: gateOn ? ensureCsrfToken(c, ctx.config.uiSessionSecret) : undefined,
+        csrfToken: gateOn ? ensureCsrfToken(c, ctx.config.uiSessionSecret, ctx.config.trustProxy) : undefined,
         canWrite: gateOn,
         probeResults: extra.probeResults,
         options: { ...pageOpts, identity: c.get("identity"), notice: extra.notice, error: extra.error },
@@ -1849,7 +1870,7 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
         revision,
         identity: c.get("identity"),
         canWrite: gateOn,
-        csrfToken: ensureCsrfToken(c, ctx.config.uiSessionSecret),
+        csrfToken: ensureCsrfToken(c, ctx.config.uiSessionSecret, ctx.config.trustProxy),
         notice: c.req.query("notice") ?? undefined,
         profileEditor: profileEditorBase(),
       }),
@@ -2035,7 +2056,7 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
             revision: existing,
             identity: c.get("identity"),
             canWrite: gateOn,
-            csrfToken: ensureCsrfToken(c, ctx.config.uiSessionSecret),
+            csrfToken: ensureCsrfToken(c, ctx.config.uiSessionSecret, ctx.config.trustProxy),
             error: form.errors.form,
             profileEditor: profileEditorBase(),
             form,
@@ -2049,7 +2070,7 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
               revision: existing,
               identity: c.get("identity"),
               canWrite: gateOn,
-              csrfToken: ensureCsrfToken(c, ctx.config.uiSessionSecret),
+              csrfToken: ensureCsrfToken(c, ctx.config.uiSessionSecret, ctx.config.trustProxy),
               notice: opts.notice,
               error: opts.error,
               profileEditor: profileEditorBase(),
@@ -2354,7 +2375,7 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
     roleModelCatalog: profileEditorBase().modelCatalog,
     roleCatalogEnforced: ctx.config.modelCatalog.length > 0,
     canWrite: opts.canWrite ?? gateOn,
-    csrfToken: gateOn ? ensureCsrfToken(c, ctx.config.uiSessionSecret) : undefined,
+    csrfToken: gateOn ? ensureCsrfToken(c, ctx.config.uiSessionSecret, ctx.config.trustProxy) : undefined,
     notice: opts.notice,
     error: opts.error,
     roleForm: opts.roleForm,
@@ -2555,7 +2576,7 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
     return {
       canScan: Boolean(c.get("identity")),
       identity: c.get("identity"),
-      csrfToken: gateOn ? ensureCsrfToken(c, ctx.config.uiSessionSecret) : undefined,
+      csrfToken: gateOn ? ensureCsrfToken(c, ctx.config.uiSessionSecret, ctx.config.trustProxy) : undefined,
       issueCreationEnabled: ctx.config.issueCreationEnabled,
       profileRevision: profileRevision ? { id: profileRevision.id, name: profileRevision.name } : null,
       recentScans,
@@ -2703,7 +2724,7 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
         return c.html(
           renderScanConfirmPage({
             identity: c.get("identity"),
-            csrfToken: ensureCsrfToken(c, ctx.config.uiSessionSecret),
+            csrfToken: ensureCsrfToken(c, ctx.config.uiSessionSecret, ctx.config.trustProxy),
             repo: `${parsed.owner}/${parsed.repo}`,
             branch: head.defaultBranch,
             sha: head.headSha,
@@ -2766,7 +2787,7 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
     return {
       canBrief: Boolean(c.get("identity")),
       identity: c.get("identity"),
-      csrfToken: gateOn ? ensureCsrfToken(c, ctx.config.uiSessionSecret) : undefined,
+      csrfToken: gateOn ? ensureCsrfToken(c, ctx.config.uiSessionSecret, ctx.config.trustProxy) : undefined,
       recentBriefs,
       model: ctx.config.chat.model || ctx.config.opencode.reviewerModel,
       timeoutMs: ctx.config.chat.timeoutMs,
@@ -2908,7 +2929,7 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
         return c.html(
           renderBriefConfirmPage({
             identity: c.get("identity"),
-            csrfToken: ensureCsrfToken(c, ctx.config.uiSessionSecret),
+            csrfToken: ensureCsrfToken(c, ctx.config.uiSessionSecret, ctx.config.trustProxy),
             repo: `${parsed.owner}/${parsed.repo}`,
             ref: refLabel,
             sha: resolvedSha,
@@ -2968,7 +2989,7 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
         payload,
         sectionIndex,
         identity: c.get("identity"),
-        csrfToken: gateOn ? ensureCsrfToken(c, ctx.config.uiSessionSecret) : undefined,
+        csrfToken: gateOn ? ensureCsrfToken(c, ctx.config.uiSessionSecret, ctx.config.trustProxy) : undefined,
       }),
     );
   });
@@ -2979,7 +3000,7 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
   ): PausePageData => ({
     canOperate: Boolean(configActor(c)),
     identity: c.get("identity"),
-    csrfToken: ensureCsrfToken(c, ctx.config.uiSessionSecret),
+    csrfToken: ensureCsrfToken(c, ctx.config.uiSessionSecret, ctx.config.trustProxy),
     pauses: ctx.store.listActivePauses().map((pause) => ({
       id: pause.id,
       repoFullName: pause.repo_full_name,
@@ -3265,7 +3286,7 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
     return c.html(
       renderScanIssuePreviewPage({
         identity: c.get("identity"),
-        csrfToken: ensureCsrfToken(c, ctx.config.uiSessionSecret),
+        csrfToken: ensureCsrfToken(c, ctx.config.uiSessionSecret, ctx.config.trustProxy),
         job: { id: job.id, repoFullName: job.repo_full_name, headSha: job.head_sha },
         items,
         rejected,
@@ -3623,14 +3644,14 @@ function noticeText(
 }
 
 // Reuses a still-valid token instead of rotating: per-request rotation would 403 forms open in other tabs.
-function ensureCsrfToken(c: Context, secret: string): string {
+function ensureCsrfToken(c: Context, secret: string, trustProxy: boolean): string {
   const existing = getCookie(c, CSRF_COOKIE);
   if (existing && verifyCsrfToken(secret, existing)) return existing;
   const token = issueCsrfToken(secret);
   setCookie(c, CSRF_COOKIE, token, {
     httpOnly: true,
     sameSite: "Lax",
-    secure: cookieSecure(c.req.url, c.req.header("x-forwarded-proto")),
+    secure: cookieSecure(c.req.url, forwardedProto(c, trustProxy)),
     path: "/",
     maxAge: Math.floor(CSRF_TTL_MS / 1000),
   });
@@ -3672,7 +3693,7 @@ function renderJobError(
     renderJob(job, ctx.store.listReviewerRuns(job.id), ctx.store.listLogs(job.id), {
       ...pageOpts,
       identity: c.get("identity"),
-      csrfToken: pageOpts.showLogout ? ensureCsrfToken(c, ctx.config.uiSessionSecret) : undefined,
+      csrfToken: pageOpts.showLogout ? ensureCsrfToken(c, ctx.config.uiSessionSecret, ctx.config.trustProxy) : undefined,
       prHeadSha: latest?.head_sha ?? job.head_sha,
       error,
       prFindings: ctx.store.listFindings(job.repo_full_name, job.pr_number, {
@@ -3723,7 +3744,7 @@ function renderCancelConfirm(c: Context<AppEnv>, ctx: ServerContext, pageOpts: P
   return c.html(
     renderCancelConfirmPage({
       identity: c.get("identity"),
-      csrfToken: pageOpts.showLogout ? ensureCsrfToken(c, ctx.config.uiSessionSecret) : undefined,
+      csrfToken: pageOpts.showLogout ? ensureCsrfToken(c, ctx.config.uiSessionSecret, ctx.config.trustProxy) : undefined,
       showLogout: pageOpts.showLogout,
       job: {
         id: job.id,

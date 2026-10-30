@@ -983,6 +983,44 @@ describe("oauth operator login", () => {
     warn.mockRestore();
   });
 
+  it("does not let a spoofed X-Forwarded-For evade the callback failure limit", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const { app } = testApp(oauthEnv, undefined, mockOauthFetch({ id: 1001, login: "octocat" }));
+    for (let i = 0; i < 10; i += 1) {
+      const res = await app.request(`/login/github/callback?code=good-code&state=bogus`, {
+        headers: { "x-forwarded-for": `10.0.0.${i}` },
+      });
+      expect(res.status).toBe(403);
+    }
+    // Each request carried a distinct header, yet all consumed one bucket —
+    // a fresh forged IP must not reset the budget.
+    const blocked = await app.request(`/login/github/callback?code=good-code&state=bogus`, {
+      headers: { "x-forwarded-for": "10.99.99.99" },
+    });
+    expect(blocked.status).toBe(429);
+    warn.mockRestore();
+  });
+
+  it("keys the callback failure limit on X-Forwarded-For only when TRUST_PROXY is set", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const { app } = testApp(
+      { ...oauthEnv, TRUST_PROXY: "true" },
+      undefined,
+      mockOauthFetch({ id: 1001, login: "octocat" }),
+    );
+    const failing = (ip: string) =>
+      app.request(`/login/github/callback?code=good-code&state=bogus`, {
+        headers: { "x-forwarded-for": ip },
+      });
+    for (let i = 0; i < 10; i += 1) {
+      expect((await failing("10.0.0.1")).status).toBe(403);
+    }
+    // A different forwarded client still has budget while the spent one is capped.
+    expect((await failing("10.0.0.2")).status).toBe(403);
+    expect((await failing("10.0.0.1")).status).toBe(429);
+    warn.mockRestore();
+  });
+
   it("revokes live sessions as soon as the id leaves the allowlist", async () => {
     const { app } = testApp(oauthEnv, undefined, mockOauthFetch({ id: 1001, login: "octocat" }));
     const start = await app.request("/login/github");

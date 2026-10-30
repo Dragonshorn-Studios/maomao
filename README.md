@@ -476,7 +476,7 @@ UI_SESSION_SECRET=a-long-random-string   # e.g. openssl rand -hex 32
 
 Aliases: `MAOMAO_UI_PASSWORD`, `MAOMAO_UI_SESSION_SECRET`. Setting `UI_PASSWORD` without `UI_SESSION_SECRET` is a startup error (`UI_SESSION_SECRET` alone is accepted, but without OAuth **or** `UI_PASSWORD` the gate stays off and the UI is open).
 
-With the password gate on, GET/POST `/login` issues an **HttpOnly**, **SameSite=Lax** cookie (`maomao_session`), signed with `UI_SESSION_SECRET`. The cookie is **Secure** when the request is HTTPS (including `X-Forwarded-Proto: https`). Unauthenticated HTML pages redirect to `/login`; `/api/*` and `/events` return 401. `/webhooks/github`, `/health`, and `/assets/maomao.css` stay public (no cookie).
+With the password gate on, GET/POST `/login` issues an **HttpOnly**, **SameSite=Lax** cookie (`maomao_session`), signed with `UI_SESSION_SECRET`. The cookie is **Secure** when the request is HTTPS (or `X-Forwarded-Proto: https` when `TRUST_PROXY` is set — see below). Unauthenticated HTML pages redirect to `/login`; `/api/*` and `/events` return 401. `/webhooks/github`, `/health`, and `/assets/maomao.css` stay public (no cookie).
 
 **CSRF protection.** While the gate is on, every `POST` request except the GitHub webhook must carry a valid CSRF token — today that is every UI form (`POST /login`, `/logout`, `/reviews`, `/scan`, `/scan/issues/*`, `/brief`, `/config/*`, and the job retry forms). The token is a signed double-submit cookie (`maomao_csrf`, HttpOnly, SameSite=Lax, Secure on HTTPS — same as the session cookie, signed with `UI_SESSION_SECRET`, valid for 7 days) whose value must also be present in the form's hidden `csrf_token` field. Requests without a matching, unexpired token are rejected with 403 and logged. A page load issues a new token only when the cookie is missing or expired; otherwise the existing token is reused, so several tabs or a stale form can share one token. The GitHub webhook is exempt — it is authenticated by its own `x-hub-signature-256` signature. When the gate is off (local development), no tokens are issued or enforced.
 
@@ -501,12 +501,14 @@ Behavior and boundaries:
 - The flow is GitHub's authorization-code flow with a short-lived, single-use `state` (10 minutes, in-process) as a confidential client: the state plus the exact registered callback carry the CSRF/code-injection role, and the client secret authenticates the exchange. GitHub has supported PKCE (S256) since 2025-07; adding it would be defense-in-depth.
 - Authorization uses **stable numeric GitHub user ids only** (`MAOMAO_ADMIN_GITHUB_IDS`). The `login` and avatar shown in the header are display-only and never used as an authorization key.
 - The allowlist is re-checked on **every request**, so removing an id revokes live sessions immediately, and the login flow re-checks it before issuing a session. Denials are logged with the numeric id and login but never tokens or secrets.
-- Login always issues a fresh session value (no session fixation), logout invalidates the cookie, and login/callback endpoints are rate-limited (30 starts / 10 callback failures per 10 minutes).
+- Login always issues a fresh session value (no session fixation), logout invalidates the cookie, and login/callback endpoints are rate-limited (30 starts / 10 callback failures per 10 minutes, keyed on the client IP).
 - The human OAuth access token is used once to resolve identity and is then discarded — it is never stored, logged, or used for review jobs or repository checkout. Reviews keep running under the **GitHub App installation identity**.
 - Logins, logouts, denials, and state rejections all emit credential-free audit lines; password logins (when the emergency path is enabled) do the same.
 - Org/team membership policies are not inferred, and repository visibility grants no UI access.
 
 **Emergency local login.** The shared-password form is hidden while OAuth is enabled. Set `UI_LOCAL_LOGIN=true` (plus `UI_PASSWORD`/`UI_SESSION_SECRET`) to show it as a recovery path; it stays off by default.
+
+**Reverse proxies.** `X-Forwarded-*` headers are client-supplied and ignored by default: login rate limits key on the socket peer address, so a spoofed `X-Forwarded-For` cannot evade them, and the cookie Secure flag follows the request URL. Set `TRUST_PROXY=true` only when Maomao sits behind a reverse proxy that overwrites those headers on every request — it then honors `X-Forwarded-For` for rate-limit keys and `X-Forwarded-Proto` for cookie Secure.
 
 ## Security / trust boundary
 
@@ -678,7 +680,7 @@ The verifier only receives the prior finding plus nearby current file/diff conte
 
 ## Configuration reference
 
-See `.env.example`. Notable knobs: `ALLOWED_GITHUB_ACCOUNT_IDS`, `ALLOWED_GITHUB_REPOSITORY_IDS`, `MAOMAO_OVERRIDE_AUTHORS`, `MAX_DIFF_BYTES`, `REPO_RATE_LIMIT_PER_WINDOW`, `REPO_RATE_WINDOW_MS`, `OPENCODE_MAX_RETRIES`, `REVIEW_DRAFTS`, `POST_EMPTY_REVIEW`, `GITHUB_REQUEST_REVIEWER_ON_ENQUEUE`, `JOB_CONCURRENCY`, `WORKSPACE_ROOT`, `DATABASE_PATH`, `MAX_INLINE_COMMENTS`, `PULL_REQUEST_ACTIONS`, `OPENCODE_VERIFIER_MODEL`, `RECONCILE_MIN_CONFIDENCE`, `GITHUB_OAUTH_CLIENT_ID`, `GITHUB_OAUTH_CLIENT_SECRET`, `MAOMAO_ADMIN_GITHUB_IDS`, `MAOMAO_PUBLIC_URL`, `UI_LOCAL_LOGIN`, `UI_PASSWORD`, `UI_SESSION_SECRET`, `REVIEWER_ROUTING`, `POISON_ALERT_POLICY`, `MAOMAO_FORGE_KEY`.
+See `.env.example`. Notable knobs: `ALLOWED_GITHUB_ACCOUNT_IDS`, `ALLOWED_GITHUB_REPOSITORY_IDS`, `MAOMAO_OVERRIDE_AUTHORS`, `MAX_DIFF_BYTES`, `REPO_RATE_LIMIT_PER_WINDOW`, `REPO_RATE_WINDOW_MS`, `OPENCODE_MAX_RETRIES`, `REVIEW_DRAFTS`, `POST_EMPTY_REVIEW`, `GITHUB_REQUEST_REVIEWER_ON_ENQUEUE`, `JOB_CONCURRENCY`, `WORKSPACE_ROOT`, `DATABASE_PATH`, `MAX_INLINE_COMMENTS`, `PULL_REQUEST_ACTIONS`, `OPENCODE_VERIFIER_MODEL`, `RECONCILE_MIN_CONFIDENCE`, `GITHUB_OAUTH_CLIENT_ID`, `GITHUB_OAUTH_CLIENT_SECRET`, `MAOMAO_ADMIN_GITHUB_IDS`, `MAOMAO_PUBLIC_URL`, `UI_LOCAL_LOGIN`, `UI_PASSWORD`, `UI_SESSION_SECRET`, `TRUST_PROXY`, `REVIEWER_ROUTING`, `POISON_ALERT_POLICY`, `MAOMAO_FORGE_KEY`.
 
 ## Follow-ups (not in this MVP)
 
