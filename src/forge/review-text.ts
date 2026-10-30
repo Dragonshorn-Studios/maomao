@@ -73,6 +73,8 @@ export function buildReviewBody(input: {
   findingsCount: number;
   reviewerCount: number;
   demoted?: DemotedFinding[];
+  /** Count of findings withheld by the out-of-checkout path gate (issue #176). */
+  withheldCount?: number;
 }): string {
   const marker = reviewMarker(input.headSha);
   const header = [
@@ -90,6 +92,9 @@ export function buildReviewBody(input: {
     );
     if (demoted.length > shown.length) lines.push(`- … and ${demoted.length - shown.length} more`);
     body += `\n#### Findings not shown inline\n\nThese locations are not part of the diff hunks, so they are listed here instead:\n\n${lines.join("\n")}\n`;
+  }
+  if (input.withheldCount) {
+    body += `\n> [!WARNING]\n> ${input.withheldCount} finding(s) were withheld because they reference paths outside the checked-out repository. See the Maomao job log.\n`;
   }
   return body;
 }

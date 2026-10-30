@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { GITHUB_SECRET_KEYS, sanitizeChildEnv } from "./env.js";
+import {
+  GITHUB_SECRET_KEYS,
+  reviewerPermissionConfig,
+  reviewerPermissionsV2Config,
+  sanitizeChildEnv,
+} from "./env.js";
 
 describe("sanitizeChildEnv", () => {
   it("strips GitHub and Maomao secrets while keeping provider keys", () => {
@@ -43,5 +48,37 @@ describe("sanitizeChildEnv", () => {
     expect(env.AWS_ACCESS_KEY_ID).toBe("AKIAEXAMPLE");
     expect(JSON.stringify(env)).not.toContain("super-secret-pem");
     expect(JSON.stringify(env)).not.toContain("ghs_xxx");
+  });
+});
+
+describe("reviewer permission configs", () => {
+  it("v1 denies external_directory except the job workspace carve-out", () => {
+    const config = reviewerPermissionConfig({ externalAllow: ["/ws/job-1"] });
+    const permission = config.permission as Record<string, unknown>;
+    expect(permission["*"]).toBe("deny");
+    expect(permission.read).toBe("allow");
+    expect(permission.glob).toBe("allow");
+    expect(permission.grep).toBe("allow");
+    const external = permission.external_directory as Record<string, string>;
+    expect(external["*"]).toBe("deny");
+    expect(external["/ws/job-1"]).toBe("allow");
+    expect(external["/ws/job-1/**"]).toBe("allow");
+  });
+
+  it("v1 denies external_directory outright with no carve-outs", () => {
+    const config = reviewerPermissionConfig();
+    const permission = config.permission as Record<string, unknown>;
+    expect(permission.external_directory).toBe("deny");
+  });
+
+  it("v2 denies external_directory and places the workspace allows after the deny", () => {
+    const config = reviewerPermissionsV2Config({ externalAllow: ["/ws/job-1"] });
+    const permissions = config.permissions as Array<{ action: string; resource: string; effect: string }>;
+    expect(permissions[0]).toEqual({ action: "*", resource: "*", effect: "deny" });
+    const external = permissions.filter((rule) => rule.action === "external_directory");
+    // Last matching rule wins — the blanket deny must precede the carve-outs.
+    expect(external[0]).toEqual({ action: "external_directory", resource: "*", effect: "deny" });
+    expect(external).toContainEqual({ action: "external_directory", resource: "/ws/job-1", effect: "allow" });
+    expect(external).toContainEqual({ action: "external_directory", resource: "/ws/job-1/**", effect: "allow" });
   });
 });

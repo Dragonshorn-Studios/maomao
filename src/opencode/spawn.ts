@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
-import { rm, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { realpath, rm, writeFile } from "node:fs/promises";
+import { dirname, join } from "node:path";
 import type { OpenCodePort, OpenCodeRunInput, OpenCodeRunResult } from "./parse.js";
 import { parseOpenCodeOutput } from "./parse.js";
 import { reviewerPermissionConfig, reviewerPermissionsV2Config, sanitizeChildEnv } from "./env.js";
@@ -124,6 +124,28 @@ export function opencodeEnvSecrets(env: NodeJS.ProcessEnv): string[] {
 }
 
 /**
+ * Directories `external_directory` must keep readable (issue #176): the job
+ * workspace holds `pr.diff`/`pr.json`/reconcile context next to the repo
+ * checkout, and `--file` attachments resolve there. The realpath variants
+ * cover symlinked workspace roots (e.g. /tmp → /private/tmp on macOS), where
+ * OpenCode's normalized check path would not match the lexical one.
+ */
+async function externalReadAllowDirs(cwd: string): Promise<string[]> {
+  const dirs = new Set<string>([dirname(cwd)]);
+  try {
+    dirs.add(await realpath(dirname(cwd)));
+  } catch {
+    // Lexical parent still applies.
+  }
+  try {
+    dirs.add(dirname(await realpath(cwd)));
+  } catch {
+    // Lexical parent still applies.
+  }
+  return [...dirs];
+}
+
+/**
  * Strip repo-supplied OpenCode config from the workspace and pin Maomao's
  * deny-list in its place. Verified against opencode v2.1.4: a repo-shipped
  * `.opencode/opencode.json` or `opencode.jsonc` takes precedence over a
@@ -131,10 +153,10 @@ export function opencodeEnvSecrets(env: NodeJS.ProcessEnv): string[] {
  * escape the deny-list — the workspace is Maomao-owned, so both variants
  * are removed before the pin is written.
  */
-async function pinV2Permissions(cwd: string): Promise<void> {
+async function pinV2Permissions(cwd: string, externalAllow: string[]): Promise<void> {
   await rm(join(cwd, ".opencode"), { recursive: true, force: true });
   await rm(join(cwd, "opencode.jsonc"), { force: true });
-  await writeFile(join(cwd, "opencode.json"), JSON.stringify(reviewerPermissionsV2Config(), null, 2));
+  await writeFile(join(cwd, "opencode.json"), JSON.stringify(reviewerPermissionsV2Config({ externalAllow }), null, 2));
 }
 
 export function createOpenCodeRunner(defaultBin = "opencode"): OpenCodePort {
@@ -148,14 +170,16 @@ export function createOpenCodeRunner(defaultBin = "opencode"): OpenCodePort {
       // permission deny-list. v2 ignores that channel entirely, so there the
       // deny-list is pinned as a project opencode.json inside the job
       // workspace (a Maomao-owned temp dir) before the spawn.
+      const externalAllow = await externalReadAllowDirs(input.cwd);
+      const permissionConfig = reviewerPermissionConfig({ externalAllow });
       const extras: Record<string, string> = v2
         ? { TERM: "dumb" }
         : {
             OPENCODE_DISABLE_DEFAULT_PLUGINS: "true",
             OPENCODE_DISABLE_CLAUDE_CODE: "true",
             OPENCODE_DISABLE_AUTOUPDATE: "true",
-            OPENCODE_CONFIG_CONTENT: JSON.stringify(reviewerPermissionConfig()),
-            OPENCODE_PERMISSION: JSON.stringify(reviewerPermissionConfig().permission),
+            OPENCODE_CONFIG_CONTENT: JSON.stringify(permissionConfig),
+            OPENCODE_PERMISSION: JSON.stringify(permissionConfig.permission),
             TERM: "dumb",
           };
       if (v2) {
@@ -164,7 +188,7 @@ export function createOpenCodeRunner(defaultBin = "opencode"): OpenCodePort {
           // The catch fails open (operators pin known-good binaries, but the
           // miss must be visible) and the finally evicts, so the next run in
           // this workspace re-pins after a checkout wipe or a failed write.
-          pin = pinV2Permissions(input.cwd)
+          pin = pinV2Permissions(input.cwd, externalAllow)
             .catch((error) => {
               console.warn(`opencode: could not pin v2 permissions in ${input.cwd}: ${String(error)}`);
             })
