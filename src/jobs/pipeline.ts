@@ -1522,6 +1522,7 @@ async function runStackJob(deps: PipelineDeps, forge: ForgeRegistry, jobId: numb
     // findings come from a model run too.
     const crossFindings: typeof cumulative.findings = [];
     let withheldCross = 0;
+    const withheldCrossRefs = new Set<string>();
     for (const finding of cumulative.findings) {
       const violations = findingPathViolations(
         { file: finding.file, summary: finding.summary, reason: finding.reason },
@@ -1532,6 +1533,7 @@ async function runStackJob(deps: PipelineDeps, forge: ForgeRegistry, jobId: numb
         continue;
       }
       withheldCross += 1;
+      for (const violation of violations) withheldCrossRefs.add(violation.ref);
       store.log(
         jobId,
         `Withholding cross-PR finding (${finding.file ?? "no file"}): references ${violations
@@ -1580,7 +1582,10 @@ async function runStackJob(deps: PipelineDeps, forge: ForgeRegistry, jobId: numb
       (cumulativeNote ? `${cumulativeNote}\n\n` : cumulativeSummary ? `${cumulativeSummary}\n\n` : "") +
       `Cross-PR findings: ${crossFindings.length}.` +
       (withheldCross > 0
-        ? ` (${withheldCross} withheld: referenced paths outside the checked-out repository)`
+        ? ` (${withheldCross} withheld: referenced ${[...withheldCrossRefs]
+            .slice(0, 5)
+            .map((ref) => `\`${ref}\``)
+            .join(", ")} outside the checked-out repository)`
         : "");
     await postStackComment(deps, job, top.pr_number, summaryBody);
     for (const finding of crossFindings) {
@@ -2547,9 +2552,11 @@ async function publishReview(
   // outside the checkout is withheld from the forge and logged, never posted.
   const outside = publishable.map((finding) => ({ finding, violations: findingPathViolations(finding, repoDir) }));
   let withheldCount = 0;
+  const withheldRefs = new Set<string>();
   publishable = outside.flatMap(({ finding, violations }) => {
     if (violations.length === 0) return [finding];
     withheldCount += 1;
+    for (const violation of violations) withheldRefs.add(violation.ref);
     deps.store.log(
       job.id,
       `Withholding finding ${finding.fingerprint} (${finding.file ?? "no file"}): references ${violations
@@ -2654,6 +2661,7 @@ async function publishReview(
     reviewerCount,
     demoted,
     withheldCount,
+    withheldRefs: [...withheldRefs],
   });
   // Re-check staleness after the decision: an APPROVE must never land on a superseded SHA.
   throwIfStale(deps.store, job.id, signal);
