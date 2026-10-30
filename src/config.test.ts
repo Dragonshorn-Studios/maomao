@@ -97,6 +97,12 @@ describe("loadConfig", () => {
     expect(loadConfig({ GITHUB_ISSUE_CREATION_ENABLED: "false" }).issueCreationEnabled).toBe(false);
   });
 
+  it("trusts forwarded headers only when TRUST_PROXY is set", () => {
+    expect(loadConfig({}).trustProxy).toBe(false);
+    expect(loadConfig({ TRUST_PROXY: "true" }).trustProxy).toBe(true);
+    expect(loadConfig({ TRUST_PROXY: "false" }).trustProxy).toBe(false);
+  });
+
   it("registers the queue-badge reviewer only when explicitly configured", () => {
     expect(loadConfig({ GITHUB_REQUEST_REVIEWER_ON_ENQUEUE: "true" }).requestReviewerOnEnqueue).toBe(true);
     expect(loadConfig({ GITHUB_REQUEST_REVIEWER_ON_ENQUEUE: "false" }).requestReviewerOnEnqueue).toBe(false);
