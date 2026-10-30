@@ -99,6 +99,7 @@ import type { JobRow } from "./jobs/store.js";
 import type { FindingRow } from "./findings/types.js";
 import type { ConfigPageData } from "./ui/index.js";
 import { issueWorthiness, parseAggregatedFindings, type IssueWorthiness } from "./findings/issue-worthiness.js";
+import { findingPathViolations } from "./findings/path-boundary.js";
 import { SCAN_ISSUE_MARKER_RE, scanIssueMarkerBase } from "./findings/identity.js";
 import { githubSecrets } from "./config.js";
 import type { JobQueue } from "./jobs/queue.js";
@@ -3292,6 +3293,33 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
     if (creatable.length === 0) {
       return renderScanDenied(c, "No selected finding passes the publication bar (confidence and specialist consensus).");
     }
+    // Same out-of-checkout gate as the review publish path (issue #176): a
+    // finding carrying a host path may be exfiltrated content and must never
+    // become a GitHub issue either. The workspace may already be swept, so
+    // the check falls back to absolute/traversal refs when repoDir is gone.
+    const scanRepoDir = job.workspace_path ? join(job.workspace_path, "repo") : undefined;
+    const pathSafe = creatable.filter((entry) => {
+      const violations = findingPathViolations(
+        {
+          file: entry.row.current_path ?? entry.row.original_path,
+          summary: entry.row.summary,
+          body: entry.row.body,
+        },
+        scanRepoDir,
+      );
+      if (violations.length === 0) return true;
+      ctx.store.log(
+        job.id,
+        `Withholding finding ${entry.row.fingerprint} from issue creation: references ${violations
+          .map((violation) => violation.ref)
+          .join(", ")} outside the checkout`,
+        "warn",
+      );
+      return false;
+    });
+    if (pathSafe.length === 0) {
+      return renderScanDenied(c, "Selected finding(s) were withheld: they reference paths outside the checked-out repository.");
+    }
     const droppedReasons = selection.selected.flatMap((entry) => (entry.worth.worthy ? [] : [entry.worth.reason]));
     if (droppedReasons.length > 0) {
       ctx.store.log(
@@ -3304,7 +3332,7 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
     let skipped = 0;
     let failed = 0;
     let permissionDenied = false;
-    for (const entry of creatable) {
+    for (const entry of pathSafe) {
       const finding = entry.row;
       const markerBase = scanIssueMarkerBase(finding.fingerprint);
       try {

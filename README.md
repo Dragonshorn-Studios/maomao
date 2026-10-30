@@ -518,16 +518,19 @@ Checked-out PR code is **untrusted input**. For MVP, reviewers are for static in
 - GitHub private keys, webhook secrets, UI passwords, session secrets, and installation tokens are stripped from the OpenCode environment
 - untrusted `opencode.json` / `.opencode` / `.claude` from the PR are deleted before review
 - OpenCode is launched with permissions that **deny** `bash`, `edit`, `write`, `webfetch`, and related tools; `read` / `glob` / `grep` are allowed
+- `external_directory` is denied so those read tools cannot reach outside the job workspace (the workspace dir itself — which holds the PR diff/metadata files next to the checkout — stays allowed). On OpenCode builds that honor the rule, a reviewer cannot read host files such as `~/.config` credentials; on builds that ignore it, reads may still leave the repo — see the next section
+- as a publish-time backstop, findings and review summaries that reference paths outside the checkout (absolute host paths, `..` escapes, `~` paths that exist on the host) are **withheld from the forge and logged**, never posted as review comments; the published review notes the withheld count
 - the repo tree is marked read-only after checkout
 - Maomao never executes `npm install`, tests, or repo-defined agents
 
 ### OpenCode must honor the permission denies
 
-Maomao passes those denies through `OPENCODE_PERMISSION` and `OPENCODE_CONFIG_CONTENT`. **The sandbox is only as strong as the OpenCode binary.** Operators must:
+Maomao passes those denies through `OPENCODE_PERMISSION` and `OPENCODE_CONFIG_CONTENT` (v1) or a pinned workspace `opencode.json` (v2). **The sandbox is only as strong as the OpenCode binary.** Operators must:
 
-- run a **known-good OpenCode build** that actually enforces those env/config flags
+- run a **known-good OpenCode build** that actually enforces those env/config flags — including `external_directory`, which defaults to allow on v2 and is the only thing keeping `read`/`glob`/`grep` inside the checkout
 - not assume a model “will behave” if the CLI ignores denies, auto-approves tools, or loads extra plugins
 - treat a future OpenCode default or host-level plugin that re-enables `bash`/`edit` as a host compromise path: malicious PR code must not regain a shell that way
+- note that the publish gate only withholds findings that *reference* out-of-checkout paths; on a build where `external_directory` is ignored, an injected reviewer could still read host files and phrase the exfiltrated content so it never names the path
 
 If you cannot pin and verify OpenCode’s permission behavior, do not point Maomao at untrusted repositories.
 
