@@ -1,3 +1,4 @@
+import { join } from "node:path";
 import type { Config } from "../config.js";
 import { TERMINAL_JOB_STATES } from "../config.js";
 import type { JobStore, JobRow, ReviewerRunRow, NewJobInput, StackMemberRow } from "./store.js";
@@ -60,6 +61,7 @@ import { resolveReviewEvent } from "./verdict.js";
 import { applyReconciliationThreads, attachStoredThreadIds, closeResolvedScanIssues, findingDiffContext, persistClassifications, persistThreadsAsFindings } from "../findings/apply.js";
 import { githubRetryReason } from "../github/errors.js";
 import { fingerprintFinding } from "../findings/identity.js";
+import { findingPathViolations, outsidePathReferences } from "../findings/path-boundary.js";
 import type { ReconciliationSnapshot } from "../findings/types.js";
 import { currentFindingsForRisk } from "../findings/types.js";
 import { mapLimit, nowIso, sleep, truncate } from "../util.js";
@@ -539,7 +541,7 @@ async function runJob(deps: PipelineDeps, forge: ForgeRegistry, jobId: number, s
     }
 
     store.setJobState(jobId, "publishing", { aggregator_state: "done" });
-    const posted = await publishReview(deps, provider, job, aggregated, reviewerCount, snapshot, diff, signal);
+    const posted = await publishReview(deps, provider, job, aggregated, reviewerCount, snapshot, diff, workspace.repoDir, signal);
     const afterPublish = store.getJob(jobId) ?? job;
     if (posted) {
       store.patchJob(jobId, { github_review_id: posted.id, github_review_url: posted.url });
@@ -1425,6 +1427,10 @@ async function runStackJob(deps: PipelineDeps, forge: ForgeRegistry, jobId: numb
     const overBudget = config.stackTokenCap > 0 && stackTokens > config.stackTokenCap;
     let cumulative: ReviewerResult;
     let cumulativeNote = "";
+    // The cumulative pass's checkout — also the repoDir the out-of-checkout
+    // publish gate resolves against. Stays undefined when the pass is skipped
+    // (which always yields zero cross-PR findings).
+    let crossRepoDir: string | undefined;
     if (sharedPaths.length === 0 || overBudget) {
       cumulative = { schema_version: 1, reviewer: "stack_cumulative", verdict: "clean", summary: "", findings: [] };
       cumulativeNote = overBudget
@@ -1467,6 +1473,7 @@ async function runStackJob(deps: PipelineDeps, forge: ForgeRegistry, jobId: numb
         },
       });
       store.patchJob(jobId, { workspace_path: workspace.dir });
+      crossRepoDir = workspace.repoDir;
       throwIfStale(store, jobId, signal);
       const result = await runStackCumulativeRun(deps, job, cumulativeRun, workspace.repoDir, stackId, members, diffs, meta, signal);
       if (!result) {
@@ -1512,9 +1519,47 @@ async function runStackJob(deps: PipelineDeps, forge: ForgeRegistry, jobId: numb
     // Phase 5 — publish the stack summary and each cross-PR finding as issue
     // comments on the top PR, naming every PR and SHA involved.
     store.setJobState(jobId, "publishing");
+    // Same out-of-checkout gate as publishReview (issue #176) — cross-PR
+    // findings come from a model run too.
+    const crossFindings: typeof cumulative.findings = [];
+    let withheldCross = 0;
+    const withheldCrossRefs = new Set<string>();
+    for (const finding of cumulative.findings) {
+      const violations = findingPathViolations(
+        { file: finding.file, summary: finding.summary, reason: finding.reason },
+        crossRepoDir,
+      );
+      if (violations.length === 0) {
+        crossFindings.push(finding);
+        continue;
+      }
+      withheldCross += 1;
+      for (const violation of violations) withheldCrossRefs.add(violation.ref);
+      store.log(
+        jobId,
+        `Withholding cross-PR finding (${finding.file ?? "no file"}): references ${violations
+          .map((violation) => violation.ref)
+          .join(", ")} outside the checkout — not publishing`,
+        "warn",
+      );
+    }
     const ordered = members
       .map((member) => `#${member.pr_number}@${member.head_sha.slice(0, 8)}`)
       .join(" → ");
+    const cumulativeSummaryRefs = cumulative.summary
+      ? outsidePathReferences(cumulative.summary, crossRepoDir)
+      : [];
+    if (cumulativeSummaryRefs.length > 0) {
+      store.log(
+        jobId,
+        `Withholding stack cumulative summary: references ${cumulativeSummaryRefs.join(", ")} outside the checkout`,
+        "warn",
+      );
+    }
+    const cumulativeSummary =
+      cumulativeSummaryRefs.length > 0
+        ? "(summary withheld — it referenced files outside the checkout; see the Maomao job log)"
+        : cumulative.summary;
     const summaryBody =
       `**Stack review "${stackId}"** — reviewed ${members.length} pull request(s) in order: ${ordered}.\n\n` +
       `Member reviews: ${
@@ -1535,10 +1580,16 @@ async function runStackJob(deps: PipelineDeps, forge: ForgeRegistry, jobId: numb
               : `member reviews recorded ${stackTokens} tokens (cap ${config.stackTokenCap})`
           }; middle members run verify-only.${memberSkips.length ? ` Skipped-budget (no prior pass to verify): ${memberSkips.join(", ")}.` : ""}\n\n`
         : "") +
-      (cumulativeNote ? `${cumulativeNote}\n\n` : cumulative.summary ? `${cumulative.summary}\n\n` : "") +
-      `Cross-PR findings: ${cumulative.findings.length}.`;
+      (cumulativeNote ? `${cumulativeNote}\n\n` : cumulativeSummary ? `${cumulativeSummary}\n\n` : "") +
+      `Cross-PR findings: ${crossFindings.length}.` +
+      (withheldCross > 0
+        ? ` (${withheldCross} withheld: referenced ${[...withheldCrossRefs]
+            .slice(0, 5)
+            .map((ref) => `\`${ref}\``)
+            .join(", ")} outside the checked-out repository)`
+        : "");
     await postStackComment(deps, job, top.pr_number, summaryBody);
-    for (const finding of cumulative.findings) {
+    for (const finding of crossFindings) {
       const location = finding.file ? `\`${finding.file}${finding.line ? `:${finding.line}` : ""}\`\n\n` : "";
       await postStackComment(
         deps,
@@ -2479,6 +2530,7 @@ async function publishReview(
   reviewerCount: number,
   snapshot: ReconciliationSnapshot,
   diff: string,
+  repoDir: string,
   signal: AbortSignal,
 ): Promise<{ id: string; url: string; postedFingerprints: string[] } | undefined> {
   if (deps.store.isStale(job.id)) return undefined;
@@ -2496,6 +2548,25 @@ async function publishReview(
   }
 
   let publishable = findingsForPublish(aggregated.findings, snapshot);
+  // Path-boundary gate (issue #176): a reviewer injected into reading host
+  // files can smuggle them into finding fields. Anything referencing a path
+  // outside the checkout is withheld from the forge and logged, never posted.
+  const outside = publishable.map((finding) => ({ finding, violations: findingPathViolations(finding, repoDir) }));
+  let withheldCount = 0;
+  const withheldRefs = new Set<string>();
+  publishable = outside.flatMap(({ finding, violations }) => {
+    if (violations.length === 0) return [finding];
+    withheldCount += 1;
+    for (const violation of violations) withheldRefs.add(violation.ref);
+    deps.store.log(
+      job.id,
+      `Withholding finding ${finding.fingerprint} (${finding.file ?? "no file"}): references ${violations
+        .map((violation) => violation.ref)
+        .join(", ")} outside the checkout — not publishing`,
+      "warn",
+    );
+    return [];
+  });
   const overridden = omitOverriddenFindings(publishable, snapshot.humanOverrides?.overrides ?? []);
   for (const entry of overridden.suppressed) {
     deps.store.dismissFinding({
@@ -2548,10 +2619,12 @@ async function publishReview(
     findings: publishable,
     allReviewersDone,
     aggregatorFallback,
+    withheldCount,
     stale: deps.store.isStale(job.id),
   });
 
-  if (clean && !deps.config.postEmptyReview) {
+  // Withheld findings still post: the suppression notice must reach the PR.
+  if (clean && withheldCount === 0 && !deps.config.postEmptyReview) {
     const reason = `${decision.reason}; not posting because POST_EMPTY_REVIEW is false`;
     deps.store.log(job.id, `Clean review with no findings; POST_EMPTY_REVIEW is false, not posting`);
     deps.store.patchJob(job.id, { review_event: "COMMENT", review_event_reason: reason });
@@ -2572,12 +2645,26 @@ async function publishReview(
       "warn",
     );
   }
+  // The summary rides into the review body too — a tainted one is withheld
+  // whole rather than partially scrubbed (secrets would not be path-shaped).
+  const summaryRefs = outsidePathReferences(aggregated.summary, repoDir);
+  let summary = aggregated.summary;
+  if (summaryRefs.length > 0) {
+    deps.store.log(
+      job.id,
+      `Withholding review summary: references ${summaryRefs.join(", ")} outside the checkout`,
+      "warn",
+    );
+    summary = "(summary withheld — it referenced files outside the checkout; see the Maomao job log)";
+  }
   const body = buildReviewBody({
     headSha: job.head_sha,
-    summary: aggregated.summary,
+    summary,
     findingsCount,
     reviewerCount,
     demoted,
+    withheldCount,
+    withheldRefs: [...withheldRefs],
   });
   // Re-check staleness after the decision: an APPROVE must never land on a superseded SHA.
   throwIfStale(deps.store, job.id, signal);
@@ -2681,8 +2768,20 @@ async function dispatchExternalEscalation(
   });
 
   const findingsList = withIds.map((finding) => finding.id).join(", ") || "(none)";
+  // Same out-of-checkout gate as the review body (issue #176): the escalation
+  // reason is model text and would otherwise publish host-path references.
+  const riskReason = latest.routing_reason || aggregated?.summary || "";
+  const riskRepoDir = latest.workspace_path ? join(latest.workspace_path, "repo") : undefined;
+  const riskRefs = outsidePathReferences(riskReason, riskRepoDir);
+  if (riskRefs.length > 0) {
+    deps.store.log(
+      latest.id,
+      `Withholding escalation reason: references ${riskRefs.join(", ")} outside the checkout`,
+      "warn",
+    );
+  }
   const riskSummary =
-    sanitizePublicReason(latest.routing_reason || aggregated?.summary || "", 300) || "poison-alert";
+    (riskRefs.length === 0 ? sanitizePublicReason(riskReason, 300) : "") || "poison-alert";
   const errors: string[] = [];
   let anySuccess = false;
 

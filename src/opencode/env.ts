@@ -84,10 +84,29 @@ export function sanitizeChildEnv(
   return env;
 }
 
+export interface ReviewerPermissionOptions {
+  /**
+   * Directories outside the project root a reviewer may still read. The
+   * pipeline workspace holds the prompt-side diff/metadata attachments next
+   * to the repo, so `external_directory` needs this carve-out or the
+   * `--file` inputs become unreachable. Everything else outside the working
+   * directory stays denied (issue #176).
+   */
+  externalAllow?: string[];
+}
+
+function externalAllowEntries(dirs: string[]): Array<readonly [string, string]> {
+  return dirs.flatMap((dir) => [
+    [dir, "allow"],
+    [`${dir}/**`, "allow"],
+  ] as const);
+}
+
 // These denies are honored only if the OpenCode binary respects
 // OPENCODE_PERMISSION / OPENCODE_CONFIG_CONTENT. Operators must pin a known-good
 // OpenCode build; a malicious PR must not regain shell via ignored permissions.
-export function reviewerPermissionConfig(): Record<string, unknown> {
+export function reviewerPermissionConfig(options: ReviewerPermissionOptions = {}): Record<string, unknown> {
+  const externalAllow = options.externalAllow ?? [];
   return {
     $schema: "https://opencode.ai/config.json",
     permission: {
@@ -95,6 +114,12 @@ export function reviewerPermissionConfig(): Record<string, unknown> {
       read: "allow",
       glob: "allow",
       grep: "allow",
+      // Governs every path-taking tool reaching outside the working
+      // directory — `read`/`glob`/`grep` may not leave the job workspace
+      // (credentials like auth.json live out there). Deny wins for anything
+      // not explicitly allowed.
+      external_directory:
+        externalAllow.length > 0 ? Object.fromEntries([["*", "deny"], ...externalAllowEntries(externalAllow)]) : "deny",
       bash: "deny",
       edit: "deny",
       write: "deny",
@@ -116,9 +141,10 @@ export function reviewerPermissionConfig(): Record<string, unknown> {
  * opencode v2.1.4: the shell action (v2's execute tool) is blocked while
  * `read`, `glob`, and `grep` keep working.
  */
-export function reviewerPermissionsV2Config(): Record<string, unknown> {
+export function reviewerPermissionsV2Config(options: ReviewerPermissionOptions = {}): Record<string, unknown> {
   const allow = (action: string) => ({ action, resource: "*", effect: "allow" });
   const deny = (action: string) => ({ action, resource: "*", effect: "deny" });
+  const externalAllow = options.externalAllow ?? [];
   return {
     $schema: "https://opencode.ai/config.json",
     permissions: [
@@ -133,6 +159,15 @@ export function reviewerPermissionsV2Config(): Record<string, unknown> {
       deny("subagent"),
       deny("skill"),
       deny("question"),
+      // `external_directory` defaults to allow on v2; rules are last-match-
+      // wins, so the workspace carve-outs must follow the blanket deny or
+      // `read`/`glob`/`grep` could still reach host files (issue #176).
+      deny("external_directory"),
+      ...externalAllowEntries(externalAllow).map(([resource, effect]) => ({
+        action: "external_directory",
+        resource,
+        effect,
+      })),
     ],
   };
 }

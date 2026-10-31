@@ -312,6 +312,147 @@ describe("pipeline", () => {
     expect(JSON.parse(job?.aggregator_normalized ?? "{}").verdict).toBe("comment");
   });
 
+  it("withholds findings referencing paths outside the checkout from the published review", async () => {
+    const config = loadConfig({
+      REVIEWER_ROLES: "correctness",
+      OPENCODE_REVIEWER_MODEL: "test/model",
+      OPENCODE_TIMEOUT_MS: "5000",
+      POST_EMPTY_REVIEW: "true",
+    });
+    const store = new JobStore(openDb(":memory:"));
+    const outside = join(await mkdtemp(join(tmpdir(), "maomao-outside-")), "auth.json");
+    await writeFile(outside, '{"token":"leaked"}');
+    const posted: { body: string; comments?: { path: string }[] }[] = [];
+    const github: GithubPort = githubPort({
+      createCommentReview: async (input) => {
+        posted.push({ body: input.body, comments: input.comments });
+        return { id: "99", url: "https://example.test/reviews/99" };
+      },
+    });
+    const opencode: OpenCodePort = {
+      async run(input) {
+        const roleMatch = input.prompt.match(/Role id: (\w+)/);
+        const text = roleMatch
+          ? reviewerJson(roleMatch[1])
+          : JSON.stringify({
+              schema_version: 1,
+              verdict: "comment",
+              summary: "Two findings.",
+              findings: [
+                { severity: "high", confidence: 0.9, category: "correctness", file: "example.ts", line: 1, summary: "bug", body: "details" },
+                { severity: "high", confidence: 0.9, category: "security", file: outside, line: 1, summary: "host file", body: "exfiltrated" },
+                { severity: "high", confidence: 0.9, category: "security", file: "../../etc/passwd", line: 1, summary: "traversal", body: "exfiltrated" },
+              ],
+            });
+        return { stdout: text, stderr: "", exitCode: 0, text, usage: { promptTokens: 3, completionTokens: 2 } };
+      },
+    };
+    const created = store.enqueue({
+      repoFullName: "acme/widgets",
+      repoOwner: "acme",
+      repoName: "widgets",
+      installationId: 9,
+      prNumber: 4,
+      prTitle: "Change example",
+      prBody: "",
+      prHtmlUrl: "",
+      prAuthor: "dev",
+      baseSha: "base",
+      headSha: "cafebabe",
+      baseRef: "main",
+      headRef: "feat",
+      reviewers: config.reviewers.map((role) => ({ role: role.id, title: role.title })),
+    });
+    const pipeline = createPipeline({
+      config,
+      store,
+      github,
+      checkout: await fixtureCheckout(),
+      opencode,
+    });
+    await pipeline.run(created.job.id);
+    const job = store.getJob(created.job.id);
+    expect(job?.state).toBe("completed");
+    expect(posted).toHaveLength(1);
+    expect(posted[0]?.body).toContain("withheld");
+    // The withheld refs are published so the suppression is investigable, but
+    // the findings' own content (summary/body) never reaches the review.
+    expect(posted[0]?.body).toContain(`\`${outside}\``);
+    expect(posted[0]?.body).toContain("`../../etc/passwd`");
+    expect(posted[0]?.body).not.toContain("exfiltrated");
+    for (const comment of posted[0]?.comments ?? []) {
+      expect(comment.path).not.toBe(outside);
+      expect(comment.path).not.toBe("../../etc/passwd");
+    }
+    const logs = store.listLogs(created.job.id).map((row) => row.message).join("\n");
+    expect(logs).toContain("Withholding finding");
+    expect(logs).toContain(outside);
+  });
+
+  it("withholds a review summary that references paths outside the checkout", async () => {
+    const config = loadConfig({
+      REVIEWER_ROLES: "correctness",
+      OPENCODE_REVIEWER_MODEL: "test/model",
+      OPENCODE_TIMEOUT_MS: "5000",
+      POST_EMPTY_REVIEW: "true",
+    });
+    const store = new JobStore(openDb(":memory:"));
+    const outside = join(await mkdtemp(join(tmpdir(), "maomao-outside-")), "auth.json");
+    await writeFile(outside, '{"token":"leaked"}');
+    const posted: { body: string }[] = [];
+    const github: GithubPort = githubPort({
+      createCommentReview: async (input) => {
+        posted.push({ body: input.body });
+        return { id: "99", url: "https://example.test/reviews/99" };
+      },
+    });
+    const opencode: OpenCodePort = {
+      async run(input) {
+        const roleMatch = input.prompt.match(/Role id: (\w+)/);
+        const text = roleMatch
+          ? reviewerJson(roleMatch[1])
+          : JSON.stringify({
+              schema_version: 1,
+              verdict: "comment",
+              summary: `Credentials were found under ${outside} — rotating them`,
+              findings: [
+                { severity: "high", confidence: 0.9, category: "correctness", file: "example.ts", line: 1, summary: "bug", body: "details" },
+              ],
+            });
+        return { stdout: text, stderr: "", exitCode: 0, text, usage: { promptTokens: 3, completionTokens: 2 } };
+      },
+    };
+    const created = store.enqueue({
+      repoFullName: "acme/widgets",
+      repoOwner: "acme",
+      repoName: "widgets",
+      installationId: 9,
+      prNumber: 4,
+      prTitle: "Change example",
+      prBody: "",
+      prHtmlUrl: "",
+      prAuthor: "dev",
+      baseSha: "base",
+      headSha: "cafebabe",
+      baseRef: "main",
+      headRef: "feat",
+      reviewers: config.reviewers.map((role) => ({ role: role.id, title: role.title })),
+    });
+    const pipeline = createPipeline({
+      config,
+      store,
+      github,
+      checkout: await fixtureCheckout(),
+      opencode,
+    });
+    await pipeline.run(created.job.id);
+    expect(posted).toHaveLength(1);
+    expect(posted[0]?.body).toContain("summary withheld");
+    expect(posted[0]?.body).not.toContain(outside);
+    const logs = store.listLogs(created.job.id).map((row) => row.message).join("\n");
+    expect(logs).toContain("Withholding review summary");
+  });
+
   it("persists the OpenCode token breakdown and incomplete usage flag", async () => {
     const config = loadConfig({
       REVIEWER_ROLES: "correctness",
@@ -6111,6 +6252,74 @@ describe("stack reviews (issue #99)", () => {
     const cumulative = store.listReviewerRuns(stack.job.id).find((r) => r.role === "stack_cumulative");
     expect(cumulative?.state).toBe("done");
     expect(JSON.parse(cumulative?.normalized_json ?? "{}").findings[0]?.severity).toBe("medium");
+  });
+
+  it("withholds cross-PR findings and a cumulative summary referencing paths outside the checkout", async () => {
+    const config = stackConfig();
+    const store = new JobStore(openDb(":memory:"));
+    const stack = enqueueStackJob(store);
+    const outside = join(await mkdtemp(join(tmpdir(), "maomao-outside-")), "auth.json");
+    await writeFile(outside, '{"token":"leaked"}');
+    const issueComments: { pullNumber: number; body: string }[] = [];
+    const github = {
+      ...githubPort(),
+      getPull: async (_i: number, _o: string, _r: string, n: number) => resolvedPull(n, `h${n}`),
+      createCommentReview: async () => ({ id: "9", url: "u" }),
+      createIssueComment: async (input: { pullNumber: number; body: string }) => {
+        issueComments.push({ pullNumber: input.pullNumber, body: input.body });
+        return { id: "1", url: "u" };
+      },
+    } as unknown as GithubPort;
+    const opencode: OpenCodePort = {
+      async run(input) {
+        const text = /stack reviewer/i.test(input.prompt)
+          ? JSON.stringify({
+              schema_version: 1,
+              reviewer: "stack_cumulative",
+              verdict: "findings",
+              summary: `break noted; credentials at ${outside}`,
+              findings: [
+                {
+                  severity: "high",
+                  confidence: 0.9,
+                  category: "cross_pr",
+                  file: outside,
+                  line: 1,
+                  summary: "leaked host credentials",
+                  reason: "exfiltrated",
+                },
+                {
+                  severity: "medium",
+                  confidence: 0.9,
+                  category: "cross_pr",
+                  file: "example.ts",
+                  line: 1,
+                  summary: "Uncovered path when #41 changes the helper #42 calls",
+                  reason: "The stack needs a regression test",
+                },
+              ],
+            })
+          : input.prompt.match(/Role id: (\w+)/)
+            ? reviewerJson("correctness")
+            : JSON.stringify({ schema_version: 1, verdict: "approve", summary: "fine", findings: [] });
+        return { stdout: text, stderr: "", exitCode: 0, text, usage: { promptTokens: 3, completionTokens: 2 } };
+      },
+    };
+    const pipeline = createPipeline({ config, store, github, checkout: await fixtureCheckout(), opencode });
+    await pipeline.run(stack.job.id);
+
+    expect(store.getJob(stack.job.id)?.state).toBe("completed");
+    const bodies = issueComments.map((comment) => comment.body).join("\n");
+    // The in-repo cross-PR finding still posts; the out-of-repo finding and
+    // the tainted cumulative summary are withheld, and no finding content leaks.
+    expect(bodies).toContain("Uncovered path when #41 changes the helper #42 calls");
+    expect(bodies).not.toContain("leaked host credentials");
+    expect(bodies).not.toContain("exfiltrated");
+    expect(bodies).toContain("withheld");
+    expect(bodies).toContain(`\`${outside}\``);
+    const logs = store.listLogs(stack.job.id).map((row) => row.message).join("\n");
+    expect(logs).toContain("Withholding cross-PR finding");
+    expect(logs).toContain("Withholding stack cumulative summary");
   });
 
   it("routes member jobs through the router, not a preselected reviewer set", async () => {

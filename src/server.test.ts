@@ -3593,6 +3593,58 @@ describe("scan issue creation", () => {
     log.mockRestore();
   });
 
+  it("denies issue creation when every selected finding references a path outside the checkout", async () => {
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    const created: Array<{ title: string; body: string }> = [];
+    const { app, store } = testApp(
+      { ...oauthEnv, GITHUB_ISSUE_CREATION_ENABLED: "true" },
+      issueGithub(created),
+      mockOauthFetch({ id: 1001, login: "octocat" }),
+    );
+    const seeded = seedScan(store, { currentPath: "/etc/hostname" });
+    const { session, csrfCookie, csrfToken } = await operatorWithCsrf(app);
+
+    const res = await app.request("/scan/issues", {
+      method: "POST",
+      headers: { cookie: `${session}; ${csrfCookie}`, "content-type": "application/x-www-form-urlencoded" },
+      body: issuePostBody(seeded.jobId, [seeded.fingerprints[0]], csrfToken),
+    });
+    expect(res.status).toBe(403);
+    expect(await res.text()).toContain("withheld");
+    expect(created).toHaveLength(0);
+    expect(store.listLogs(seeded.jobId).map((row) => row.message).join("\n")).toContain(
+      "Withholding finding",
+    );
+    log.mockRestore();
+  });
+
+  it("creates the path-safe finding's issue while withholding the out-of-checkout one", async () => {
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    const created: Array<{ title: string; body: string }> = [];
+    const { app, store } = testApp(
+      { ...oauthEnv, GITHUB_ISSUE_CREATION_ENABLED: "true" },
+      issueGithub(created),
+      mockOauthFetch({ id: 1001, login: "octocat" }),
+    );
+    const seeded = seedScan(store, { currentPath: "/etc/hostname", second: true });
+    const { session, csrfCookie, csrfToken } = await operatorWithCsrf(app);
+
+    const res = await app.request("/scan/issues", {
+      method: "POST",
+      headers: { cookie: `${session}; ${csrfCookie}`, "content-type": "application/x-www-form-urlencoded" },
+      body: issuePostBody(seeded.jobId, seeded.fingerprints, csrfToken),
+    });
+    expect(res.status).toBe(302);
+    // Only the in-repo finding ("unbounded retry loop", b.ts) becomes an issue.
+    expect(created).toHaveLength(1);
+    expect(created[0].title).toContain("unbounded retry loop");
+    expect(created[0].body).not.toContain("/etc/hostname");
+    expect(store.listLogs(seeded.jobId).map((row) => row.message).join("\n")).toContain(
+      "Withholding finding",
+    );
+    log.mockRestore();
+  });
+
   it("stops with an explicit notice when GitHub refuses the write, and the retry succeeds", async () => {
     const log = vi.spyOn(console, "log").mockImplementation(() => {});
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
