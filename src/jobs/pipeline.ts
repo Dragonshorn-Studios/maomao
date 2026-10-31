@@ -1,3 +1,4 @@
+import { join } from "node:path";
 import type { Config } from "../config.js";
 import { TERMINAL_JOB_STATES } from "../config.js";
 import type { JobStore, JobRow, ReviewerRunRow, NewJobInput, StackMemberRow } from "./store.js";
@@ -2618,10 +2619,12 @@ async function publishReview(
     findings: publishable,
     allReviewersDone,
     aggregatorFallback,
+    withheldCount,
     stale: deps.store.isStale(job.id),
   });
 
-  if (clean && !deps.config.postEmptyReview) {
+  // Withheld findings still post: the suppression notice must reach the PR.
+  if (clean && withheldCount === 0 && !deps.config.postEmptyReview) {
     const reason = `${decision.reason}; not posting because POST_EMPTY_REVIEW is false`;
     deps.store.log(job.id, `Clean review with no findings; POST_EMPTY_REVIEW is false, not posting`);
     deps.store.patchJob(job.id, { review_event: "COMMENT", review_event_reason: reason });
@@ -2765,8 +2768,20 @@ async function dispatchExternalEscalation(
   });
 
   const findingsList = withIds.map((finding) => finding.id).join(", ") || "(none)";
+  // Same out-of-checkout gate as the review body (issue #176): the escalation
+  // reason is model text and would otherwise publish host-path references.
+  const riskReason = latest.routing_reason || aggregated?.summary || "";
+  const riskRepoDir = latest.workspace_path ? join(latest.workspace_path, "repo") : undefined;
+  const riskRefs = outsidePathReferences(riskReason, riskRepoDir);
+  if (riskRefs.length > 0) {
+    deps.store.log(
+      latest.id,
+      `Withholding escalation reason: references ${riskRefs.join(", ")} outside the checkout`,
+      "warn",
+    );
+  }
   const riskSummary =
-    sanitizePublicReason(latest.routing_reason || aggregated?.summary || "", 300) || "poison-alert";
+    (riskRefs.length === 0 ? sanitizePublicReason(riskReason, 300) : "") || "poison-alert";
   const errors: string[] = [];
   let anySuccess = false;
 

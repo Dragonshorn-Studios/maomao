@@ -31,6 +31,18 @@ describe("review event resolution", () => {
     expect(resolveReviewEvent(input({ stale: true })).event).toBe("COMMENT");
   });
 
+  it("never approves when findings were withheld for out-of-checkout path references (issue #176)", () => {
+    // Withheld findings are absent from `findings`, so an all-withheld run
+    // would otherwise pass the approve ceiling vacuously.
+    const result = resolveReviewEvent(
+      input({ clean: false, findings: [], approveMaxSeverity: "low", withheldCount: 2 }),
+    );
+    expect(result.event).toBe("COMMENT");
+    expect(result.reason).toContain("2 finding(s) withheld");
+    // Even a nominally clean verdict stays comment-only once the gate fired.
+    expect(resolveReviewEvent(input({ withheldCount: 1 })).event).toBe("COMMENT");
+  });
+
   it("escalates to request-changes only for findings at or above the threshold", () => {
     const findings = [{ severity: "blocker" }, { severity: "medium" }];
     const result = resolveReviewEvent(input({ clean: false, findings }));
