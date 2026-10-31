@@ -565,6 +565,35 @@ describe("manual review trigger", () => {
     expect(csrfSegment).toContain("Max-Age=");
   });
 
+  it("ignores X-Forwarded-Proto for cookie Secure unless TRUST_PROXY is set", async () => {
+    const env = { UI_PASSWORD: "hunter2", UI_SESSION_SECRET: "session-secret-for-tests" };
+    for (const trust of [false, true]) {
+      const { app } = testApp(trust ? { ...env, TRUST_PROXY: "true" } : env);
+      const forwarded = { "x-forwarded-proto": "https" };
+      // CSRF cookie minted on the login page GET.
+      const page = await app.request("http://maomao.internal/login", { headers: forwarded });
+      const csrfSegment =
+        (page.headers.get("set-cookie") ?? "").split(",").find((part) => part.includes(CSRF_COOKIE)) ?? "";
+      // Session cookie minted on the login POST.
+      const { csrfCookie, csrfToken } = await csrfArtifacts(page);
+      const login = await app.request("http://maomao.internal/login", {
+        method: "POST",
+        headers: { cookie: csrfCookie, "content-type": "application/x-www-form-urlencoded", ...forwarded },
+        body: `password=hunter2&next=%2F&csrf_token=${encodeURIComponent(csrfToken)}`,
+      });
+      expect(login.status).toBe(302);
+      const sessionSegment =
+        (login.headers.get("set-cookie") ?? "").split(",").find((part) => part.includes(SESSION_COOKIE)) ?? "";
+      if (trust) {
+        expect(csrfSegment).toMatch(/secure/i);
+        expect(sessionSegment).toMatch(/secure/i);
+      } else {
+        expect(csrfSegment).not.toMatch(/secure/i);
+        expect(sessionSegment).not.toMatch(/secure/i);
+      }
+    }
+  });
+
   it("logs out with a valid token and clears the session", async () => {
     const { app } = testApp(
       { UI_PASSWORD: "hunter2", UI_SESSION_SECRET: "session-secret-for-tests" },
@@ -1018,6 +1047,69 @@ describe("oauth operator login", () => {
     // A different forwarded client still has budget while the spent one is capped.
     expect((await failing("10.0.0.2")).status).toBe(403);
     expect((await failing("10.0.0.1")).status).toBe(429);
+    warn.mockRestore();
+  });
+
+  it("keys the callback failure limit on the socket peer when forwarded headers are untrusted", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const { app } = testApp(oauthEnv, undefined, mockOauthFetch({ id: 1001, login: "octocat" }));
+    // @hono/node-server exposes the peer as c.env.incoming.socket; inject it here.
+    const peer = (address: string) => ({ incoming: { socket: { remoteAddress: address } } });
+    for (let i = 0; i < 10; i += 1) {
+      const res = await app.request(`/login/github/callback?code=good-code&state=bogus`, {}, peer("203.0.113.7"));
+      expect(res.status).toBe(403);
+    }
+    // A second peer keeps its own budget while the exhausted one is capped.
+    expect((await app.request(`/login/github/callback?code=good-code&state=bogus`, {}, peer("203.0.113.8"))).status).toBe(403);
+    expect((await app.request(`/login/github/callback?code=good-code&state=bogus`, {}, peer("203.0.113.7"))).status).toBe(429);
+    warn.mockRestore();
+  });
+
+  it("warns once when forwarded headers arrive while TRUST_PROXY is off", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const { app } = testApp(oauthEnv, undefined, mockOauthFetch({ id: 1001, login: "octocat" }));
+    await app.request(`/login/github/callback?code=good-code&state=bogus`, {
+      headers: { "x-forwarded-for": "10.0.0.1" },
+    });
+    await app.request(`/login/github/callback?code=good-code&state=bogus`, {
+      headers: { "x-forwarded-for": "10.0.0.2" },
+    });
+    const hints = warn.mock.calls.filter(([msg]) => String(msg).includes("TRUST_PROXY"));
+    expect(hints).toHaveLength(1);
+    warn.mockRestore();
+  });
+
+  it("ignores a spoofed X-Forwarded-For on the sign-in start limit by default", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const { app } = testApp(oauthEnv, undefined, mockOauthFetch({ id: 1001, login: "octocat" }));
+    // 30 fresh forged IPs still consume one socket-peer bucket: the next start 429s.
+    for (let i = 0; i < 30; i += 1) {
+      const res = await app.request("/login/github", {
+        headers: { "x-forwarded-for": `10.1.0.${i}` },
+      });
+      expect(res.status).toBe(302);
+    }
+    const blocked = await app.request("/login/github", {
+      headers: { "x-forwarded-for": "10.1.9.9" },
+    });
+    expect(blocked.status).toBe(429);
+    warn.mockRestore();
+  });
+
+  it("honors per-IP start budgets from X-Forwarded-For when TRUST_PROXY is set", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const { app } = testApp(
+      { ...oauthEnv, TRUST_PROXY: "true" },
+      undefined,
+      mockOauthFetch({ id: 1001, login: "octocat" }),
+    );
+    // 31 starts behind distinct forwarded IPs each get their own bucket — no 429.
+    for (let i = 0; i < 31; i += 1) {
+      const res = await app.request("/login/github", {
+        headers: { "x-forwarded-for": `10.2.0.${i}` },
+      });
+      expect(res.status).toBe(302);
+    }
     warn.mockRestore();
   });
 

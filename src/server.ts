@@ -307,6 +307,23 @@ function setSessionCookie(c: Context<AppEnv>, value: string, trustProxy: boolean
 
 export function createApp(ctx: ServerContext): Hono<AppEnv> {
   const app = new Hono<AppEnv>();
+  // Forwarded headers arriving while trust is off mean either a client is
+  // spoofing or an unconfigured proxy fronts Maomao — either way the operator
+  // should hear about it once rather than discover a collapsed limiter bucket.
+  let forwardedHintLogged = false;
+  app.use("*", async (c, next) => {
+    if (
+      !ctx.config.trustProxy &&
+      !forwardedHintLogged &&
+      (c.req.header("x-forwarded-for") !== undefined || c.req.header("x-forwarded-proto") !== undefined)
+    ) {
+      forwardedHintLogged = true;
+      console.warn(
+        "auth: X-Forwarded-* headers received but TRUST_PROXY is off — forwarded headers are ignored; set TRUST_PROXY=true only if Maomao sits behind a reverse proxy that sets them",
+      );
+    }
+    return next();
+  });
   // Every page renders the top banner while the global pause switch is on;
   // the provider reads the store live so toggles take effect on next load.
   setGlobalPauseProvider(() => {
