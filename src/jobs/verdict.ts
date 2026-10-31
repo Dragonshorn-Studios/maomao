@@ -20,6 +20,13 @@ export interface ReviewEventInput {
   findings: Array<{ severity?: string | null }>;
   allReviewersDone: boolean;
   aggregatorFallback: boolean;
+  /**
+   * Findings withheld by the out-of-checkout path gate (issue #176). Withheld
+   * findings are excluded from `findings`, so without this gate an injected
+   * reviewer could wrap real findings in host-path references and convert a
+   * REQUEST_CHANGES into a vacuous approve-ceiling pass. Comment-only.
+   */
+  withheldCount?: number;
   stale: boolean;
 }
 
@@ -41,6 +48,9 @@ export function resolveReviewEvent(input: ReviewEventInput): ReviewEventDecision
   }
   if (input.aggregatorFallback) {
     return { event: "COMMENT", reason: "aggregator used the deterministic fallback; comment-only" };
+  }
+  if (input.withheldCount) {
+    return { event: "COMMENT", reason: `${input.withheldCount} finding(s) withheld for out-of-checkout path references; comment-only` };
   }
   // severityRank is inverted: blocker=0 is the most severe, so "at or above the
   // threshold" means rank <= threshold rank (same convention as findingsMeetThreshold).
