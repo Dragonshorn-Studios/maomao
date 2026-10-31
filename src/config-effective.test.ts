@@ -348,6 +348,7 @@ describe("env-var to entry mapping (table)", () => {
     ["OPENOBSERVE_LOGS_URL", "OpenObserve logs endpoint"],
     ["MAX_INLINE_COMMENTS", "Max inline comments"],
     ["MAOMAO_OVERRIDE_AUTHORS", "Comment override authors"],
+    ["TRUST_PROXY", "Trust proxy headers (X-Forwarded-*)"],
     ["POISON_ALERT_INTERNAL_MAX_COST_USD", "Internal max cost"],
     ["POISON_ALERT_INTERNAL_MAX_TOKENS", "Internal max tokens"],
     ["POISON_ALERT_EXTERNAL_MIN_SEVERITY", "External minimum severity"],
@@ -374,6 +375,7 @@ describe("env-var to entry mapping (table)", () => {
     POISON_ALERT_INTERNAL_MAX_TOKENS: "100000",
     POISON_ALERT_EXTERNAL_MIN_SEVERITY: "high",
     REVIEWER_ROUTING: "deterministic",
+    TRUST_PROXY: "true",
   };
   // Rendered form differs from the raw value for formatted rows.
   const rendered: Record<string, string> = {
@@ -385,6 +387,7 @@ describe("env-var to entry mapping (table)", () => {
     TELEMETRY_USER_ID: "disabled",
     OPENOBSERVE_LOGS_URL: "https://oo.example.com/api/x/_json",
     POISON_ALERT_INTERNAL_MAX_COST_USD: "$0.50",
+    TRUST_PROXY: "enabled",
   };
   // Rows that only render when the feature is enabled.
   const requiresEnabled: Record<string, string> = {
