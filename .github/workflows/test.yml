@@ -17,6 +17,19 @@ jobs:
       - run: npm ci
       - run: npm test
       - run: npm run build
+      - name: Install Playwright Chromium
+        run: npx playwright install --with-deps chromium
+      # The dev-only UI workbench boots on its own: no .env, no database, no
+      # GitHub, no OpenCode. The Playwright config starts it.
+      - name: Run UI workbench smoke test
+        run: npm run test:e2e
+      - name: Upload workbench screenshots on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ui-workbench-screenshots
+          path: test-results/
+          if-no-files-found: ignore
       - name: Check install scripts
         run: |
           bash -n scripts/install.sh

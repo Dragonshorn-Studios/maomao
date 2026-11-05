@@ -195,6 +195,24 @@ function accountMenu(options: PageOptions): string {
     </details>`;
 }
 
+/** The `<main>` markers of the shell below. */
+const MAIN_OPEN = '<main id="main">';
+const MAIN_CLOSE = "</main>";
+
+/**
+ * The `<main>` body of a page rendered by `layout`, without the app chrome.
+ *
+ * The dev-only UI workbench frames one component at a time; extracting the
+ * marker here keeps it next to the code that writes it, so a change to the
+ * shell cannot silently break the frames.
+ */
+export function layoutBody(html: string): string {
+  const start = html.indexOf(MAIN_OPEN);
+  const end = html.lastIndexOf(MAIN_CLOSE);
+  if (start < 0 || end < start) return "";
+  return html.slice(start + MAIN_OPEN.length, end);
+}
+
 export function layout(title: string, body: string, options: PageOptions = {}): string {
   const live = options.live !== false;
   const script = live
@@ -274,7 +292,7 @@ export function layout(title: string, body: string, options: PageOptions = {}): 
       ? `<div class="pause-banner" role="status">Reviews paused by ${escapeHtml(pause.actor)} — no reviews will be enqueued or run. <a href="/pause">Manage</a></div>`
       : "";
   })()}
-  <main id="main">${body}</main>
+  ${MAIN_OPEN}${body}${MAIN_CLOSE}
   ${script}
 </body>
 </html>`;

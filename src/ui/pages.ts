@@ -588,11 +588,12 @@ function prExternalLinkHtml(job: JobRow): string {
   return `<a class="pr-external" href="${escapeHtml(job.pr_html_url)}" target="_blank" rel="noopener noreferrer" title="${escapeHtml(label)}" aria-label="${escapeHtml(label)}">${externalLinkGlyph()}</a>`;
 }
 
-type StackMemberSummary = { position: number; prNumber: number; memberJobId: number | null; state: string };
+export type StackMemberSummary = { position: number; prNumber: number; memberJobId: number | null; state: string };
 
 /** Miniature of the job-page member rail for the queue card: numbered nodes
- * chained left to right, tinted by member state, linking to each member job. */
-function renderStackStrip(members: StackMemberSummary[]): string {
+ * chained left to right, tinted by member state, linking to each member job.
+ * Exported so the dev-only UI workbench can frame the real component. */
+export function renderStackStrip(members: StackMemberSummary[]): string {
   const done = members.filter((member) => member.state === "done").length;
   const items = members
     .map((member) => {
@@ -610,7 +611,11 @@ function renderStackStrip(members: StackMemberSummary[]): string {
   </div>`;
 }
 
-function renderQueueCard(
+/**
+ * One queue card: the job summary shown on the dashboard. Exported so the
+ * dev-only UI workbench can frame the real component instead of a copy of it.
+ */
+export function renderQueueCard(
   job: JobRow,
   metrics: JobMetrics,
   uiFlavor?: UiFlavor,
@@ -665,9 +670,10 @@ function renderQueueCard(
 /**
  * The compact two-line row a stack member job renders as under its stack
  * card: position + linked PR title + state on line one, head SHA, elapsed
- * and the verify-first marker on line two.
+ * and the verify-first marker on line two. Exported so the dev-only UI
+ * workbench can frame the real component.
  */
-function renderMemberCard(job: JobRow, position: number): string {
+export function renderMemberCard(job: JobRow, position: number): string {
   const state = jobStateLabel(job.state);
   const elapsed = formatDuration(elapsedMs(job.started_at, job.finished_at) ?? elapsedMs(job.created_at));
   const isLive = LIVE_JOB_STATES.includes(job.state);
@@ -932,7 +938,9 @@ function renderDiagnosis(metrics: JobMetrics, aggregatorState: string): string {
   </div>`;
 }
 
-function renderSeverityChips(counts: SeverityCounts, unconfirmed = false): string {
+/** The severity chips a job card counts its findings with. Exported so the
+ * dev-only UI workbench can frame the real component. */
+export function renderSeverityChips(counts: SeverityCounts, unconfirmed = false): string {
   if (counts.total === 0) return `<div class="meta-row"><span class="muted">No suspicious findings</span></div>`;
   const keys = ["blocker", "high", "medium", "low", "info"] as const;
   const chips = keys
@@ -990,7 +998,10 @@ function renderJobRetry(jobId: number, count: number, csrfToken?: string): strin
   </form>`;
 }
 
-function renderRun(
+/** One specialist run card — the model, the usage, and the findings the
+ * reviewer reported. Exported so the dev-only UI workbench can frame the
+ * real component. */
+export function renderRun(
   run: ReviewerRunRow,
   showRetry = false,
   csrfToken?: string,
@@ -1152,7 +1163,10 @@ function renderFindings(
   return banner + active.join("") + settledBlock;
 }
 
-function renderFindingCard(
+/** One finding as the job page renders it: severity, location, reason, and
+ * the diff panel the persisted record carries. Exported so the dev-only UI
+ * workbench can frame the real component. */
+export function renderFindingCard(
   input: {
     severity: string;
     category: string;
@@ -2007,7 +2021,9 @@ export function renderDraftEditPage(data: DraftEditPageData): string {
   });
 }
 
-function configAuditTable(audit: ConfigPageData["audit"]): string {
+/** The configuration audit trail — who changed which profile revision, and
+ * when. Exported so the dev-only UI workbench can frame the real component. */
+export function configAuditTable(audit: ConfigPageData["audit"]): string {
   const rows = audit
     .map(
       (entry) =>
@@ -2050,7 +2066,10 @@ export function renderNewProfilePage(data: ConfigPageData): string {
   });
 }
 
-function deliveriesTable(deliveries: WebhookDeliveryRow[]): string {
+/** The webhook delivery log — what maomao saw, what it did with it, and what
+ * it ignored. Exported so the dev-only UI workbench can frame the real
+ * component. */
+export function deliveriesTable(deliveries: WebhookDeliveryRow[]): string {
   const rows = deliveries
     .map((delivery) => {
       const ignored = delivery.ignored === 1;
@@ -2228,7 +2247,10 @@ function promptRevisionCard(revision: PromptRevisionView, data: PromptConfigPage
   </article>`;
 }
 
-function promptRoleCard(
+/** One reviewer role on the prompt page: the built-in instructions or the
+ * active override, plus its revision history. Exported so the dev-only UI
+ * workbench can frame the real component. */
+export function promptRoleCard(
   role: { id: string; title: string; defaultBody: string },
   revisions: PromptRevisionView[],
   data: PromptConfigPageData,

@@ -508,6 +508,17 @@ Behavior and boundaries:
 
 **Emergency local login.** The shared-password form is hidden while OAuth is enabled. Set `UI_LOCAL_LOGIN=true` (plus `UI_PASSWORD`/`UI_SESSION_SECRET`) to show it as a recovery path; it stays off by default.
 
+## UI workbench
+
+A dev-only, fail-closed gallery of Maomao's real server-rendered pages and its React island. One command, no credentials:
+
+```bash
+npm run ui:dev        # build the vendor bundles, then serve the workbench
+npm run ui:validate   # check the story registry, the catalog schema, and every preview
+```
+
+The gallery is at http://127.0.0.1:4310/dev/ui — loopback only, and never in production. `npm run ui:dev` is the explicit opt-in; the same routes are mounted in the normal server under `MAOMAO_UI_WORKBENCH_ENABLED=1`. Every preview renders the production component on deterministic fixtures: no job is started, no model is called, and the frames never touch the network. `/dev/ui/tokens` renders the app's design tokens with a swatch per theme. See [docs/ui-workbench/README.md](docs/ui-workbench/README.md) for the routes, the catalog contract, and how to add a story; [docs/ui-workbench/portability-findings.md](docs/ui-workbench/portability-findings.md) records how the workbench was ported from Sumomo's.
+
 ## Security / trust boundary
 
 Checked-out PR code is **untrusted input**. For MVP, reviewers are for static inspection:

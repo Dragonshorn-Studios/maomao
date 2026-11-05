@@ -10,6 +10,8 @@ github-app.pem
 *.sqlite-wal
 *.sqlite-shm
 coverage/
+test-results/
+playwright-report/
 .DS_Store
 *.log
 .zcode/

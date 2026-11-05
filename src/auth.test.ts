@@ -110,6 +110,19 @@ describe("csrf tokens", () => {
     expect(csrfExemptPath("/reviews")).toBe(false);
     expect(csrfExemptPath("/health")).toBe(false);
   });
+
+  it("exempts the workbench prefix, which has its own gate", () => {
+    expect(isPublicPath("/dev/ui")).toBe(true);
+    expect(isPublicPath("/dev/ui/catalog.json")).toBe(true);
+    expect(isPublicPath("/dev/ui/job-card/completed/frame")).toBe(true);
+    // Only the exact prefix: a lookalike path stays behind the login.
+    expect(isPublicPath("/dev/uix")).toBe(false);
+    expect(isPublicPath("/dev")).toBe(false);
+
+    expect(csrfExemptPath("/dev/ui")).toBe(true);
+    expect(csrfExemptPath("/dev/ui/fake/chat/stream")).toBe(true);
+    expect(csrfExemptPath("/dev/uix")).toBe(false);
+  });
 });
 
 describe("oauth sessions", () => {
