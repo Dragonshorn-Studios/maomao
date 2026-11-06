@@ -26,6 +26,8 @@ import type { ProfileFieldErrors, ProfileFormValues } from "./config-form.js";
 import { decodeProfileAction, decodeProfileForm, applyProfileAction, profileFormToDefinition } from "./config-form.js";
 import { KNOWN_REVIEWER_ROLES, PROVIDER_PROBE_PROMPT, promptBodyFromRolePrompt } from "./prompts.js";
 import { subscribe } from "./events.js";
+import { isProduction, workbenchFlagEnabled } from "./ui-workbench/gate.js";
+import { mountWorkbench } from "./ui-workbench/mount.js";
 import { redactSecrets, truncate } from "./util.js";
 import { readFileSync } from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
@@ -154,6 +156,11 @@ export interface ServerContext {
   telemetryFetch?: typeof fetch;
   /** The environment loadConfig consumed; defaults to process.env. Injectable for tests. */
   env?: NodeJS.ProcessEnv;
+  /**
+   * Resolves the peer address for the dev-only workbench gate. Defaults to
+   * the socket address; tests inject a loopback address.
+   */
+  workbenchPeerAddress?: (c: Context<AppEnv>) => string | undefined;
 }
 
 const OAUTH_STATE_TTL_MS = 10 * 60 * 1000;
@@ -311,6 +318,16 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
   let providerTestInFlight = false;
   let telemetryTestInFlight = false;
   const oauthStates = new OAuthStateStore();
+
+  // Dev-only UI workbench. The gate answers a hard 404 before anything else
+  // when the flag is off, the process runs in production, or the peer is not
+  // on the loopback interface — no redirect, no partial page.
+  mountWorkbench(app, {
+    enabled: workbenchFlagEnabled(ctx.env ?? process.env),
+    production: isProduction(ctx.env ?? process.env),
+    peerAddress: ctx.workbenchPeerAddress,
+    announce: true,
+  });
 
   app.use("*", async (c, next) => {
     if (!gateOn || isPublicPath(c.req.path)) return next();

@@ -44,6 +44,16 @@ export function safeNextPath(raw: string | undefined | null): string {
   return value;
 }
 
+/**
+ * The dev-only UI workbench lives under this prefix.
+ *
+ * It is protected by its own gate (explicit flag, non-production, loopback
+ * peer) rather than by the operator login, so it needs no credentials.
+ */
+export function isWorkbenchPath(path: string): boolean {
+  return path === "/dev/ui" || path.startsWith("/dev/ui/");
+}
+
 export function isPublicPath(path: string): boolean {
   return (
     path === "/health" ||
@@ -64,12 +74,19 @@ export function isPublicPath(path: string): boolean {
     path === "/assets/favicon.svg" ||
     path === "/assets/favicon.png" ||
     path === "/assets/icon.svg" ||
-    path === "/assets/icon.png"
+    path === "/assets/icon.png" ||
+    // The UI workbench has its own gate; see src/ui-workbench/mount.ts.
+    isWorkbenchPath(path)
   );
 }
 
 export function csrfExemptPath(path: string): boolean {
-  return path === "/webhooks/github" || path.startsWith("/webhooks/gitlab/");
+  return (
+    path === "/webhooks/github" ||
+    path.startsWith("/webhooks/gitlab/") ||
+    // The workbench's fake endpoints are in-process and side-effect free.
+    isWorkbenchPath(path)
+  );
 }
 
 export type CsrfRejectReason = "missing-cookie" | "missing-field" | "mismatch" | "bad-token";

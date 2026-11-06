@@ -12,9 +12,12 @@
     "start": "node dist/index.js",
     "dev": "npm run build:vendor && tsx watch src/index.ts",
     "demo": "npm run build:vendor && tsx src/demo/serve.ts",
+    "ui:dev": "npm run build:vendor && tsx watch src/ui-workbench/dev.ts",
+    "ui:validate": "tsx src/ui-workbench/validate-cli.ts",
+    "test:e2e": "playwright test",
     "test": "npm run build:vendor && vitest run",
     "test:watch": "vitest",
-    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.chat.json --noEmit",
+    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.chat.json --noEmit && tsc -p tsconfig.e2e.json",
     "build:vendor": "esbuild src/ui/pierre-entry.ts --bundle --minify --format=iife --global-name=__maomaoPierre --target=es2020 --outfile=dist/assets/vendor/pierre-diffs.js && esbuild src/ui/chat-entry.tsx --bundle --minify --format=iife --jsx=automatic --target=es2020 --outfile=dist/assets/chat.js"
   },
   "dependencies": {
@@ -29,6 +32,7 @@
   },
   "devDependencies": {
     "@assistant-ui/react": "^0.15.21",
+    "@playwright/test": "^1.64.1",
     "@types/better-sqlite3": "^7.6.13",
     "@types/node": "^22.18.8",
     "@types/react": "^18.3.31",
