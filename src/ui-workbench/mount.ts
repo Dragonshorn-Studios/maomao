@@ -6,7 +6,7 @@
  */
 import type { Context, Env, Hono, MiddlewareHandler, Next } from "hono";
 import { createWorkbenchApp, type WorkbenchAppOptions } from "./app.js";
-import { isProduction, workbenchAvailable, workbenchFlagEnabled } from "./gate.js";
+import { isProduction, looksProxied, workbenchAvailable, workbenchFlagEnabled } from "./gate.js";
 
 /** The path prefix the workbench is mounted at in every host. */
 export const WORKBENCH_PREFIX = "/dev/ui";
@@ -23,6 +23,8 @@ export interface WorkbenchGateOptions {
    * be a browser on the loopback interface.
    */
   peerAddress?: (c: Context) => string | undefined;
+  /** Prints a startup warning when the workbench is enabled. */
+  announce?: boolean;
 }
 
 /**
@@ -39,6 +41,11 @@ export function defaultPeerAddress(c: Context): string | undefined {
 export function createWorkbenchGate(options: WorkbenchGateOptions = {}): MiddlewareHandler<any, string, any> {
   const peerAddress = options.peerAddress ?? defaultPeerAddress;
   return async (c: Context<any, string, any>, next: Next) => {
+    // A request that carries forwarding headers came through a proxy, so the
+    // socket peer is the proxy's address and the loopback rule proves nothing
+    // about who is asking. Refuse it instead of trusting the header.
+    if (looksProxied((name) => c.req.header(name))) return c.notFound();
+
     const available = workbenchAvailable({
       enabled: options.enabled ?? workbenchFlagEnabled(),
       production: options.production ?? isProduction(),
@@ -65,5 +72,12 @@ export function mountWorkbench<E extends Env>(
   app.use(WORKBENCH_PREFIX, gate);
   app.use(`${WORKBENCH_PREFIX}/*`, gate);
   app.route(WORKBENCH_PREFIX, createWorkbenchApp(options));
+
+  if (options.announce && (options.enabled ?? workbenchFlagEnabled())) {
+    console.warn(
+      "[ui-workbench] enabled — it answers direct loopback requests only. A reverse proxy in front of this host is refused, because the peer would be the proxy's address and not the client's.",
+    );
+  }
+
   return app;
 }

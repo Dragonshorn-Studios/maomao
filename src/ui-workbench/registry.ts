@@ -186,7 +186,11 @@ export function resolveViewport(
   requested: string | undefined,
   fallback: ViewportName,
 ): { name: ViewportName; width: number; height: number } {
-  const name = (requested ?? "") in VIEWPORTS ? (requested as ViewportName) : fallback;
-  const preset = VIEWPORTS[name] ?? VIEWPORTS.desktop;
-  return { name, ...preset };
+  // `in` walks the prototype chain, so `?viewport=toString` would pass as a
+  // preset and resolve to an inherited function. Only own keys are presets.
+  const fallbackName = Object.hasOwn(VIEWPORTS, fallback) ? fallback : "desktop";
+  const name =
+    requested && Object.hasOwn(VIEWPORTS, requested) ? (requested as ViewportName) : fallbackName;
+  const preset = VIEWPORTS[name];
+  return { name, width: preset.width, height: preset.height };
 }

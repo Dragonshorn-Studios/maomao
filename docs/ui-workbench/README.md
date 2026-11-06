@@ -308,18 +308,21 @@ The workbench fails closed. It answers only when **all** of the following hold:
 | Explicit opt-in | `MAOMAO_UI_WORKBENCH_ENABLED=1`. Off unless the value is exactly `1`. `npm run ui:dev` is itself the opt-in: it enables the gate in-process instead of reading the flag. |
 | Not production | `NODE_ENV` must not be `production`. |
 | Loopback peer | The socket peer address must be loopback (`127.0.0.0/8` or `::1`). |
+| No forwarding headers | A request that carries `Forwarded`, `X-Forwarded-For`, `X-Forwarded-Host`, or `X-Forwarded-Proto` is refused. |
 
 - `X-Forwarded-For` is deliberately ignored — only the socket address counts, so a spoofed header can never pose as loopback.
+- A request with a forwarding header is refused outright. Behind a same-host reverse proxy the socket peer is the proxy's address, so the loopback rule would prove nothing: refusing the header keeps "loopback only" true instead of silently degrading to "the proxy only", which would expose the previews and their CSRF-exempt fake endpoint to every remote visitor. Reach the workbench through an SSH tunnel or the standalone server instead of a proxy.
 - A denial is a hard `404` (never a redirect, never a partial page), produced before any other middleware runs.
 - The workbench routes are **not** behind the operator login: they are protected by the gate, like Sumomo's.
 - In the production server the routes are mounted with the same gate (`src/server.ts`), so a deployed Maomao answers `404` for every `/dev/ui` path unless the flag is on, the process is not production, and the peer is on loopback.
+- Enabling the workbench prints a startup warning naming the proxy caveat.
 
 ## Verification
 
 ```bash
-npm run typecheck     # tsc over the app and the chat island
+npm run typecheck     # tsc over the app, the chat island, and the browser suite
 npm test              # vitest: registry, catalog schema, gating, fake I/O, rendering
-npm run ui:validate   # registry + catalog schema + every preview renders non-empty
+npm run ui:validate   # registry + the published catalog + every preview renders non-empty
 npm run test:e2e      # playwright: the catalog → frame → screenshot flow
 ```
 
@@ -341,15 +344,17 @@ The browser suite starts its own workbench on port **4311** (override with `MAOM
 | File | Role |
 | --- | --- |
 | `src/ui-workbench/contract.ts` | Zod schemas and types for the shared contract: slug ids, viewport presets, catalog JSON shape. |
+| `src/ui-workbench/catalog.ts` | Builds the catalog document. The server serves it and `npm run ui:validate` checks it, so the two cannot drift. |
 | `src/ui-workbench/registry.ts` | The explicit allowlist (`WorkbenchRegistry`): only registered ids resolve, `problems()` reports malformed registries, source paths are validated to stay inside the repository. |
 | `src/ui-workbench/stories.ts` | The app-specific seam: the story allowlist and the fixtures each story renders. |
 | `src/ui-workbench/fixtures.ts` | Deterministic fixtures (literal timestamps, literal job/run/profile rows). |
 | `src/ui-workbench/render.ts` | Gallery, story chrome, and the sandboxed frame. |
-| `src/ui-workbench/app.ts` | The Hono routes and the catalog builder. |
+| `src/ui-workbench/app.ts` | The Hono routes. |
 | `src/ui-workbench/gate.ts` | The fail-closed gate. |
 | `src/ui-workbench/mount.ts` | Mounts the routes and the gate into a Hono app. |
 | `src/ui-workbench/dev.ts` | The standalone dev server (`npm run ui:dev`). |
-| `src/ui-workbench/validate.ts` | The `npm run ui:validate` CLI. |
+| `src/ui-workbench/validate.ts` | The checks `npm run ui:validate` runs, callable from a test. |
+| `src/ui-workbench/validate-cli.ts` | The `npm run ui:validate` command-line entry point. |
 | `src/ui-workbench/assets.ts` | Which built bundles exist on disk. |
 | `src/ui-workbench/tokens.ts` | Parses the theme stylesheet into the design tokens the `/dev/ui/tokens` page renders. |
 | `src/ui/layout.ts` | Production. Owns `layoutBody()`, the helper that extracts a page's `<main>` body. |

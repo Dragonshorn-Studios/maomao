@@ -326,6 +326,7 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
     enabled: workbenchFlagEnabled(ctx.env ?? process.env),
     production: isProduction(ctx.env ?? process.env),
     peerAddress: ctx.workbenchPeerAddress,
+    announce: true,
   });
 
   app.use("*", async (c, next) => {

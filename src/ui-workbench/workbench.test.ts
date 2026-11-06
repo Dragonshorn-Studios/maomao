@@ -1,19 +1,27 @@
 import { describe, expect, it } from "vitest";
 import { Hono } from "hono";
+import { serve } from "@hono/node-server";
+import { spawnSync } from "node:child_process";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { loadConfig } from "../config.js";
 import { openDb } from "../db.js";
 import { JobStore } from "../jobs/store.js";
 import type { JobQueue } from "../jobs/queue.js";
 import { createApp } from "../server.js";
+import { FAVICON_PNG_BASE64 } from "../ui/icons.js";
 import { catalogSchema, SLUG_PATTERN, VIEWPORTS } from "./contract.js";
 import { isLoopback, normalizeAddress, workbenchAvailable } from "./gate.js";
 import { createWorkbenchApp } from "./app.js";
 import { mountWorkbench } from "./mount.js";
-import { WorkbenchRegistry } from "./registry.js";
-import { frameUrl, storyUrl } from "./render.js";
+import { WorkbenchRegistry, resolveViewport } from "./registry.js";
+import { FRAME_SANDBOX_JS, frameUrl, storyUrl } from "./render.js";
 import { designTokens } from "./tokens.js";
+import { runValidation } from "./validate.js";
 import { STORIES } from "./stories.js";
 import type { WorkbenchStory } from "./contract.js";
+
+const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
 
 /** The workbench without the gate, for rendering and catalog assertions. */
 function openWorkbench(): Hono {
@@ -256,6 +264,17 @@ describe("gate rules", () => {
     expect(normalizeAddress("::ffff:127.0.0.1")).toBe("127.0.0.1");
   });
 
+  it("rejects an inherited property name as a viewport", () => {
+    expect(resolveViewport("toString", "mobile")).toEqual({
+      name: "mobile",
+      width: 390,
+      height: 844,
+    });
+    expect(resolveViewport("constructor", "desktop").name).toBe("desktop");
+    expect(resolveViewport(undefined, "tablet").name).toBe("tablet");
+    expect(resolveViewport("mobile", "desktop").name).toBe("mobile");
+  });
+
   it("requires every condition", () => {
     expect(workbenchAvailable({ enabled: true, production: false, remoteAddr: "127.0.0.1" })).toBe(true);
     expect(workbenchAvailable({ enabled: false, production: false, remoteAddr: "127.0.0.1" })).toBe(false);
@@ -379,6 +398,13 @@ describe("rendering", () => {
     expect(frozen).toContain("animation-play-state: paused");
     const live = await (await app.request("/dev/ui/job-card/completed/frame")).text();
     expect(live).not.toContain("animation-play-state: paused");
+  });
+
+  it("falls back to the default for an unknown viewport", async () => {
+    const response = await app.request("/dev/ui/job-card/completed/frame?viewport=toString");
+    const html = await response.text();
+    expect(html).toContain('data-workbench-viewport="desktop"');
+    expect(html).not.toContain('width="undefined"');
   });
 
   it("honours the viewport and theme parameters", async () => {
@@ -538,5 +564,202 @@ describe("composition", () => {
     const problems = new WorkbenchRegistry([dangling, selfReferencing]).problems();
     expect(problems.some((problem) => problem.includes("composes unknown story"))).toBe(true);
     expect(problems.some((problem) => problem.includes("cannot compose itself"))).toBe(true);
+  });
+});
+
+describe("the frame sandbox", () => {
+  /**
+   * Runs the shipped sandbox script against a minimal DOM.
+   *
+   * The script is what makes "previews never touch the network" true, so it
+   * is executed here rather than only matched as a substring of the frame.
+   */
+  function runSandbox() {
+    const listeners = new Map<string, Array<(event: unknown) => void>>();
+    const captures = new Map<string, boolean>();
+    const calls: string[] = [];
+
+    const windowStub = {
+      fetch: (url: string) => {
+        calls.push(url);
+        return Promise.resolve("original");
+      },
+    };
+
+    const documentStub = {
+      addEventListener(type: string, handler: (event: unknown) => void, capture?: boolean) {
+        const bucket = listeners.get(type) ?? [];
+        bucket.push(handler);
+        listeners.set(type, bucket);
+        captures.set(type, capture === true);
+      },
+    };
+
+    new Function("window", "document", FRAME_SANDBOX_JS)(windowStub, documentStub);
+
+    return {
+      window: windowStub,
+      calls,
+      capture: (type: string) => captures.get(type),
+      dispatch(type: string, event: unknown) {
+        for (const handler of listeners.get(type) ?? []) handler(event);
+      },
+    };
+  }
+
+  it("lets the fake endpoint through and rejects every other request", async () => {
+    const sandbox = runSandbox();
+    expect(sandbox.calls).toEqual([]);
+
+    await expect(sandbox.window.fetch("/dev/ui/fake/chat/stream")).resolves.toBe("original");
+    expect(sandbox.calls).toEqual(["/dev/ui/fake/chat/stream"]);
+
+    await expect(sandbox.window.fetch("/api/jobs")).rejects.toThrow(/network access is blocked/);
+    await expect(sandbox.window.fetch("https://api.github.com/repos")).rejects.toThrow(
+      /network access is blocked/,
+    );
+    expect(sandbox.calls).toEqual(["/dev/ui/fake/chat/stream"]);
+  });
+
+  it("blocks form submissions before any handler runs", () => {
+    const sandbox = runSandbox();
+    expect(sandbox.capture("submit")).toBe(true);
+
+    let prevented = false;
+    sandbox.dispatch("submit", {
+      preventDefault() {
+        prevented = true;
+      },
+    });
+    expect(prevented).toBe(true);
+  });
+
+  it("blocks navigation away from the preview", () => {
+    const sandbox = runSandbox();
+
+    const anchor = { getAttribute: (name: string) => (name === "href" ? "/jobs/412" : null) };
+    let prevented = false;
+    sandbox.dispatch("click", {
+      target: { closest: (selector: string) => (selector === "a" ? anchor : null) },
+      preventDefault() {
+        prevented = true;
+      },
+    });
+    expect(prevented).toBe(true);
+
+    // A fragment link stays inside the frame and is left alone.
+    let fragmentPrevented = false;
+    sandbox.dispatch("click", {
+      target: {
+        closest: (selector: string) =>
+          selector === "a" ? { getAttribute: (name: string) => (name === "href" ? "#section" : null) } : null,
+      },
+      preventDefault() {
+        fragmentPrevented = true;
+      },
+    });
+    expect(fragmentPrevented).toBe(false);
+  });
+});
+
+describe("the standalone dev server", () => {
+  it("refuses to start in production", () => {
+    const result = spawnSync(process.execPath, ["--import", "tsx", "src/ui-workbench/dev.ts"], {
+      cwd: REPO_ROOT,
+      env: { ...process.env, NODE_ENV: "production" },
+      encoding: "utf8",
+      timeout: 30_000,
+    });
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("refuses to start");
+  });
+
+  it("serves the brand PNGs as decoded bytes", async () => {
+    const app = new Hono();
+    app.get("/assets/favicon.png", (c) =>
+      c.newResponse(new Uint8Array(Buffer.from(FAVICON_PNG_BASE64, "base64")), 200, {
+        "content-type": "image/png",
+      }),
+    );
+    // The dev server mirrors the production route; this pins the decoding.
+    const bytes = Buffer.from(FAVICON_PNG_BASE64, "base64");
+    const response = await app.request("/assets/favicon.png");
+    const body = Buffer.from(await response.arrayBuffer());
+    expect(body.equals(bytes)).toBe(true);
+    expect(body.subarray(1, 4).toString("ascii")).toBe("PNG");
+  });
+});
+
+describe("the peer address", () => {
+  it("reads the real socket address of a live server", async () => {
+    const app = new Hono();
+    mountWorkbench(app, { enabled: true, production: false });
+
+    let announce: (port: number) => void = () => {};
+    const listening = new Promise<number>((resolve) => {
+      announce = resolve;
+    });
+    const server = serve({ fetch: app.fetch, port: 0, hostname: "127.0.0.1" }, (info) =>
+      announce(info.port),
+    );
+    const port = await listening;
+
+    try {
+      const direct = await fetch(`http://127.0.0.1:${port}/dev/ui/catalog.json`);
+      expect(direct.status).toBe(200);
+
+      // A forwarded header means the peer is a proxy, not the client: the
+      // loopback rule proves nothing, so the request is refused.
+      const proxied = await fetch(`http://127.0.0.1:${port}/dev/ui/catalog.json`, {
+        headers: { "X-Forwarded-For": "127.0.0.1" },
+      });
+      expect(proxied.status).toBe(404);
+    } finally {
+      server.close();
+    }
+  });
+
+  it("refuses a spoofed forwarding header from a remote peer", async () => {
+    const app = productionApp({ MAOMAO_UI_WORKBENCH_ENABLED: "1" }, () => "203.0.113.7");
+    const response = await app.request("/dev/ui/catalog.json", {
+      headers: { "X-Forwarded-For": "127.0.0.1" },
+    });
+    expect(response.status).toBe(404);
+  });
+});
+
+describe("the validation CLI", () => {
+  it("reports a valid story set", () => {
+    const result = runValidation(STORIES);
+    expect(result.problems).toEqual([]);
+    expect(result.exitCode).toBe(0);
+    expect(result.stories).toBe(STORIES.length);
+  });
+
+  it("reports problems and a failing exit code", () => {
+    const broken: WorkbenchStory = {
+      id: "broken",
+      title: "",
+      category: "",
+      family: "ssr",
+      variants: [],
+      sourceFiles: ["src/does-not-exist.ts"],
+      defaultViewport: "desktop",
+      uses: ["missing-story"],
+      preview: () => "   ",
+    };
+    const result = runValidation([broken]);
+    expect(result.exitCode).toBe(1);
+    expect(result.problems.length).toBeGreaterThan(0);
+  });
+
+  it("exits nonzero when the story set is malformed", () => {
+    const result = spawnSync(
+      process.execPath,
+      ["--import", "tsx", "src/ui-workbench/validate-cli.ts"],
+      { cwd: REPO_ROOT, encoding: "utf8", timeout: 30_000 },
+    );
+    expect(result.status).toBe(0);
+    expect(result.stdout).toContain("story registry is valid");
   });
 });

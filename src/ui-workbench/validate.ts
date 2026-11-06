@@ -1,17 +1,33 @@
 /**
- * `npm run ui:validate` — the copyable installation check for the workbench.
+ * The checks `npm run ui:validate` runs.
  *
- * It exits nonzero and explains what to fix when the story set is malformed:
- * duplicate or malformed ids, missing variants, source references that do not
- * resolve inside the repository, a catalog that does not match the published
- * schema, or a variant that renders nothing.
+ * They live here, apart from the command-line entry point, so a test can
+ * exercise them without the process exiting underneath it.
  */
 import { catalogSchema } from "./contract.js";
+import { buildCatalog } from "./catalog.js";
 import { WorkbenchRegistry } from "./registry.js";
-import { STORIES } from "./stories.js";
+import type { WorkbenchStory } from "./contract.js";
 
-function main(): number {
-  const registry = new WorkbenchRegistry(STORIES);
+export interface ValidationResult {
+  /** Every problem found, in the order they were found. */
+  problems: string[];
+  /** 0 when the story set is valid, 1 when it is not. */
+  exitCode: number;
+  /** The number of stories checked. */
+  stories: number;
+  /** The number of variants checked. */
+  variants: number;
+}
+
+/**
+ * Collects the problems of a story set.
+ *
+ * The catalog is built through the same builder the server publishes, so the
+ * artifact the CLI checks is the artifact `/dev/ui/catalog.json` serves.
+ */
+export function runValidation(stories: WorkbenchStory[]): ValidationResult {
+  const registry = new WorkbenchRegistry(stories);
   const problems = registry.problems();
 
   // Every variant must render something: a story that throws or renders an
@@ -30,52 +46,17 @@ function main(): number {
     }
   }
 
-  const catalog = catalogSchema.safeParse({
-    generatedBy: "maomao-ui-workbench",
-    viewports: {
-      mobile: { width: 390, height: 844 },
-      tablet: { width: 834, height: 1112 },
-      desktop: { width: 1440, height: 900 },
-    },
-    stories: registry.all().map((story) => ({
-      id: story.id,
-      title: story.title,
-      category: story.category,
-      family: story.family,
-      defaultViewport: story.defaultViewport,
-      sourceFiles: story.sourceFiles,
-      uses: [],
-      notes: story.notes ?? null,
-      variants: story.variants.map((variant) => ({
-        id: variant.id,
-        title: variant.title,
-        url: `/dev/ui/${story.id}/${variant.id}`,
-        frameUrl: `/dev/ui/${story.id}/${variant.id}/frame`,
-      })),
-    })),
-  });
+  const catalog = catalogSchema.safeParse(buildCatalog(registry));
   if (!catalog.success) {
     for (const issue of catalog.error.issues) {
       problems.push(`Catalog schema: ${issue.path.join(".")} ${issue.message}`);
     }
   }
 
-  for (const problem of problems) {
-    console.error(problem);
-  }
-
-  if (problems.length > 0) {
-    console.error(
-      `UI workbench story registry is invalid (${problems.length} problem${problems.length === 1 ? "" : "s"}).`,
-    );
-    return 1;
-  }
-
-  const variants = registry.all().reduce((total, story) => total + story.variants.length, 0);
-  console.log(
-    `UI workbench story registry is valid (${registry.all().length} stor${registry.all().length === 1 ? "y" : "ies"}, ${variants} variants).`,
-  );
-  return 0;
+  return {
+    problems,
+    exitCode: problems.length > 0 ? 1 : 0,
+    stories: registry.all().length,
+    variants: registry.all().reduce((total, story) => total + story.variants.length, 0),
+  };
 }
-
-process.exit(main());

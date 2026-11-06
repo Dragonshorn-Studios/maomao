@@ -17,6 +17,9 @@ jobs:
       - run: npm ci
       - run: npm test
       - run: npm run build
+      # `npm run build` typechecks the app; this covers the chat island and
+      # the Playwright suite, which no build project includes.
+      - run: npm run typecheck
       - name: Install Playwright Chromium
         run: npx playwright install --with-deps chromium
       # The dev-only UI workbench boots on its own: no .env, no database, no

@@ -87,8 +87,9 @@ export const catalogStorySchema = z.object({
   defaultViewport: viewportNameSchema,
   sourceFiles: z.array(z.string().min(1)),
   /**
-   * Kept for schema compatibility with Sumomo's catalog. Maomao has no
-   * component-composition graph, so the list is always empty.
+   * The stories this one composes. Maomao declares the edges on the story
+   * (see `WorkbenchStory.uses`); the key and its type stay as Sumomo
+   * publishes them.
    */
   uses: z.array(slugSchema),
   notes: z.string().nullable(),

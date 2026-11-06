@@ -7,8 +7,9 @@
  * way.
  */
 import { Hono } from "hono";
-import { VIEWPORTS, type Catalog, type ViewportName } from "./contract.js";
+import type { ViewportName } from "./contract.js";
 import { WorkbenchRegistry, resolveViewport } from "./registry.js";
+import { buildCatalog } from "./catalog.js";
 import { frameUrl, renderFrame, renderGallery, renderStoryPage, renderTokensPage, storyUrl } from "./render.js";
 import { frameHeadScripts } from "./assets.js";
 import { designTokens } from "./tokens.js";
@@ -28,34 +29,6 @@ export interface WorkbenchAppOptions {
 /** The story id the fake chat endpoint answers for. */
 const FAKE_CHAT_JOB = 415;
 
-function buildCatalog(registry: WorkbenchRegistry): Catalog {
-  return {
-    generatedBy: "maomao-ui-workbench",
-    viewports: {
-      mobile: { ...VIEWPORTS.mobile },
-      tablet: { ...VIEWPORTS.tablet },
-      desktop: { ...VIEWPORTS.desktop },
-    },
-    stories: registry.all().map((story) => ({
-      id: story.id,
-      title: story.title,
-      category: story.category,
-      family: story.family,
-      defaultViewport: story.defaultViewport,
-      sourceFiles: [...story.sourceFiles],
-      // Maomao declares its composition edges: the renderers are plain
-      // functions, so only the story knows which components it renders.
-      uses: [...(story.uses ?? [])],
-      notes: story.notes ?? null,
-      variants: story.variants.map((variant) => ({
-        id: variant.id,
-        title: variant.title,
-        url: storyUrl(story.id, variant.id),
-        frameUrl: frameUrl(story.id, variant.id),
-      })),
-    })),
-  };
-}
 
 /**
  * The fake chat endpoint: a deterministic in-process SSE responder.

@@ -63,12 +63,25 @@ app.get(PIERRE_DIFFS_HREF, (c) => {
 });
 app.get("/assets/favicon.svg", (c) => c.newResponse(FAVICON_SVG, 200, { "content-type": "image/svg+xml" }));
 app.get("/assets/icon.svg", (c) => c.newResponse(LARGE_ICON_SVG, 200, { "content-type": "image/svg+xml" }));
-app.get("/assets/favicon.png", (c) => c.newResponse(FAVICON_PNG_BASE64, 200, { "content-type": "image/png" }));
-app.get("/assets/icon.png", (c) => c.newResponse(LARGE_ICON_PNG_BASE64, 200, { "content-type": "image/png" }));
+// The brand PNGs are stored as base64; the production asset route decodes
+// them, and so must this one — base64 text with an image content type is
+// not an image.
+app.get("/assets/favicon.png", (c) =>
+  c.newResponse(new Uint8Array(Buffer.from(FAVICON_PNG_BASE64, "base64")), 200, {
+    "content-type": "image/png",
+    "cache-control": "public, max-age=86400",
+  }),
+);
+app.get("/assets/icon.png", (c) =>
+  c.newResponse(new Uint8Array(Buffer.from(LARGE_ICON_PNG_BASE64, "base64")), 200, {
+    "content-type": "image/png",
+    "cache-control": "public, max-age=86400",
+  }),
+);
 
 // The workbench routes, behind the same gate the production server uses. The
 // dev command is the explicit opt-in, so the flag is on here.
-mountWorkbench(app, { enabled: true, production: isProduction() });
+mountWorkbench(app, { enabled: true, production: isProduction(), announce: true });
 
 serve({ fetch: app.fetch, hostname: HOST, port: PORT }, (info) => {
   console.log(`Maomao UI workbench on http://${info.address}:${info.port}/dev/ui`);

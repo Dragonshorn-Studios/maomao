@@ -22,7 +22,9 @@ const PORT = process.env.MAOMAO_UI_WORKBENCH_PORT ?? "4311";
 
 export default async function globalSetup(): Promise<() => Promise<void>> {
   // The React chat island is served from the built bundle.
-  execFileSync("npm", ["run", "build:vendor"], { cwd: REPO_ROOT, stdio: "inherit" });
+  // On Windows the npm launcher is `npm.cmd`, and it is not a shell script.
+  const npm = process.platform === "win32" ? "npm.cmd" : "npm";
+  execFileSync(npm, ["run", "build:vendor"], { cwd: REPO_ROOT, stdio: "inherit" });
 
   const child = spawn(process.execPath, ["--import", "tsx", "src/ui-workbench/dev.ts"], {
     cwd: REPO_ROOT,

@@ -67,3 +67,23 @@ export function workbenchFlagEnabled(env: NodeJS.ProcessEnv = process.env): bool
 export function isProduction(env: NodeJS.ProcessEnv = process.env): boolean {
   return env.NODE_ENV === "production";
 }
+
+/**
+ * Headers that only a reverse proxy sets.
+ *
+ * Their presence means the socket peer is the proxy's address, not the
+ * client's, so the loopback rule proves nothing about who is asking.
+ */
+export const PROXY_HEADERS = ["forwarded", "x-forwarded-for", "x-forwarded-host", "x-forwarded-proto"];
+
+/**
+ * True when a request carries a forwarding header.
+ *
+ * The workbench refuses these rather than trusting them: a proxy in front of
+ * the host would otherwise present a loopback peer and turn "loopback only"
+ * into "the proxy only" — serving the previews, and their CSRF-exempt fake
+ * endpoint, to every remote visitor.
+ */
+export function looksProxied(header: (name: string) => string | undefined): boolean {
+  return PROXY_HEADERS.some((name) => header(name) !== undefined);
+}

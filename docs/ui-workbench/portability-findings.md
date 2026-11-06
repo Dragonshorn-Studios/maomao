@@ -104,6 +104,14 @@ One adapter: Playwright's `webServer` probes the URL **before** it starts anythi
 
 The peer check reads the **socket** address only. `X-Forwarded-For` is deliberately ignored: a spoofed header must never pose as loopback. Maomao's `127.0.0.0/8` acceptance is broader than a literal `127.0.0.1` match, but `::ffff:127.0.0.1` is normalized to `127.0.0.1` so both spellings match.
 
+### The proxy hole, closed
+
+Sumomo's gate checks the peer address and stops there. That is sound for a socket-facing deployment, but it degrades behind a same-host reverse proxy: the proxy connects from loopback, so a non-production host fronted by nginx would present a loopback peer and serve the workbench — and its CSRF-exempt POST endpoint — to every remote visitor. The peer check would still be "true" while meaning "the proxy", not "you".
+
+Maomao therefore refuses a request that carries a forwarding header (`Forwarded`, `X-Forwarded-For`, `X-Forwarded-Host`, `X-Forwarded-Proto`). The peer address of a proxied request says nothing about the client, so the request is denied outright rather than passed on a header the gate cannot trust. Enabling the workbench prints a startup warning that names the rule.
+
+This is a hardening step **beyond** the Sumomo pattern, and it is worth stating plainly: the shared contract fixes the *gate rule* (flag on, not production, loopback peer) but not what to do when a proxy is in the middle. A third project should decide for itself — and should not inherit "loopback only" as a claim it has not checked.
+
 ### Family vocabulary (the one intentional difference)
 
 | | Families |
