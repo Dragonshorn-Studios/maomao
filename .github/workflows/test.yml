@@ -15,7 +15,11 @@ jobs:
   test:
     runs-on: ubuntu-latest
     steps:
+      # Full history: Elyseum's diff-coverage resolves origin/main and needs
+      # the merge-base, which a depth-1 checkout doesn't have.
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: actions/setup-node@v4
         with:
           node-version: 22
