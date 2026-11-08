@@ -30,9 +30,13 @@ jobs:
       - run: npm run test:report
       # Elyseum: PR diff-coverage comment + quality-gate check run + upload.
       # The action only supports pull_request events (it comments on the PR).
+      # Pinned to the unmerged rework branch: every released tag (@v1,
+      # v1.0.15) still has the multi-line $GITHUB_OUTPUT parse bug and no
+      # upload support. TODO: pin the released tag once the PR #3/#4/#5
+      # stack merges.
       - name: Report diff coverage to Elyseum
         if: github.event_name == 'pull_request'
-        uses: Dragonshorn-Studios/elyseum-coverage-reporter-action@v1
+        uses: Dragonshorn-Studios/elyseum-coverage-reporter-action@14-contract-docs
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
           command: diff-coverage
