@@ -42,8 +42,9 @@ jobs:
           command: diff-coverage
           # npm 1.0.12 was published from a stale build (no emit-envelope);
           # 1.1.0 omitted per-file percent rounding (host rejects with 422);
-          # 1.1.1 is the first fully working published build.
-          elyseum-cli-version: "1.1.1"
+          # 1.1.1 omitted run timestamps (runs stayed "in progress");
+          # 1.1.2 is the first fully working published build.
+          elyseum-cli-version: "1.1.2"
           quality-gate: "60"
           quality-gate-fail: "15"
           elyseum-server: https://elyseum.dragonshorn.cloud
@@ -61,7 +62,7 @@ jobs:
         env:
           ELYSIUM_INGEST_TOKEN: ${{ secrets.ELYSIUM_INGEST_TOKEN }}
         run: |
-          npm install -g @dragonshorn-studios/elyseum-cli@1.1.1
+          npm install -g @dragonshorn-studios/elyseum-cli@1.1.2
           elyseum-cli emit-envelope \
             --emit-envelope.tests-format vitest-json \
             --emit-envelope.tests-input coverage/vitest.json \
