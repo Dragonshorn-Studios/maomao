@@ -16,6 +16,7 @@
     "ui:validate": "tsx src/ui-workbench/validate-cli.ts",
     "test:e2e": "playwright test",
     "test": "npm run build:vendor && vitest run",
+    "test:report": "npm run build:vendor && vitest run --coverage --reporter=default --reporter=json --outputFile=coverage/vitest.json",
     "test:watch": "vitest",
     "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.chat.json --noEmit && tsc -p tsconfig.e2e.json",
     "build:vendor": "esbuild src/ui/pierre-entry.ts --bundle --minify --format=iife --global-name=__maomaoPierre --target=es2020 --outfile=dist/assets/vendor/pierre-diffs.js && esbuild src/ui/chat-entry.tsx --bundle --minify --format=iife --jsx=automatic --target=es2020 --outfile=dist/assets/chat.js"
@@ -37,6 +38,7 @@
     "@types/node": "^22.18.8",
     "@types/react": "^18.3.31",
     "@types/react-dom": "^18.3.7",
+    "@vitest/coverage-v8": "^3.2.7",
     "esbuild": "^0.28.2",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
