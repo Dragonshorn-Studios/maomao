@@ -44,8 +44,9 @@ jobs:
           # 1.1.0 omitted per-file percent rounding (host rejects with 422);
           # 1.1.1 omitted run timestamps (runs stayed "in progress");
           # 1.1.2's diff parsing crashes on some file content (exit 5);
-          # 1.1.3 is the first fully working published build.
-          elyseum-cli-version: "1.1.3"
+          # 1.1.3 crashed diff parsing on some content; 1.1.4 records real branch
+          # names (CI checkouts reported "HEAD").
+          elyseum-cli-version: "1.1.4"
           quality-gate: "60"
           quality-gate-fail: "15"
           elyseum-server: https://elyseum.dragonshorn.cloud
@@ -63,7 +64,7 @@ jobs:
         env:
           ELYSIUM_INGEST_TOKEN: ${{ secrets.ELYSIUM_INGEST_TOKEN }}
         run: |
-          npm install -g @dragonshorn-studios/elyseum-cli@1.1.3
+          npm install -g @dragonshorn-studios/elyseum-cli@1.1.4
           elyseum-cli emit-envelope \
             --emit-envelope.tests-format vitest-json \
             --emit-envelope.tests-input coverage/vitest.json \
