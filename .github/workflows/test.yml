@@ -5,17 +5,74 @@ on:
     branches: [main]
   pull_request:
 
+# pull-requests/checks are needed by the Elyseum coverage reporter step.
+permissions:
+  contents: read
+  pull-requests: write
+  checks: write
+
 jobs:
   test:
     runs-on: ubuntu-latest
     steps:
+      # Full history: Elyseum's diff-coverage resolves origin/main and needs
+      # the merge-base, which a depth-1 checkout doesn't have.
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: actions/setup-node@v4
         with:
           node-version: 22
           cache: npm
       - run: npm ci
-      - run: npm test
+      # test:report = vitest run with coverage (lcov) and a JSON report,
+      # both consumed by the Elyseum steps below.
+      - run: npm run test:report
+      # Elyseum: PR diff-coverage comment + quality-gate check run + upload.
+      # The action only supports pull_request events (it comments on the PR).
+      # Pinned to the unmerged rework branch: every released tag (@v1,
+      # v1.0.15) still has the multi-line $GITHUB_OUTPUT parse bug and no
+      # upload support. TODO: pin the released tag once the PR #3/#4/#5
+      # stack merges.
+      - name: Report diff coverage to Elyseum
+        if: github.event_name == 'pull_request'
+        uses: Dragonshorn-Studios/elyseum-coverage-reporter-action@14-contract-docs
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          command: diff-coverage
+          # npm 1.0.12 was published from a stale build (no emit-envelope);
+          # 1.1.0 omitted per-file percent rounding (host rejects with 422);
+          # 1.1.1 is the first fully working published build.
+          elyseum-cli-version: "1.1.1"
+          quality-gate: "60"
+          quality-gate-fail: "15"
+          elyseum-server: https://elyseum.dragonshorn.cloud
+          elyseum-project-slug: maomao
+          elyseum-ingest-token: ${{ secrets.ELYSIUM_INGEST_TOKEN }}
+          envelope-tests-format: vitest-json
+          envelope-tests-input: coverage/vitest.json
+          envelope-coverage-format: lcov
+          envelope-coverage-input: coverage/lcov.info
+      # Elyseum: main pushes can't use the action (no PR to comment on), so
+      # emit the envelope and upload it directly — this keeps ledger history
+      # continuous between merges.
+      - name: Report main run to Elyseum
+        if: github.event_name == 'push'
+        env:
+          ELYSIUM_INGEST_TOKEN: ${{ secrets.ELYSIUM_INGEST_TOKEN }}
+        run: |
+          npm install -g @dragonshorn-studios/elyseum-cli@1.1.1
+          elyseum-cli emit-envelope \
+            --emit-envelope.tests-format vitest-json \
+            --emit-envelope.tests-input coverage/vitest.json \
+            --emit-envelope.coverage-format lcov \
+            --emit-envelope.coverage-input coverage/lcov.info \
+            --emit-envelope.out envelope.json
+          curl -sS -f -X POST \
+            -H "Authorization: Bearer $ELYSIUM_INGEST_TOKEN" \
+            -H "Content-Type: application/json" \
+            --data-binary @envelope.json \
+            "https://elyseum.dragonshorn.cloud/api/v1/projects/maomao/runs"
       - run: npm run build
       # `npm run build` typechecks the app; this covers the chat island and
       # the Playwright suite, which no build project includes.
