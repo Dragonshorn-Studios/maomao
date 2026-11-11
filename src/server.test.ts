@@ -303,6 +303,30 @@ describe("HTTP app", () => {
   });
 });
 
+describe("security headers", () => {
+  function expectSecurityHeaders(response: Response) {
+    expect(response.headers.get("content-security-policy")).toBe("frame-ancestors 'none'");
+    expect(response.headers.get("x-content-type-options")).toBe("nosniff");
+    expect(response.headers.get("referrer-policy")).toBe("same-origin");
+    expect(response.headers.get("x-frame-options")).toBeNull();
+  }
+
+  it("sets framing, nosniff, and referrer headers on JSON, HTML, and asset responses", async () => {
+    const { app } = testApp();
+    expectSecurityHeaders(await app.request("/health"));
+    expectSecurityHeaders(await app.request("/"));
+    expectSecurityHeaders(await app.request("/assets/maomao.css"));
+  });
+
+  it("sets the headers on gate-issued redirects too", async () => {
+    const { app } = testApp({ UI_PASSWORD: "hunter2", UI_SESSION_SECRET: "session-secret-for-tests" });
+    const response = await app.request("/");
+    expect(response.status).toBe(302);
+    expect(response.headers.get("location")).toContain("/login");
+    expectSecurityHeaders(response);
+  });
+});
+
 function fakePull(overrides: Partial<ResolvedPull> = {}): ResolvedPull {
   return {
     installationId: 42,

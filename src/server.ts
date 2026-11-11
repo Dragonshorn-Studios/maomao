@@ -27,7 +27,7 @@ import { decodeProfileAction, decodeProfileForm, applyProfileAction, profileForm
 import { KNOWN_REVIEWER_ROLES, PROVIDER_PROBE_PROMPT, promptBodyFromRolePrompt } from "./prompts.js";
 import { subscribe } from "./events.js";
 import { isProduction, workbenchFlagEnabled } from "./ui-workbench/gate.js";
-import { mountWorkbench } from "./ui-workbench/mount.js";
+import { mountWorkbench, WORKBENCH_PREFIX } from "./ui-workbench/mount.js";
 import { redactSecrets, truncate } from "./util.js";
 import { readFileSync } from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
@@ -318,6 +318,20 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
   let providerTestInFlight = false;
   let telemetryTestInFlight = false;
   const oauthStates = new OAuthStateStore();
+
+  // Security headers land after next() so they also cover responses that
+  // middleware issues directly (auth redirects, 401/403 JSON). The dev
+  // workbench is exempt from the framing ban because it previews stories in
+  // same-origin iframes; it is loopback-only and refuses production, so the
+  // exemption is unreachable for real traffic.
+  app.use("*", async (c, next) => {
+    await next();
+    c.header("X-Content-Type-Options", "nosniff");
+    c.header("Referrer-Policy", "same-origin");
+    if (c.req.path !== WORKBENCH_PREFIX && !c.req.path.startsWith(`${WORKBENCH_PREFIX}/`)) {
+      c.header("Content-Security-Policy", "frame-ancestors 'none'");
+    }
+  });
 
   // Dev-only UI workbench. The gate answers a hard 404 before anything else
   // when the flag is off, the process runs in production, or the peer is not
