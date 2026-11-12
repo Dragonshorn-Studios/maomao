@@ -81,6 +81,8 @@ export interface OpenCodeConfig {
 export interface Config {
   host: string;
   port: number;
+  /** Number of trusted reverse proxies, counted from the socket inward. Zero ignores XFF. */
+  trustProxyHops: number;
   databasePath: string;
   workspaceRoot: string;
   workspaceRetentionHours: number;
@@ -284,6 +286,10 @@ function loadPoisonAlert(env: NodeJS.ProcessEnv): PoisonAlertConfig {
 }
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
+  const proxyHops = env.TRUST_PROXY_HOPS?.trim() || "0";
+  if (!/^\d+$/.test(proxyHops) || !Number.isSafeInteger(Number(proxyHops))) {
+    throw new Error("TRUST_PROXY_HOPS must be a nonnegative safe integer");
+  }
   const actions = parseCsv(env.PULL_REQUEST_ACTIONS) as PullRequestAction[];
   const pullRequestActions = (actions.length > 0 ? actions : DEFAULT_ACTIONS).filter((action) =>
     DEFAULT_ACTIONS.includes(action),
@@ -292,6 +298,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   return {
     host: env.HOST?.trim() || "0.0.0.0",
     port: parseInteger(env.PORT, 3000),
+    trustProxyHops: Number(proxyHops),
     databasePath: env.DATABASE_PATH?.trim() || "./data/maomao.sqlite",
     workspaceRoot: env.WORKSPACE_ROOT?.trim() || "./data/workspaces",
     workspaceRetentionHours: parseInteger(env.WORKSPACE_RETENTION_HOURS, 24),
