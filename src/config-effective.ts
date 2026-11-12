@@ -317,6 +317,12 @@ export function effectiveConfigEntries(
       ? `${config.repoRateLimitPerWindow} per ${Math.round(config.repoRateWindowMs / 60000)}min`
       : "disabled",
   );
+  row(
+    "Webhooks and access",
+    "Trust proxy headers (X-Forwarded-*)",
+    "TRUST_PROXY",
+    config.trustProxy ? "enabled — behind a trusted reverse proxy" : "disabled — forwarded headers ignored",
+  );
 
   // --- Publishing behavior ---
   row(

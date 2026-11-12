@@ -122,6 +122,13 @@ export interface Config {
   uiLocalLogin: boolean;
   /** Public base URL used to build the exact OAuth callback URL. */
   publicUrl: string;
+  /**
+   * Opt-in: the deployment sits behind a reverse proxy that sets trusted
+   * forwarding headers. Off by default — while off, `X-Forwarded-For` is
+   * ignored (login rate limits key on the socket peer, which clients cannot
+   * spoof) and `X-Forwarded-Proto` does not affect the cookie Secure flag.
+   */
+  trustProxy: boolean;
   /** GitHub user/org REST numeric ids (`installation.account.id`). Empty = unrestricted on this axis. */
   allowedGithubAccountIds: number[];
   /** GitHub repository REST numeric ids (`repository.id`). Empty = unrestricted on this axis. */
@@ -333,6 +340,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     adminGithubIds: parseIdList(env.MAOMAO_ADMIN_GITHUB_IDS, "MAOMAO_ADMIN_GITHUB_IDS"),
     uiLocalLogin: parseBoolean(env.UI_LOCAL_LOGIN, false),
     publicUrl: env.MAOMAO_PUBLIC_URL?.trim().replace(/\/+$/, "") || "",
+    trustProxy: parseBoolean(env.TRUST_PROXY, false),
     modelCatalog: parseCsv(env.MODEL_CATALOG),
     issueCreationEnabled: parseBoolean(env.GITHUB_ISSUE_CREATION_ENABLED, false),
     uiFlavor: parseUiFlavor(env.UI_FLAVOR),
