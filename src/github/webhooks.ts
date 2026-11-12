@@ -29,7 +29,8 @@ import {
   mentionsEscalateCommand,
   mentionsReviewCommand,
 } from "../routing/escalation.js";
-import { enqueueClaimResult, recordWebhookDelivery } from "../forge/deliveries.js";
+import { enqueueClaimResult, emitWebhookHandled, recordWebhookDelivery } from "../forge/deliveries.js";
+import { logForgeWrite } from "../telemetry/forge-log.js";
 
 export interface WebhookRequest {
   event: string;
@@ -44,6 +45,70 @@ export type WebhookHandleResult = {
   enqueue?: EnqueueResult;
   dispatchJobId?: number;
 };
+
+// Structured skip record for a delivery that was seen but produced no work —
+// the machine-readable replacement for the old free-text console.warns. One
+// `maomao.job_skipped` line plus a reason-keyed counter point, so "how many
+// jobs did a pause swallow?" is a group-by in OpenObserve.
+function logJobSkipped(
+  store: JobStore,
+  input: {
+    reason: string;
+    repo: string;
+    pr?: number | null;
+    event: string;
+    deliveryId?: string;
+    expiresAt?: string;
+  },
+): void {
+  store.appLog("job_skipped", {
+    level: "warn",
+    provider: "github",
+    reason: input.reason,
+    repo: input.repo,
+    pr: input.pr ?? null,
+    // Not `event`: that key would collide with the app-log line's own
+    // `event: maomao.job_skipped` name in appLogPayload's spread.
+    webhook_event: input.event,
+    delivery_id: input.deliveryId || null,
+    ...(input.expiresAt ? { expires_at: input.expiresAt } : {}),
+  });
+  store.appCounter("maomao.webhook.skips", { provider: "github", reason: input.reason });
+}
+
+// One structured `maomao.stack_command` record per stack lifecycle terminal
+// point — declared, started, triggered, rechecked, deduped, refused — keyed
+// by the same result string the delivery row claims. Called from the shared
+// finish closures so every command path (comment and PR-body alike) emits
+// exactly one record without the run* functions each having to remember to.
+function emitStackCommandLog(
+  store: JobStore,
+  input: {
+    repo: string;
+    pr: number;
+    actor: string;
+    webhookEvent: string;
+    result: string;
+    body: Record<string, unknown>;
+  },
+): void {
+  const body = input.body;
+  store.appLog("stack_command", {
+    level: body.error != null ? "warn" : "info",
+    provider: "github",
+    result: input.result,
+    command: body.command ?? null,
+    stack_id: body.stackId ?? null,
+    repo: input.repo,
+    pr: input.pr,
+    actor: input.actor,
+    webhook_event: input.webhookEvent,
+    member_count: body.memberCount ?? null,
+    job_id: body.jobId ?? null,
+    enqueued: body.enqueued ?? null,
+    error: body.error ?? null,
+  });
+}
 
 export interface IssueCommentWebhookPayload {
   action?: string;
@@ -283,6 +348,7 @@ export interface GithubWebhookInput {
 }
 
 export async function handleGithubWebhook(input: GithubWebhookInput): Promise<WebhookHandleResult> {
+  const startedAt = Date.now();
   const result = await handleGithubWebhookRequest(input);
   // Boundary bookkeeping: record verified deliveries the inner handlers left
   // unclaimed — every `ignored` answer (unsupported events, non-command
@@ -294,6 +360,13 @@ export async function handleGithubWebhook(input: GithubWebhookInput): Promise<We
     event: input.request.event,
     rawBody: input.request.rawBody,
     result,
+  });
+  emitWebhookHandled(input.store, {
+    provider: "github",
+    event: input.request.event,
+    deliveryId: input.request.deliveryId,
+    result,
+    durationMs: Date.now() - startedAt,
   });
   return result;
 }
@@ -357,9 +430,13 @@ async function handleGithubWebhookRequest(input: GithubWebhookInput): Promise<We
     // zero active jobs) and merged pulls cannot be reopened, so the gate is
     // permanent. Keyed by repo full name, so a rename slips past it.
     if (input.store.hasMergedPull(parsed.repoFullName, parsed.prNumber)) {
-      console.warn(
-        `webhook: ignoring ${input.request.event}.${payload.action} for merged ${parsed.repoFullName}#${parsed.prNumber} (delivery ${input.request.deliveryId || "unknown"})`,
-      );
+      logJobSkipped(input.store, {
+        reason: "merged",
+        repo: parsed.repoFullName,
+        pr: parsed.prNumber,
+        event: `${input.request.event}.${payload.action}`,
+        deliveryId: input.request.deliveryId,
+      });
       return ignored("pull request already merged; not enqueueing");
     }
 
@@ -395,10 +472,13 @@ async function handleGithubWebhookRequest(input: GithubWebhookInput): Promise<We
         input.request.event,
         "paused (global)",
       );
-      console.warn(
-        `webhook: skipped ${input.request.event}.${payload.action} for ${parsed.repoFullName} ` +
-          `(reviews paused globally since ${globalPause.created_at}, delivery ${input.request.deliveryId || "unknown"})`,
-      );
+      logJobSkipped(input.store, {
+        reason: "global_pause",
+        repo: parsed.repoFullName,
+        pr: parsed.prNumber,
+        event: `${input.request.event}.${payload.action}`,
+        deliveryId: input.request.deliveryId,
+      });
       return ignored("reviews paused globally");
     }
 
@@ -414,10 +494,14 @@ async function handleGithubWebhookRequest(input: GithubWebhookInput): Promise<We
         input.request.event,
         `paused (expires ${pause.expires_at})`,
       );
-      console.warn(
-        `webhook: skipped ${input.request.event}.${payload.action} for paused ${parsed.repoFullName} ` +
-          `(pause expires ${pause.expires_at}, delivery ${input.request.deliveryId || "unknown"})`,
-      );
+      logJobSkipped(input.store, {
+        reason: "repo_pause",
+        repo: parsed.repoFullName,
+        pr: parsed.prNumber,
+        event: `${input.request.event}.${payload.action}`,
+        deliveryId: input.request.deliveryId,
+        expiresAt: pause.expires_at,
+      });
       return ignored(`automatic reviews paused until ${pause.expires_at}`);
     }
 
@@ -438,6 +522,13 @@ async function handleGithubWebhookRequest(input: GithubWebhookInput): Promise<We
           input.config.repoRateWindowMs,
         )
       ) {
+        logJobSkipped(input.store, {
+          reason: "rate_limited",
+          repo: parsed.repoFullName,
+          pr: parsed.prNumber,
+          event: `${input.request.event}.${payload.action}`,
+          deliveryId: input.request.deliveryId,
+        });
         logRateLimited({
           installationId: parsed.installationId,
           repositoryId: parsed.githubRepositoryId,
@@ -623,15 +714,29 @@ const STACK_USAGE =
 
 async function stackReply(ctx: StackCommandContext, text: string): Promise<void> {
   try {
-    await ctx.input.github?.createIssueComment?.({
+    const posted = await ctx.input.github?.createIssueComment?.({
       installationId: ctx.installationId,
       owner: ctx.repoOwner,
       repo: ctx.repoName,
       pullNumber: ctx.prNumber,
       body: text,
     });
+    logForgeWrite(ctx.input.store, {
+      op: "reply",
+      outcome: "posted",
+      repo: ctx.repoFullName,
+      pr: ctx.prNumber,
+      id: posted?.id ?? null,
+      url: posted?.url || null,
+    });
   } catch (error) {
-    console.warn(`stack command: could not post reply on ${ctx.repoFullName}#${ctx.prNumber}: ${error instanceof Error ? error.message : error}`);
+    logForgeWrite(ctx.input.store, {
+      op: "reply",
+      outcome: "failed",
+      repo: ctx.repoFullName,
+      pr: ctx.prNumber,
+      error: error instanceof Error ? error.message : String(error),
+    });
   }
 }
 
@@ -700,16 +805,30 @@ async function handleReviewCommand(
 
   const reply = async (text: string): Promise<void> => {
     try {
-      await input.github?.createIssueComment?.({
+      const posted = await input.github?.createIssueComment?.({
         installationId,
         owner: repoOwner,
         repo: repoName,
         pullNumber: prNumber,
         body: text,
       });
+      logForgeWrite(input.store, {
+        op: "reply",
+        outcome: "posted",
+        repo: repoFullName,
+        pr: prNumber,
+        id: posted?.id ?? null,
+        url: posted?.url || null,
+      });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      console.warn(`re-review reply failed for ${repoFullName}#${prNumber}: ${message}`);
+      logForgeWrite(input.store, {
+        op: "reply",
+        outcome: "failed",
+        repo: repoFullName,
+        pr: prNumber,
+        error: message,
+      });
     }
   };
 
@@ -743,10 +862,24 @@ async function handleReviewCommand(
   }
   if (input.store.hasMergedPull(repoFullName, prNumber)) {
     await reply("Not re-reviewing — this pull request is already merged.");
+    logJobSkipped(input.store, {
+      reason: "merged",
+      repo: repoFullName,
+      pr: prNumber,
+      event: input.request.event,
+      deliveryId: input.request.deliveryId,
+    });
     return finish("review-merged", { ok: true, ignored: true, reason: "pull request already merged" });
   }
   if (pull.draft && !input.config.reviewDrafts) {
     await reply("Not re-reviewing — this pull request is a draft.");
+    logJobSkipped(input.store, {
+      reason: "draft",
+      repo: repoFullName,
+      pr: prNumber,
+      event: input.request.event,
+      deliveryId: input.request.deliveryId,
+    });
     return finish("review-draft", { ok: true, ignored: true, reason: "draft pull request" });
   }
 
@@ -760,12 +893,26 @@ async function handleReviewCommand(
       return finish("review-upgraded", { ok: true, jobId: occupant.id, dispatchJobId: occupant.id });
     }
     await reply(`A review is already ${occupant.state} at this head — job ${occupant.id}.`);
+    logJobSkipped(input.store, {
+      reason: "in_flight",
+      repo: repoFullName,
+      pr: prNumber,
+      event: input.request.event,
+      deliveryId: input.request.deliveryId,
+    });
     return finish("review-in-flight", { ok: true, jobId: occupant.id, reason: `job already ${occupant.state} for this SHA` });
   }
   if (occupant) {
     const retired = input.store.retireJobDedupKey(occupant.id, `rereview:${occupant.id}`);
     if (!retired) {
       await reply(`Could not re-review — job ${occupant.id} still holds this head's review slot.`);
+      logJobSkipped(input.store, {
+        reason: "retire_failed",
+        repo: repoFullName,
+        pr: prNumber,
+        event: input.request.event,
+        deliveryId: input.request.deliveryId,
+      });
       return finish("review-retire-failed", { ok: false, error: "could not retire dedup slot", jobId: occupant.id });
     }
   }
@@ -792,6 +939,13 @@ async function handleReviewCommand(
   });
   if (!enqueue.created) {
     await reply(`Re-review not queued — ${mdInline(enqueue.skippedReason ?? "a job already exists for this head")}.`);
+    logJobSkipped(input.store, {
+      reason: "dedup",
+      repo: repoFullName,
+      pr: prNumber,
+      event: input.request.event,
+      deliveryId: input.request.deliveryId,
+    });
     return finish("review-skipped", { ok: true, created: false, skippedReason: enqueue.skippedReason, jobId: enqueue.job.id });
   }
   await registerQueuedReviewer({
@@ -897,7 +1051,13 @@ async function refreshStackComments(
         members,
       });
     } catch (error) {
-      console.warn(`stack command: could not update stack comment on ${ctx.repoFullName}#${member.prNumber}: ${error instanceof Error ? error.message : error}`);
+      logForgeWrite(ctx.input.store, {
+        op: "stack_comment",
+        outcome: "failed",
+        repo: ctx.repoFullName,
+        pr: member.prNumber,
+        error: error instanceof Error ? error.message : String(error),
+      });
     }
   }
 }
@@ -920,20 +1080,24 @@ async function runStackEnqueue(
   via: "top" | "end",
 ): Promise<WebhookHandleResult> {
   // Automatic stack triggers share the quiet deny path with pr_review: a
-  // spend-control refusal claims the delivery and logs, but leaves no PR
-  // comment — tip thrash must not flood the thread (issue #130). Manual
-  // comment commands still get the actionable reply.
-  const quietDeny = (message: string): void => {
-    console.warn(
-      `stack: skipped automatic "${stackId}" trigger in ${ctx.repoFullName} — ${message} ` +
-        `(delivery ${ctx.input.request.deliveryId || "unknown"})`,
-    );
+  // spend-control refusal claims the delivery and emits a structured skip
+  // record, but leaves no PR comment — tip thrash must not flood the thread
+  // (issue #130). Manual comment commands still get the actionable reply.
+  const quietDeny = (reason: string, expiresAt?: string): void => {
+    logJobSkipped(ctx.input.store, {
+      reason,
+      repo: ctx.repoFullName,
+      pr: ctx.prNumber,
+      event: ctx.webhookEvent,
+      deliveryId: ctx.input.request.deliveryId,
+      expiresAt,
+    });
   };
   // A stack run is reviews: the global pause blocks it like any other
   // enqueue. Checked after validation so the reply is still a useful error.
   if (ctx.input.store.getGlobalPause()) {
     if (ctx.enforceSpendControls) {
-      quietDeny("reviews paused globally");
+      quietDeny("global_pause");
     } else {
       await stackReply(ctx, `Could not run stack "${stackId}": reviews are paused globally — resume on /pause.`);
     }
@@ -954,11 +1118,11 @@ async function runStackEnqueue(
   if (ctx.enforceSpendControls) {
     const repoPause = ctx.input.store.getActivePause(ctx.repoFullName);
     if (repoPause) {
-      quietDeny(`reviews paused until ${repoPause.expires_at}`);
+      quietDeny("repo_pause", repoPause.expires_at);
       return ctx.finish(`${via}-paused`, { ok: true, command: via, stackId, enqueued: false, error: `paused until ${repoPause.expires_at}` });
     }
     if (rateOn && ctx.githubRepositoryId == null) {
-      quietDeny("missing repository id for rate limiting");
+      quietDeny("missing_repository_id");
       logAuthorizationRejection({ installationId: ctx.installationId, reason: "missing repository id" });
       return ctx.finish(`${via}-rate-limited`, { ok: true, command: via, stackId, enqueued: false, error: "missing repository id" });
     }
@@ -973,7 +1137,7 @@ async function runStackEnqueue(
         ctx.input.config.repoRateWindowMs,
       )
     ) {
-      quietDeny("rate limited");
+      quietDeny("rate_limited");
       logRateLimited({ installationId: ctx.installationId, repositoryId: ctx.githubRepositoryId });
       return ctx.finish(`${via}-rate-limited`, { ok: true, command: via, stackId, enqueued: false, error: "rate limited" });
     }
@@ -1111,6 +1275,7 @@ async function runStackEnqueue(
     stackId,
     enqueued: enqueue.created,
     rechecked,
+    memberCount: members.length,
     jobId: enqueue.job.id,
     staleJobIds: enqueue.staleJobIds,
   });
@@ -1153,7 +1318,13 @@ async function runStackStart(ctx: StackCommandContext, stackId?: string): Promis
         pending: true,
       });
     } catch (error) {
-      console.warn(`stack command: could not update stack comment on ${ctx.repoFullName}#${ctx.prNumber}: ${error instanceof Error ? error.message : error}`);
+      logForgeWrite(ctx.input.store, {
+        op: "stack_comment",
+        outcome: "failed",
+        repo: ctx.repoFullName,
+        pr: ctx.prNumber,
+        error: error instanceof Error ? error.message : String(error),
+      });
     }
   }
   return ctx.finish(start.created ? "start-recorded" : "start-duplicate", {
@@ -1338,6 +1509,7 @@ async function handleStackCommand(
   const finish = (result: string, body: Record<string, unknown>): WebhookHandleResult => {
     input.store.claimWebhookDelivery(input.request.deliveryId, input.request.event, result);
     if (commentId != null) input.store.claimReviewCommand(String(commentId), input.request.deliveryId, "stack-command", result);
+    emitStackCommandLog(input.store, { repo: repoFullName, pr: prNumber, actor: actorLogin, webhookEvent: "issue_comment", result, body });
     return { status: 200, body };
   };
   // enforceSpendControls stays unset here on purpose: comment commands are
@@ -1464,6 +1636,14 @@ async function handleStackBodyMarker(
   }
   const finish = (result: string, body: Record<string, unknown>): WebhookHandleResult => {
     input.store.claimWebhookDelivery(input.request.deliveryId, input.request.event, result);
+    emitStackCommandLog(input.store, {
+      repo: parsed.repoFullName,
+      pr: parsed.prNumber,
+      actor: parsed.prAuthor,
+      webhookEvent: `pull_request.${payload.action}`,
+      result,
+      body,
+    });
     return { status: 200, body };
   };
   const ctx: StackCommandContext = {
@@ -1535,7 +1715,13 @@ async function handleStackBodyMarker(
           stackId: marker.stackId,
         });
       } catch (error) {
-        console.warn(`stack marker: could not post suppression note on ${ctx.repoFullName}#${ctx.prNumber}: ${error instanceof Error ? error.message : error}`);
+        logForgeWrite(ctx.input.store, {
+          op: "stack_comment",
+          outcome: "failed",
+          repo: ctx.repoFullName,
+          pr: ctx.prNumber,
+          error: error instanceof Error ? error.message : String(error),
+        });
       }
     }
     return finish("member-marker", {

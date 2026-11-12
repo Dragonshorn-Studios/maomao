@@ -1,10 +1,12 @@
 import { createHmac } from "node:crypto";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { openDb } from "../db.js";
 import { JobStore } from "../jobs/store.js";
 import { loadConfig } from "../config.js";
 import { handleGithubWebhook, parsePullRequestPayload, shouldHandlePullRequest } from "./webhooks.js";
 import { RepoRateLimiter } from "./rate-limit.js";
+import { setAppLogSink } from "../telemetry/app-log.js";
+import { flushIngestPosts } from "../telemetry/ingest.js";
 import type { GithubPort, RepoPermission, ReviewThread } from "./client.js";
 
 function sign(secret: string, body: string): string {
@@ -3495,5 +3497,281 @@ describe("reviewer registration on enqueue (queue badge)", () => {
     expect(result.body.enqueued).toBe(true);
     // Exactly one badge, on the stack job's PR — the top member, not one per member.
     expect(requested).toEqual([{ owner: "acme", repo: "widgets", pullNumber: 42, reviewers: ["maomao[bot]"] }]);
+  });
+});
+
+describe("job_skipped app-log events", () => {
+  const appLogLines: string[] = [];
+  const captureAppLog = (line: string) => {
+    appLogLines.push(line);
+  };
+
+  afterEach(async () => {
+    appLogLines.length = 0;
+    setAppLogSink((line) => process.stdout.write(`${line}\n`));
+    await flushIngestPosts();
+    vi.unstubAllGlobals();
+    vi.unstubAllEnvs();
+    vi.restoreAllMocks();
+  });
+
+  function emittingStore() {
+    // Same opt-in the production store gets in src/index.ts: app logs and
+    // counters only fire from stores that carry emitJobSummaries.
+    return new JobStore(openDb(":memory:"), [], { emitJobSummaries: true });
+  }
+
+  async function pauseConfig() {
+    return loadConfig({
+      GITHUB_WEBHOOK_SECRET: "s3cret",
+      GITHUB_APP_ID: "1",
+      GITHUB_APP_PRIVATE_KEY: "k",
+      REVIEWER_ROLES: "correctness",
+    });
+  }
+
+  it("emits maomao.job_skipped with repo_pause while a timed pause is active", async () => {
+    vi.stubEnv("OPENOBSERVE_LOGS_URL", "");
+    vi.stubEnv("OPENOBSERVE_METRICS_URL", "");
+    setAppLogSink(captureAppLog);
+    const config = await pauseConfig();
+    const store = emittingStore();
+    const pause = store.createPause({ repoFullName: "acme/widgets", actor: "alice", durationMs: 60_000 });
+    const body = JSON.stringify(prPayload());
+    const result = await handleGithubWebhook({
+      config,
+      store,
+      request: { event: "pull_request", deliveryId: "skip-r1", signature: sign("s3cret", body), rawBody: body },
+    });
+    expect(result.body.ignored).toBe(true);
+    const events = appLogLines.map((line) => JSON.parse(line) as Record<string, unknown>);
+    expect(events).toContainEqual(
+      expect.objectContaining({
+        event: "maomao.job_skipped",
+        level: "warn",
+        provider: "github",
+        reason: "repo_pause",
+        repo: "acme/widgets",
+        pr: 7,
+        webhook_event: "pull_request.opened",
+        delivery_id: "skip-r1",
+        expires_at: pause.expires_at,
+      }),
+    );
+  });
+
+  it("emits maomao.job_skipped with global_pause and merged reasons", async () => {
+    vi.stubEnv("OPENOBSERVE_LOGS_URL", "");
+    vi.stubEnv("OPENOBSERVE_METRICS_URL", "");
+    setAppLogSink(captureAppLog);
+    const config = await pauseConfig();
+    const store = emittingStore();
+    store.setGlobalPause("alice");
+    const body = JSON.stringify(prPayload());
+    await handleGithubWebhook({
+      config,
+      store,
+      request: { event: "pull_request", deliveryId: "skip-g1", signature: sign("s3cret", body), rawBody: body },
+    });
+
+    // A merged pull's late push skips with the merged reason.
+    store.endGlobalPause("alice");
+    store.markPullMerged("acme/widgets", 7, "merge-marker");
+    const mergedBody = JSON.stringify(
+      prPayload({ action: "synchronize", pull_request: { ...prPayload().pull_request, head: { sha: "late-push", ref: "feature" } } }),
+    );
+    await handleGithubWebhook({
+      config,
+      store,
+      request: { event: "pull_request", deliveryId: "skip-m1", signature: sign("s3cret", mergedBody), rawBody: mergedBody },
+    });
+
+    const events = appLogLines.map((line) => JSON.parse(line) as Record<string, unknown>);
+    const reasons = events
+      .filter((e) => e.event === "maomao.job_skipped")
+      .map((e) => e.reason);
+    expect(reasons).toEqual(["global_pause", "merged"]);
+    expect(events.filter((e) => e.event === "maomao.job_skipped")[0]).toMatchObject({ delivery_id: "skip-g1" });
+  });
+
+  it("stays silent on stores without the emitJobSummaries opt-in", async () => {
+    vi.stubEnv("OPENOBSERVE_LOGS_URL", "");
+    vi.stubEnv("OPENOBSERVE_METRICS_URL", "");
+    setAppLogSink(captureAppLog);
+    const config = await pauseConfig();
+    const store = new JobStore(openDb(":memory:"));
+    store.setGlobalPause("alice");
+    const body = JSON.stringify(prPayload());
+    await handleGithubWebhook({
+      config,
+      store,
+      request: { event: "pull_request", deliveryId: "skip-quiet", signature: sign("s3cret", body), rawBody: body },
+    });
+    expect(appLogLines).toHaveLength(0);
+  });
+});
+
+describe("forge message app-log events (webhooks)", () => {
+  const appLogLines: string[] = [];
+  const captureAppLog = (line: string) => {
+    appLogLines.push(line);
+  };
+
+  afterEach(async () => {
+    appLogLines.length = 0;
+    setAppLogSink((line) => process.stdout.write(`${line}\n`));
+    await flushIngestPosts();
+    vi.unstubAllGlobals();
+    vi.unstubAllEnvs();
+    vi.restoreAllMocks();
+  });
+
+  it("emits maomao.forge_message_failed when a command reply cannot post", async () => {
+    vi.stubEnv("OPENOBSERVE_LOGS_URL", "");
+    vi.stubEnv("OPENOBSERVE_METRICS_URL", "");
+    setAppLogSink(captureAppLog);
+    const secret = "s3cret";
+    const config = loadConfig({
+      GITHUB_WEBHOOK_SECRET: secret,
+      GITHUB_APP_ID: "1",
+      GITHUB_APP_PRIVATE_KEY: "k",
+      REVIEWER_ROLES: "correctness",
+    });
+    const store = new JobStore(openDb(":memory:"), [], { emitJobSummaries: true });
+    const { github } = stackGithub({ pulls: {} });
+    // Every reply path funnels through createIssueComment; a rejected post
+    // must surface as a forge_message_failed record, not just the old
+    // console.warn.
+    (github as unknown as Record<string, unknown>).createIssueComment = async () => {
+      throw new Error("403 Resource not accessible by integration");
+    };
+    const body = JSON.stringify(
+      commentPayload({ comment: { ...commentPayload().comment, body: "@maomao review" } }),
+    );
+    await handleGithubWebhook({
+      config,
+      store,
+      github,
+      request: { event: "issue_comment", deliveryId: "fm1", signature: sign(secret, body), rawBody: body },
+    });
+    const events = appLogLines.map((line) => JSON.parse(line) as Record<string, unknown>);
+    expect(events).toContainEqual(
+      expect.objectContaining({
+        event: "maomao.forge_message_failed",
+        level: "error",
+        op: "reply",
+        outcome: "failed",
+        repo: "acme/widgets",
+        pr: 42,
+        error: "403 Resource not accessible by integration",
+      }),
+    );
+  });
+});
+
+describe("stack command + webhook boundary app-log events", () => {
+  const appLogLines: string[] = [];
+  const captureAppLog = (line: string) => {
+    appLogLines.push(line);
+  };
+
+  afterEach(async () => {
+    appLogLines.length = 0;
+    setAppLogSink((line) => process.stdout.write(`${line}\n`));
+    await flushIngestPosts();
+    vi.unstubAllGlobals();
+    vi.unstubAllEnvs();
+    vi.restoreAllMocks();
+  });
+
+  function chainPulls() {
+    return [
+      resolvedStackPull(41, { baseRef: "main", headRef: "feat-a", baseSha: "m0", headSha: "h41" }),
+      resolvedStackPull(42, { baseRef: "feat-a", headRef: "feat-b", baseSha: "h41", headSha: "h42" }),
+      resolvedStackPull(43, { baseRef: "feat-b", headRef: "feat-c", baseSha: "h42", headSha: "h43" }),
+    ];
+  }
+
+  it("emits maomao.stack_command and maomao.webhook_handled when an end trigger enqueues", async () => {
+    vi.stubEnv("OPENOBSERVE_LOGS_URL", "");
+    vi.stubEnv("OPENOBSERVE_METRICS_URL", "");
+    setAppLogSink(captureAppLog);
+    const secret = "s3cret";
+    const config = loadConfig({
+      GITHUB_WEBHOOK_SECRET: secret,
+      GITHUB_APP_ID: "1",
+      GITHUB_APP_PRIVATE_KEY: "k",
+      REVIEWER_ROLES: "correctness",
+    });
+    const store = new JobStore(openDb(":memory:"), [], { emitJobSummaries: true });
+    store.upsertStackStart({ repoFullName: "acme/widgets", stackId: "u1", prNumber: 41, actor: "alice" });
+    const { github } = stackGithub({ openPulls: chainPulls() });
+    const body = JSON.stringify(
+      commentPayload({
+        issue: { number: 43, pull_request: { url: "https://github.com/acme/widgets/pull/43" } },
+        comment: { id: 9100, body: "end of stack u1", user: { login: "alice", type: "User" }, author_association: "OWNER" },
+      }),
+    );
+    const result = await handleGithubWebhook({
+      config,
+      store,
+      github,
+      request: { event: "issue_comment", deliveryId: "sc1", signature: sign(secret, body), rawBody: body },
+    });
+    expect(result.body.enqueued).toBe(true);
+    const events = appLogLines.map((line) => JSON.parse(line) as Record<string, unknown>);
+    expect(events).toContainEqual(
+      expect.objectContaining({
+        event: "maomao.stack_command",
+        level: "info",
+        provider: "github",
+        result: "end-enqueued",
+        command: "end",
+        stack_id: "u1",
+        repo: "acme/widgets",
+        pr: 43,
+        actor: "alice",
+        webhook_event: "issue_comment",
+        member_count: 3,
+        job_id: result.body.jobId,
+        enqueued: true,
+      }),
+    );
+    expect(events).toContainEqual(
+      expect.objectContaining({
+        event: "maomao.webhook_handled",
+        provider: "github",
+        webhook_event: "issue_comment",
+        delivery_id: "sc1",
+        status: 200,
+        outcome: "enqueued",
+      }),
+    );
+    expect(events).not.toContainEqual(expect.objectContaining({ event: "maomao.job_skipped" }));
+  });
+
+  it("records signature failures on the boundary event with an error outcome", async () => {
+    vi.stubEnv("OPENOBSERVE_LOGS_URL", "");
+    vi.stubEnv("OPENOBSERVE_METRICS_URL", "");
+    setAppLogSink(captureAppLog);
+    const config = loadConfig({ GITHUB_WEBHOOK_SECRET: "s3cret", REVIEWER_ROLES: "correctness" });
+    const store = new JobStore(openDb(":memory:"), [], { emitJobSummaries: true });
+    await handleGithubWebhook({
+      config,
+      store,
+      request: { event: "pull_request", deliveryId: "bad1", signature: "sha256=deadbeef", rawBody: "{}" },
+    });
+    const events = appLogLines.map((line) => JSON.parse(line) as Record<string, unknown>);
+    expect(events).toContainEqual(
+      expect.objectContaining({
+        event: "maomao.webhook_handled",
+        level: "error",
+        provider: "github",
+        webhook_event: "pull_request",
+        delivery_id: "bad1",
+        status: 401,
+        outcome: "error",
+      }),
+    );
   });
 });

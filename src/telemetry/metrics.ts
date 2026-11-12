@@ -152,6 +152,52 @@ export function terminalJobMetrics(
 }
 
 /**
+ * One DELTA +1 counter point for an operational event that never reaches a
+ * terminal job transition — webhook delivery outcomes, forge message writes.
+ * Attribute values are usage metadata only (ids, outcomes, reasons).
+ */
+export function eventCounterMetric(
+  name: string,
+  attributes: Record<string, string | number | boolean>,
+  description = "Operational event counter",
+  now: string = nanoTime(),
+): OtlpMetric {
+  return {
+    name,
+    unit: "{events}",
+    description,
+    sum: {
+      aggregationTemporality: 1,
+      isMonotonic: true,
+      dataPoints: [
+        {
+          timeUnixNano: now,
+          asInt: "1",
+          attributes: Object.entries(attributes).map(([key, value]) => attr(key, value)),
+        },
+      ],
+    },
+  };
+}
+
+/**
+ * Fire-and-forget one operational event counter. Same call pattern as
+ * `exportQueueMetrics`; never throws and no-ops unless a metrics URL is
+ * configured (env or stored).
+ */
+export function exportEventCounter(
+  name: string,
+  attributes: Record<string, string | number | boolean>,
+  env: NodeJS.ProcessEnv = process.env,
+  stored?: TelemetryChannelConfig,
+  shared?: TelemetrySharedConfig,
+  logsStored?: TelemetryChannelConfig,
+  appLogs = true,
+): void {
+  exportMetrics([eventCounterMetric(name, attributes)], env, stored, shared, logsStored, appLogs);
+}
+
+/**
  * Emit terminal-transition metrics for one job. Same call site and snapshot
  * options as `emitJobSummary`; never throws and no-ops unless
  * OPENOBSERVE_METRICS_URL is configured.

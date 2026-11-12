@@ -887,3 +887,44 @@ describe("GitLab delivery log", () => {
     ).toBeUndefined();
   });
 });
+
+describe("gitlab app-log events", () => {
+  const appLogLines: string[] = [];
+  const captureAppLog = (line: string) => {
+    appLogLines.push(line);
+  };
+
+  it("emits job_skipped with global_pause and a boundary webhook_handled record", async () => {
+    const { setAppLogSink } = await import("../telemetry/app-log.js");
+    setAppLogSink(captureAppLog);
+    const connections = newConnections();
+    const { id, secret } = createConnection(connections);
+    const input = baseInput(connections, id, signedRequest(secret, "merge_request", JSON.stringify(mrPayload())));
+    input.store = new JobStore(openDb(":memory:"), [], { emitJobSummaries: true });
+    input.store.setGlobalPause("alice");
+
+    const paused = await handleGitLabWebhook(input);
+    expect(paused.body.ignored).toBe(true);
+    const events = appLogLines.map((line) => JSON.parse(line) as Record<string, unknown>);
+    expect(events).toContainEqual(
+      expect.objectContaining({
+        event: "maomao.job_skipped",
+        level: "warn",
+        provider: "gitlab",
+        reason: "global_pause",
+        repo: "acme/widgets",
+        pr: 7,
+      }),
+    );
+    expect(events).toContainEqual(
+      expect.objectContaining({
+        event: "maomao.webhook_handled",
+        provider: "gitlab",
+        outcome: "ignored",
+        reason: "reviews paused globally",
+      }),
+    );
+    appLogLines.length = 0;
+    setAppLogSink((line) => process.stdout.write(`${line}\n`));
+  });
+});
