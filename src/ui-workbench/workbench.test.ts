@@ -252,6 +252,17 @@ describe("gating", () => {
     expect((await app.request("/health")).status).toBe(200);
     expect((await app.request("/")).status).toBe(200);
   });
+
+  it("is exempt from the framing ban so story previews still render in iframes", async () => {
+    const app = productionApp({ MAOMAO_UI_WORKBENCH_ENABLED: "1" }, () => "127.0.0.1");
+    const frame = await app.request("/dev/ui/job-card/completed/frame");
+    expect(frame.status).toBe(200);
+    expect(frame.headers.get("x-content-type-options")).toBe("nosniff");
+    expect(frame.headers.get("referrer-policy")).toBe("same-origin");
+    expect(frame.headers.get("content-security-policy") ?? "").not.toContain("frame-ancestors 'none'");
+    // Everything outside the workbench still bans framing.
+    expect((await app.request("/health")).headers.get("content-security-policy")).toBe("frame-ancestors 'none'");
+  });
 });
 
 describe("gate rules", () => {
