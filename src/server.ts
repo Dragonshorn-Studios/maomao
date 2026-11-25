@@ -889,7 +889,7 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
     }
   });
 
-  const JOB_TYPE_VALUES = ["pr_review", "stack_review", "repo_brief", "health_scan"] as const;
+  const JOB_TYPE_VALUES = ["pr_review", "stack_review", "repo_brief", "health_scan", "merge_group_check"] as const;
   app.get("/", (c) => {
     const cursor = jobsPageCursor(c.req.query("before"), c.req.query("after"));
     // Forge filter: `?forge=provider:instance`, validated against the scopes

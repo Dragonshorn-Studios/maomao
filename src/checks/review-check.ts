@@ -99,7 +99,7 @@ export class ReviewCheckPublisher {
   ) {}
 
   publish(job: JobRow, input: ReviewCheckInput): Promise<void> {
-    if (job.job_type !== "pr_review" || job.pr_number <= 0) return Promise.resolve();
+    if ((job.job_type !== "pr_review" && job.job_type !== "merge_group_check") || (job.job_type === "pr_review" && job.pr_number <= 0)) return Promise.resolve();
     const key = keyFor(job, this.identity.name);
     const chainKey = [
       key.provider,
@@ -168,7 +168,10 @@ export class ReviewCheckPublisher {
     }
     if (!provider.publishCheck || provider.supportsNativeChecks?.() === false) return;
 
-    if (input.status === "completed" && input.validateHead !== false && input.conclusion !== "cancelled") {
+    // A merge-group job is anchored to an immutable synthetic commit. The PR-head
+    // revalidation below would always supersede it, and staleness cannot transfer:
+    // GitHub requests checks again with a new synthetic SHA when the group changes.
+    if (job.job_type !== "merge_group_check" && input.status === "completed" && input.validateHead !== false && input.conclusion !== "cancelled") {
       try {
         const change = await provider.getChange(forgeTargetOf(job));
         if (change.headSha !== job.head_sha) {

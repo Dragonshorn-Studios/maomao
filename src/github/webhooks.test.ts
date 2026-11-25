@@ -63,6 +63,96 @@ describe("webhook handling", () => {
     expect(result.status).toBe(200);
   });
 
+
+  it("enqueues merge_group checks_requested against the exact synthetic SHA", async () => {
+    const secret = "s3cret";
+    const config = loadConfig({ GITHUB_WEBHOOK_SECRET: secret, REVIEWER_ROLES: "correctness" });
+    const store = new JobStore(openDb(":memory:"));
+    const payload = {
+      action: "checks_requested",
+      installation: { id: 42, account: { id: 1001 } },
+      repository: { id: 2002, full_name: "acme/widgets", name: "widgets", owner: { login: "acme", id: 1001 } },
+      merge_group: {
+        base_sha: "base999",
+        head_sha: "synthetic888",
+        base_ref: "refs/heads/main",
+        head_ref: "refs/heads/gh-readonly-queue/main/pr-7-abc",
+        pull_requests: [{ number: 7, title: "Add frob", html_url: "https://github.com/acme/widgets/pull/7", head: { sha: "head222" } }],
+      },
+    };
+    const rawBody = JSON.stringify(payload);
+    const result = await handleGithubWebhook({
+      config,
+      store,
+      request: { event: "merge_group", deliveryId: "mg1", signature: sign(secret, rawBody), rawBody },
+    });
+    expect(result.status).toBe(202);
+    expect(result.body.created).toBe(true);
+    const job = store.getJob(Number(result.body.jobId));
+    expect(job).toMatchObject({
+      job_type: "merge_group_check",
+      pr_number: 7,
+      base_sha: "base999",
+      head_sha: "synthetic888",
+      base_ref: "main",
+      head_ref: "refs/heads/gh-readonly-queue/main/pr-7-abc",
+    });
+    expect(job?.merge_group_json).toContain("head222");
+    expect(job?.dedup_key).toBe("merge-group:refs/heads/gh-readonly-queue/main/pr-7-abc");
+    expect(store.listReviewerRuns(job!.id)).toHaveLength(0);
+
+    const duplicate = await handleGithubWebhook({
+      config,
+      store,
+      request: { event: "merge_group", deliveryId: "mg2", signature: sign(secret, rawBody), rawBody },
+    });
+    expect(duplicate.status).toBe(200);
+    expect(duplicate.body.created).toBe(false);
+    expect(duplicate.body.jobId).toBe(result.body.jobId);
+  });
+
+
+  it("handles a realistic merge_group payload without enumerated participants", async () => {
+    const secret = "s3cret";
+    const config = loadConfig({ GITHUB_WEBHOOK_SECRET: secret, REVIEWER_ROLES: "correctness" });
+    const store = new JobStore(openDb(":memory:"));
+    const payload = {
+      action: "checks_requested",
+      installation: { id: 42, account: { id: 1001 } },
+      repository: { id: 2002, full_name: "acme/widgets", name: "widgets", owner: { login: "acme", id: 1001 } },
+      merge_group: {
+        base_sha: "base999",
+        head_sha: "synthetic888",
+        base_ref: "refs/heads/main",
+        head_ref: "refs/heads/gh-readonly-queue/main/pr-7",
+      },
+    };
+    const rawBody = JSON.stringify(payload);
+    const result = await handleGithubWebhook({
+      config,
+      store,
+      request: { event: "merge_group", deliveryId: "mg-real", signature: sign(secret, rawBody), rawBody },
+    });
+    expect(result.status).toBe(202);
+    const job = store.getJob(Number(result.body.jobId));
+    expect(job).toMatchObject({ job_type: "merge_group_check", pr_number: 7, head_sha: "synthetic888" });
+    expect(job?.merge_group_json).not.toContain("head222");
+  });
+
+  it("ignores merge_group actions other than checks_requested", async () => {
+    const secret = "s3cret";
+    const config = loadConfig({ GITHUB_WEBHOOK_SECRET: secret });
+    const store = new JobStore(openDb(":memory:"));
+    const rawBody = JSON.stringify({ action: "destroyed", installation: { id: 42 }, repository: {}, merge_group: {} });
+    const result = await handleGithubWebhook({
+      config,
+      store,
+      request: { event: "merge_group", deliveryId: "mgd", signature: sign(secret, rawBody), rawBody },
+    });
+    expect(result.status).toBe(202);
+    expect(result.body.ignored).toBe(true);
+  });
+
   it("ignores drafts by default", () => {
     const config = loadConfig({ REVIEW_DRAFTS: "false" });
     expect(shouldHandlePullRequest(config, prPayload({ pull_request: { ...prPayload().pull_request, draft: true } }))).toEqual(

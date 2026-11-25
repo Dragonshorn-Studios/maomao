@@ -52,12 +52,14 @@ export interface JobRow {
   cancelled_reason: CancelReason | null;
   cancelled_by: string | null;
   profile_revision_id: number | null;
-  job_type: "pr_review" | "health_scan" | "repo_brief" | "stack_review";
+  job_type: "pr_review" | "health_scan" | "repo_brief" | "stack_review" | "merge_group_check";
   /** "full" runs the specialist pipeline; "verify" only reconciles open findings (issue #123). */
   review_mode: "full" | "verify";
   scan_branch: string | null;
   /** Repo-brief payload (TOC + persisted file fragments), JSON; null for other job types. */
   brief_json: string | null;
+  /** GitHub merge-group payload subset (participant PRs/SHAs), JSON; null for other job types. */
+  merge_group_json: string | null;
   /**
    * Dedup discriminator for the jobs UNIQUE key: '' for PR reviews and scans
    * (one job per repo+PR+SHA), a per-request nonce for repo briefs — every
@@ -317,10 +319,12 @@ export interface NewJobInput {
   webhookDeliveryId?: string;
   webhookEvent?: string;
   reviewers: { role: string; title: string; model?: string }[];
-  jobType?: "pr_review" | "health_scan" | "repo_brief" | "stack_review";
+  jobType?: "pr_review" | "health_scan" | "repo_brief" | "stack_review" | "merge_group_check";
   /** Only meaningful for pr_review jobs; other types ignore it. */
   reviewMode?: "full" | "verify";
   scanBranch?: string | null;
+  /** Serialized participant metadata for merge_group_check jobs. */
+  mergeGroupJson?: string | null;
   /** Dedup discriminator inside the jobs UNIQUE; repo_brief overrides this with a nonce. */
   dedupKey?: string;
   /** stack_review members. When provided, they are inserted in the same
@@ -649,8 +653,8 @@ export class JobStore {
             repo_full_name, repo_owner, repo_name, installation_id, provider, provider_instance, forge_connection_id,
             github_account_id, github_repository_id, pr_number,
             pr_title, pr_body, pr_html_url, pr_author, base_sha, head_sha, base_ref, head_ref,
-            webhook_delivery_id, webhook_event, profile_revision_id, job_type, review_mode, scan_branch, dedup_key, state, created_at, updated_at
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?)`,
+            webhook_delivery_id, webhook_event, profile_revision_id, job_type, review_mode, scan_branch, merge_group_json, dedup_key, state, created_at, updated_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?)`,
         )
         .run(
           input.repoFullName,
@@ -677,6 +681,7 @@ export class JobStore {
           jobType,
           input.reviewMode ?? "full",
           input.scanBranch ?? null,
+          input.mergeGroupJson ?? null,
           dedupKey,
           createdAt,
           createdAt,

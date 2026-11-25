@@ -125,6 +125,7 @@ function migrate(db: SqliteDb): void {
       job_type TEXT NOT NULL DEFAULT 'pr_review',
       review_mode TEXT NOT NULL DEFAULT 'full',
       brief_json TEXT,
+      merge_group_json TEXT,
       dedup_key TEXT NOT NULL DEFAULT '',
       retry_count INTEGER NOT NULL DEFAULT 0,
       UNIQUE (provider, provider_instance, repo_full_name, pr_number, head_sha, job_type, dedup_key)
@@ -607,6 +608,7 @@ function migrate(db: SqliteDb): void {
     db.exec(`UPDATE webhook_deliveries SET ignored = 1 WHERE ignored = 0 AND result LIKE 'ignored:%'`);
     const jobColumns: Array<[string, string]> = [
       ["brief_json", "TEXT"],
+      ["merge_group_json", "TEXT"],
       ["routing_state", "TEXT NOT NULL DEFAULT 'queued'"],
       ["routing_mode", "TEXT"],
       ["routing_profile", "TEXT"],

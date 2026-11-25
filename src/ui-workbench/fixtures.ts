@@ -76,6 +76,7 @@ export function jobFixture(overrides: Partial<JobRow> = {}): JobRow {
     review_mode: "full",
     scan_branch: null,
     brief_json: null,
+    merge_group_json: null,
     dedup_key: "",
     aggregator_raw: null,
     aggregator_normalized: null,

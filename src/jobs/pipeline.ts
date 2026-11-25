@@ -219,7 +219,7 @@ export function createPipeline(deps: PipelineDeps) {
       status: "completed",
       conclusion,
       title: `Maomao merge readiness ${conclusion === "cancelled" ? "cancelled" : "requires action"}`,
-      summary: `Merge readiness for PR #${job.pr_number} at ${job.head_sha.slice(0, 12)} is non-success: ${reason}`,
+      summary: `Merge readiness for ${job.job_type === "merge_group_check" ? "the GitHub merge group" : `PR #${job.pr_number}`} at ${job.head_sha.slice(0, 12)} is non-success: ${reason}`,
       validateHead: conclusion !== "cancelled",
     });
   }
@@ -246,7 +246,7 @@ export function createPipeline(deps: PipelineDeps) {
       conclusion,
       title: `Maomao merge readiness ${conclusion === "success" ? "passed" : conclusion === "failure" ? "failed" : "requires action"}`,
       summary: [
-        `${detail} for PR #${job.pr_number} at exact head ${job.head_sha.slice(0, 12)}.`,
+        `${detail} for ${job.job_type === "merge_group_check" ? "the GitHub merge group" : `PR #${job.pr_number}`} at exact head ${job.head_sha.slice(0, 12)}.`,
         `Policy source: ${policy.source}; trusted revision: ${policy.revision}; review required: ${policy.requireReview ? "yes" : "no"}.`,
       ].join("\n\n"),
       validateHead: true,
@@ -255,7 +255,7 @@ export function createPipeline(deps: PipelineDeps) {
   }
 
   async function publishTrustedTerminal(job: JobRow, conclusion: "cancelled" | "action_required", reason: string): Promise<void> {
-    if (job.job_type !== "pr_review") return;
+    if (job.job_type !== "pr_review" && job.job_type !== "merge_group_check") return;
     for (const name of trustedNamesWithPublications(job)) {
       const key = trustedKey(job, name);
       const existing = deps.store.getCheckPublication(key);
@@ -341,16 +341,134 @@ export function createPipeline(deps: PipelineDeps) {
     }
     forgetTrustedPublicationMemory(job);
   }
+  function mergeGroupParticipants(job: JobRow): Array<{ number: number; headSha: string; title?: string; htmlUrl?: string }> {
+    if (!job.merge_group_json) return [];
+    try {
+      const parsed = JSON.parse(job.merge_group_json) as { pullRequests?: Array<{ number?: number; headSha?: string; title?: string; htmlUrl?: string }> };
+      return (parsed.pullRequests ?? []).filter((pr): pr is { number: number; headSha: string; title?: string; htmlUrl?: string } =>
+        typeof pr.number === "number" && typeof pr.headSha === "string",
+      );
+    } catch {
+      return [];
+    }
+  }
+
+  /** Aggregate exact participant-head maomao/review publications for the merge group. */
+  function mergeGroupReviewConclusion(job: JobRow): string | undefined {
+    const participants = mergeGroupParticipants(job);
+    if (participants.length === 0) return undefined;
+    const conclusions: string[] = [];
+    let missing = false;
+    for (const participant of participants) {
+      const row = deps.store.getCheckPublication({
+        provider: job.provider,
+        providerInstance: job.provider_instance,
+        repoFullName: job.repo_full_name,
+        prNumber: participant.number,
+        headSha: participant.headSha,
+        name: "maomao/review",
+      });
+      if (row?.status !== "completed" || !row.conclusion || !row.published_at) {
+        missing = true;
+        continue;
+      }
+      conclusions.push(row.conclusion);
+    }
+    // A known failure must not be hidden by another participant whose evidence
+    // is unavailable: missing evidence is inconclusive, failed evidence is bad.
+    if (conclusions.some((conclusion) => conclusion === "failure" || conclusion === "timed_out")) return "failure";
+    if (missing) return undefined;
+    if (conclusions.length === participants.length && conclusions.every((conclusion) => conclusion === "success")) return "success";
+    return undefined;
+  }
+
+  async function runMergeGroupJob(jobId: number, signal: AbortSignal): Promise<void> {
+    const job = deps.store.getJob(jobId);
+    if (!job) return;
+    if (["stale", "cancelled"].includes(job.state)) {
+      await publishTrustedTerminal(job, "cancelled", "the merge-group check was cancelled or superseded before the scanner started");
+      return;
+    }
+    try {
+      if (job.provider !== "github") throw new Error(`merge-group checks are only available for GitHub, not ${job.provider}`);
+      const auth = authorizeGithubTarget(deps.config, {
+        installationId: job.installation_id,
+        accountId: job.github_account_id ?? undefined,
+        repositoryId: job.github_repository_id ?? undefined,
+      });
+      if (!auth.ok) throw new Error(`unauthorized: ${auth.reason}`);
+      deps.store.setJobState(jobId, "preparing", { started_at: nowIso() });
+      deps.store.log(jobId, `Preparing GitHub merge-group workspace for ${job.repo_full_name} at synthetic head ${job.head_sha}`);
+      throwIfStale(deps.store, jobId, signal);
+      const provider = forge.forJob(job);
+      if (!provider.getCommitDiff) throw new Error("GitHub merge-group checks require commit diff support");
+      const target = forgeTargetOf(job);
+      const clone = await provider.cloneSpec(target);
+      const diff = await provider.getCommitDiff(
+        { provider: target.provider, instance: target.instance, repoOwner: target.repoOwner, repoName: target.repoName, repoFullName: target.repoFullName },
+        job.head_sha,
+      );
+      const workspace = await deps.checkout.prepare({
+        jobId,
+        cloneUrl: clone.cloneUrl,
+        gitAuthArgs: clone.gitAuthArgs,
+        remoteRef: job.head_ref || job.head_sha,
+        secrets: [...clone.secrets, ...globalSecrets(deps.config)],
+        baseSha: job.base_sha,
+        headSha: job.head_sha,
+        signal,
+        fetchDiff: async () => diff,
+        metadata: {
+          repo: job.repo_full_name,
+          mergeGroup: true,
+          participants: mergeGroupParticipants(job),
+          baseSha: job.base_sha,
+          headSha: job.head_sha,
+        },
+      });
+      deps.store.patchJob(jobId, { workspace_path: workspace.dir });
+      deps.store.log(jobId, `Checked out merge-group synthetic head ${job.head_sha} into ${workspace.dir}`);
+      throwIfStale(deps.store, jobId, signal);
+      deps.store.setJobState(jobId, "reviewing");
+      const current = deps.store.getJob(jobId) ?? job;
+      await runTrustedChecks(current, workspace, signal);
+      throwIfStale(deps.store, jobId, signal);
+      // Review evidence is exact participant-head evidence when the payload carries
+      // participant heads; scanner evidence is always freshly computed on the
+      // synthetic combined tree. GitHub does not portably enumerate participants,
+      // so a policy requiring review fails closed rather than treating queue
+      // admission as proof that Maomao's own review check passed.
+      await publishMergeReadiness(current, mergeGroupReviewConclusion(current));
+      throwIfStale(deps.store, jobId, signal);
+      deps.store.setJobState(jobId, "completed", { aggregator_state: "done", finished_at: nowIso() });
+      deps.store.log(jobId, `Merge-group checks completed for synthetic head ${job.head_sha}`);
+    } catch (error) {
+      const latest = deps.store.getJob(jobId) ?? job;
+      if (deps.store.isStale(jobId) || signal.aborted) {
+        await publishTrustedTerminal(latest, "cancelled", "the merge-group check was cancelled or superseded before completion");
+        if (!deps.store.isStale(jobId)) deps.store.setJobState(jobId, "stale", { finished_at: nowIso() });
+        return;
+      }
+      const message = error instanceof Error ? error.message : String(error);
+      await publishTrustedTerminal(latest, "action_required", message);
+      deps.store.setJobState(jobId, "failed", { failure_reason: message, finished_at: nowIso() });
+      deps.store.log(jobId, `Merge-group checks failed: ${message}`, "error");
+    }
+  }
+
   return {
     abortJob,
     async publishQueuedCheck(jobId: number): Promise<void> {
-      await checks.publishQueuedJobId(jobId);
-      const job = deps.store.getJob(jobId);
+      const queuedJob = deps.store.getJob(jobId);
+      // Merge-group jobs run deterministic checks only; maomao/review would
+      // never have a completion transition on that job type.
+      if (queuedJob?.job_type !== "merge_group_check") await checks.publishQueuedJobId(jobId);
+      const job = queuedJob;
       if (!job || job.state !== "queued") return;
       await readinessPublisher.publish(job, {
         status: "queued",
         title: "Maomao merge readiness queued",
-        summary: `Maomao queued merge-readiness evaluation for PR #${job.pr_number} at ${job.head_sha.slice(0, 12)}.`,
+        summary: `Maomao queued merge-readiness evaluation for ${job.job_type === "merge_group_check" ? "the GitHub merge group" : `PR #${job.pr_number}`} at ${job.head_sha.slice(0, 12)}.`,
       });
       if (!trustedChecks.enabled()) return;
       await Promise.all(
@@ -359,7 +477,7 @@ export function createPipeline(deps: PipelineDeps) {
           return trustedPublisher(name).publish(job, {
             status: "queued",
             title: `Maomao ${name} check queued`,
-            summary: `Maomao queued the pinned deterministic ${name} check for PR #${job.pr_number} at ${job.head_sha.slice(0, 12)}.`,
+            summary: `Maomao queued the pinned deterministic ${name} check for ${job.job_type === "merge_group_check" ? "the GitHub merge group" : `PR #${job.pr_number}`} at ${job.head_sha.slice(0, 12)}.`,
           });
         }),
       );
@@ -399,7 +517,9 @@ export function createPipeline(deps: PipelineDeps) {
           }
           return;
         }
-        if (job?.job_type === "health_scan") {
+        if (job?.job_type === "merge_group_check") {
+          await runMergeGroupJob(jobId, controller.signal);
+        } else if (job?.job_type === "health_scan") {
           await runScanJob(deps, forge, jobId, controller.signal);
         } else if (job?.job_type === "repo_brief") {
           await runBriefJob(deps, forge, jobId, controller.signal);
