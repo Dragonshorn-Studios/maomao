@@ -156,6 +156,10 @@ export interface ForgeChange {
   baseRef: string;
   headRef: string;
   draft: boolean;
+  /** Provider-normalized closed flag when authoritative; omit when unknown. */
+  closed?: boolean;
+  /** Authoritative merged flag when the provider exposes one; omit when unknown. */
+  merged?: boolean;
   /** GitHub-only numeric identifiers; undefined on other forges. */
   repositoryId?: number;
   accountId?: number;

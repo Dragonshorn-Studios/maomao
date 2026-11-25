@@ -20,7 +20,9 @@ import { ForgeRegistry } from "./forge/registry.js"
 import { TelemetrySettingsStore, telemetryConfigPath } from "./telemetry/settings.js";
 import { TrustedCheckSettingsStore } from "./checks/settings.js";
 import { MergeModeSettingsStore } from "./merge/settings.js";
+import { ForgejoMergeReconciler } from "./merge/reconcile.js";
 import { emitAppLog } from "./telemetry/app-log.js";
+import { RepoRateLimiter } from "./github/rate-limit.js";
 
 const config = loadConfig();
 mkdirSync(config.workspaceRoot, { recursive: true });
@@ -110,6 +112,12 @@ const queue = new JobQueue(
 );
 queue.start();
 
+// Webhooks are authoritative, but this bounded read-only sweep is the missed-event
+// safety net required for native merge lifecycle state. It never invokes merge APIs.
+const rateLimiter = new RepoRateLimiter();
+const forgejoMergeReconciler = new ForgejoMergeReconciler({ config, store, queue, forge, rateLimiter });
+forgejoMergeReconciler.start();
+
 const chatStore = config.chat.enabled ? new ChatStore(db) : undefined;
 const chat = chatStore
   ? {
@@ -138,6 +146,7 @@ const app = createApp({
   telemetrySettings,
   trustedCheckSettings,
   mergeModeSettings,
+  rateLimiter,
   startedAt: Date.now(),
   env: process.env,
 });
@@ -182,6 +191,7 @@ serve({ fetch: app.fetch, hostname: config.host, port: config.port }, (info) => 
 
 function shutdown(signal: string) {
   console.log(`Received ${signal}, exiting`);
+  forgejoMergeReconciler.stop();
   db.close();
   process.exit(0);
 }

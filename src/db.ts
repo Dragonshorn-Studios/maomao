@@ -672,6 +672,7 @@ function migrate(db: SqliteDb): void {
     db.exec(`
     CREATE INDEX IF NOT EXISTS idx_jobs_created ON jobs(created_at DESC);
     CREATE INDEX IF NOT EXISTS idx_jobs_state ON jobs(state);
+    CREATE INDEX IF NOT EXISTS idx_jobs_pr_reconcile ON jobs(job_type, provider, provider_instance, repo_full_name, pr_number, id DESC);
   `);
 
     // stack_run_members had no (job_id, position) uniqueness, and a webhook

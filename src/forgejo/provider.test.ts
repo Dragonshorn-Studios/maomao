@@ -63,6 +63,8 @@ function fixtureServer(state: { statuses: unknown[]; comments: Array<{ id: numbe
           base: { sha: "base111", ref: "main" },
           head: { sha: "head222", ref: "feature" },
           draft: false,
+          state: "open",
+          merged: false,
         });
         return;
       }
@@ -125,7 +127,7 @@ describe("ForgejoProvider", () => {
     const state = { statuses: [] as unknown[], comments: [] as Array<{ id: number; body: string; html_url?: string }>, requests: [] as string[] };
     server = fixtureServer(state);
     const { provider } = await providerOn(server);
-    await expect(provider.getChange(TARGET)).resolves.toMatchObject({ headSha: "head222", baseSha: "base111", draft: false });
+    await expect(provider.getChange(TARGET)).resolves.toMatchObject({ headSha: "head222", baseSha: "base111", draft: false, closed: false, merged: false });
     await expect(provider.getChangeDiff(TARGET)).resolves.toContain("diff --git a/a.ts");
     expect(state.requests).toContain("GET /api/v1/repos/acme/widgets/pulls/7.diff");
   });
