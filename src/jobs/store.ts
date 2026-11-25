@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import type { SqliteDb } from "../db.js";
 import type { CancelReason, JobState, ReviewerState } from "../config.js";
 import { JOBS_PAGE_SIZE_DEFAULT, JOBS_PAGE_SIZE_MAX, LIVE_JOB_STATES, TERMINAL_JOB_STATES } from "../config.js";
-import type { ForgeScope, WebhookDeliveryContext } from "../forge/types.js";
+import type { ForgeCheckConclusion, ForgeCheckStatus, ForgeScope, WebhookDeliveryContext } from "../forge/types.js";
 import { IGNORED_RESULT_PREFIX, normalizeScope } from "../forge/types.js";
 import type { FindingRow, FindingStatus } from "../findings/types.js";
 import { nowIso } from "../util.js";
@@ -133,6 +133,39 @@ export interface JobRow {
   manual_escalate_requested: number | null;
   /** Bumped by retryFailedReviewers — discriminates terminal summary lines per attempt. */
   retry_count: number;
+}
+
+export interface CheckPublicationKey {
+  provider: string;
+  providerInstance: string;
+  repoFullName: string;
+  prNumber: number;
+  headSha: string;
+  name: string;
+}
+
+export interface CheckPublicationRow {
+  id: number;
+  provider: string;
+  provider_instance: string;
+  repo_full_name: string;
+  pr_number: number;
+  head_sha: string;
+  name: string;
+  external_id: string;
+  job_id: number | null;
+  status: string;
+  conclusion: string | null;
+  native_id: string | null;
+  native_url: string | null;
+  details_url: string | null;
+  title: string;
+  summary: string;
+  publish_error: string | null;
+  attempts: number;
+  created_at: string;
+  updated_at: string;
+  published_at: string | null;
 }
 
 export interface ReviewerRunRow {
@@ -1288,6 +1321,104 @@ export class JobStore {
          WHERE id = ?`,
       )
       .run(patch.baseSha ?? null, patch.headSha ?? null, patch.memberJobId ?? null, patch.state ?? null, id);
+  }
+
+  /** Durable audit/intent row for one logical native check at one exact SHA. */
+  beginCheckPublication(input: CheckPublicationKey & {
+    externalId: string;
+    jobId: number;
+    status: ForgeCheckStatus;
+    conclusion?: ForgeCheckConclusion;
+    title: string;
+    summary: string;
+    detailsUrl?: string;
+  }): CheckPublicationRow {
+    const scope = normalizeScope({ provider: input.provider, instance: input.providerInstance });
+    const now = nowIso();
+    this.db
+      .prepare(
+        `INSERT INTO check_publications (
+          provider, provider_instance, repo_full_name, pr_number, head_sha, name, external_id, job_id,
+          status, conclusion, details_url, title, summary, attempts, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
+        ON CONFLICT(provider, provider_instance, repo_full_name, pr_number, head_sha, name) DO UPDATE SET
+          external_id = excluded.external_id,
+          job_id = excluded.job_id,
+          status = excluded.status,
+          conclusion = excluded.conclusion,
+          details_url = excluded.details_url,
+          title = excluded.title,
+          summary = excluded.summary,
+          native_id = NULL,
+          native_url = NULL,
+          publish_error = NULL,
+          published_at = NULL,
+          attempts = check_publications.attempts + 1,
+          updated_at = excluded.updated_at`,
+      )
+      .run(
+        scope.provider,
+        scope.instance,
+        input.repoFullName,
+        input.prNumber,
+        input.headSha,
+        input.name,
+        input.externalId,
+        input.jobId,
+        input.status,
+        input.conclusion ?? null,
+        input.detailsUrl ?? null,
+        input.title,
+        input.summary,
+        now,
+        now,
+      );
+    const row = this.getCheckPublication(input);
+    if (!row) throw new Error("failed to load check publication");
+    return row;
+  }
+
+  finishCheckPublication(
+    key: CheckPublicationKey,
+    result: { nativeId?: string; nativeUrl?: string; error?: string; published?: boolean },
+  ): void {
+    const scope = normalizeScope({ provider: key.provider, instance: key.providerInstance });
+    this.db
+      .prepare(
+        `UPDATE check_publications
+         SET native_id = COALESCE(?, native_id),
+             native_url = COALESCE(?, native_url),
+             publish_error = ?,
+             published_at = CASE WHEN ? THEN ? ELSE published_at END,
+             updated_at = ?
+         WHERE provider = ? AND provider_instance = ? AND repo_full_name = ? AND pr_number = ? AND head_sha = ? AND name = ?`,
+      )
+      .run(
+        result.nativeId ?? null,
+        result.nativeUrl ?? null,
+        result.error ?? null,
+        result.published ? 1 : 0,
+        nowIso(),
+        nowIso(),
+        scope.provider,
+        scope.instance,
+        key.repoFullName,
+        key.prNumber,
+        key.headSha,
+        key.name,
+      );
+  }
+
+  getCheckPublication(key: CheckPublicationKey): CheckPublicationRow | undefined {
+    const scope = normalizeScope({ provider: key.provider, instance: key.providerInstance });
+    return this.db
+      .prepare(
+        `SELECT * FROM check_publications
+         WHERE provider = ? AND provider_instance = ? AND repo_full_name = ? AND pr_number = ? AND head_sha = ? AND name = ?`,
+      )
+      .get(scope.provider, scope.instance, key.repoFullName, key.prNumber, key.headSha, key.name) as
+      | CheckPublicationRow
+      | undefined;
   }
 
   getJob(id: number): JobRow | undefined {

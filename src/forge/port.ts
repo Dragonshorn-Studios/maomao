@@ -14,6 +14,8 @@ import type {
   ForgeDiscussion,
   ForgeInlineComment,
   ForgePermission,
+  ForgeCheckPublishInput,
+  ForgeCheckPublishResult,
   ForgePublishInput,
   ForgePublishResult,
   ForgeRepoTarget,
@@ -35,6 +37,11 @@ export interface ForgePort {
   listSummaries(target: ForgeRepoTarget): Promise<ForgeSummary[]>;
   /** Publish a summary with optional inline comments; degrade instead of dying when inlines are rejected. */
   publishReview(input: ForgePublishInput): Promise<ForgePublishResult>;
+
+  /** Whether this adapter exposes native check/status publication; API permissions are still validated at runtime. */
+  supportsNativeChecks?(): boolean;
+  /** Publish/update one native check or commit status. Optional because not every forge exposes an equivalent API. */
+  publishCheck?(input: ForgeCheckPublishInput): Promise<ForgeCheckPublishResult>;
 
   /** Every discussion thread on the change (Maomao-owned and not). */
   listDiscussions(target: ForgeRepoTarget): Promise<ForgeDiscussion[]>;

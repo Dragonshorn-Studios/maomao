@@ -237,6 +237,30 @@ function migrate(db: SqliteDb): void {
       PRIMARY KEY (provider, provider_instance, delivery_id)
     );
 
+    CREATE TABLE IF NOT EXISTS check_publications (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      ${PROVIDER_COLUMNS},
+      repo_full_name TEXT NOT NULL,
+      pr_number INTEGER NOT NULL,
+      head_sha TEXT NOT NULL,
+      name TEXT NOT NULL,
+      external_id TEXT NOT NULL,
+      job_id INTEGER,
+      status TEXT NOT NULL,
+      conclusion TEXT,
+      native_id TEXT,
+      native_url TEXT,
+      details_url TEXT,
+      title TEXT NOT NULL DEFAULT '',
+      summary TEXT NOT NULL DEFAULT '',
+      publish_error TEXT,
+      attempts INTEGER NOT NULL DEFAULT 0,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      published_at TEXT,
+      UNIQUE (provider, provider_instance, repo_full_name, pr_number, head_sha, name)
+    );
+
     CREATE TABLE IF NOT EXISTS merged_pulls (
       repo_full_name TEXT NOT NULL,
       pr_number INTEGER NOT NULL,
@@ -488,6 +512,7 @@ function migrate(db: SqliteDb): void {
     CREATE INDEX IF NOT EXISTS idx_logs_job ON job_logs(job_id, id);
     CREATE INDEX IF NOT EXISTS idx_runs_job ON reviewer_runs(job_id);
 
+    CREATE INDEX IF NOT EXISTS idx_check_publications_job ON check_publications(job_id, updated_at);
     CREATE INDEX IF NOT EXISTS idx_findings_pr ON findings(repo_full_name, pr_number, status);
     CREATE INDEX IF NOT EXISTS idx_findings_thread ON findings(github_thread_id);
     CREATE INDEX IF NOT EXISTS idx_findings_comment ON findings(github_comment_id);

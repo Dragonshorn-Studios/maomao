@@ -153,6 +153,7 @@ Create a GitHub App for your user or org. Maomao needs **least privilege**:
 | Metadata | Read | Identify the installation / repository |
 | Contents | **Read**, or **Read & write** to collapse resolved review threads | Fetch the PR head. GitHub's `resolveReviewThread` mutation is gated on Contents write (repo write / merge-level), **not** on Pull requests write. Maomao never pushes, edits files, or merges — grant write only if you want conversations auto-resolved. |
 | Pull requests | Read & write | Read the diff; post a `COMMENT` review |
+| Checks | Write (optional) | Publish the native `maomao/review` Check Run lifecycle without workflow YAML. Without this permission reviews still post as comments and check publication is logged as unavailable. |
 | Issues | Write (optional) | Poison-alert mention/command comments on the PR conversation, and creating issues from health scans (`GITHUB_ISSUE_CREATION_ENABLED=true`) |
 
 Do **not** grant Actions write, Administration, Secrets, merge, or branch push. After you change App permissions, open each installation and **accept the new permissions** — tokens keep the old scopes until you do, and resolve still fails with `Resource not accessible by integration`.
@@ -183,6 +184,12 @@ If you turn on an allowlist while jobs are already queued from before this schem
 Valid signatures for an unauthorized installation or repository receive **`202`** with `{ "ok": true, "ignored": true, "reason": "..." }`. Maomao logs only `installation_id`, `repository_id`, and the reason — never the repository name, URL, or author. The operator paste-URL form (`POST /reviews`) uses the same policy and cannot bypass it.
 
 Events handled by default: `opened`, `reopened`, `synchronize`, `ready_for_review`. Draft PRs are ignored unless `REVIEW_DRAFTS=true`. Also subscribe the app to **Pull request review comment** so thread replies can bury or reopen findings.
+
+### Native review checks
+
+When the App has **Checks: write**, Maomao publishes one stable `maomao/review` Check Run per pull-request head SHA. It moves from `queued` to `in_progress` while the existing review pipeline runs, then completes with a conclusion derived from the actual review outcome: clean reviews are `success`, request-changes verdicts are `failure`, comment-only reviews are `neutral`, and cancelled or superseded work is `cancelled`. Retries for the same SHA update the same logical check instead of intentionally creating another active one.
+
+The check is a visibility layer over the existing review job. It does not replace the human-facing review comment, does not merge or approve by itself, and never publishes diff text or secret values. If `MAOMAO_PUBLIC_URL` is set, the check links back to the Maomao job page. A missing Checks permission or GitHub API failure is recorded on the job and in Maomao's durable `check_publications` audit row without failing the review itself.
 
 
 ## Configure GitLab (GitLab.com and self-managed)

@@ -6,6 +6,7 @@ import type {
   ForgeDiscussionComment,
   ForgeInlineComment,
   ForgePermission,
+  ForgeCheckState,
   ForgePublishResult,
   ForgeVerdict,
 } from "../forge/types.js";
@@ -73,6 +74,18 @@ export interface ManualTriggerPort {
   getPull(installationId: number, owner: string, repo: string, pullNumber: number): Promise<ResolvedPull>;
 }
 
+export type GithubCheckRunUpsertInput = ForgeCheckState & {
+  installationId: number;
+  owner: string;
+  repo: string;
+  headSha: string;
+  name: string;
+  externalId: string;
+  title: string;
+  summary: string;
+  detailsUrl?: string;
+};
+
 export interface GithubPort {
   getInstallationToken(installationId: number): Promise<string>;
   /** Every open pull request in the repository — the input for stack chain resolution. */
@@ -84,12 +97,14 @@ export interface GithubPort {
     pullNumber: number,
     maxBytes?: number,
   ): Promise<string>;
+  /** Create or update one stable-named Check Run for an exact commit. */
+  upsertCheckRun?(input: GithubCheckRunUpsertInput): Promise<{ id: string; url?: string }>;
   listReviews(
     installationId: number,
     owner: string,
     repo: string,
     pullNumber: number,
-  ): Promise<{ id: number; body: string; commitId?: string; htmlUrl?: string; userLogin?: string }[]>;
+  ): Promise<{ id: number; body: string; commitId?: string; htmlUrl?: string; userLogin?: string; verdict?: ForgeVerdict }[]>;
   createCommentReview(input: {
     installationId: number;
     owner: string;
@@ -421,7 +436,7 @@ export class GithubClient implements GithubPort, ManualTriggerPort {
     owner: string,
     repo: string,
     pullNumber: number,
-  ): Promise<{ id: number; body: string; commitId?: string; htmlUrl?: string; userLogin?: string }[]> {
+  ): Promise<{ id: number; body: string; commitId?: string; htmlUrl?: string; userLogin?: string; verdict?: ForgeVerdict }[]> {
     const octokit = this.installationOctokit(installationId);
     const reviews = await octokit.paginate(octokit.rest.pulls.listReviews, {
       owner,
@@ -435,7 +450,63 @@ export class GithubClient implements GithubPort, ManualTriggerPort {
       commitId: review.commit_id ?? undefined,
       htmlUrl: review.html_url,
       userLogin: review.user?.login ?? undefined,
+      verdict:
+        review.state === "CHANGES_REQUESTED" ? "REQUEST_CHANGES" : review.state === "APPROVED" ? "APPROVE" : "COMMENT",
     }));
+  }
+
+  async upsertCheckRun(input: GithubCheckRunUpsertInput): Promise<{ id: string; url?: string }> {
+    const octokit = this.installationOctokit(input.installationId);
+    const output = {
+      title: input.title.slice(0, 255),
+      summary: input.summary.slice(0, 65_000),
+    };
+    const shared = {
+      owner: input.owner,
+      repo: input.repo,
+      name: input.name,
+      status: input.status,
+      ...(input.status === "completed" && input.conclusion ? { conclusion: input.conclusion } : {}),
+      ...(input.detailsUrl ? { details_url: input.detailsUrl } : {}),
+      output,
+    };
+    const runs = [];
+    for (let page = 1; ; page += 1) {
+      const listed = await octokit.rest.checks.listForRef({
+        owner: input.owner,
+        repo: input.repo,
+        ref: input.headSha,
+        check_name: input.name,
+        filter: "all",
+        per_page: 100,
+        page,
+      });
+      const batch = listed.data.check_runs ?? [];
+      runs.push(...batch);
+      const totalCount = listed.data.total_count ?? runs.length;
+      if (batch.length < 100 || runs.length >= totalCount) break;
+    }
+    // Only the stable external id identifies Maomao's logical check. Falling
+    // back to the display name could hijack a same-named check owned by a
+    // different GitHub App.
+    const ownAppId = this.config.github.appId;
+    const existing = runs
+      .filter((run) => run.external_id === input.externalId && String(run.app?.id ?? "") === ownAppId)
+      .reduce<(typeof runs)[number] | undefined>((latest, run) => (latest == null || run.id > latest.id ? run : latest), undefined);
+    if (existing) {
+      const updated = await octokit.rest.checks.update({
+        ...shared,
+        check_run_id: existing.id,
+        external_id: input.externalId,
+      });
+      return { id: String(updated.data.id), url: updated.data.html_url ?? undefined };
+    }
+    const created = await octokit.rest.checks.create({
+      ...shared,
+      head_sha: input.headSha,
+      external_id: input.externalId,
+    });
+    return { id: String(created.data.id), url: created.data.html_url ?? undefined };
   }
 
   async getRepositoryHead(installationId: number, owner: string, repo: string) {

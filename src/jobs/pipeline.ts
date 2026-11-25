@@ -85,6 +85,7 @@ import {
   sanitizePublicReason,
   targetKey,
 } from "../routing/escalation.js";
+import { ReviewCheckPublisher, reviewCheckInputForState } from "../checks/review-check.js";
 import {
   assignFindingIds,
   findingsMeetThreshold,
@@ -104,6 +105,8 @@ export interface PipelineDeps {
   forge?: ForgeRegistry;
   /** Persisted forge connections backing the default registry's GitLab bindings. */
   connections?: ForgeConnectionStore;
+  /** Optional check publisher override for focused tests; production uses the default review publisher. */
+  checkPublisher?: ReviewCheckPublisher;
   checkout: CheckoutPort;
   opencode: OpenCodePort;
   getInstallationToken?: (installationId: number) => Promise<string>;
@@ -120,8 +123,22 @@ export function abortJob(jobId: number): void {
 export function createPipeline(deps: PipelineDeps) {
   const forge =
     deps.forge ?? new ForgeRegistry(deps.github, deps.config.github.appSlug, deps.getInstallationToken, deps.connections);
+  const checks =
+    deps.checkPublisher ??
+    new ReviewCheckPublisher({
+      store: deps.store,
+      forge,
+      config: deps.config,
+      publicUrl: deps.config.publicUrl,
+    });
   return {
     abortJob,
+    publishQueuedCheck(jobId: number): Promise<void> {
+      return checks.publishQueuedJobId(jobId);
+    },
+    publishCancelledCheck(jobId: number): Promise<void> {
+      return checks.publishCancelledJobId(jobId);
+    },
     async run(jobId: number): Promise<void> {
       const existing = aborts.get(jobId);
       if (existing) existing.abort();
@@ -146,6 +163,7 @@ export function createPipeline(deps: PipelineDeps) {
             cancelled.length ? "info" : "warn",
           );
           if (cancelled.length) {
+            await checks.publishCancelledJobId(jobId);
             publish({ type: "job", jobId });
             publish({ type: "jobs" });
           }
@@ -156,9 +174,9 @@ export function createPipeline(deps: PipelineDeps) {
         } else if (job?.job_type === "repo_brief") {
           await runBriefJob(deps, forge, jobId, controller.signal);
         } else if (job?.job_type === "stack_review") {
-          await runStackJob(deps, forge, jobId, controller.signal);
+          await runStackJob(deps, forge, jobId, controller.signal, checks);
         } else {
-          await runJob(deps, forge, jobId, controller.signal);
+          await runJob(deps, forge, jobId, controller.signal, checks);
         }
       } finally {
         if (aborts.get(jobId) === controller) aborts.delete(jobId);
@@ -356,7 +374,13 @@ async function runBudgetedAggregation(
   return aggregated;
 }
 
-async function runJob(deps: PipelineDeps, forge: ForgeRegistry, jobId: number, signal: AbortSignal): Promise<void> {
+async function runJob(
+  deps: PipelineDeps,
+  forge: ForgeRegistry,
+  jobId: number,
+  signal: AbortSignal,
+  checks: ReviewCheckPublisher,
+): Promise<void> {
   const { store, config } = deps;
   const job = store.getJob(jobId);
   if (!job) {
@@ -412,6 +436,7 @@ async function runJob(deps: PipelineDeps, forge: ForgeRegistry, jobId: number, s
 
   try {
     store.setJobState(jobId, "preparing", { started_at: nowIso() });
+    void checks.publish(store.getJob(jobId) ?? job, { status: "in_progress", stage: "preparing" });
     store.log(jobId, `Preparing isolated workspace for ${job.repo_full_name}#${job.pr_number} @ ${job.head_sha}`);
     throwIfStale(store, jobId, signal);
 
@@ -475,6 +500,7 @@ async function runJob(deps: PipelineDeps, forge: ForgeRegistry, jobId: number, s
       throwIfStale(store, jobId, signal);
 
       store.setJobState(jobId, "reviewing");
+      void checks.publish(store.getJob(jobId) ?? job, { status: "in_progress", stage: "reviewing" });
       const runs = store.listReviewerRuns(jobId).filter((run) => run.state !== "done");
       await runProfileReviewers(
         deps,
@@ -542,7 +568,9 @@ async function runJob(deps: PipelineDeps, forge: ForgeRegistry, jobId: number, s
     }
 
     store.setJobState(jobId, "publishing", { aggregator_state: "done" });
-    const posted = await publishReview(deps, provider, job, aggregated, reviewerCount, snapshot, diff, workspace.repoDir, signal);
+    void checks.publish(store.getJob(jobId) ?? job, { status: "in_progress", stage: "publishing" });
+    const publication = await publishReview(deps, provider, job, aggregated, reviewerCount, snapshot, diff, workspace.repoDir, signal);
+    const posted = publication.posted;
     const afterPublish = store.getJob(jobId) ?? job;
     if (posted) {
       store.patchJob(jobId, { github_review_id: posted.id, github_review_url: posted.url });
@@ -608,6 +636,16 @@ async function runJob(deps: PipelineDeps, forge: ForgeRegistry, jobId: number, s
 
     throwIfStale(store, jobId, signal);
     await dispatchExternalEscalation(deps, store.getJob(jobId) ?? afterPublish, aggregated);
+    // Cancellation/supersession can win during the escalation network call.
+    // Re-check before claiming a successful terminal check, and again after it
+    // before writing the terminal job state.
+    throwIfStale(store, jobId, signal);
+    const latestBeforeCompletion = store.getJob(jobId) ?? job;
+    await checks.publish(
+      { ...latestBeforeCompletion, state: "completed" },
+      reviewCheckInputForState({ ...latestBeforeCompletion, state: "completed" }, publication.clean, publication.event),
+    );
+    throwIfStale(store, jobId, signal);
     store.setJobState(jobId, "completed", {
       github_review_id: posted?.id ?? store.getJob(jobId)?.github_review_id ?? null,
       github_review_url: posted?.url ?? store.getJob(jobId)?.github_review_url ?? null,
@@ -634,6 +672,11 @@ async function runJob(deps: PipelineDeps, forge: ForgeRegistry, jobId: number, s
           internal_escalation_reason: "job ended before the internal pass finished",
         });
       }
+      const latest = store.getJob(jobId) ?? job;
+      await checks.publish(
+        { ...latest, state: cancelled ? "cancelled" : "stale" },
+        reviewCheckInputForState({ ...latest, state: cancelled ? "cancelled" : "stale" }),
+      );
       if (!store.isStale(jobId)) store.setJobState(jobId, "stale", { finished_at: nowIso() });
       return;
     }
@@ -647,6 +690,11 @@ async function runJob(deps: PipelineDeps, forge: ForgeRegistry, jobId: number, s
         });
       }
     }
+    const latest = store.getJob(jobId) ?? job;
+    await checks.publish(
+      { ...latest, state: "failed", failure_reason: message },
+      reviewCheckInputForState({ ...latest, state: "failed", failure_reason: message }),
+    );
     store.setJobState(jobId, "failed", {
       failure_reason: message,
       finished_at: nowIso(),
@@ -1154,7 +1202,13 @@ function memberJobSpend(store: JobStore, jobId: number): { cost: number; tokens:
   return { cost: spend.costUsd ?? 0, tokens: spend.totalTokens };
 }
 
-async function runStackJob(deps: PipelineDeps, forge: ForgeRegistry, jobId: number, signal: AbortSignal): Promise<void> {
+async function runStackJob(
+  deps: PipelineDeps,
+  forge: ForgeRegistry,
+  jobId: number,
+  signal: AbortSignal,
+  checks: ReviewCheckPublisher,
+): Promise<void> {
   const { store, config } = deps;
   const job = store.getJob(jobId);
   if (!job) return;
@@ -1327,7 +1381,7 @@ async function runStackJob(deps: PipelineDeps, forge: ForgeRegistry, jobId: numb
         store.patchStackMember(member.id, { memberJobId, state: "reviewing" });
         if (enqueued.created) {
           store.log(jobId, `Reviewing stack member #${member.pr_number} as job ${memberJobId}`);
-          await runJob(deps, forge, memberJobId, signal);
+          await runJob(deps, forge, memberJobId, signal, checks);
           outcome = await waitForJob(deps.store, memberJobId, jobId, signal);
           // Run envelope (issue #136): only spend this run itself enqueued
           // counts — a reused job's recorded tokens belong to the run that
@@ -2542,6 +2596,14 @@ async function runInternalEscalation(
   return firstPass;
 }
 
+interface ReviewPublication {
+  /** Whether the completed run is clean after reconciliation, filtering, suppression, and severity policy. */
+  clean: boolean;
+  /** The event this run would publish, even when an existing review makes reposting unnecessary. */
+  event: ForgeVerdict;
+  posted?: { id: string; url: string; postedFingerprints: string[] };
+}
+
 async function publishReview(
   deps: PipelineDeps,
   forge: ForgePort,
@@ -2552,20 +2614,12 @@ async function publishReview(
   diff: string,
   repoDir: string,
   signal: AbortSignal,
-): Promise<{ id: string; url: string; postedFingerprints: string[] } | undefined> {
-  if (deps.store.isStale(job.id)) return undefined;
+): Promise<ReviewPublication> {
+  if (deps.store.isStale(job.id)) return { clean: false, event: "COMMENT" };
   const target = forgeTargetOf(job);
 
   const existing: ForgeSummary[] = await forge.listSummaries(target);
   const already = findExistingReview(existing, job.head_sha);
-  if (already) {
-    deps.store.log(job.id, `Review already exists for ${job.head_sha}; skipping publish`);
-    deps.store.patchJob(job.id, {
-      review_event: "COMMENT",
-      review_event_reason: "existing maomao review found by marker",
-    });
-    return { ...already, postedFingerprints: [] };
-  }
 
   let publishable = findingsForPublish(aggregated.findings, snapshot);
   // Path-boundary gate (issue #176): a reviewer injected into reading host
@@ -2578,37 +2632,9 @@ async function publishReview(
     if (violations.length === 0) return [finding];
     withheldCount += 1;
     for (const violation of violations) withheldRefs.add(violation.ref);
-    deps.store.log(
-      job.id,
-      `Withholding finding ${finding.fingerprint} (${finding.file ?? "no file"}): references ${violations
-        .map((violation) => violation.ref)
-        .join(", ")} outside the checkout — not publishing`,
-      "warn",
-    );
     return [];
   });
   const overridden = omitOverriddenFindings(publishable, snapshot.humanOverrides?.overrides ?? []);
-  for (const entry of overridden.suppressed) {
-    deps.store.dismissFinding({
-      repoFullName: job.repo_full_name,
-      prNumber: job.pr_number,
-      scope: scopeOf(job),
-      fingerprint: entry.finding.fingerprint,
-      actor: entry.override.author,
-      command: entry.override.signal,
-      reviewedSha: job.head_sha,
-      summary: entry.finding.summary,
-      path: entry.finding.file,
-      line: entry.finding.line,
-      category: entry.finding.category,
-      severity: entry.finding.severity,
-      body: entry.finding.body,
-    });
-    deps.store.log(
-      job.id,
-      `Omitting ${entry.finding.category ?? "finding"} ${entry.finding.fingerprint} (${entry.finding.file ?? "?"}:${entry.finding.line ?? "?"}): ${entry.override.signal} by ${entry.override.author}`,
-    );
-  }
   publishable = overridden.kept;
   // severityRank is inverted (blocker=0), so "at or above" the minimum means rank <= threshold.
   const profileDefinition = profileDefinitionForJob(deps.store, job);
@@ -2619,9 +2645,6 @@ async function publishReview(
     );
   }
   const dismissedCount = snapshot.items.filter((item) => item.status === "dismissed").length;
-  if (dismissedCount > 0) {
-    deps.store.log(job.id, `Omitting ${dismissedCount} dismissed finding(s) from this review`);
-  }
   const findingsCount = publishable.length;
   // A review only counts as clean when the aggregator said so AND nothing survived filtering.
   const clean = findingsCount === 0 && aggregated.verdict === "clean";
@@ -2643,12 +2666,61 @@ async function publishReview(
     stale: deps.store.isStale(job.id),
   });
 
+  const escalatesExisting =
+    already && decision.event === "REQUEST_CHANGES" && already.verdict != null && already.verdict !== "REQUEST_CHANGES";
+  if (already && !escalatesExisting) {
+    deps.store.log(job.id, `Review already exists for ${job.head_sha}; skipping publish`);
+    deps.store.patchJob(job.id, {
+      review_event: "COMMENT",
+      review_event_reason: "existing maomao review found by marker",
+    });
+    return { clean, event: decision.event, posted: { ...already, postedFingerprints: [] } };
+  }
+  if (already && escalatesExisting) {
+    deps.store.log(job.id, `Posting a new REQUEST_CHANGES review for ${job.head_sha}; the existing review was ${already.verdict}`);
+  }
+
+  for (const { finding, violations } of outside) {
+    if (violations.length === 0) continue;
+    deps.store.log(
+      job.id,
+      `Withholding finding ${finding.fingerprint} (${finding.file ?? "no file"}): references ${violations
+        .map((violation) => violation.ref)
+        .join(", ")} outside the checkout — not publishing`,
+      "warn",
+    );
+  }
+  for (const entry of overridden.suppressed) {
+    deps.store.dismissFinding({
+      repoFullName: job.repo_full_name,
+      prNumber: job.pr_number,
+      scope: scopeOf(job),
+      fingerprint: entry.finding.fingerprint,
+      actor: entry.override.author,
+      command: entry.override.signal,
+      reviewedSha: job.head_sha,
+      summary: entry.finding.summary,
+      path: entry.finding.file,
+      line: entry.finding.line,
+      category: entry.finding.category,
+      severity: entry.finding.severity,
+      body: entry.finding.body,
+    });
+    deps.store.log(
+      job.id,
+      `Omitting ${entry.finding.category ?? "finding"} ${entry.finding.fingerprint} (${entry.finding.file ?? "?"}:${entry.finding.line ?? "?"}): ${entry.override.signal} by ${entry.override.author}`,
+    );
+  }
+  if (dismissedCount > 0) {
+    deps.store.log(job.id, `Omitting ${dismissedCount} dismissed finding(s) from this review`);
+  }
+
   // Withheld findings still post: the suppression notice must reach the PR.
   if (clean && withheldCount === 0 && !deps.config.postEmptyReview) {
     const reason = `${decision.reason}; not posting because POST_EMPTY_REVIEW is false`;
     deps.store.log(job.id, `Clean review with no findings; POST_EMPTY_REVIEW is false, not posting`);
     deps.store.patchJob(job.id, { review_event: "COMMENT", review_event_reason: reason });
-    return undefined;
+    return { clean, event: decision.event };
   }
 
   deps.store.log(job.id, `Review event: ${decision.event} (${decision.reason})`);
@@ -2743,7 +2815,7 @@ async function publishReview(
   for (const warning of posted.warnings ?? []) {
     deps.store.log(job.id, warning, "warn");
   }
-  return { ...posted, postedFingerprints };
+  return { clean, event: decision.event, posted: { ...posted, postedFingerprints } };
 }
 
 async function dispatchExternalEscalation(

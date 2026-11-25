@@ -96,6 +96,12 @@ const queue = new JobQueue(
   (jobId) => pipeline.run(jobId),
   telemetrySettings,
   config.jobSummaries,
+  (jobId) => {
+    void pipeline.publishQueuedCheck(jobId);
+  },
+  (jobId) => {
+    void pipeline.publishCancelledCheck(jobId);
+  },
 );
 queue.start();
 

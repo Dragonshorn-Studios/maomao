@@ -189,6 +189,47 @@ export interface ForgeSummary {
   commitId?: string;
   htmlUrl?: string;
   userLogin?: string;
+  /** Native review verdict when the forge exposes one (GitHub reviews do; note-only forges do not). */
+  verdict?: ForgeVerdict;
+}
+
+
+/** Native check/status lifecycle in the forge-neutral vocabulary. */
+export type ForgeCheckStatus = "queued" | "in_progress" | "completed";
+
+/** Provider-neutral completion vocabulary; unsupported values degrade inside adapters. */
+export type ForgeCheckConclusion =
+  | "success"
+  | "failure"
+  | "neutral"
+  | "cancelled"
+  | "skipped"
+  | "timed_out"
+  | "action_required";
+
+/** A completed check must have a conclusion; non-terminal checks must not. */
+export type ForgeCheckState =
+  | { status: "queued" | "in_progress"; conclusion?: never }
+  | { status: "completed"; conclusion: ForgeCheckConclusion };
+
+interface ForgeCheckPublishFields {
+  target: ForgeRepoTarget;
+  /** Immutable commit the check describes. */
+  commitSha: string;
+  /** Stable logical check/context name, e.g. maomao/review. */
+  name: string;
+  /** Stable idempotency key for one logical check at one exact SHA. */
+  externalId: string;
+  title: string;
+  summary: string;
+  detailsUrl?: string;
+}
+
+export type ForgeCheckPublishInput = ForgeCheckPublishFields & ForgeCheckState;
+
+export interface ForgeCheckPublishResult {
+  id: string;
+  url?: string;
 }
 
 export interface ForgePublishInput {

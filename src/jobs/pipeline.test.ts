@@ -10,6 +10,7 @@ import type { OpenCodePort } from "../opencode/parse.js";
 import { OpenCodeTimeoutError } from "../opencode/spawn.js";
 import { profileBudgetExceeded } from "../routing/policy.js";
 import { findingMarker, fingerprintFinding } from "../findings/identity.js";
+import type { ReviewCheckInput, ReviewCheckPublisher } from "../checks/review-check.js";
 import { createPipeline } from "./pipeline.js";
 import { parseBriefPayload } from "./brief.js";
 import { JobStore } from "./store.js";
@@ -311,6 +312,160 @@ describe("pipeline", () => {
     const runs = store.listReviewerRuns(created.job.id);
     expect(runs.every((run) => run.state === "done")).toBe(true);
     expect(JSON.parse(job?.aggregator_normalized ?? "{}").verdict).toBe("comment");
+  });
+
+  it("publishes the review lifecycle to a stable GitHub check run", async () => {
+    const config = loadConfig({
+      REVIEWER_ROLES: "correctness",
+      OPENCODE_REVIEWER_MODEL: "test/model",
+      OPENCODE_TIMEOUT_MS: "5000",
+      POST_EMPTY_REVIEW: "true",
+      MAOMAO_PUBLIC_URL: "https://maomao.example",
+    });
+    const store = new JobStore(openDb(":memory:"));
+    const checks: Array<{ status?: string; conclusion?: string; externalId: string; detailsUrl?: string }> = [];
+    const github = {
+      ...githubPort(),
+      getPull: async () => ({
+        installationId: 9,
+        accountId: 1001,
+        repositoryId: 2002,
+        repoOwner: "acme",
+        repoName: "widgets",
+        repoFullName: "acme/widgets",
+        prNumber: 4,
+        prTitle: "Change example",
+        prBody: "",
+        prHtmlUrl: "https://example.test/pull/4",
+        prAuthor: "dev",
+        baseSha: "base",
+        headSha: "cafebabe",
+        baseRef: "main",
+        headRef: "feat",
+        draft: false,
+      }),
+      upsertCheckRun: async (input: { status?: string; conclusion?: string; externalId: string; detailsUrl?: string }) => {
+        checks.push(input);
+        return { id: "check-1", url: "https://example.test/checks/1" };
+      },
+    } as unknown as GithubPort;
+    const opencode: OpenCodePort = {
+      async run(input) {
+        const roleMatch = input.prompt.match(/Role id: (\w+)/);
+        const text = roleMatch
+          ? reviewerJson(roleMatch[1])
+          : JSON.stringify({ schema_version: 1, verdict: "comment", summary: "Please fix the finding.", findings: [] });
+        return { stdout: text, stderr: "", exitCode: 0, text, usage: { promptTokens: 3, completionTokens: 2 } };
+      },
+    };
+    const created = store.enqueue({
+      repoFullName: "acme/widgets",
+      repoOwner: "acme",
+      repoName: "widgets",
+      installationId: 9,
+      prNumber: 4,
+      prTitle: "Change example",
+      prBody: "",
+      prHtmlUrl: "",
+      prAuthor: "dev",
+      baseSha: "base",
+      headSha: "cafebabe",
+      baseRef: "main",
+      headRef: "feat",
+      reviewers: config.reviewers.map((role) => ({ role: role.id, title: role.title })),
+    });
+
+    const pipeline = createPipeline({ config, store, github, checkout: await fixtureCheckout(), opencode });
+    await pipeline.publishQueuedCheck(created.job.id);
+    await pipeline.run(created.job.id);
+
+    expect(store.getJob(created.job.id)?.state).toBe("completed");
+    expect(checks[0]).toMatchObject({ status: "queued", detailsUrl: `https://maomao.example/jobs/${created.job.id}` });
+    expect(checks.at(-1)).toMatchObject({ status: "completed", conclusion: "success" });
+    expect(new Set(checks.map((check) => check.externalId)).size).toBe(1);
+    const stored = store.getCheckPublication({
+      provider: "github",
+      providerInstance: "github.com",
+      repoFullName: "acme/widgets",
+      prNumber: 4,
+      headSha: "cafebabe",
+      name: "maomao/review",
+    });
+    expect(stored).toMatchObject({ native_id: "check-1", conclusion: "success", publish_error: null });
+  });
+
+  it("does not overwrite a cancellation that wins during final check publication", async () => {
+    const config = loadConfig({
+      REVIEWER_ROLES: "correctness",
+      OPENCODE_REVIEWER_MODEL: "test/model",
+      OPENCODE_TIMEOUT_MS: "5000",
+      POST_EMPTY_REVIEW: "true",
+    });
+    const store = new JobStore(openDb(":memory:"));
+    const checks: Array<{ status?: string; conclusion?: string }> = [];
+    const created = store.enqueue({
+      repoFullName: "acme/widgets",
+      repoOwner: "acme",
+      repoName: "widgets",
+      installationId: 9,
+      prNumber: 4,
+      prTitle: "Change example",
+      prBody: "",
+      prHtmlUrl: "",
+      prAuthor: "dev",
+      baseSha: "base",
+      headSha: "cafebabe",
+      baseRef: "main",
+      headRef: "feat",
+      reviewers: config.reviewers.map((role) => ({ role: role.id, title: role.title })),
+    });
+    const github = {
+      ...githubPort(),
+      getPull: async () => ({
+        installationId: 9,
+        accountId: 1001,
+        repositoryId: 2002,
+        repoOwner: "acme",
+        repoName: "widgets",
+        repoFullName: "acme/widgets",
+        prNumber: 4,
+        prTitle: "Change example",
+        prBody: "",
+        prHtmlUrl: "https://example.test/pull/4",
+        prAuthor: "dev",
+        baseSha: "base",
+        headSha: "cafebabe",
+        baseRef: "main",
+        headRef: "feat",
+        draft: false,
+      }),
+      upsertCheckRun: async (input: { status?: string; conclusion?: string }) => {
+        checks.push(input);
+        if (input.status === "completed" && input.conclusion === "success") {
+          store.cancelJobs(
+            { jobId: created.job.id, scope: { provider: "github", instance: "github.com" } },
+            "manual_cancel",
+            null,
+          );
+        }
+        return { id: "check-1" };
+      },
+    } as unknown as GithubPort;
+    const opencode: OpenCodePort = {
+      async run(input) {
+        const roleMatch = input.prompt.match(/Role id: (\w+)/);
+        const text = roleMatch
+          ? reviewerJson(roleMatch[1])
+          : JSON.stringify({ schema_version: 1, verdict: "clean", summary: "Clean.", findings: [] });
+        return { stdout: text, stderr: "", exitCode: 0, text, usage: { promptTokens: 3, completionTokens: 2 } };
+      },
+    };
+
+    const pipeline = createPipeline({ config, store, github, checkout: await fixtureCheckout(), opencode });
+    await pipeline.run(created.job.id);
+
+    expect(store.getJob(created.job.id)?.state).toBe("cancelled");
+    expect(checks.at(-1)).toMatchObject({ status: "completed", conclusion: "cancelled" });
   });
 
   it("withholds findings referencing paths outside the checkout from the published review", async () => {
@@ -736,13 +891,26 @@ describe("pipeline", () => {
   });
 
   it("does not post a second review when a marker already exists", async () => {
-    const config = loadConfig({ REVIEWER_ROLES: "correctness", POST_EMPTY_REVIEW: "true" });
+    const config = loadConfig({
+      REVIEWER_ROLES: "correctness",
+      POST_EMPTY_REVIEW: "true",
+      GITHUB_REVIEW_ALLOW_REQUEST_CHANGES: "true",
+      GITHUB_REVIEW_REQUEST_CHANGES_MIN_SEVERITY: "high",
+    });
     const store = new JobStore(openDb(":memory:"));
+    const publishedChecks: ReviewCheckInput[] = [];
+    const checkPublisher = {
+      publish: async (_job: object, input: ReviewCheckInput) => {
+        publishedChecks.push(input);
+      },
+      publishQueuedJobId: async () => {},
+      publishCancelledJobId: async () => {},
+    } as unknown as ReviewCheckPublisher;
     let creates = 0;
     const github: GithubPort = githubPort({
       getInstallationToken: async () => "token",
       getPullDiff: async () => "diff",
-      listReviews: async () => [{ id: 5, body: "<!-- maomao-review sha=abc -->", htmlUrl: "https://r" }],
+      listReviews: async () => [{ id: 5, body: "<!-- maomao-review sha=abc -->", htmlUrl: "https://r", verdict: "REQUEST_CHANGES" }],
       createCommentReview: async () => {
         creates += 1;
         return { id: "x", url: "u" };
@@ -751,7 +919,21 @@ describe("pipeline", () => {
     const opencode: OpenCodePort = {
       async run(input) {
         const text = input.prompt.includes("aggregator")
-          ? JSON.stringify({ verdict: "clean", summary: "ok", findings: [] })
+          ? JSON.stringify({
+              verdict: "comment",
+              summary: "high finding",
+              findings: [
+                {
+                  severity: "high",
+                  confidence: 0.9,
+                  category: "correctness",
+                  file: "example.ts",
+                  line: 1,
+                  summary: "high bug",
+                  body: "details",
+                },
+              ],
+            })
           : JSON.stringify({ reviewer: "correctness", verdict: "clean", findings: [] });
         return { stdout: text, stderr: "", exitCode: 0, text, usage: {} };
       },
@@ -776,11 +958,87 @@ describe("pipeline", () => {
       config,
       store,
       github,
+      checkPublisher,
       checkout: await fixtureCheckout(),
       opencode,
     }).run(created.job.id);
     expect(creates).toBe(0);
     expect(store.getJob(created.job.id)?.github_review_id).toBe("5");
+    expect(publishedChecks.at(-1)).toMatchObject({ status: "completed", conclusion: "failure" });
+  });
+
+  it("posts a new review when a retry escalates an existing comment to request changes", async () => {
+    const config = loadConfig({
+      REVIEWER_ROLES: "correctness",
+      POST_EMPTY_REVIEW: "true",
+      GITHUB_REVIEW_ALLOW_REQUEST_CHANGES: "true",
+      GITHUB_REVIEW_REQUEST_CHANGES_MIN_SEVERITY: "high",
+    });
+    const store = new JobStore(openDb(":memory:"));
+    const publishedChecks: ReviewCheckInput[] = [];
+    const checkPublisher = {
+      publish: async (_job: object, input: ReviewCheckInput) => {
+        publishedChecks.push(input);
+      },
+      publishQueuedJobId: async () => {},
+      publishCancelledJobId: async () => {},
+    } as unknown as ReviewCheckPublisher;
+    const postedEvents: Array<string | undefined> = [];
+    const github: GithubPort = githubPort({
+      getInstallationToken: async () => "token",
+      getPullDiff: async () => "diff",
+      listReviews: async () => [{ id: 5, body: "<!-- maomao-review sha=abc -->", htmlUrl: "https://r", verdict: "COMMENT" }],
+      createCommentReview: async (input) => {
+        postedEvents.push(input.event);
+        return { id: "6", url: "https://example.test/reviews/6" };
+      },
+    });
+    const opencode: OpenCodePort = {
+      async run(input) {
+        const text = input.prompt.includes("aggregator")
+          ? JSON.stringify({
+              verdict: "comment",
+              summary: "high finding",
+              findings: [
+                {
+                  severity: "high",
+                  confidence: 0.9,
+                  category: "correctness",
+                  file: "example.ts",
+                  line: 1,
+                  summary: "high bug",
+                  body: "details",
+                },
+              ],
+            })
+          : JSON.stringify({ reviewer: "correctness", verdict: "clean", findings: [] });
+        return { stdout: text, stderr: "", exitCode: 0, text, usage: {} };
+      },
+    };
+    const created = store.enqueue({
+      repoFullName: "acme/widgets",
+      repoOwner: "acme",
+      repoName: "widgets",
+      installationId: 9,
+      prNumber: 4,
+      prTitle: "t",
+      prBody: "",
+      prHtmlUrl: "",
+      prAuthor: "dev",
+      baseSha: "base",
+      headSha: "abc",
+      baseRef: "main",
+      headRef: "feat",
+      reviewers: [{ role: "correctness", title: "Correctness" }],
+    });
+
+    await createPipeline({ config, store, github, checkPublisher, checkout: await fixtureCheckout(), opencode }).run(
+      created.job.id,
+    );
+
+    expect(postedEvents).toEqual(["REQUEST_CHANGES"]);
+    expect(store.getJob(created.job.id)?.github_review_id).toBe("6");
+    expect(publishedChecks.at(-1)).toMatchObject({ status: "completed", conclusion: "failure" });
   });
 
   it("marks leftover reviewers failed when checkout throws", async () => {
@@ -2108,7 +2366,7 @@ describe("inline comment anchoring", () => {
             stdout: "",
             stderr: "",
             exitCode: 0,
-            text: JSON.stringify({ verdict: "comment", summary: "moved", findings: [] }),
+            text: JSON.stringify({ verdict: "clean", summary: "moved", findings: [] }),
             usage: {},
           };
         },
@@ -2299,9 +2557,18 @@ describe("finding reconciliation", () => {
     const created = enqueueJob(store, config, "movedsha");
     const resolved: string[] = [];
     const posted: { path: string; line: number }[] = [];
+    const publishedChecks: ReviewCheckInput[] = [];
+    const checkPublisher = {
+      publish: async (_job: object, input: ReviewCheckInput) => {
+        publishedChecks.push(input);
+      },
+      publishQueuedJobId: async () => {},
+      publishCancelledJobId: async () => {},
+    } as unknown as ReviewCheckPublisher;
     await createPipeline({
       config,
       store,
+      checkPublisher,
       github: githubPort({
         getPullDiff: async () =>
           "diff --git a/example.ts b/example.ts\n--- a/example.ts\n+++ b/example.ts\n@@ -8,1 +8,1 @@\n-old line\n+new line\n",
@@ -2352,6 +2619,7 @@ describe("finding reconciliation", () => {
     }).run(created.job.id);
     expect(posted).toEqual([{ path: "example.ts", line: 8 }]);
     expect(resolved).toEqual([`thread-${fingerprint}`]);
+    expect(publishedChecks.at(-1)).toMatchObject({ status: "completed", conclusion: "neutral" });
   });
 
   it("does not re-verify a stored resolved finding when no thread is open", async () => {
