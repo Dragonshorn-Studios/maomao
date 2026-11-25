@@ -87,6 +87,7 @@ import {
 } from "../routing/escalation.js";
 import { ReviewCheckPublisher, reviewCheckInputForState } from "../checks/review-check.js";
 import { TRUSTED_CHECK_NAMES, TrustedCheckRunner, trustedCheckNativeName, type TrustedCheckResult } from "../checks/trusted.js";
+import { mergeReadinessDecision } from "../checks/readiness.js";
 import type { TrustedCheckSettingsStore } from "../checks/settings.js";
 import {
   assignFindingIds,
@@ -233,26 +234,13 @@ export function createPipeline(deps: PipelineDeps) {
       await publishReadinessTerminal(job, "action_required", `trusted policy could not be read: ${error instanceof Error ? error.message : String(error)}`);
       return;
     }
-    const failures: string[] = [];
-    const errors: string[] = [];
-    if (reviewConclusion === "failure" || reviewConclusion === "timed_out") failures.push("review");
-    if (policy.requireReview && reviewConclusion !== "success") failures.push("review did not pass required policy");
     const rows = deps.store.listTrustedCheckResults(job.id);
-    for (const name of policy.requiredChecks) {
-      const native = trustedCheckNativeName(name);
-      const row = rows.find((candidate) => candidate.name === native);
-      if (!row) {
-        errors.push(`${native} missing`);
-      } else if (row.status === "failure") {
-        failures.push(native);
-      } else if (row.status !== "success") {
-        errors.push(`${native} ${row.status}`);
-      }
-    }
-    const conclusion = failures.length ? "failure" as const : errors.length ? "action_required" as const : "success" as const;
-    const detail = failures.length || errors.length
-      ? [...failures.map((item) => `blocking: ${item}`), ...errors.map((item) => `unavailable: ${item}`)].join("; ")
-      : "all required review and deterministic check inputs passed";
+    const { conclusion, detail } = mergeReadinessDecision({
+      reviewConclusion,
+      requireReview: policy.requireReview,
+      requiredChecks: policy.requiredChecks,
+      results: rows,
+    });
     await readinessPublisher.publish(job, {
       status: "completed",
       conclusion,
