@@ -168,6 +168,27 @@ export interface CheckPublicationRow {
   published_at: string | null;
 }
 
+export interface TrustedCheckResultRow {
+  id: number;
+  provider: string;
+  provider_instance: string;
+  repo_full_name: string;
+  pr_number: number;
+  head_sha: string;
+  job_id: number | null;
+  name: string;
+  status: string;
+  conclusion: string;
+  scanner_name: string;
+  scanner_version: string | null;
+  revision: string;
+  findings_json: string;
+  diagnostics: string;
+  duration_ms: number;
+  created_at: string;
+  updated_at: string;
+}
+
 export interface ReviewerRunRow {
   id: number;
   job_id: number;
@@ -1419,6 +1440,62 @@ export class JobStore {
       .get(scope.provider, scope.instance, key.repoFullName, key.prNumber, key.headSha, key.name) as
       | CheckPublicationRow
       | undefined;
+  }
+
+  recordTrustedCheckResult(input: CheckPublicationKey & {
+    jobId: number;
+    status: string;
+    conclusion: string;
+    scannerName: string;
+    scannerVersion?: string;
+    revision: string;
+    findingsJson: string;
+    diagnostics: string;
+    durationMs: number;
+  }): void {
+    const scope = normalizeScope({ provider: input.provider, instance: input.providerInstance });
+    const now = nowIso();
+    this.db
+      .prepare(
+        `INSERT INTO trusted_check_results (
+          provider, provider_instance, repo_full_name, pr_number, head_sha, job_id, name, status, conclusion,
+          scanner_name, scanner_version, revision, findings_json, diagnostics, duration_ms, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(provider, provider_instance, repo_full_name, pr_number, head_sha, name) DO UPDATE SET
+          job_id = excluded.job_id,
+          status = excluded.status,
+          conclusion = excluded.conclusion,
+          scanner_name = excluded.scanner_name,
+          scanner_version = excluded.scanner_version,
+          revision = excluded.revision,
+          findings_json = excluded.findings_json,
+          diagnostics = excluded.diagnostics,
+          duration_ms = excluded.duration_ms,
+          updated_at = excluded.updated_at`,
+      )
+      .run(
+        scope.provider,
+        scope.instance,
+        input.repoFullName,
+        input.prNumber,
+        input.headSha,
+        input.jobId,
+        input.name,
+        input.status,
+        input.conclusion,
+        input.scannerName,
+        input.scannerVersion ?? null,
+        input.revision,
+        input.findingsJson,
+        input.diagnostics,
+        input.durationMs,
+        now,
+        now,
+      );
+  }
+
+  listTrustedCheckResults(jobId: number): TrustedCheckResultRow[] {
+    return this.db.prepare(`SELECT * FROM trusted_check_results WHERE job_id = ? ORDER BY name`).all(jobId) as TrustedCheckResultRow[];
   }
 
   getJob(id: number): JobRow | undefined {

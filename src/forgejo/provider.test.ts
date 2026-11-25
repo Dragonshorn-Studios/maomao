@@ -15,6 +15,7 @@ import { JobStore } from "../jobs/store.js";
 import type { CheckoutPort } from "../checkout.js";
 import type { OpenCodePort } from "../opencode/parse.js";
 import { ForgejoProvider, forgejoStatusState } from "./provider.js";
+import type { TrustedCheckRunner } from "../checks/trusted.js";
 
 const TARGET = {
   provider: "forgejo",
@@ -245,12 +246,35 @@ describe("pipeline over a Forgejo job (end-to-end)", () => {
       },
     };
     const registry = new ForgeRegistry(github, "maomao", undefined, connections);
-    await createPipeline({ config, store: jobs, github, forge: registry, checkout: await fixtureCheckout(), opencode }).run(created.job.id);
+    const trustedRunner = {
+      enabled: () => true,
+      async run(input: { name: "secrets" | "security" }) {
+        const failure = input.name === "secrets";
+        return {
+          name: input.name,
+          nativeName: `maomao/${input.name}`,
+          status: failure ? "failure" as const : "success" as const,
+          conclusion: failure ? "failure" as const : "success" as const,
+          findings: failure
+            ? [{ severity: "high" as const, category: "secret", file: "a.ts", line: 1, summary: "credential detected", evidence: "[redacted]" }]
+            : [],
+          diagnostics: "",
+          scannerName: `${input.name}-fixture`,
+          revision: "0123456789abcdef0123456789abcdef01234567",
+          durationMs: 1,
+        };
+      },
+    } as TrustedCheckRunner;
+    await createPipeline({ config, store: jobs, github, forge: registry, checkout: await fixtureCheckout(), opencode, trustedCheckRunner: trustedRunner }).run(created.job.id);
 
     expect(jobs.getJob(created.job.id)?.state).toBe("completed");
     expect(state.comments.some((comment) => comment.body.includes("forgejo finding"))).toBe(true);
-    expect(state.statuses.length).toBeGreaterThanOrEqual(2);
-    expect(state.statuses.every((status) => status.context === "maomao/review")).toBe(true);
-    expect(state.statuses.at(-1)).toMatchObject({ state: "warning", target_url: expect.any(String) });
+    expect(state.statuses.length).toBeGreaterThanOrEqual(6);
+    expect(state.statuses.filter((status) => status.context === "maomao/review").at(-1)).toMatchObject({ state: "warning", target_url: expect.any(String) });
+    expect(state.statuses.filter((status) => status.context === "maomao/secrets").at(-1)).toMatchObject({ state: "failure" });
+    expect(state.statuses.filter((status) => status.context === "maomao/security").at(-1)).toMatchObject({ state: "success" });
+    const storedChecks = jobs.listTrustedCheckResults(created.job.id);
+    expect(storedChecks.map((row) => row.name).sort()).toEqual(["maomao/secrets", "maomao/security"]);
+    expect(storedChecks.find((row) => row.name === "maomao/secrets")?.findings_json).toContain("credential detected");
   });
 });

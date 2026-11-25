@@ -270,6 +270,58 @@ Forgejo does not expose GitHub Check Runs or portable line annotations. Maomao i
 
 The complete human-facing review is posted as a pull-request comment; inline findings are retained in that comment body rather than pretending Forgejo supports GitHub-style line anchors. Review-thread resolution and approval/request-changes verdicts are not currently available through this adapter; those degrade to comments while the native status still records Maomao's deterministic lifecycle outcome.
 
+## Trusted deterministic checks
+
+Maomao can publish deterministic `maomao/secrets` and `maomao/security` native checks alongside `maomao/review`. These checks are intentionally separate from LLM reviewers: a model can inform the human review, but deterministic check conclusions come only from the pinned scanner result contract.
+
+### Trusted source and pinning
+
+Checks are disabled unless exactly one source and one full immutable commit SHA are configured:
+
+```bash
+MAOMAO_TRUSTED_CHECKS_REPO_URL=https://git.example.com/security/maomao-trusted-checks.git
+MAOMAO_TRUSTED_CHECKS_REVISION=0123456789abcdef0123456789abcdef01234567
+```
+
+For operator-managed local deployments use `MAOMAO_TRUSTED_CHECKS_PATH` instead of the repository URL. The local path must be a clean git checkout exactly at the pinned revision; dirty or wrong-revision checkouts fail closed. A repository URL is cloned into Maomao's workspace cache and verified with `git rev-parse HEAD` before use. Do not point this at the pull-request repository: scripts, hooks, package commands, test configuration, Dockerfiles, Makefiles, or any other executable content supplied by a PR are never used for these checks.
+
+The pinned checkout contains `maomao-trusted-checks.json`:
+
+```json
+{
+  "version": 1,
+  "checks": {
+    "secrets": { "path": "checks/secrets/gitleaks.py", "interpreter": "python3", "timeoutMs": 120000 },
+    "security": { "path": "checks/security/semgrep.py", "interpreter": "python3", "timeoutMs": 300000 }
+  }
+}
+```
+
+Paths are validated inside the trusted checkout. Supported interpreters are `sh`, `bash`, and `python3`. Optional `cpuSeconds` and `memoryBytes` fields override the default CPU/memory resource limits within operator caps (at most 900 seconds and 8 GiB); timeout is always enforced. This repository's `trusted-checks/` directory contains reference Gitleaks and Semgrep wrappers plus a small Semgrep baseline; copy or vendor them into your operator-controlled trusted-checks repository, adjust policy/rules there, and pin the promotion commit SHA. Scanner binaries are runtime prerequisites and are not installed by Maomao.
+
+### Scanner contract and redaction
+
+Each script receives `MAOMAO_REPO_DIR`, `MAOMAO_DIFF_PATH`, `MAOMAO_RESULT_PATH`, `MAOMAO_CHECK_NAME`, `MAOMAO_CHECK_REVISION`, and `MAOMAO_TRUSTED_DIR`. It must write JSON at `MAOMAO_RESULT_PATH`:
+
+```json
+{
+  "status": "failure",
+  "scanner": { "name": "gitleaks", "version": "8.x" },
+  "diagnostics": "optional operator-facing diagnostics",
+  "findings": [
+    { "severity": "high", "category": "secret", "file": "src/a.ts", "line": 3, "summary": "credential detected", "evidence": "redacted evidence" }
+  ]
+}
+```
+
+Allowed statuses are `success`, `failure`, `error`, and `skipped`; severities use Maomao's normal `blocker`/`high`/`medium`/`low`/`info` vocabulary. Wrappers may include exact sensitive values in `secret`, `token`, or `password` fields solely so the runner can redact every occurrence before validation and persistence; those fields are not retained in the normalized result. Missing output, malformed output, contract violations, scanner crashes, and timeouts all become non-success (`action_required` in the native-check vocabulary). Skipped scans are never success.
+
+### Isolation and lifecycle
+
+Production execution requires `bwrap` (bubblewrap). The sandbox unshares the network and namespaces, exposes only system runtime paths plus the trusted checkout and exact PR workspace needed by the scanner, and gives the scanner a dedicated writable output directory. If bubblewrap cannot be found, checks report an error rather than running unsandboxed. `MAOMAO_TRUSTED_CHECKS_ALLOW_UNSAFE_LOCAL=1` is an explicit development/test escape hatch only; never enable it for production reviews.
+
+When trusted checks are configured, PR jobs publish queued/in-progress/native terminal states for both checks. Scanner results and pinned revisions are persisted in `trusted_check_results`, and native-check publication remains bound to the immutable PR head SHA. A cancelled, stale, timed-out, crashed, missing, or otherwise incomplete scan can never become a success.
+
 ## Configure OpenCode models
 
 Maomao does not embed a model vendor. It runs:

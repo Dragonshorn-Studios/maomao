@@ -261,6 +261,27 @@ function migrate(db: SqliteDb): void {
       UNIQUE (provider, provider_instance, repo_full_name, pr_number, head_sha, name)
     );
 
+    CREATE TABLE IF NOT EXISTS trusted_check_results (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      ${PROVIDER_COLUMNS},
+      repo_full_name TEXT NOT NULL,
+      pr_number INTEGER NOT NULL,
+      head_sha TEXT NOT NULL,
+      job_id INTEGER,
+      name TEXT NOT NULL,
+      status TEXT NOT NULL,
+      conclusion TEXT NOT NULL,
+      scanner_name TEXT NOT NULL,
+      scanner_version TEXT,
+      revision TEXT NOT NULL,
+      findings_json TEXT NOT NULL DEFAULT '[]',
+      diagnostics TEXT NOT NULL DEFAULT '',
+      duration_ms INTEGER NOT NULL DEFAULT 0,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      UNIQUE (provider, provider_instance, repo_full_name, pr_number, head_sha, name)
+    );
+
     CREATE TABLE IF NOT EXISTS merged_pulls (
       repo_full_name TEXT NOT NULL,
       pr_number INTEGER NOT NULL,
@@ -513,6 +534,7 @@ function migrate(db: SqliteDb): void {
     CREATE INDEX IF NOT EXISTS idx_runs_job ON reviewer_runs(job_id);
 
     CREATE INDEX IF NOT EXISTS idx_check_publications_job ON check_publications(job_id, updated_at);
+    CREATE INDEX IF NOT EXISTS idx_trusted_check_results_job ON trusted_check_results(job_id, updated_at);
     CREATE INDEX IF NOT EXISTS idx_findings_pr ON findings(repo_full_name, pr_number, status);
     CREATE INDEX IF NOT EXISTS idx_findings_thread ON findings(github_thread_id);
     CREATE INDEX IF NOT EXISTS idx_findings_comment ON findings(github_comment_id);

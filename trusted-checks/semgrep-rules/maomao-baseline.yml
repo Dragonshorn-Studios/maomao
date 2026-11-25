@@ -1,0 +1,16 @@
+rules:
+  - id: maomao.python-eval-exec
+    languages: [python]
+    severity: ERROR
+    message: Avoid eval/exec on dynamically controlled input.
+    patterns:
+      - pattern-either:
+          - pattern: eval(...)
+          - pattern: exec(...)
+  - id: maomao.child-process-shell-true
+    languages: [javascript, typescript]
+    severity: ERROR
+    message: Avoid shell:true with dynamically controlled commands.
+    pattern-either:
+      - pattern: child_process.exec(...)
+      - pattern: exec(...)

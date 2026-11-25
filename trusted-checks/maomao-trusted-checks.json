@@ -1,0 +1,15 @@
+{
+  "version": 1,
+  "checks": {
+    "secrets": {
+      "path": "checks/secrets/gitleaks.py",
+      "interpreter": "python3",
+      "timeoutMs": 120000
+    },
+    "security": {
+      "path": "checks/security/semgrep.py",
+      "interpreter": "python3",
+      "timeoutMs": 300000
+    }
+  }
+}

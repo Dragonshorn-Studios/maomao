@@ -78,6 +78,15 @@ export interface OpenCodeConfig {
   reviewerConcurrency: number;
 }
 
+export interface TrustedChecksConfig {
+  /** Trusted definitions are disabled unless an immutable revision and source are configured. */
+  repoUrl: string;
+  localPath: string;
+  revision: string;
+  /** Explicit development/test escape hatch; production runs fail closed without bubblewrap. */
+  allowUnsafeLocal: boolean;
+}
+
 export interface Config {
   host: string;
   port: number;
@@ -152,6 +161,8 @@ export interface Config {
   stackTokenCap: number;
   /** Key sealing forge connection tokens at rest. Absent until a forge connection needs one. */
   forgeKey?: Buffer;
+  /** Operator-pinned deterministic check definitions. */
+  trustedChecks: TrustedChecksConfig;
   /** MVP bootstrap: seed one GitLab connection from env at boot (all three required). */
   gitlabBootstrap?: {
     baseUrl: string;
@@ -355,6 +366,12 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     repoRateWindowMs: Math.max(0, parseInteger(env.REPO_RATE_WINDOW_MS, 60 * 60 * 1000)),
     stackTokenCap: Math.max(0, parseInteger(env.STACK_TOKEN_CAP, 10_000_000)),
     forgeKey: loadForgeKey(env),
+    trustedChecks: {
+      repoUrl: env.MAOMAO_TRUSTED_CHECKS_REPO_URL?.trim() || "",
+      localPath: env.MAOMAO_TRUSTED_CHECKS_PATH?.trim() || "",
+      revision: env.MAOMAO_TRUSTED_CHECKS_REVISION?.trim().toLowerCase() || "",
+      allowUnsafeLocal: parseBoolean(env.MAOMAO_TRUSTED_CHECKS_ALLOW_UNSAFE_LOCAL, false),
+    },
     gitlabBootstrap: parseGitLabBootstrap(env),
     chat: {
       enabled: parseBoolean(env.MAOMAO_EXPLAIN_ENABLED, false),
@@ -418,6 +435,13 @@ export function assertRuntimeConfig(
   }
   if (config.poisonAlert.internal.enabled && !config.poisonAlert.internal.model) {
     throw new Error("POISON_ALERT_INTERNAL_ENABLED requires POISON_ALERT_INTERNAL_MODEL");
+  }
+  const trustedSource = Boolean(config.trustedChecks.repoUrl || config.trustedChecks.localPath);
+  if (trustedSource && !/^[0-9a-f]{40}$/.test(config.trustedChecks.revision)) {
+    throw new Error("Trusted checks require MAOMAO_TRUSTED_CHECKS_REVISION to be a full commit SHA");
+  }
+  if (config.trustedChecks.repoUrl && config.trustedChecks.localPath) {
+    throw new Error("Set either MAOMAO_TRUSTED_CHECKS_REPO_URL or MAOMAO_TRUSTED_CHECKS_PATH, not both");
   }
   const passwordSet = Boolean(config.uiPassword);
   const secretSet = Boolean(config.uiSessionSecret);

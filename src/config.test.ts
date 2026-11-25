@@ -275,3 +275,29 @@ describe("env parsers", () => {
     );
   });
 });
+
+describe("trusted checks boot validation", () => {
+  it("requires one immutable source and a full pinned revision", () => {
+    expect(() => assertRuntimeConfig(loadConfig({ GITHUB_APP_ID: "1", GITHUB_APP_PRIVATE_KEY: "-----BEGIN KEY-----", GITHUB_WEBHOOK_SECRET: "secret", MAOMAO_TRUSTED_CHECKS_PATH: "/trusted" }))).toThrow(/TRUSTED_CHECKS_REVISION/);
+    expect(() =>
+      assertRuntimeConfig(
+        loadConfig({
+          GITHUB_APP_ID: "1",
+          GITHUB_APP_PRIVATE_KEY: "-----BEGIN KEY-----",
+          GITHUB_WEBHOOK_SECRET: "secret",
+          MAOMAO_TRUSTED_CHECKS_PATH: "/trusted",
+          MAOMAO_TRUSTED_CHECKS_REPO_URL: "https://example.com/trusted.git",
+          MAOMAO_TRUSTED_CHECKS_REVISION: "0123456789abcdef0123456789abcdef01234567",
+        }),
+      ),
+    ).toThrow(/not both/);
+    expect(() =>
+      assertRuntimeConfig(
+        loadConfig({
+          MAOMAO_TRUSTED_CHECKS_PATH: "/trusted",
+          MAOMAO_TRUSTED_CHECKS_REVISION: "0123456789abcdef0123456789abcdef01234567",
+        }),
+      ),
+    ).toThrow(/GITHUB_APP_ID/);
+  });
+});
