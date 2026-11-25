@@ -181,7 +181,38 @@ describe("HTTP app", () => {
 
     const detail = await app.request(`/jobs/${enqueued[0]}`);
     expect(detail.status).toBe(200);
-    expect(await detail.text()).toContain("acme/widgets #8");
+    const detailHtml = await detail.text();
+    expect(detailHtml).toContain("acme/widgets #8");
+    expect(detailHtml).toContain("Merge lifecycle");
+    expect(detailHtml).toContain("reviewing");
+  });
+
+  it("shows merged lifecycle only for the exact forge-confirmed head", async () => {
+    const { app, store } = testApp();
+    const base = {
+      repoFullName: "acme/widgets",
+      repoOwner: "acme",
+      repoName: "widgets",
+      installationId: 1,
+      prNumber: 8,
+      prTitle: "Hello",
+      prBody: "",
+      prHtmlUrl: "https://example.test",
+      prAuthor: "dev",
+      baseSha: "b",
+      baseRef: "main",
+      headRef: "f",
+      reviewers: [{ role: "correctness", title: "Correctness" }],
+    };
+    const older = store.enqueue({ ...base, headSha: "older-head" });
+    const current = store.enqueue({ ...base, headSha: "merged-head" });
+    store.markPullMerged("acme/widgets", 8, "delivery-1", undefined, "merged-head");
+
+    const olderHtml = await (await app.request(`/jobs/${older.job.id}`)).text();
+    const currentHtml = await (await app.request(`/jobs/${current.job.id}`)).text();
+    expect(olderHtml).toContain("<strong>stale</strong>");
+    expect(olderHtml).not.toContain("<strong>merged</strong>");
+    expect(currentHtml).toContain("<strong>merged</strong>");
   });
 
   it("protects UI/API/events with a session cookie and leaves webhook/health public", async () => {

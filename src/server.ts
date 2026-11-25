@@ -100,6 +100,7 @@ import { ProviderCredentialStore, opencodeAuthPath, providerAuthSecrets } from "
 import { opencodeEnvSecrets } from "./opencode/spawn.js";
 import { ModelDiscovery } from "./opencode/models.js";
 import { parseBriefPayload } from "./jobs/brief.js";
+import { MERGE_READINESS_NAME, mergeLifecycleFor } from "./merge/lifecycle.js";
 import type { JobRow } from "./jobs/store.js";
 import type { FindingRow } from "./findings/types.js";
 import type { ConfigPageData } from "./ui/index.js";
@@ -1123,6 +1124,18 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
         scanIssueCreation: scanIssueCreationData(job),
         scanIssues: job.job_type === "health_scan" ? ctx.store.listScanIssues(job.id) : undefined,
         stackMembers: job.job_type === "stack_review" ? ctx.store.listStackMembers(job.id) : undefined,
+        mergeLifecycle: job.job_type === "pr_review" ? mergeLifecycleFor(
+          job,
+          ctx.store.getCheckPublication({
+            provider: job.provider,
+            providerInstance: job.provider_instance,
+            repoFullName: job.repo_full_name,
+            prNumber: job.pr_number,
+            headSha: job.head_sha,
+            name: MERGE_READINESS_NAME,
+          }),
+          ctx.store.hasMergedPullAtHead(job.repo_full_name, job.pr_number, job.head_sha, { provider: job.provider, instance: job.provider_instance }),
+        ) : undefined,
       }),
     );
   });

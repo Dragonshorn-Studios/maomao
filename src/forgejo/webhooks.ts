@@ -148,7 +148,7 @@ async function handleForgejoWebhookRequest(input: {
 
   if (payload.action === "closed") {
     if (!payload.merged) return ignored("pull request closed without merge");
-    store.markPullMerged(payload.repoFullName, payload.prNumber, deliveryId, scope);
+    store.markPullMerged(payload.repoFullName, payload.prNumber, deliveryId, scope, payload.headSha);
     const { cancelledJobIds } = cancelJobsForPull(store, {
       repoFullName: payload.repoFullName,
       prNumber: payload.prNumber,

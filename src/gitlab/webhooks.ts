@@ -304,7 +304,7 @@ async function handleMergeRequestEvent(input: {
   if (payload.state === "merged" || payload.action === "merge") {
     // Record the merged marker BEFORE cancelling, mirroring the GitHub path:
     // the gate must exist even when no job was active at merge time.
-    input.store.markPullMerged(payload.projectPath, payload.mrIid, input.deliveryId || null, scope);
+    input.store.markPullMerged(payload.projectPath, payload.mrIid, input.deliveryId || null, scope, payload.headSha);
     const { cancelledJobIds } = cancelJobsForPull(
       input.store,
       {

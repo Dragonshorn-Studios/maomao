@@ -122,6 +122,36 @@ describe("usage schema migration", () => {
     }
   });
 
+  it("adds exact head SHAs to legacy merged-pull markers without losing rows", () => {
+    const dir = mkdtempSync(join(tmpdir(), "maomao-db-"));
+    const path = join(dir, "merged-legacy.sqlite");
+    try {
+      const legacy = new Database(path);
+      legacy.exec(`
+        CREATE TABLE merged_pulls (
+          repo_full_name TEXT NOT NULL,
+          pr_number INTEGER NOT NULL,
+          merged_at TEXT NOT NULL,
+          delivery_id TEXT,
+          PRIMARY KEY (repo_full_name, pr_number)
+        );
+        INSERT INTO merged_pulls (repo_full_name, pr_number, merged_at, delivery_id)
+        VALUES ('acme/widgets', 7, '2026-01-01T00:00:00.000Z', 'delivery-1');
+      `);
+      legacy.close();
+
+      const store = new JobStore(openDb(path));
+      const db = new Database(path, { readonly: true });
+      const columns = db.prepare(`PRAGMA table_info(merged_pulls)`).all() as { name: string }[];
+      expect(columns.map((column) => column.name)).toContain("head_sha");
+      expect(store.hasMergedPull("acme/widgets", 7)).toBe(true);
+      expect(store.hasMergedPullAtHead("acme/widgets", 7, "unknown-legacy-head")).toBe(false);
+      db.close();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it("rebuilds the jobs uniqueness to include job_type so a brief coexists with a scan", () => {
     const dir = mkdtempSync(join(tmpdir(), "maomao-db-"));
     const path = join(dir, "scoped-unique.sqlite");

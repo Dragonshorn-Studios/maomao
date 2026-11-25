@@ -318,7 +318,7 @@ function handlePullClosed(
   // Record the merge before cancelling: the marker must exist even when no
   // job was active at merge time (the common case), because the enqueue gate
   // reads it and merged pulls cannot be reopened.
-  input.store.markPullMerged(repoFullName, prNumber, deliveryId || null);
+  input.store.markPullMerged(repoFullName, prNumber, deliveryId || null, undefined, payload.pull_request?.head?.sha);
   const { cancelledJobIds } = cancelJobsForPull(input.store, {
     repoFullName,
     prNumber,
