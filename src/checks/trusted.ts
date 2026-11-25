@@ -10,12 +10,16 @@ import { createHash } from "node:crypto";
 import { access, lstat, mkdir, readFile, realpath, rm } from "node:fs/promises";
 import { join, resolve, sep } from "node:path";
 import { z } from "zod";
-import type { Config } from "../config.js";
+import type { Config, TrustedChecksConfig } from "../config.js";
 import type { Severity } from "../schema.js";
 
 export type TrustedCheckName = "secrets" | "security";
 export const TRUSTED_CHECK_NAMES: TrustedCheckName[] = ["secrets", "security"];
 export const trustedCheckNativeName = (name: TrustedCheckName) => `maomao/${name}`;
+
+export type TrustedCheckRuntimeConfig = TrustedChecksConfig & {
+  enabledChecks: TrustedCheckName[];
+};
 
 const findingSchema = z.object({
   severity: z.enum(["blocker", "high", "medium", "low", "info"]),
@@ -211,11 +215,27 @@ function errorResult(name: TrustedCheckName, revision: string, diagnostics: stri
 
 export class TrustedCheckRunner {
   private checkoutPromise?: Promise<string>;
+  private checkoutKey?: string;
 
-  constructor(private readonly config: Config) {}
+  constructor(
+    private readonly config: Config,
+    private readonly resolveConfig: () => TrustedCheckRuntimeConfig = () => ({
+      ...config.trustedChecks,
+      enabledChecks: [...TRUSTED_CHECK_NAMES],
+    }),
+  ) {}
+
+  settings(): TrustedCheckRuntimeConfig {
+    return this.resolveConfig();
+  }
 
   enabled(): boolean {
-    return Boolean((this.config.trustedChecks.repoUrl || this.config.trustedChecks.localPath) && this.config.trustedChecks.revision);
+    const settings = this.settings();
+    return Boolean((settings.repoUrl || settings.localPath) && settings.revision);
+  }
+
+  enabledFor(name: TrustedCheckName): boolean {
+    return this.enabled() && this.settings().enabledChecks.includes(name);
   }
 
   async run(input: {
@@ -226,10 +246,12 @@ export class TrustedCheckRunner {
     signal?: AbortSignal;
   }): Promise<TrustedCheckResult> {
     const startedAt = Date.now();
-    const revision = this.config.trustedChecks.revision;
+    const settings = this.settings();
+    const revision = settings.revision;
     if (!this.enabled()) return errorResult(input.name, revision, "trusted checks are not configured", startedAt);
+    if (!this.enabledFor(input.name)) return errorResult(input.name, revision, `trusted ${input.name} check is disabled`, startedAt);
     try {
-      const trustedDir = await this.checkout();
+      const trustedDir = await this.checkout(settings);
       const repoRealPath = await realpath(input.repoDir);
       if (trustedDir === repoRealPath || trustedDir.startsWith(repoRealPath + sep) || repoRealPath.startsWith(trustedDir + sep)) {
         throw new Error("trusted checks checkout must not overlap the pull-request checkout");
@@ -246,7 +268,7 @@ export class TrustedCheckRunner {
       const resultHostPath = join(outputDir, "result.json");
       await rm(resultHostPath, { force: true, recursive: true });
       const sandboxed = await executableOnPath("bwrap");
-      if (!sandboxed && !this.config.trustedChecks.allowUnsafeLocal) {
+      if (!sandboxed && !settings.allowUnsafeLocal) {
         return errorResult(input.name, revision, "bubblewrap (bwrap) is unavailable; refusing to run deterministic checks without isolation", startedAt);
       }
 
@@ -382,9 +404,14 @@ export class TrustedCheckRunner {
     }
   }
 
-  private checkout(): Promise<string> {
+  private checkout(settings = this.settings()): Promise<string> {
+    const key = `${settings.repoUrl} ${settings.localPath} ${settings.revision}`;
+    if (this.checkoutKey !== key) {
+      this.checkoutPromise = undefined;
+      this.checkoutKey = key;
+    }
     if (!this.checkoutPromise) {
-      const pending = this.prepareCheckout();
+      const pending = this.prepareCheckout(settings);
       this.checkoutPromise = pending;
       void pending.catch(() => {
         if (this.checkoutPromise === pending) this.checkoutPromise = undefined;
@@ -393,17 +420,17 @@ export class TrustedCheckRunner {
     return this.checkoutPromise;
   }
 
-  private async prepareCheckout(): Promise<string> {
-    const revision = this.config.trustedChecks.revision;
-    if (this.config.trustedChecks.localPath) {
-      const path = await realpath(this.config.trustedChecks.localPath);
+  private async prepareCheckout(settings: TrustedCheckRuntimeConfig): Promise<string> {
+    const revision = settings.revision;
+    if (settings.localPath) {
+      const path = await realpath(settings.localPath);
       const head = await git(["rev-parse", "HEAD"], path);
       if (head !== revision) throw new Error(`trusted checks local checkout is at ${head}, not pinned revision ${revision}`);
       const dirty = await git(["status", "--porcelain"], path);
       if (dirty) throw new Error("trusted checks local checkout has uncommitted changes");
       return path;
     }
-    const repoUrl = this.config.trustedChecks.repoUrl;
+    const repoUrl = settings.repoUrl;
     if (!repoUrl || repoUrl.startsWith("-")) throw new Error("trusted checks repository URL is missing or invalid");
     const root = join(this.config.workspaceRoot, "trusted-checks", createHash("sha256").update(repoUrl).digest("hex").slice(0, 16));
     const target = join(root, revision);

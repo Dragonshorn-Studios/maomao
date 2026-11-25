@@ -248,6 +248,7 @@ describe("pipeline over a Forgejo job (end-to-end)", () => {
     const registry = new ForgeRegistry(github, "maomao", undefined, connections);
     const trustedRunner = {
       enabled: () => true,
+      enabledFor: () => true,
       async run(input: { name: "secrets" | "security" }) {
         const failure = input.name === "secrets";
         return {
@@ -264,7 +265,7 @@ describe("pipeline over a Forgejo job (end-to-end)", () => {
           durationMs: 1,
         };
       },
-    } as TrustedCheckRunner;
+    } as unknown as TrustedCheckRunner;
     await createPipeline({ config, store: jobs, github, forge: registry, checkout: await fixtureCheckout(), opencode, trustedCheckRunner: trustedRunner }).run(created.job.id);
 
     expect(jobs.getJob(created.job.id)?.state).toBe("completed");

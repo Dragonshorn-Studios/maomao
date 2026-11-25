@@ -285,6 +285,8 @@ MAOMAO_TRUSTED_CHECKS_REVISION=0123456789abcdef0123456789abcdef01234567
 
 For operator-managed local deployments use `MAOMAO_TRUSTED_CHECKS_PATH` instead of the repository URL. The local path must be a clean git checkout exactly at the pinned revision; dirty or wrong-revision checkouts fail closed. A repository URL is cloned into Maomao's workspace cache and verified with `git rev-parse HEAD` before use. Do not point this at the pull-request repository: scripts, hooks, package commands, test configuration, Dockerfiles, Makefiles, or any other executable content supplied by a PR are never used for these checks.
 
+When the environment does not pin trusted checks, an authenticated operator can configure the repository URL or local path, the full pinned commit SHA, and whether `maomao/secrets` and `maomao/security` are enabled at `/config/trusted-checks`. Stored UI settings apply to subsequent scans and are ignored when the environment supplies a complete trusted-check configuration.
+
 The pinned checkout contains `maomao-trusted-checks.json`:
 
 ```json

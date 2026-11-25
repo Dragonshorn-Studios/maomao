@@ -87,6 +87,7 @@ import {
 } from "../routing/escalation.js";
 import { ReviewCheckPublisher, reviewCheckInputForState } from "../checks/review-check.js";
 import { TRUSTED_CHECK_NAMES, TrustedCheckRunner, trustedCheckNativeName, type TrustedCheckResult } from "../checks/trusted.js";
+import type { TrustedCheckSettingsStore } from "../checks/settings.js";
 import {
   assignFindingIds,
   findingsMeetThreshold,
@@ -110,6 +111,8 @@ export interface PipelineDeps {
   checkPublisher?: ReviewCheckPublisher;
   /** Optional trusted-check runner override for focused tests. */
   trustedCheckRunner?: TrustedCheckRunner;
+  /** Operator-managed trusted-check pinning; absent tests use static env config. */
+  trustedCheckSettings?: TrustedCheckSettingsStore;
   checkout: CheckoutPort;
   opencode: OpenCodePort;
   getInstallationToken?: (installationId: number) => Promise<string>;
@@ -156,7 +159,14 @@ export function createPipeline(deps: PipelineDeps) {
     publicUrl: deps.config.publicUrl,
   };
   const checks = deps.checkPublisher ?? new ReviewCheckPublisher(publisherDeps);
-  const trustedChecks = deps.trustedCheckRunner ?? new TrustedCheckRunner(deps.config);
+  const trustedChecks = deps.trustedCheckRunner ?? new TrustedCheckRunner(
+    deps.config,
+    () => deps.trustedCheckSettings?.effective() ?? { ...deps.config.trustedChecks, enabledChecks: [...TRUSTED_CHECK_NAMES] },
+  );
+  const activeTrustedCheckNames = () => TRUSTED_CHECK_NAMES.filter((name) => trustedChecks.enabledFor(name));
+  const trustedPublicationMemory = new Set<string>();
+  const trustedMemoryKey = (job: JobRow, name: (typeof TRUSTED_CHECK_NAMES)[number]) =>
+    JSON.stringify([job.provider, job.provider_instance, job.repo_full_name, job.pr_number, job.head_sha, name]);
 
   const trustedPublishers = new Map<string, ReviewCheckPublisher>();
   function trustedPublisher(name: (typeof TRUSTED_CHECK_NAMES)[number]): ReviewCheckPublisher {
@@ -182,9 +192,21 @@ export function createPipeline(deps: PipelineDeps) {
     };
   }
 
-  async function publishTrustedTerminal(job: JobRow, conclusion: "cancelled" | "action_required", reason: string): Promise<void> {
-    if (!trustedChecks.enabled() || job.job_type !== "pr_review") return;
+  function forgetTrustedPublicationMemory(job: JobRow): void {
+    for (const name of TRUSTED_CHECK_NAMES) trustedPublicationMemory.delete(trustedMemoryKey(job, name));
+  }
+
+  function trustedNamesWithPublications(job: JobRow): typeof TRUSTED_CHECK_NAMES {
+    const active = new Set(activeTrustedCheckNames());
     for (const name of TRUSTED_CHECK_NAMES) {
+      if (deps.store.getCheckPublication(trustedKey(job, name)) || trustedPublicationMemory.has(trustedMemoryKey(job, name))) active.add(name);
+    }
+    return TRUSTED_CHECK_NAMES.filter((name) => active.has(name));
+  }
+
+  async function publishTrustedTerminal(job: JobRow, conclusion: "cancelled" | "action_required", reason: string): Promise<void> {
+    if (job.job_type !== "pr_review") return;
+    for (const name of trustedNamesWithPublications(job)) {
       const key = trustedKey(job, name);
       const existing = deps.store.getCheckPublication(key);
       if (existing?.status === "completed" && existing.conclusion && !(conclusion === "cancelled" && existing.conclusion === "action_required")) continue;
@@ -196,11 +218,24 @@ export function createPipeline(deps: PipelineDeps) {
         validateHead: conclusion !== "cancelled",
       });
     }
+    forgetTrustedPublicationMemory(job);
   }
 
   async function runTrustedChecks(job: JobRow, workspace: { repoDir: string; dir: string; diffPath: string }, signal: AbortSignal): Promise<void> {
-    if (!trustedChecks.enabled()) return;
-    for (const name of TRUSTED_CHECK_NAMES) {
+    const active = new Set(activeTrustedCheckNames());
+    for (const name of trustedNamesWithPublications(job)) {
+      if (active.has(name)) continue;
+      const existing = deps.store.getCheckPublication(trustedKey(job, name));
+      if (existing?.status === "completed") continue;
+      await trustedPublisher(name).publish(job, {
+        status: "completed",
+        conclusion: "cancelled",
+        title: `Maomao ${name} check cancelled`,
+        summary: `The deterministic ${name} check was disabled before it ran for PR #${job.pr_number} at ${job.head_sha.slice(0, 12)}.`,
+        validateHead: false,
+      });
+    }
+    for (const name of active) {
       const publisher = trustedPublisher(name);
       await publisher.publish(job, {
         status: "in_progress",
@@ -240,6 +275,7 @@ export function createPipeline(deps: PipelineDeps) {
       );
       await publisher.publish(deps.store.getJob(job.id) ?? job, trustedCheckPublicationInput(result));
     }
+    forgetTrustedPublicationMemory(job);
   }
   return {
     abortJob,
@@ -248,13 +284,14 @@ export function createPipeline(deps: PipelineDeps) {
       const job = deps.store.getJob(jobId);
       if (!job || job.state !== "queued" || !trustedChecks.enabled()) return;
       await Promise.all(
-        TRUSTED_CHECK_NAMES.map((name) =>
-          trustedPublisher(name).publish(job, {
+        activeTrustedCheckNames().map((name) => {
+          trustedPublicationMemory.add(trustedMemoryKey(job, name));
+          return trustedPublisher(name).publish(job, {
             status: "queued",
             title: `Maomao ${name} check queued`,
             summary: `Maomao queued the pinned deterministic ${name} check for PR #${job.pr_number} at ${job.head_sha.slice(0, 12)}.`,
-          }),
-        ),
+          });
+        }),
       );
     },
     async publishCancelledCheck(jobId: number): Promise<void> {
