@@ -2170,7 +2170,7 @@ export function renderConfigDeliveriesPage(data: ConfigPageData): string {
 export function renderConfigAuditPage(data: ConfigPageData): string {
   const body = `
     <h1>Configuration audit</h1>
-    <p class="lede">The most recent profile lifecycle transitions — who did what, and when.</p>
+    <p class="lede">The most recent configuration changes — who did what, and when.</p>
     ${configSubNav("audit")}
     ${data.notice ? `<p class="notice" role="status">${escapeHtml(data.notice)}</p>` : ""}
     ${data.error ? `<p class="error" role="alert">${escapeHtml(data.error)}</p>` : ""}

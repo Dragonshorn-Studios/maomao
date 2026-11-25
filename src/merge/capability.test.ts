@@ -67,7 +67,7 @@ describe("MergeCapabilityService", () => {
   it("fails closed to an explained unknown when the adapter cannot probe", async () => {
     const registry = { forJob: () => ({ provider: "gitlab" }) } as unknown as ForgeRegistry;
     const result = await new MergeCapabilityService(registry).forJob(job);
-    expect(result).toMatchObject({ nativeAutoMerge: "unknown", githubNativeQueue: "unknown", mergeMethods: [] });
+    expect(result).toMatchObject({ mergeMode: "manual", nativeAutoMerge: "unknown", githubNativeQueue: "unknown", mergeMethods: [] });
     expect(result.reasons[0]).toContain("does not expose merge capability detection");
   });
 

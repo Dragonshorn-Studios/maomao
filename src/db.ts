@@ -279,6 +279,10 @@ function migrate(db: SqliteDb): void {
       merge_mode TEXT NOT NULL CHECK (merge_mode IN ('disabled', 'manual', 'native_auto_merge', 'github_native_queue')),
       updated_by TEXT NOT NULL,
       updated_at TEXT NOT NULL,
+      CHECK (
+        (provider = '' AND provider_instance = '' AND repo_full_name = '')
+        OR (provider <> '' AND provider_instance <> '' AND repo_full_name <> '')
+      ),
       UNIQUE (provider, provider_instance, repo_full_name)
     );
 

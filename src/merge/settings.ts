@@ -85,25 +85,31 @@ export class MergeModeSettingsStore {
     const actor = clean(input.actor) || "operator";
     const previous = this.db.prepare("SELECT merge_mode FROM merge_mode_settings WHERE provider = ? AND provider_instance = ? AND repo_full_name = ?")
       .get(provider, providerInstance, repoFullName) as { merge_mode?: ForgeMergeMode } | undefined;
-    this.db.prepare(
-      `INSERT INTO merge_mode_settings (provider, provider_instance, repo_full_name, merge_mode, updated_by, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?)
-       ON CONFLICT(provider, provider_instance, repo_full_name) DO UPDATE SET
-         merge_mode = excluded.merge_mode,
-         updated_by = excluded.updated_by,
-         updated_at = excluded.updated_at`,
-    ).run(provider, providerInstance, repoFullName, mergeMode, actor, nowIso());
-    this.audit("merge_mode_saved", actor, `${repoFullName || "global default"}@${provider || "all"}:${providerInstance || "all"} ${previous?.merge_mode ?? "unset"} -> ${mergeMode}`);
+    this.db.transaction(() => {
+      this.db.prepare(
+        `INSERT INTO merge_mode_settings (provider, provider_instance, repo_full_name, merge_mode, updated_by, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?)
+         ON CONFLICT(provider, provider_instance, repo_full_name) DO UPDATE SET
+           merge_mode = excluded.merge_mode,
+           updated_by = excluded.updated_by,
+           updated_at = excluded.updated_at`,
+      ).run(provider, providerInstance, repoFullName, mergeMode, actor, nowIso());
+      this.audit("merge_mode_saved", actor, `${repoFullName || "global default"}@${provider || "all"}:${providerInstance || "all"} ${previous?.merge_mode ?? "unset"} -> ${mergeMode}`);
+    })();
     return { ok: true };
   }
 
   clear(id: number, actor = "operator"): { removed: boolean } {
     const row = this.db.prepare("SELECT * FROM merge_mode_settings WHERE id = ?").get(id) as RuleRow | undefined;
-    const result = this.db.prepare("DELETE FROM merge_mode_settings WHERE id = ?").run(id);
-    if (row && result.changes > 0) {
-      this.audit("merge_mode_cleared", actor, `${row.repo_full_name || "global default"}@${row.provider || "all"}:${row.provider_instance || "all"} removed`);
-    }
-    return { removed: result.changes > 0 };
+    let removed = false;
+    this.db.transaction(() => {
+      const result = this.db.prepare("DELETE FROM merge_mode_settings WHERE id = ?").run(id);
+      removed = result.changes > 0;
+      if (row && removed) {
+        this.audit("merge_mode_cleared", actor, `${row.repo_full_name || "global default"}@${row.provider || "all"}:${row.provider_instance || "all"} removed`);
+      }
+    })();
+    return { removed };
   }
 
   private audit(action: "merge_mode_saved" | "merge_mode_cleared", actor: string, detail: string): void {
