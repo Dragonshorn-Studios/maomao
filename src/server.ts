@@ -985,7 +985,10 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
         activeForge: forge ? `${forge.provider}:${forge.instance}` : undefined,
         superseded: showSuperseded
           ? { active: true, hidden: 0 }
-          : { active: false, hidden: ctx.store.supersededJobCount(forge) },
+          : // The count mirrors what the toggle can actually reveal: the
+            // active job-type refinement when one is set, else the view's
+            // job family — never stale rows of other families.
+            { active: false, hidden: ctx.store.supersededJobCount(forge, jobType ? [jobType] : viewDef.types) },
         jobFilters: { repos: repoNames, repo, type: jobType },
         queueView: { active: view },
       }),

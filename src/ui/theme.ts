@@ -34,6 +34,12 @@ export const THEME_CSS = `
   --action-ink: var(--if-accent-ink);
   --action-soft: var(--if-accent-soft);
   --ash: var(--if-muted);
+  --muted: var(--if-muted);
+  --ink-weak: var(--if-text-soft);
+  --ink-soft: var(--if-text-soft);
+  --rule: var(--if-line);
+  --well: var(--if-bg-raised);
+  --font-body: var(--if-font);
   --line: var(--if-line);
   --line-strong: var(--if-line-strong);
   --focus: var(--if-accent);
@@ -54,6 +60,43 @@ export const THEME_CSS = `
   --space-5: 1.5rem;
   --space-6: 2.25rem;
   --measure: 72rem;
+
+}
+
+/* No-JS light fallback: the shell's theme is applied by the appearance boot
+   script setting data-if-theme, and infernal's :root base is dark — so a
+   client without JavaScript would be locked to dark regardless of OS
+   preference. When the attribute is absent (only possible without JS) and
+   the OS prefers light, re-state the library's light + mergehenna-brand
+   token values. Keep in sync with the infernal.css [data-if-theme="light"]
+   block and its mergehenna brand override when re-vendoring. */
+@media (prefers-color-scheme: light) {
+  :root:not([data-if-theme]) {
+    color-scheme: light;
+    --if-bg: #f2eff4;
+    --if-bg-raised: #f9f7fb;
+    --if-surface: #ffffff;
+    --if-surface-2: #f4f2f8;
+    --if-surface-hover: #eae7f1;
+    --if-line: #dfdce8;
+    --if-line-strong: #c5bfd3;
+    --if-text: #282334;
+    --if-text-soft: #5c586b;
+    --if-muted: #777383;
+    --if-success: #14784a;
+    --if-success-soft: #ddf5e7;
+    --if-warning: #8f580e;
+    --if-warning-soft: #fff1d9;
+    --if-danger: #b72d47;
+    --if-danger-soft: #ffe5e9;
+    --if-info: #2b67b2;
+    --if-info-soft: #e1efff;
+    --if-shadow: 0 20px 55px rgba(56, 39, 71, 0.09);
+    --if-accent: #a95523;
+    --if-accent-ink: #fff;
+    --if-accent-soft: #fff0e3;
+    --if-accent-line: #e7c4aa;
+  }
 }
 
 *, *::before, *::after { box-sizing: border-box; }
@@ -166,6 +209,9 @@ a:hover { color: var(--action); filter: brightness(1.12); }
   min-height: 100vh;
 }
 .shell.has-context { grid-template-columns: 3.75rem 14.5rem minmax(0, 1fr); }
+/* Rail-less pages (login) have no rail child — without this their content
+   would land in the 3.75rem first column and render unusably narrow. */
+.shell--railless, .shell--railless.has-context { grid-template-columns: minmax(0, 1fr); }
 .shell-rail {
   position: sticky;
   top: 0;

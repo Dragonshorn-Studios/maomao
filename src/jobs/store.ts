@@ -1631,11 +1631,12 @@ export class JobStore {
   }
 
   /** Stale rows hidden by the default list view, scoped like `listJobsPage`. */
-  supersededJobCount(forge?: { provider: string; instance: string }): number {
+  supersededJobCount(forge?: { provider: string; instance: string }, types?: readonly string[]): number {
     const where = forge ? `AND provider = ? AND provider_instance = ?` : "";
+    const typeWhere = types?.length ? `AND job_type IN (${types.map(() => "?").join(", ")})` : "";
     const row = this.db
-      .prepare(`SELECT COUNT(*) AS count FROM jobs WHERE state = 'stale' ${where}`)
-      .get(...(forge ? [forge.provider, forge.instance] : [])) as { count: number };
+      .prepare(`SELECT COUNT(*) AS count FROM jobs WHERE state = 'stale' ${where} ${typeWhere}`)
+      .get(...(forge ? [forge.provider, forge.instance] : []), ...(types ?? [])) as { count: number };
     return row.count;
   }
 

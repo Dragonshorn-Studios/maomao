@@ -394,7 +394,7 @@ export function layout(title: string, body: string, options: PageOptions = {}): 
 </head>
 <body${options.surface === "operator" ? ' class="operator"' : ""}>
   <a class="skip" href="#main">Skip to content</a>
-  <div class="shell${contextNav ? " has-context" : ""}">
+  <div class="shell${rail ? "" : " shell--railless"}${contextNav ? " has-context" : ""}">
     ${rail ? railHtml(options) : ""}
     ${contextNav}
     <div class="shell-content">
