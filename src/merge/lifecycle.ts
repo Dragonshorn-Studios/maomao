@@ -35,6 +35,9 @@ export function mergeLifecycleFor(job: JobRow, readiness: CheckPublicationRow | 
     };
   }
   if (readiness.status !== "completed") {
+    if (nativeMergeScheduled) {
+      return { state: "scheduled_auto_merge", detail: "The forge-native merge-when-checks-succeed schedule was created after the latest observed head push; the forge still waits for required checks and branch protection.", readiness };
+    }
     const evaluating = readiness.status === "in_progress" || job.state === "publishing" || job.state === "completed";
     return { state: evaluating ? "waiting_checks" : "reviewing", detail: `Merge readiness is ${readiness.status} for this exact head SHA.`, readiness };
   }
