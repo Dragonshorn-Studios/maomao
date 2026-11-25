@@ -113,6 +113,7 @@ const JOB_TYPE_FILTERS: { value: JobRow["job_type"]; label: string }[] = [
   { value: "stack_review", label: "Stack reviews" },
   { value: "repo_brief", label: "Repo briefs" },
   { value: "health_scan", label: "Health scans" },
+  { value: "merge_group_check", label: "Merge groups" },
 ];
 
 export function renderHome(jobs: JobRow[], store: JobStore, options: PageOptions = {}): string {
@@ -423,13 +424,17 @@ export function renderJob(
   const isScan = job.job_type === "health_scan";
   const isBrief = job.job_type === "repo_brief";
   const isStack = job.job_type === "stack_review";
+  const isMergeGroup = job.job_type === "merge_group_check";
+  const hidesReviewDetails = isBrief || isMergeGroup;
   const heading = isBrief
     ? `Repo brief · ${escapeHtml(job.repo_full_name)} @ ${escapeHtml(shortSha(job.head_sha, 12))}`
     : isScan
       ? `Health scan · ${escapeHtml(job.repo_full_name)} @ ${escapeHtml(shortSha(job.head_sha, 12))}`
-      : isStack
-        ? `Stack · ${forgeBadgeTitleHtml(job, job.repo_full_name, job.pr_number)}`
-        : `${forgeBadgeTitleHtml(job, job.repo_full_name, job.pr_number)}${job.review_mode === "verify" ? " · verify" : ""}`;
+      : isMergeGroup
+        ? `Merge group · ${escapeHtml(job.repo_full_name)} @ ${escapeHtml(shortSha(job.head_sha, 12))}`
+        : isStack
+          ? `Stack · ${forgeBadgeTitleHtml(job, job.repo_full_name, job.pr_number)}`
+          : `${forgeBadgeTitleHtml(job, job.repo_full_name, job.pr_number)}${job.review_mode === "verify" ? " · verify" : ""}`;
   const cancelledBanner =
     job.state === "cancelled"
       ? renderCancelledBanner(job)
@@ -447,7 +452,7 @@ export function renderJob(
     ${isBrief ? `<p><a href="/jobs/${job.id}/brief">Repo brief →</a></p>` : ""}
     ${jobActions}
     ${
-      job.state === "completed"
+      job.state === "completed" && !isMergeGroup
         ? `<p class="muted">${escapeHtml(huntersReturnedCopy(metrics.reviewersDone, metrics.findings.total, options.uiFlavor))}</p>`
         : ""
     }
@@ -472,7 +477,7 @@ export function renderJob(
         <dt>Elapsed</dt>
         <dd class="metric">${escapeHtml(elapsed)}</dd>
       </div>
-      ${isBrief ? "" : `<div>
+      ${hidesReviewDetails ? "" : `<div>
         <dt>Aggregator</dt>
         <dd>${renderState(job.aggregator_state, runStateLabel(job.aggregator_state).text, runStateLabel(job.aggregator_state).hint, runStateLabel(job.aggregator_state).mark)}
           ${job.aggregator_model ? `<div><code class="metric">${escapeHtml(job.aggregator_model)}</code>${job.aggregator_provider ? `<span class="muted"> · <code class="metric">${escapeHtml(job.aggregator_provider)}</code></span>` : ""}</div>` : ""}
@@ -494,7 +499,7 @@ export function renderJob(
           <div class="muted usage-note">${escapeHtml(usageReportedCopy())}</div>
         </dd>
       </div>
-      ${isBrief ? "" : `<div>
+      ${hidesReviewDetails ? "" : `<div>
         <dt>GitHub review</dt>
         <dd>${
           job.github_review_url
@@ -512,19 +517,19 @@ export function renderJob(
       </div>`}
     </dl>
     ${job.job_type === "pr_review" && options.mergeLifecycle ? renderMergeLifecycle(options.mergeLifecycle, job, options.mergeCapabilities) : ""}
-    ${isBrief ? "" : renderRouting(job)}
-    ${isBrief ? "" : renderEscalation(job)}
+    ${hidesReviewDetails ? "" : renderRouting(job)}
+    ${hidesReviewDetails ? "" : renderEscalation(job)}
     ${options.stackMembers?.length ? renderStackMembers(options.stackMembers) : ""}
     ${job.failure_reason ? `<p class="error" role="alert"><strong>Failure:</strong> ${escapeHtml(job.failure_reason)}</p>` : ""}
-    <div class="section-head">
+    ${hidesReviewDetails ? "" : `<div class="section-head">
       <h2>Reviewers</h2>
       ${failedToRetry > 0 ? renderJobRetry(job.id, failedToRetry, options.csrfToken) : ""}
     </div>
     <p class="muted">${escapeHtml(progressCopy(metrics))}</p>
     <div class="cards">
       ${runs.map((run) => renderRun(run, canRetryRun(job, run), options.csrfToken, options.uiFlavor)).join("")}
-    </div>
-    ${isBrief ? renderJobBriefSection(job) : `<h2>Aggregator</h2>
+    </div>`}
+    ${isBrief ? renderJobBriefSection(job) : isMergeGroup ? `<h2>Merge group</h2><p class="muted">This job runs deterministic trusted checks against the immutable synthetic merge commit. It has no LLM reviewers or aggregator.</p>` : `<h2>Aggregator</h2>
     ${renderAggregator(job, metrics)}
     <h2 id="findings">Findings</h2>
     ${renderFindings(metrics, options.prFindings ?? [], {
@@ -550,7 +555,9 @@ export function renderJob(
       ? `Repo brief · ${job.repo_full_name}`
       : isScan
         ? `Health scan · ${job.repo_full_name}`
-        : forgeBadgeTitle(job, job.repo_full_name, job.pr_number),
+        : isMergeGroup
+          ? `Merge group · ${job.repo_full_name}`
+          : forgeBadgeTitle(job, job.repo_full_name, job.pr_number),
     body,
     options,
   );
@@ -630,7 +637,9 @@ function renderJobActions(job: JobRow, csrfToken?: string): string {
  * jobs enqueued before the URL was captured have nothing to link to.
  */
 function prExternalLinkHtml(job: JobRow): string {
-  if (!job.pr_html_url || !job.pr_number) return "";
+  // A merge-group job can span multiple pull requests; linking only the
+  // participant encoded in the queue ref would misrepresent the check subject.
+  if (job.job_type === "merge_group_check" || !job.pr_html_url || !job.pr_number) return "";
   const label = `View on ${providerLabel(job.provider)}`;
   return `<a class="pr-external" href="${escapeHtml(job.pr_html_url)}" target="_blank" rel="noopener noreferrer" title="${escapeHtml(label)}" aria-label="${escapeHtml(label)}">${externalLinkGlyph()}</a>`;
 }

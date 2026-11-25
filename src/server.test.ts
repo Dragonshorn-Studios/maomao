@@ -7178,3 +7178,42 @@ describe("telemetry config routes", () => {
     log.mockRestore();
   });
 });
+
+describe("merge-group job UI", () => {
+  it("labels merge-group jobs and omits LLM review sections", async () => {
+    const { app, store } = testApp();
+    const created = store.enqueue({
+      repoFullName: "acme/widgets",
+      repoOwner: "acme",
+      repoName: "widgets",
+      installationId: 1,
+      prNumber: 8,
+      prTitle: "GitHub merge group for main",
+      prBody: "",
+      prHtmlUrl: "https://github.com/acme/widgets/pull/8",
+      prAuthor: "github-merge-queue",
+      baseSha: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      headSha: "0123456789abcdef0123456789abcdef01234567",
+      baseRef: "main",
+      headRef: "refs/heads/gh-readonly-queue/main/pr-8",
+      reviewers: [],
+      jobType: "merge_group_check",
+      dedupKey: "merge-group:refs/heads/gh-readonly-queue/main/pr-8",
+      mergeGroupJson: JSON.stringify({ pullRequests: [] }),
+    });
+    store.setJobState(created.job.id, "completed");
+
+    const detail = await app.request(`/jobs/${created.job.id}`);
+    expect(detail.status).toBe(200);
+    const html = await detail.text();
+    expect(html).toContain("Merge group · acme/widgets");
+    expect(html).toContain("deterministic trusted checks");
+    expect(html).not.toContain("<h2>Reviewers</h2>");
+    expect(html).not.toContain("<h2>Aggregator</h2>");
+    expect(html).not.toContain("<dt>GitHub review</dt>");
+    expect(html).not.toContain("View on GitHub");
+
+    const home = await app.request("/");
+    expect((await home.text())).toContain('value="merge_group_check"');
+  });
+});
