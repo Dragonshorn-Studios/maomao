@@ -468,13 +468,20 @@ button, summary {
 .specimen {
   padding: 0.85rem 1rem 0.95rem;
   position: relative;
+  border-radius: var(--if-radius, 10px);
+  overflow: hidden;
+}
+/* Live jobs wear the ember accent as a full border plus the breathing bar —
+   the infernal if-card--ember treatment. */
+.specimen.is-live {
+  border-color: var(--if-accent-line, var(--live));
 }
 .specimen.is-live::before {
   content: "";
   position: absolute;
   left: 0;
-  top: 0.65rem;
-  bottom: 0.65rem;
+  top: 0;
+  bottom: 0;
   width: 3px;
   background: var(--live);
   animation: breathe 2.6s ease-in-out infinite;
@@ -485,12 +492,15 @@ button, summary {
   display: inline-flex;
   align-items: center;
   gap: 0.3rem;
-  padding: 0.08rem 0.45rem;
-  border: 1px solid var(--plum);
+  padding: 2px 7px;
+  border: 1px solid transparent;
+  border-radius: 5px;
   background: var(--plum-soft);
-  color: var(--ink);
-  font-size: 0.75rem;
-  letter-spacing: 0.04em;
+  color: var(--plum);
+  font-family: var(--font-mono);
+  font-size: 0.63rem;
+  font-weight: 600;
+  letter-spacing: 0.06em;
   text-transform: uppercase;
   vertical-align: middle;
   white-space: nowrap;
@@ -501,19 +511,28 @@ button, summary {
   display: flex;
   flex-wrap: wrap;
   gap: 0.4rem 0.8rem;
-  align-items: baseline;
+  align-items: center;
   justify-content: space-between;
+  /* The infernal screen-job head band: a separated strip bleeding to the
+     card edges, so the state badge reads as card chrome, not content. */
+  margin: -0.85rem -1rem 0.65rem;
+  padding: 0.65rem 1rem;
+  border-bottom: 1px solid var(--line);
+  background: color-mix(in srgb, var(--surface-2) 50%, transparent);
 }
 .specimen-id {
-  font-size: 0.7rem;
-  letter-spacing: 0.14em;
+  font-family: var(--font-mono);
+  font-size: 0.63rem;
+  font-weight: 700;
+  letter-spacing: 0.12em;
   text-transform: uppercase;
   color: var(--ash);
 }
 .specimen-title {
-  margin: 0.25rem 0 0.15rem;
-  font-size: 1.05rem;
-  font-weight: 600;
+  margin: 0.1rem 0 0.15rem;
+  font-size: 1rem;
+  font-weight: 700;
+  letter-spacing: -0.01em;
 }
 .specimen-title a { color: var(--ink); text-decoration: none; }
 .specimen-title a:hover { color: var(--action); text-decoration: underline; }
@@ -543,13 +562,20 @@ h1 a.pr-external { font-size: 0.72em; }
 .meta-row {
   display: flex;
   flex-wrap: wrap;
-  gap: 0.35rem 1rem;
+  gap: 0.35rem 1.1rem;
   align-items: center;
-  margin-top: 0.45rem;
+  margin-top: 0.55rem;
   font-size: 0.88rem;
+}
+/* Inside job cards the meta row is the infernal screen-job__meta pattern:
+   small mono, quiet labels, brighter values. */
+.specimen .meta-row, .member-card .meta-row {
+  font-family: var(--font-mono);
+  font-size: 0.68rem;
 }
 .meta-row .pair { color: var(--ink-muted); }
 .meta-row .pair strong { color: var(--ink); font-weight: 600; }
+.specimen .meta-row .pair strong, .member-card .meta-row .pair strong { font-weight: 500; }
 
 .diagnosis {
   display: flex;
@@ -583,23 +609,26 @@ h1 a.pr-external { font-size: 0.72em; }
 .state {
   display: inline-flex;
   align-items: center;
-  gap: 0.3rem;
-  padding: 0.08rem 0.45rem;
-  border: 1px solid var(--line);
+  gap: 0.35rem;
+  padding: 3px 8px;
+  border: 1px solid transparent;
+  border-radius: 5px;
   background: var(--surface-2);
-  font-size: 0.75rem;
-  letter-spacing: 0.04em;
+  font-family: var(--font-mono);
+  font-size: 0.63rem;
+  font-weight: 600;
+  letter-spacing: 0.06em;
   text-transform: uppercase;
-  color: var(--ink);
+  color: var(--ink-soft, var(--ink));
   white-space: nowrap;
 }
 .state .mark { font-size: 0.7rem; }
-.state-completed, .state-done { background: var(--jade-soft); border-color: var(--jade); }
-.state-failed { background: var(--cinnabar-soft); border-color: var(--cinnabar); }
-.state-stale, .state-cancelled { background: var(--amber-soft); border-color: var(--amber); }
+.state-completed, .state-done { color: var(--jade); background: var(--jade-soft); }
+.state-failed { color: var(--cinnabar); background: var(--cinnabar-soft); }
+.state-stale, .state-cancelled { color: var(--amber); background: var(--amber-soft); }
 .state-reviewing, .state-aggregating, .state-sniffing, .state-publishing, .state-running, .state-preparing, .state-routing, .state-reconciling {
+  color: var(--working);
   background: var(--working-soft);
-  border-color: var(--working);
 }
 .state-preparing .mark,
 .state-reconciling .mark,
@@ -629,15 +658,17 @@ h1 a.pr-external { font-size: 0.72em; }
   align-items: center;
   gap: 0.25rem;
   font-family: var(--font-mono);
-  font-size: 0.75rem;
-  letter-spacing: 0.04em;
-  padding: 0.05rem 0.4rem;
-  border: 1px solid var(--line);
+  font-size: 0.63rem;
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  padding: 2px 7px;
+  border: 1px solid transparent;
+  border-radius: 5px;
   background: var(--surface-2);
 }
-.sev-blocker, .sev-high { background: var(--cinnabar-soft); border-color: var(--cinnabar); }
-.sev-medium { background: var(--amber-soft); border-color: var(--amber); }
-.sev-low, .sev-info { background: var(--jade-soft); border-color: var(--herb); }
+.sev-blocker, .sev-high { color: var(--cinnabar); background: var(--cinnabar-soft); }
+.sev-medium { color: var(--amber); background: var(--amber-soft); }
+.sev-low, .sev-info { color: var(--herb); background: var(--jade-soft); }
 
 /* Stack members on a stack_review job page: numbered nodes on a connecting
    rail, in the bottom-up order the runner reviews them. */
@@ -793,18 +824,35 @@ h1 a.pr-external { font-size: 0.72em; }
 
 /* Stack member jobs nest under their stack card on the home list — one
    glued block (no gap, no rail), each member a compact two-line row. */
+/* Stack members hang off the stack card on the infernal screen-rail
+   pattern: one vertical line, a dot per member, no nested boxes. */
 .member-cards {
   list-style: none;
-  margin: 0 0 0 1.2rem;
+  margin: 0.25rem 0 0.4rem 1.4rem;
   padding: 0;
-  background: var(--surface);
-  border: 1px solid var(--line);
-  border-top: none;
-  border-radius: 0 0 var(--radius) var(--radius);
+  border-left: 1px solid var(--line-strong, var(--line));
 }
-.member-card { padding: 0.35rem 0.7rem; font-size: 0.88rem; }
-.member-card + .member-card { border-top: 1px solid var(--line); }
-.member-card.is-live { box-shadow: inset 3px 0 0 var(--live); }
+.member-card {
+  position: relative;
+  padding: 0.45rem 0.7rem 0.5rem 1.15rem;
+  font-size: 0.88rem;
+}
+.member-card::before {
+  content: "";
+  position: absolute;
+  left: -5.5px;
+  top: 0.85rem;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--surface);
+  border: 2px solid var(--line-strong, var(--line));
+}
+.member-card.is-live::before {
+  border-color: var(--working);
+  background: var(--working-soft);
+}
+.member-card + .member-card { border-top: 1px solid color-mix(in srgb, var(--line) 55%, transparent); }
 .member-row {
   display: flex;
   align-items: baseline;
