@@ -102,6 +102,8 @@ import { ModelDiscovery } from "./opencode/models.js";
 import { parseBriefPayload } from "./jobs/brief.js";
 import { MERGE_READINESS_NAME, mergeLifecycleFor } from "./merge/lifecycle.js";
 import { MergeCapabilityService } from "./merge/capability.js";
+import type { MergeModeSettingsStore } from "./merge/settings.js";
+import { renderMergeModesPage } from "./ui/merge-modes.js";
 import type { ForgeRegistry } from "./forge/registry.js";
 import type { JobRow } from "./jobs/store.js";
 import type { FindingRow } from "./findings/types.js";
@@ -163,6 +165,8 @@ export interface ServerContext {
   telemetrySettings?: TelemetrySettingsStore;
   /** Operator-managed trusted-check pinning for /config/trusted-checks. */
   trustedCheckSettings?: TrustedCheckSettingsStore;
+  /** Operator-managed merge-mode opt-in policy for /config/merge-modes. */
+  mergeModeSettings?: MergeModeSettingsStore;
   /** Injectable transport for the telemetry connection probe (tests). */
   telemetryFetch?: typeof fetch;
   /** The environment loadConfig consumed; defaults to process.env. Injectable for tests. */
@@ -304,7 +308,7 @@ function setSessionCookie(c: Context<AppEnv>, value: string): void {
 }
 
 export function createApp(ctx: ServerContext): Hono<AppEnv> {
-  const mergeCapabilities = ctx.forge ? new MergeCapabilityService(ctx.forge) : undefined;
+  const mergeCapabilities = ctx.forge ? new MergeCapabilityService(ctx.forge, undefined, ctx.mergeModeSettings) : undefined;
   const app = new Hono<AppEnv>();
   // Every page renders the top banner while the global pause switch is on;
   // the provider reads the store live so toggles take effect on next load.
@@ -1642,6 +1646,53 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
     const result = ctx.trustedCheckSettings.clear();
     const note = result.removed ? "Stored trusted-check settings cleared." : "No stored trusted-check settings.";
     return c.redirect(`/config/trusted-checks?notice=${encodeURIComponent(note)}`, 303);
+  });
+
+  const renderMergeModes = (
+    c: Context<AppEnv>,
+    extra: { notice?: string; error?: string; status?: number } = {},
+  ) => {
+    if (!ctx.mergeModeSettings) return c.text("Merge-mode settings are unavailable on this process", 503);
+    return c.html(
+      renderMergeModesPage({
+        rules: ctx.mergeModeSettings.list(),
+        csrfToken: gateOn ? ensureCsrfToken(c, ctx.config.uiSessionSecret) : undefined,
+        canWrite: gateOn,
+        options: { ...pageOpts, identity: c.get("identity"), notice: extra.notice, error: extra.error },
+      }),
+      (extra.status ?? 200) as 200 | 400 | 503,
+    );
+  };
+
+  app.get("/config/merge-modes", (c) => {
+    if (!gateOn) return c.redirect("/", 302);
+    return renderMergeModes(c, { notice: c.req.query("notice") ?? undefined, error: c.req.query("error") ?? undefined });
+  });
+
+  app.post("/config/merge-modes", async (c) => {
+    if (!gateOn) return c.redirect("/", 302);
+    if (!ctx.mergeModeSettings) return c.text("Merge-mode settings are unavailable on this process", 503);
+    const body = await c.req.parseBody();
+    const text = (name: string) => (typeof body[name] === "string" ? (body[name] as string).trim() : "");
+    const result = ctx.mergeModeSettings.save({
+      provider: text("provider"),
+      providerInstance: text("providerInstance"),
+      repoFullName: text("repoFullName"),
+      mergeMode: text("mergeMode"),
+      actor: actionActor(c),
+    });
+    if (!result.ok) return renderMergeModes(c, { error: result.error, status: 400 });
+    return c.redirect(`/config/merge-modes?notice=${encodeURIComponent("Merge mode saved. Native actions still require the forge integration that implements them.")}`, 303);
+  });
+
+  app.post("/config/merge-modes/delete", async (c) => {
+    if (!gateOn) return c.redirect("/", 302);
+    if (!ctx.mergeModeSettings) return c.text("Merge-mode settings are unavailable on this process", 503);
+    const body = await c.req.parseBody();
+    const id = Number(typeof body.id === "string" ? body.id : 0);
+    const result = Number.isInteger(id) && id > 0 ? ctx.mergeModeSettings.clear(id, actionActor(c) ?? "operator") : { removed: false };
+    const note = result.removed ? "Merge-mode rule deleted." : "Merge-mode rule not found.";
+    return c.redirect(`/config/merge-modes?notice=${encodeURIComponent(note)}`, 303);
   });
 
   app.get("/config/telemetry", (c) => {

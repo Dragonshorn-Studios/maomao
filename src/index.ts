@@ -19,6 +19,7 @@ import { ensureEnvGitLabConnection } from "./forge/bootstrap.js";
 import { ForgeRegistry } from "./forge/registry.js"
 import { TelemetrySettingsStore, telemetryConfigPath } from "./telemetry/settings.js";
 import { TrustedCheckSettingsStore } from "./checks/settings.js";
+import { MergeModeSettingsStore } from "./merge/settings.js";
 import { emitAppLog } from "./telemetry/app-log.js";
 
 const config = loadConfig();
@@ -52,6 +53,7 @@ assertRuntimeConfig(config, {
 // endpoint credentials here; env vars stay authoritative over stored values.
 const telemetrySettings = new TelemetrySettingsStore(telemetryConfigPath(process.env));
 const trustedCheckSettings = new TrustedCheckSettingsStore(db, config.trustedChecks);
+const mergeModeSettings = new MergeModeSettingsStore(db);
 const store = new JobStore(db, config.modelCatalog, {
   emitJobSummaries: config.jobSummaries,
   telemetry: telemetrySettings,
@@ -135,6 +137,7 @@ const app = createApp({
   modelDiscovery,
   telemetrySettings,
   trustedCheckSettings,
+  mergeModeSettings,
   startedAt: Date.now(),
   env: process.env,
 });

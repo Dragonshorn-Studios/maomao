@@ -271,6 +271,21 @@ function migrate(db: SqliteDb): void {
       updated_at TEXT NOT NULL
     );
 
+    CREATE TABLE IF NOT EXISTS merge_mode_settings (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      provider TEXT NOT NULL DEFAULT '',
+      provider_instance TEXT NOT NULL DEFAULT '',
+      repo_full_name TEXT NOT NULL DEFAULT '',
+      merge_mode TEXT NOT NULL CHECK (merge_mode IN ('disabled', 'manual', 'native_auto_merge', 'github_native_queue')),
+      updated_by TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      CHECK (
+        (provider = '' AND provider_instance = '' AND repo_full_name = '')
+        OR (provider <> '' AND provider_instance <> '' AND repo_full_name <> '')
+      ),
+      UNIQUE (provider, provider_instance, repo_full_name)
+    );
+
     CREATE TABLE IF NOT EXISTS trusted_check_results (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       ${PROVIDER_COLUMNS},

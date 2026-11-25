@@ -76,7 +76,6 @@ describe("GitHubProvider", () => {
         draft: true,
       }),
       getMergeCapabilities: async (_installationId, _owner, _repo, baseRef, pullNumber) => ({
-        mergeMode: "manual",
         nativeAutoMerge: "available",
         githubNativeQueue: "unavailable",
         requiredStatusContexts: [baseRef, String(pullNumber)],

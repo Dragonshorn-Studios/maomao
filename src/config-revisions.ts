@@ -148,7 +148,9 @@ export type ConfigAuditAction =
   | "role_updated"
   | "role_deleted"
   | "imported"
-  | "exported";
+  | "exported"
+  | "merge_mode_saved"
+  | "merge_mode_cleared";
 
 /**
  * Versioned review-profile configuration. Revisions are immutable once left draft state;

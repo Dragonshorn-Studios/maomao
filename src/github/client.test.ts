@@ -152,7 +152,6 @@ describe("GithubClient.getMergeCapabilities", () => {
     }, (seen) => { variables = seen; });
     expect(variables).toBeUndefined();
     await expect(client.getMergeCapabilities(9, "acme", "widgets", "main", 7)).resolves.toMatchObject({
-      mergeMode: "manual",
       nativeAutoMerge: "available",
       githubNativeQueue: "available",
       requiredStatusContexts: ["maomao/merge-readiness", "test"],
@@ -169,7 +168,7 @@ describe("GithubClient.getMergeCapabilities", () => {
   it("explains missing native queue and branch-rule visibility without enabling writes", async () => {
     const client = clientWithGraphql({ autoMergeAllowed: false, mergeQueue: null }, { error: Object.assign(new Error("forbidden"), { status: 403 }) });
     const capabilities = await client.getMergeCapabilities(9, "acme", "widgets", "main", 7);
-    expect(capabilities).toMatchObject({ mergeMode: "manual", nativeAutoMerge: "unavailable", githubNativeQueue: "unavailable", requiredStatusContexts: [] });
+    expect(capabilities).toMatchObject({ nativeAutoMerge: "unavailable", githubNativeQueue: "unavailable", requiredStatusContexts: [] });
     expect(capabilities.protectedBranch).toBeUndefined();
     expect(capabilities.reasons.join(" ")).toContain("merge queue is not configured");
     expect(capabilities.reasons.join(" ")).toContain("branch rules could not be read");

@@ -97,7 +97,6 @@ export type ForgeCapabilityState = "available" | "unavailable" | "unknown";
 
 /** Read-only detection of forge-native merge machinery. Never authorization to merge. */
 export interface ForgeMergeCapabilities {
-  mergeMode: ForgeMergeMode;
   nativeAutoMerge: ForgeCapabilityState;
   githubNativeQueue: ForgeCapabilityState;
   requiredStatusContexts: string[];
@@ -112,6 +111,11 @@ export interface ForgeMergeCapabilities {
   forgeVersion?: string;
   reasons: string[];
   source: string;
+}
+
+/** Capability evidence plus the operator-configured merge mode applied to one change. */
+export interface MergeCapabilityReport extends ForgeMergeCapabilities {
+  mergeMode: ForgeMergeMode;
 }
 
 /** A repository plus the change request under review on one forge instance. */
