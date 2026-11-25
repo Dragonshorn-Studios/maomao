@@ -253,6 +253,7 @@ export class TrustedCheckRunner {
     workspaceDir: string;
     diffPath: string;
     repoFullName?: string;
+    policy?: import("./policy.js").ResolvedTrustedPolicy;
     signal?: AbortSignal;
   }): Promise<TrustedCheckResult> {
     const startedAt = Date.now();
@@ -266,7 +267,7 @@ export class TrustedCheckRunner {
       if (trustedDir === repoRealPath || trustedDir.startsWith(repoRealPath + sep) || repoRealPath.startsWith(trustedDir + sep)) {
         throw new Error("trusted checks checkout must not overlap the pull-request checkout");
       }
-      const policy = await readTrustedPolicy(trustedDir, input.repoFullName ?? "*", settings.enabledChecks, revision);
+      const policy = input.policy ?? await readTrustedPolicy(trustedDir, input.repoFullName ?? "*", settings.enabledChecks, revision);
       const manifestRaw = JSON.parse(await readFile(join(trustedDir, "maomao-trusted-checks.json"), "utf8")) as { version?: number; checks?: Record<string, unknown> };
       if (manifestRaw.version !== 1) throw new Error("trusted checks manifest version must be 1");
       const definition = parseDefinition(input.name, manifestRaw.checks?.[input.name]);

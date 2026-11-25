@@ -58,7 +58,7 @@ function suppressionsOr(value: unknown): TrustedPolicySuppression[] {
   if (value == null) return [];
   if (!Array.isArray(value)) throw new Error("trusted policy suppressions must be an array");
   return value.flatMap((item) => {
-    if (!item || typeof item !== "object" || Array.isArray(item)) return [];
+    if (!item || typeof item !== "object" || Array.isArray(item)) throw new Error("trusted policy suppression entries must be objects");
     const row = item as Record<string, unknown>;
     if (typeof row.fingerprint !== "string" || !/^[0-9a-f]{64}$/.test(row.fingerprint) || typeof row.reason !== "string" || !row.reason.trim()) {
       throw new Error("trusted policy suppressions require a 64-character lowercase fingerprint and reason");

@@ -173,6 +173,7 @@ export function createPipeline(deps: PipelineDeps) {
   );
   const activeTrustedCheckNames = () => TRUSTED_CHECK_NAMES.filter((name) => trustedChecks.enabledFor(name));
   const trustedPublicationMemory = new Set<string>();
+  const trustedPolicyMemory = new Map<number, Awaited<ReturnType<TrustedCheckRunner["policyForRepo"]>>>();
   const trustedMemoryKey = (job: JobRow, name: (typeof TRUSTED_CHECK_NAMES)[number]) =>
     JSON.stringify([job.provider, job.provider_instance, job.repo_full_name, job.pr_number, job.head_sha, name]);
 
@@ -225,9 +226,9 @@ export function createPipeline(deps: PipelineDeps) {
   async function publishMergeReadiness(job: JobRow, reviewConclusion: string | undefined): Promise<void> {
     let policy;
     try {
-      policy = typeof trustedChecks.policyForRepo === "function"
+      policy = trustedPolicyMemory.get(job.id) ?? (typeof trustedChecks.policyForRepo === "function"
         ? await trustedChecks.policyForRepo(job.repo_full_name)
-        : { requireReview: false, requiredChecks: activeTrustedCheckNames(), revision: "unconfigured", source: "default" as const };
+        : { requireReview: false, requiredChecks: activeTrustedCheckNames(), revision: "unconfigured", source: "default" as const });
     } catch (error) {
       await publishReadinessTerminal(job, "action_required", `trusted policy could not be read: ${error instanceof Error ? error.message : String(error)}`);
       return;
@@ -262,6 +263,7 @@ export function createPipeline(deps: PipelineDeps) {
       ].join("\n\n"),
       validateHead: true,
     });
+    trustedPolicyMemory.delete(job.id);
   }
 
   async function publishTrustedTerminal(job: JobRow, conclusion: "cancelled" | "action_required", reason: string): Promise<void> {
@@ -279,6 +281,7 @@ export function createPipeline(deps: PipelineDeps) {
       });
     }
     await publishReadinessTerminal(job, conclusion, reason);
+    trustedPolicyMemory.delete(job.id);
     forgetTrustedPublicationMemory(job);
   }
 
@@ -290,6 +293,10 @@ export function createPipeline(deps: PipelineDeps) {
       summary: `Maomao is evaluating review and deterministic check results for PR #${job.pr_number} at ${job.head_sha.slice(0, 12)}.`,
     });
     const active = new Set(activeTrustedCheckNames());
+    if (typeof trustedChecks.policyForRepo === "function") {
+      trustedPolicyMemory.set(job.id, await trustedChecks.policyForRepo(job.repo_full_name));
+    }
+    const runPolicy = trustedPolicyMemory.get(job.id);
     for (const name of trustedNamesWithPublications(job)) {
       if (active.has(name)) continue;
       const existing = deps.store.getCheckPublication(trustedKey(job, name));
@@ -317,6 +324,7 @@ export function createPipeline(deps: PipelineDeps) {
         workspaceDir: workspace.dir,
         diffPath: workspace.diffPath,
         repoFullName: job.repo_full_name,
+        ...(runPolicy ? { policy: runPolicy } : {}),
         signal,
       });
       deps.store.recordTrustedCheckResult({
