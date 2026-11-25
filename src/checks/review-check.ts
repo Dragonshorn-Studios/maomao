@@ -175,7 +175,7 @@ export class ReviewCheckPublisher {
           effective = {
             ...input,
             conclusion: "cancelled",
-            title: "Maomao review superseded",
+            title: `${this.identity.label} superseded`,
             summary: `The pull request head moved before this result was published; this check is cancelled for ${job.head_sha.slice(0, 12)}.`,
           };
         }

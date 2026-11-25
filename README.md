@@ -297,7 +297,7 @@ The pinned checkout contains `maomao-trusted-checks.json`:
 }
 ```
 
-Paths are validated inside the trusted checkout. Supported interpreters are `sh`, `bash`, and `python3`. This repository's `trusted-checks/` directory contains reference Gitleaks and Semgrep wrappers plus a small Semgrep baseline; copy or vendor them into your operator-controlled trusted-checks repository, adjust policy/rules there, and pin the promotion commit SHA. Scanner binaries are runtime prerequisites and are not installed by Maomao.
+Paths are validated inside the trusted checkout. Supported interpreters are `sh`, `bash`, and `python3`. Optional `cpuSeconds` and `memoryBytes` fields override the default CPU/memory resource limits within operator caps (at most 900 seconds and 8 GiB); timeout is always enforced. This repository's `trusted-checks/` directory contains reference Gitleaks and Semgrep wrappers plus a small Semgrep baseline; copy or vendor them into your operator-controlled trusted-checks repository, adjust policy/rules there, and pin the promotion commit SHA. Scanner binaries are runtime prerequisites and are not installed by Maomao.
 
 ### Scanner contract and redaction
 

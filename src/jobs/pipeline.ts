@@ -158,12 +158,17 @@ export function createPipeline(deps: PipelineDeps) {
   const checks = deps.checkPublisher ?? new ReviewCheckPublisher(publisherDeps);
   const trustedChecks = deps.trustedCheckRunner ?? new TrustedCheckRunner(deps.config);
 
+  const trustedPublishers = new Map<string, ReviewCheckPublisher>();
   function trustedPublisher(name: (typeof TRUSTED_CHECK_NAMES)[number]): ReviewCheckPublisher {
-    return new ReviewCheckPublisher(publisherDeps, {
+    const existing = trustedPublishers.get(name);
+    if (existing) return existing;
+    const publisher = new ReviewCheckPublisher(publisherDeps, {
       name: trustedCheckNativeName(name),
       label: `Maomao ${name} check`,
       externalPrefix: `maomao-${name}`,
     });
+    trustedPublishers.set(name, publisher);
+    return publisher;
   }
 
   function trustedKey(job: JobRow, name: (typeof TRUSTED_CHECK_NAMES)[number]) {
@@ -509,6 +514,7 @@ async function runJob(
   }
   if (["stale", "cancelled"].includes(job.state)) {
     store.log(jobId, `Skipped run: job is ${job.state}`, "warn");
+    await trustedHooks.finish(job, "cancelled", "the review job was cancelled or superseded before the scanner started");
     return;
   }
   if (job.state === "completed") {

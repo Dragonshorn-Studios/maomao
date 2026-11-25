@@ -1,11 +1,13 @@
 /**
  * Trusted deterministic check runner. Definitions come only from an
  * operator-selected, immutable git revision — never from the pull request —
- * and execute without network access in a bubblewrap sandbox when available.
+ * and execute without network access in a resource-limited bubblewrap sandbox.
+ * Production fails closed when that isolation is unavailable; the unsafe local
+ * mode is an explicit development/test escape hatch.
  */
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
-import { access, mkdir, readFile, realpath, rm, writeFile } from "node:fs/promises";
+import { access, lstat, mkdir, readFile, realpath, rm } from "node:fs/promises";
 import { join, resolve, sep } from "node:path";
 import { z } from "zod";
 import type { Config } from "../config.js";
@@ -52,6 +54,8 @@ interface CheckDefinition {
   path: string;
   interpreter: "sh" | "bash" | "python3";
   timeoutMs: number;
+  cpuSeconds: number;
+  memoryBytes: number;
 }
 
 interface ProcessResult {
@@ -133,10 +137,22 @@ function parseDefinition(name: TrustedCheckName, raw: unknown): CheckDefinition 
   if (interpreter !== "sh" && interpreter !== "bash" && interpreter !== "python3") {
     throw new Error(`trusted check ${name} interpreter must be sh, bash, or python3`);
   }
-  const timeoutMs = typeof value.timeoutMs === "number" && Number.isInteger(value.timeoutMs)
-    ? Math.min(Math.max(value.timeoutMs, 1_000), 15 * 60_000)
-    : 120_000;
-  return { path, interpreter, timeoutMs };
+  if (value.timeoutMs != null && (typeof value.timeoutMs !== "number" || !Number.isInteger(value.timeoutMs) || value.timeoutMs < 1_000 || value.timeoutMs > 15 * 60_000)) {
+    throw new Error(`trusted check ${name} timeoutMs must be an integer between 1000 and 900000`);
+  }
+  const timeoutMs = typeof value.timeoutMs === "number" ? value.timeoutMs : 120_000;
+  if (value.cpuSeconds != null && (typeof value.cpuSeconds !== "number" || !Number.isInteger(value.cpuSeconds) || value.cpuSeconds < 1 || value.cpuSeconds > 900)) {
+    throw new Error(`trusted check ${name} cpuSeconds must be an integer between 1 and 900`);
+  }
+  const cpuSeconds = typeof value.cpuSeconds === "number" ? value.cpuSeconds : Math.min(Math.max(Math.ceil(timeoutMs / 1000), 1), 900);
+  if (
+    value.memoryBytes != null &&
+    (typeof value.memoryBytes !== "number" || !Number.isInteger(value.memoryBytes) || value.memoryBytes < 64 * 1024 * 1024 || value.memoryBytes > 8 * 1024 * 1024 * 1024)
+  ) {
+    throw new Error(`trusted check ${name} memoryBytes must be an integer between 64 MiB and 8 GiB`);
+  }
+  const memoryBytes = typeof value.memoryBytes === "number" ? value.memoryBytes : 2 * 1024 * 1024 * 1024;
+  return { path, interpreter, timeoutMs, cpuSeconds, memoryBytes };
 }
 
 function interpreterArgv(interpreter: CheckDefinition["interpreter"], scriptPath: string): string[] {
@@ -214,6 +230,10 @@ export class TrustedCheckRunner {
     if (!this.enabled()) return errorResult(input.name, revision, "trusted checks are not configured", startedAt);
     try {
       const trustedDir = await this.checkout();
+      const repoRealPath = await realpath(input.repoDir);
+      if (trustedDir === repoRealPath || trustedDir.startsWith(repoRealPath + sep) || repoRealPath.startsWith(trustedDir + sep)) {
+        throw new Error("trusted checks checkout must not overlap the pull-request checkout");
+      }
       const manifestRaw = JSON.parse(await readFile(join(trustedDir, "maomao-trusted-checks.json"), "utf8")) as { version?: number; checks?: Record<string, unknown> };
       if (manifestRaw.version !== 1) throw new Error("trusted checks manifest version must be 1");
       const definition = parseDefinition(input.name, manifestRaw.checks?.[input.name]);
@@ -224,11 +244,16 @@ export class TrustedCheckRunner {
       const outputDir = join(input.workspaceDir, "trusted-checks", input.name);
       await mkdir(outputDir, { recursive: true });
       const resultHostPath = join(outputDir, "result.json");
+      await rm(resultHostPath, { force: true, recursive: true });
       const sandboxed = await executableOnPath("bwrap");
       if (!sandboxed && !this.config.trustedChecks.allowUnsafeLocal) {
         return errorResult(input.name, revision, "bubblewrap (bwrap) is unavailable; refusing to run deterministic checks without isolation", startedAt);
       }
 
+      const limited = await executableOnPath("prlimit");
+      if (sandboxed && !limited) {
+        return errorResult(input.name, revision, "prlimit is unavailable; refusing to run deterministic checks without resource limits", startedAt);
+      }
       const scriptPath = sandboxed ? `/trusted/${definition.path}` : scriptHostPath;
       const repoPath = sandboxed ? "/work/repo" : input.repoDir;
       const diffPath = sandboxed ? "/work/pr.diff" : input.diffPath;
@@ -249,7 +274,7 @@ export class TrustedCheckRunner {
       };
       if (sandboxed) {
         const binds: string[] = [];
-        for (const dir of ["/usr", "/bin", "/lib", "/lib64"]) {
+        for (const dir of ["/usr/bin", "/usr/lib", "/usr/lib64", "/usr/libexec", "/usr/share", "/usr/local/bin", "/usr/local/lib", "/usr/local/lib64", "/usr/local/libexec", "/usr/local/share", "/bin", "/lib", "/lib64"]) {
           try {
             await access(dir);
             binds.push("--ro-bind", dir, dir);
@@ -285,14 +310,30 @@ export class TrustedCheckRunner {
           ...childArgs,
         ];
         env = process.env;
+        args = [
+          `--cpu=${definition.cpuSeconds}`,
+          `--as=${definition.memoryBytes}`,
+          `--fsize=${64 * 1024 * 1024}`,
+          command,
+          ...args,
+        ];
+        command = "prlimit";
       }
 
       if (input.signal?.aborted) return errorResult(input.name, revision, "cancelled before scanner start", startedAt);
       const processResult = await runProcess(command, args, { timeoutMs: definition.timeoutMs, env, signal: input.signal });
       let raw = "";
       try {
+        const resultStat = await lstat(resultHostPath);
+        if (!resultStat.isFile() || resultStat.isSymbolicLink()) throw new Error("result path is not a regular file");
+        if (resultStat.size > 1024 * 1024) throw new Error(`result JSON exceeds 1 MiB (${resultStat.size} bytes)`);
         raw = await readFile(resultHostPath, "utf8");
-      } catch {
+        await rm(resultHostPath, { force: true, recursive: true });
+      } catch (readError) {
+        if (readError instanceof Error && (readError.message === "result path is not a regular file" || readError.message.startsWith("result JSON exceeds"))) {
+          await rm(resultHostPath, { force: true, recursive: true });
+          return errorResult(input.name, revision, readError.message, startedAt);
+        }
         const detail = processResult.timedOut
           ? `scanner timed out after ${definition.timeoutMs}ms and wrote no result`
           : `scanner wrote no result (exit ${processResult.code ?? processResult.signal ?? "unknown"}): ${(processResult.stderr || processResult.spawnError || "").slice(-1_000)}`;
@@ -313,7 +354,6 @@ export class TrustedCheckRunner {
       if (!parsed.success) {
         return errorResult(input.name, revision, `scanner result violates the contract: ${parsed.error.issues.map((issue) => issue.message).join("; ").slice(0, 500)}`, startedAt);
       }
-      await writeFile(resultHostPath, `${JSON.stringify(parsed.data, null, 2)}\n`);
       const diagnostics = [
         parsed.data.diagnostics ?? "",
         processResult.timedOut ? `scanner timed out after ${definition.timeoutMs}ms` : "",
@@ -343,7 +383,13 @@ export class TrustedCheckRunner {
   }
 
   private checkout(): Promise<string> {
-    this.checkoutPromise ??= this.prepareCheckout();
+    if (!this.checkoutPromise) {
+      const pending = this.prepareCheckout();
+      this.checkoutPromise = pending;
+      void pending.catch(() => {
+        if (this.checkoutPromise === pending) this.checkoutPromise = undefined;
+      });
+    }
     return this.checkoutPromise;
   }
 

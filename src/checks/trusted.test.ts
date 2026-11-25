@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { mkdtemp, mkdir, readFile, writeFile } from "node:fs/promises";
+import { access, mkdtemp, mkdir, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
@@ -63,8 +63,7 @@ JSON
     expect(result.conclusion).toBe("failure");
     expect(result.findings[0]?.evidence).toBe("value [redacted]");
     expect(JSON.stringify(result.findings)).not.toContain(secret);
-    const persisted = await readFile(join(fixture.workspace, "trusted-checks", "secrets", "result.json"), "utf8");
-    expect(persisted).not.toContain(secret);
+    await expect(access(join(fixture.workspace, "trusted-checks", "secrets", "result.json"))).rejects.toThrow();
     expect(result.revision).toBe(fixture.revision);
   });
 
@@ -140,6 +139,36 @@ JSON
     });
     expect(result.status).toBe("success");
     expect(result.findings[0]?.summary).toBe("etc absent");
+  });
+
+  it("deletes stale output before execution so a crashed scanner cannot reuse it", async () => {
+    const fixture = await trustedFixture(`exit 7
+`);
+    const outputDir = join(fixture.workspace, "trusted-checks", "secrets");
+    await mkdir(outputDir, { recursive: true });
+    await writeFile(join(outputDir, "result.json"), JSON.stringify({ status: "success", scanner: { name: "stale" }, findings: [] }));
+    const result = await new TrustedCheckRunner(configFor(fixture.revision, fixture.trusted, fixture.workspace)).run({
+      name: "secrets",
+      repoDir: fixture.repoDir,
+      workspaceDir: fixture.workspace,
+      diffPath: fixture.diffPath,
+    });
+    expect(result.status).toBe("error");
+    expect(result.scannerName).toBe("secrets");
+    expect(result.diagnostics).toContain("wrote no result");
+  });
+
+  it("refuses a trusted checkout that overlaps the pull-request checkout", async () => {
+    const fixture = await trustedFixture(`exit 0
+`);
+    const result = await new TrustedCheckRunner(configFor(fixture.revision, fixture.trusted, fixture.workspace)).run({
+      name: "secrets",
+      repoDir: fixture.trusted,
+      workspaceDir: fixture.workspace,
+      diffPath: fixture.diffPath,
+    });
+    expect(result.status).toBe("error");
+    expect(result.diagnostics).toContain("must not overlap");
   });
 
   it("refuses a dirty or wrong-revision local trusted checkout before executing anything", async () => {

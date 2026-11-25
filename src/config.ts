@@ -438,7 +438,7 @@ export function assertRuntimeConfig(
   }
   const trustedSource = Boolean(config.trustedChecks.repoUrl || config.trustedChecks.localPath);
   if (trustedSource && !/^[0-9a-f]{40}$/.test(config.trustedChecks.revision)) {
-    throw new Error("Trusted checks require MAOMAO_TRUSTED_CHECKS_REVISION to be a full lowercase commit SHA");
+    throw new Error("Trusted checks require MAOMAO_TRUSTED_CHECKS_REVISION to be a full commit SHA");
   }
   if (config.trustedChecks.repoUrl && config.trustedChecks.localPath) {
     throw new Error("Set either MAOMAO_TRUSTED_CHECKS_REPO_URL or MAOMAO_TRUSTED_CHECKS_PATH, not both");
