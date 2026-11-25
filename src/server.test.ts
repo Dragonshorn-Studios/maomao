@@ -5739,7 +5739,8 @@ describe("forge connection routes", () => {
     expect(response.status).toBe(200);
     const html = await response.text();
     expect(html).toContain("Forge connections");
-    expect(html).toContain("Add a GitLab connection");
+    expect(html).toContain("Add a forge connection");
+    expect(html).toContain("option value=\"forgejo\"");
   });
 
   it("rejects a connection whose URL violates the policy, without persisting", async () => {

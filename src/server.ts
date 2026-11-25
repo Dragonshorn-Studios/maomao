@@ -5,6 +5,7 @@ import type { Config } from "./config.js";
 import type { JobStore } from "./jobs/store.js";
 import { handleGithubWebhook } from "./github/webhooks.js";
 import { handleGitLabWebhook } from "./gitlab/webhooks.js";
+import { handleForgejoWebhook } from "./forgejo/webhooks.js";
 import { ForgeConnectionStore, countConnections, toView } from "./forge/connections.js";
 import { probeConnection } from "./forge/probe.js";
 import { InstanceUrlError } from "./forge/safe-http.js";
@@ -693,6 +694,34 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
     return c.json(result.body, result.status as 200);
   });
 
+  app.post("/webhooks/forgejo/:connectionId", async (c) => {
+    if (!ctx.forgeConnections) {
+      return c.text("Forge connections require MAOMAO_FORGE_KEY", 503);
+    }
+    const rawBody = await c.req.text();
+    const result = await handleForgejoWebhook({
+      config: ctx.config,
+      store: ctx.store,
+      connections: ctx.forgeConnections,
+      rateLimiter,
+      connectionId: c.req.param("connectionId"),
+      request: {
+        event: c.req.header("x-forgejo-event") ?? c.req.header("x-gitea-event") ?? "",
+        rawBody,
+        deliveryId: c.req.header("x-forgejo-delivery") ?? c.req.header("x-gitea-delivery") ?? c.req.header("x-github-delivery") ?? undefined,
+        forgejoSignature: c.req.header("x-forgejo-signature") ?? undefined,
+        giteaSignature: c.req.header("x-gitea-signature") ?? undefined,
+        hubSignature256: c.req.header("x-hub-signature-256") ?? undefined,
+        gogsSignature: c.req.header("x-gogs-signature") ?? undefined,
+      },
+      abortJobs: (ids) => ctx.queue.abortMany(ids),
+    });
+    if (result.enqueue) {
+      dispatchEnqueue(ctx.queue, result.enqueue);
+    }
+    return c.json(result.body, result.status as 200);
+  });
+
   app.get("/reviews", (c) => c.redirect("/", 302));
 
   app.post("/reviews", async (c) => {
@@ -1236,14 +1265,22 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
     const checked = (name: string) => body[name] === "1";
     const redirect = (query: string) => c.redirect(`/connections${query}`, 303);
     try {
+      const providerText = text("provider");
+      if (providerText && providerText !== "gitlab" && providerText !== "forgejo") {
+        throw new Error("provider must be gitlab or forgejo");
+      }
+      const provider = (providerText || "gitlab") as "gitlab" | "forgejo";
       const row = ctx.forgeConnections.create({
-        provider: "gitlab",
+        provider,
         label: text("label"),
         instanceUrl: text("instanceUrl"),
         token: typeof body.token === "string" ? body.token : "",
-        tokenType: (["project", "group", "pat"] as const).includes(text("tokenType") as "project")
-          ? (text("tokenType") as "project" | "group" | "pat")
-          : "pat",
+        tokenType:
+          provider === "forgejo"
+            ? "pat"
+            : (["project", "group", "pat"] as const).includes(text("tokenType") as "project")
+              ? (text("tokenType") as "project" | "group" | "pat")
+              : "pat",
         scopeType: (["instance", "group", "project"] as const).includes(text("scopeType") as "instance")
           ? (text("scopeType") as "instance" | "group" | "project")
           : "instance",
@@ -1283,9 +1320,10 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
     if (!gateOn) return c.redirect("/", 302);
     if (!ctx.forgeConnections) return c.text("Forge connections require MAOMAO_FORGE_KEY", 503);
     const id = c.req.param("id");
+    const row = ctx.forgeConnections.get(id);
     const probe = await probeConnection(ctx.forgeConnections, id, { timeoutMs: 10_000 });
     if (probe.ok) {
-      return c.redirect(`/connections?notice=${encodeURIComponent(`Probe ok: ${probe.botUsername}${probe.version ? ` on GitLab ${probe.version}` : ""}`)}`, 303);
+      return c.redirect(`/connections?notice=${encodeURIComponent(`Probe ok: ${probe.botUsername}${probe.version ? ` on ${row?.provider === "forgejo" ? "Forgejo" : "GitLab"} ${probe.version}` : ""}`)}`, 303);
     }
     return c.redirect(`/connections?error=${encodeURIComponent(`Probe failed: ${probe.error}`)}`, 303);
   });

@@ -58,7 +58,7 @@ export async function probeConnection(
           : `instance returned status ${response.status} for /user`,
     };
   }
-  let user: { id?: unknown; username?: unknown };
+  let user: { id?: unknown; username?: unknown; login?: unknown };
   try {
     user = JSON.parse(response.body) as { id?: unknown; username?: unknown };
   } catch {
@@ -68,15 +68,17 @@ export async function probeConnection(
   if (typeof botUserId !== "number" || !Number.isSafeInteger(botUserId)) {
     return { ok: false, error: "instance /user response is missing a numeric id" };
   }
-  const botUsername = typeof user.username === "string" ? user.username : undefined;
+  const botUsername = typeof user.username === "string" ? user.username : typeof user.login === "string" ? user.login : undefined;
 
   // Token scopes: best-effort; older self-managed versions may not expose
   // the self endpoint to project/group access tokens. Never fatal, but the
   // outcome is recorded so "unknown" never masquerades as "checked".
-  const scopes = await bestEffort(`${base}/personal_access_tokens/self`, requestBase, (body) => {
-    const parsed = JSON.parse(body) as { scopes?: unknown };
-    return Array.isArray(parsed.scopes) ? parsed.scopes.map(String) : undefined;
-  });
+  const scopes = connection.row.provider === "gitlab"
+    ? await bestEffort(`${base}/personal_access_tokens/self`, requestBase, (body) => {
+        const parsed = JSON.parse(body) as { scopes?: unknown };
+        return Array.isArray(parsed.scopes) ? parsed.scopes.map(String) : undefined;
+      })
+    : { value: undefined };
 
   const version = await bestEffort(`${base}/version`, requestBase, (body) => {
     const parsed = JSON.parse(body) as { version?: unknown };

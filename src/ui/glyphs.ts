@@ -42,6 +42,8 @@ export function forgeMark(provider: string): string {
       return githubMark();
     case "gitlab":
       return gitlabMark();
+    case "forgejo":
+      return `<svg ${SIZE}><path d="M3 11.5h10M4 8.5h8M8 2.5 13 7H3Z M5 11.5v2h6v-2" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linejoin="miter"/></svg>`;
     default:
       return "";
   }
