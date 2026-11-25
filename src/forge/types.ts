@@ -156,6 +156,10 @@ export interface ForgeChange {
   baseRef: string;
   headRef: string;
   draft: boolean;
+  /** Provider-reported change state when portable enough to reconcile; omit when unknown. */
+  state?: string;
+  /** Authoritative merged flag when the provider exposes one; omit when unknown. */
+  merged?: boolean;
   /** GitHub-only numeric identifiers; undefined on other forges. */
   repositoryId?: number;
   accountId?: number;

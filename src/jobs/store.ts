@@ -1512,6 +1512,34 @@ export class JobStore {
   }
 
   /**
+   * Latest PR-review job per forge/repo/pull, newest first. The optional id
+   * cursor lets background reconciliation walk the whole catalog in bounded
+   * batches instead of either hammering every forge or permanently missing
+   * long-lived pulls.
+   */
+  listLatestPullReviewJobsPage(input: { beforeId?: number; limit: number; provider?: string }): { jobs: JobRow[]; hasMore: boolean } {
+    const limit = Math.max(1, Math.min(100, Math.trunc(input.limit)));
+    const clauses = ["job_type = 'pr_review'"];
+    const params: unknown[] = [];
+    if (input.provider) {
+      clauses.push("provider = ?");
+      params.push(input.provider);
+    }
+    const rows = this.db
+      .prepare(
+        `SELECT * FROM (
+           SELECT *, ROW_NUMBER() OVER (
+             PARTITION BY provider, provider_instance, repo_full_name, pr_number ORDER BY id DESC
+           ) AS rn
+           FROM jobs WHERE ${clauses.join(" AND ")}
+         ) WHERE rn = 1 AND id < ?
+         ORDER BY id DESC LIMIT ?`,
+      )
+      .all(...params, input.beforeId ?? Number.MAX_SAFE_INTEGER, limit + 1) as JobRow[];
+    return { jobs: rows.slice(0, limit), hasMore: rows.length > limit };
+  }
+
+  /**
    * Pancake easter egg: derived, not stored — every completed job is one
    * pancake, counting straight off the jobs table so restarts and retries
    * never double-count. `latestId` is the newest completed job id (0 if none);
