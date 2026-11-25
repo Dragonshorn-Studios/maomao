@@ -97,7 +97,7 @@ export function renderLogin(options: LoginOptions = {}): string {
         Password
         <input type="password" name="password" autocomplete="current-password" autofocus required/>
       </label>
-      <button type="submit">Sign in</button>
+      <button class="if-button if-button--primary" type="submit">Sign in</button>
     </form>`
     : "";
   const body = `
@@ -268,7 +268,7 @@ export function renderHome(jobs: JobRow[], store: JobStore, options: PageOptions
           ).join("")}
         </select>
       </label>
-      <button type="submit">Filter</button>
+      <button class="if-button if-button--sm" type="submit">Filter</button>
       ${jobFilters.repo || jobFilters.type ? `<a class="top-link" href="/${queueParams({ view, forge: options.activeForge, superseded: superseded?.active === true })}">Clear filters</a>` : ""}
     </form>`
     : "";
@@ -299,7 +299,7 @@ export function renderHome(jobs: JobRow[], store: JobStore, options: PageOptions
         Queue a GitHub pull request
         <input type="url" name="url" placeholder="https://github.com/owner/repo/pull/123" value="${escapeHtml(options.reviewUrl ?? "")}" required/>
       </label>
-      <button type="submit">Queue review</button>
+      <button class="if-button if-button--primary" type="submit">Queue review</button>
     </form>
     ${
       cards
@@ -523,9 +523,13 @@ function renderStackMembers(members: NonNullable<JobPageOptions["stackMembers"]>
       </li>`;
     })
     .join("");
+  const pct = members.length ? Math.round((doneCount / members.length) * 100) : 0;
   return `<h2>Stack members</h2>
     <ol class="stack-rail" aria-label="Pull requests in stack review order">${rows}</ol>
-    <p class="muted">Reviewed bottom-up; each member is pinned to the head SHA shown. ${doneCount} / ${members.length} done.</p>`;
+    <div class="stack-progress">
+      <div class="if-progress${pct === 100 ? " if-progress--success" : ""}" role="progressbar" aria-valuenow="${pct}" aria-valuemin="0" aria-valuemax="100" aria-label="${doneCount} of ${members.length} member reviews done"><span style="width:${pct}%"></span></div>
+      <p class="muted">Reviewed bottom-up; each member is pinned to the head SHA shown. ${doneCount} / ${members.length} done.</p>
+    </div>`;
 }
 
 function renderScanIssuesAudit(rows: NonNullable<JobPageOptions["scanIssues"]>): string {
@@ -741,7 +745,7 @@ function renderCancelledBanner(job: JobRow): string {
 function dequeueForm(jobId: number, csrfToken?: string, hint?: string): string {
   return `<form class="dequeue" method="post" action="/jobs/${jobId}/dequeue">
       ${csrfInput(csrfToken)}
-      <button type="submit">Dequeue</button>
+      <button class="if-button if-button--sm" type="submit">Dequeue</button>
       ${hint ? `<span class="muted">${escapeHtml(hint)}</span>` : ""}
     </form>`;
 }
@@ -946,7 +950,7 @@ export function renderReviewerBoard(
           ${RUN_STATE_FILTERS.map((filter) => `<option value="${filter.value}"${stateFilter === filter.value ? " selected" : ""}>${filter.label}</option>`).join("")}
         </select>
       </label>
-      <button type="submit">Filter</button>
+      <button class="if-button if-button--sm" type="submit">Filter</button>
       ${stateFilter ? `<a class="top-link" href="/reviewers">Clear filters</a>` : ""}
     </form>
     ${
@@ -1225,37 +1229,38 @@ export function renderRun(
     cacheReadTokens: run.cache_read_tokens ?? 0,
     cacheWriteTokens: run.cache_write_tokens ?? 0,
   });
-  return `<article class="card">
-    <header>
-      <span class="role"${hint ? ` title="${escapeHtml(hint)}"` : ""}>${roleGlyph(run.role)} <strong>${escapeHtml(run.title || run.role)}</strong> <span class="muted">(${escapeHtml(run.role)})</span></span>
+  const metric = (label: string, value: string) => `<div><small>${label}</small><strong>${escapeHtml(value)}</strong></div>`;
+  return `<article class="if-reviewer-card run-card">
+    <div class="if-row if-row--between">
+      <span class="if-row"><span class="if-reviewer-card__icon" aria-hidden="true">${roleGlyph(run.role)}</span><span class="role"${hint ? ` title="${escapeHtml(hint)}"` : ""}><strong>${escapeHtml(run.title || run.role)}</strong> <span class="muted">(${escapeHtml(run.role)})</span></span></span>
       ${renderState(run.state, state.text, state.hint, state.mark)}
-    </header>
+    </div>
     ${hunt ? `<p class="muted">${escapeHtml(hunt)}</p>` : ""}
-    <p class="muted">
-      model <code class="metric">${escapeHtml(run.model || "default model")}</code>
-      ${run.provider ? ` · provider <code class="metric">${escapeHtml(run.provider)}</code>` : ""}
-      · attempt ${run.attempt}
-      · <span class="metric">${escapeHtml(formatDuration(run.duration_ms))}</span>
-      ${tokens ? ` · <span class="metric">${escapeHtml(tokens)}</span>` : ""}
-      ${run.cost != null ? ` · <span class="metric">${escapeHtml(formatCost(run.cost))}</span>` : ""}
-      · ${findingCount} finding(s)
-    </p>
+    <div class="if-metric-strip">
+      ${metric("Model", run.model || "default model")}
+      ${run.provider ? metric("Provider", run.provider) : ""}
+      ${metric("Attempt", String(run.attempt))}
+      ${metric("Duration", formatDuration(run.duration_ms))}
+      ${tokens ? metric("Tokens", tokens) : ""}
+      ${run.cost != null ? metric("Cost", formatCost(run.cost)) : ""}
+      ${metric("Findings", `${findingCount} finding(s)`)}
+    </div>
     ${breakdown ? `<p class="muted usage-breakdown">${escapeHtml(breakdown)}</p>` : ""}
     ${run.usage_complete === 0 ? `<p class="usage-incomplete">${escapeHtml(run.usage_warning || usageIncompleteCopy())}</p>` : ""}
-    ${run.validation_error ? `<p class="error" role="alert"><strong>Validation error:</strong> ${escapeHtml(run.validation_error)}</p>` : ""}
+    ${run.validation_error ? `<p class="error if-banner if-banner--danger" role="alert"><strong>Validation error:</strong> ${escapeHtml(run.validation_error)}</p>` : ""}
     ${
       showRetry
         ? `<form class="retry" method="post" action="/jobs/${run.job_id}/reviewers/${run.id}/retry">
              ${csrfInput(csrfToken)}
-             <button type="submit">Retry</button>
+             <button class="if-button if-button--sm" type="submit">Retry</button>
            </form>`
         : ""
     }
     ${parsed?.summary ? `<p>${escapeHtml(parsed.summary)}</p>` : ""}
-    ${run.normalized_json ? `<details><summary>Normalized JSON</summary><pre class="log-panel">${escapeHtml(run.normalized_json)}</pre></details>` : ""}
-    ${run.raw_output && run.raw_output !== run.normalized_json ? `<details><summary>Raw output</summary><pre class="log-panel">${escapeHtml(run.raw_output)}</pre></details>` : ""}
-    ${run.stdout ? `<details><summary>stdout</summary><pre class="log-panel">${escapeHtml(run.stdout)}</pre></details>` : ""}
-    ${run.stderr ? `<details><summary>stderr</summary><pre class="log-panel">${escapeHtml(run.stderr)}</pre></details>` : ""}
+    ${run.normalized_json ? `<details><summary>Normalized JSON</summary><pre class="log-panel if-log">${escapeHtml(run.normalized_json)}</pre></details>` : ""}
+    ${run.raw_output && run.raw_output !== run.normalized_json ? `<details><summary>Raw output</summary><pre class="log-panel if-log">${escapeHtml(run.raw_output)}</pre></details>` : ""}
+    ${run.stdout ? `<details><summary>stdout</summary><pre class="log-panel if-log">${escapeHtml(run.stdout)}</pre></details>` : ""}
+    ${run.stderr ? `<details><summary>stderr</summary><pre class="log-panel if-log">${escapeHtml(run.stderr)}</pre></details>` : ""}
   </article>`;
 }
 
@@ -1268,21 +1273,21 @@ function renderAggregator(job: JobRow, metrics: JobMetrics): string {
       : agg?.findings?.length
         ? observationsCopy(agg.findings.length)
         : "Aggregator result";
-  return `<article class="card">
-    <header>
-      <span class="role role-agg">${roleGlyph("aggregator")} <strong>Aggregator</strong></span>
+  return `<article class="if-reviewer-card run-card">
+    <div class="if-row if-row--between">
+      <span class="if-row"><span class="if-reviewer-card__icon" aria-hidden="true">${roleGlyph("aggregator")}</span><span class="role role-agg"><strong>Aggregator</strong></span></span>
       ${renderState(job.aggregator_state, state.text, state.hint, state.mark)}
-    </header>
-    <p class="muted">
-      ${job.aggregator_model ? `model <code class="metric">${escapeHtml(job.aggregator_model)}</code>` : "model pending"}
-      ${job.aggregator_provider ? ` · provider <code class="metric">${escapeHtml(job.aggregator_provider)}</code>` : ""}
-      · <span class="metric">${escapeHtml(formatDuration(job.aggregator_duration_ms))}</span>
-      · <span class="metric">${escapeHtml(aggregatorUsageCopy(job))}</span>
-    </p>
+    </div>
+    <div class="if-metric-strip">
+      <div><small>Model</small><strong>${escapeHtml(job.aggregator_model || "pending")}</strong></div>
+      ${job.aggregator_provider ? `<div><small>Provider</small><strong>${escapeHtml(job.aggregator_provider)}</strong></div>` : ""}
+      <div><small>Duration</small><strong>${escapeHtml(formatDuration(job.aggregator_duration_ms))}</strong></div>
+      <div><small>Usage</small><strong>${escapeHtml(aggregatorUsageCopy(job))}</strong></div>
+    </div>
     <p><strong>${escapeHtml(heading)}</strong></p>
-    ${agg?.summary ? `<pre class="log-panel">${escapeHtml(agg.summary)}</pre>` : job.aggregator_normalized || job.aggregator_raw ? "" : `<p class="muted">(pending)</p>`}
-    ${job.aggregator_normalized ? `<details><summary>Normalized JSON</summary><pre class="log-panel">${escapeHtml(job.aggregator_normalized)}</pre></details>` : ""}
-    ${job.aggregator_raw ? `<details><summary>Raw output</summary><pre class="log-panel">${escapeHtml(job.aggregator_raw)}</pre></details>` : ""}
+    ${agg?.summary ? `<pre class="log-panel if-log">${escapeHtml(agg.summary)}</pre>` : job.aggregator_normalized || job.aggregator_raw ? "" : `<p class="muted">(pending)</p>`}
+    ${job.aggregator_normalized ? `<details><summary>Normalized JSON</summary><pre class="log-panel if-log">${escapeHtml(job.aggregator_normalized)}</pre></details>` : ""}
+    ${job.aggregator_raw ? `<details><summary>Raw output</summary><pre class="log-panel if-log">${escapeHtml(job.aggregator_raw)}</pre></details>` : ""}
   </article>`;
 }
 
@@ -1440,36 +1445,36 @@ export function renderFindingCard(
         ${attention ? `<p><strong>${attention}</strong></p>` : ""}
         ${displayReason ? `<p>${escapeHtml(displayReason)}</p>` : ""}
         ${input.suggested ? `<p class="muted">Suggested check: ${escapeHtml(input.suggested)}</p>` : ""}
-        ${input.agreed?.length ? `<p class="muted">reviewers: ${escapeHtml(input.agreed.join(", "))}</p>` : ""}
         ${record?.confidence != null ? `<p class="muted">Aggregator confidence: ${Math.round(record.confidence * 100)}%</p>` : ""}
         ${diffBlock}
         ${markerNote}`;
-  if (collapsed) {
-    return `<details class="${classes}">
+  // Unified infernal if-finding disclosure: active findings render open,
+  // settled (buried/resolved) ones collapsed — the library's finding
+  // lifecycle pattern. All semantic classes stay as hooks for tests and the
+  // status-driven styling in theme.ts.
+  const captionBits = [
+    loc ? escapeHtml(loc) : "",
+    input.category ? escapeHtml(input.category) : "",
+    input.agreed?.length ? `reviewers: ${escapeHtml(input.agreed.join(", "))}` : "",
+  ].filter(Boolean);
+  return `<details class="${classes} if-finding"${collapsed ? "" : " open"}>
         <summary>
-          ${statusBadge}
-          ${staleBadge}
-          <span class="sev sev-${escapeHtml(input.severity)}"><span class="mark" aria-hidden="true">${sev.mark}</span> ${sev.text}</span>
-          ${loc ? `<span class="loc">${escapeHtml(loc)}</span>` : ""}
-          <span class="finding-title">${escapeHtml(displaySummary)}</span>
+          <span class="finding-summary-text">
+            <strong class="finding-title">${escapeHtml(displaySummary)}</strong>
+            ${captionBits.length ? `<br><span class="if-caption if-mono loc">${captionBits.join(" · ")}</span>` : ""}
+          </span>
+          <span class="finding-summary-badges">
+            ${input.unconfirmed ? `<span class="unconfirmed">Unconfirmed</span>` : ""}
+            ${statusBadge}
+            ${staleBadge}
+            <span class="sev sev-${escapeHtml(input.severity)}"><span class="mark" aria-hidden="true">${sev.mark}</span> ${sev.text}</span>
+          </span>
         </summary>
-        ${input.category ? `<p class="muted">${escapeHtml(input.category)}</p>` : ""}
-        ${body}
-      </details>`;
-  }
-  return `<article class="${classes}">
-        <div class="finding-head">
-          <span class="sev sev-${escapeHtml(input.severity)}"><span class="mark" aria-hidden="true">${sev.mark}</span> ${sev.text}</span>
-          ${statusBadge}
-          ${staleBadge}
-          ${input.unconfirmed ? `<span class="unconfirmed">Unconfirmed</span>` : ""}
-          ${input.category ? `<span>· ${escapeHtml(input.category)}</span>` : ""}
-          ${input.agreed?.length ? `<span class="muted">reviewers: ${escapeHtml(input.agreed.join(", "))}</span>` : ""}
+        <div class="if-finding__body">
+          ${locLink ? `<p class="loc">${locLink}</p>` : ""}
+          ${body}
         </div>
-        ${loc ? `<p class="loc">${escapeHtml(loc)}${locLink}</p>` : ""}
-        <h3>${escapeHtml(displaySummary)}</h3>
-        ${body}
-      </article>`;
+      </details>`;
 }
 
 function renderFindingDiff(record?: FindingRow): string {
@@ -1637,42 +1642,42 @@ function revisionCard(revision: ConfigRevisionView, data: ConfigPageData): strin
   const csrf = csrfInput(data.csrfToken);
   const actions: string[] = [];
   if (data.canWrite && revision.status === "draft") {
-    actions.push(`<a href="/config/profiles/drafts/${revision.id}/edit" class="btn-secondary">Edit draft</a>`);
+    actions.push(`<a href="/config/profiles/drafts/${revision.id}/edit" class="btn-secondary if-button if-button--sm">Edit draft</a>`);
     actions.push(`<form method="post" action="/config/revisions/${revision.id}/activate" class="inline-form">
       ${csrf}
-      <button type="submit" class="btn">Activate</button>
+      <button type="submit" class="btn if-button if-button--primary if-button--sm">Activate</button>
     </form>`);
     actions.push(`<form method="post" action="/config/revisions/${revision.id}/discard" class="inline-form">
       ${csrf}
-      <button type="submit" class="btn-secondary">Discard</button>
+      <button type="submit" class="btn-secondary if-button if-button--sm">Discard</button>
     </form>`);
   }
   if (data.canWrite && (revision.status === "active" || revision.status === "retired")) {
     actions.push(`<form method="post" action="/config/revisions/${revision.id}/edit" class="inline-form">
       ${csrf}
-      <button type="submit" class="btn-secondary">Edit</button>
+      <button type="submit" class="btn-secondary if-button if-button--sm">Edit</button>
     </form>`);
   }
   if (data.canWrite && revision.status === "active") {
     actions.push(`<form method="post" action="/config/revisions/${revision.id}/deactivate" class="inline-form">
       ${csrf}
-      <button type="submit" class="btn-secondary">Deactivate</button>
+      <button type="submit" class="btn-secondary if-button if-button--sm">Deactivate</button>
     </form>`);
   }
   if (data.canWrite && revision.status === "retired") {
     actions.push(`<form method="post" action="/config/revisions/${revision.id}/rollback" class="inline-form">
       ${csrf}
-      <button type="submit" class="btn-secondary">Roll back to this revision</button>
+      <button type="submit" class="btn-secondary if-button if-button--sm">Roll back to this revision</button>
     </form>`);
     actions.push(`<form method="post" action="/config/revisions/${revision.id}/delete" class="inline-form">
       ${csrf}
-      <button type="submit" class="btn-secondary">Delete</button>
+      <button type="submit" class="btn-secondary if-button if-button--sm">Delete</button>
     </form>`);
   }
   if (data.canWrite) {
     actions.push(`<form method="post" action="/config/revisions/${revision.id}/duplicate" class="inline-form">
       ${csrf}
-      <button type="submit" class="btn-secondary">Duplicate</button>
+      <button type="submit" class="btn-secondary if-button if-button--sm">Duplicate</button>
     </form>`);
   }
   const routedPatterns = (data.profileRoutes ?? []).filter((route) => route.profile_name === revision.name);
@@ -1697,7 +1702,7 @@ function revisionCard(revision: ConfigRevisionView, data: ConfigPageData): strin
     ${effectNote}
     <details>
       <summary>Definition</summary>
-      <pre class="log-panel">${escapeHtml(definitionJson)}</pre>
+      <pre class="log-panel if-log">${escapeHtml(definitionJson)}</pre>
     </details>
     <div class="config-actions">${actions.join("")}</div>
   </article>`;
@@ -1789,20 +1794,20 @@ export function renderProfileForm(
       // click that does nothing. Boundary rows simply have fewer buttons.
       const upButton =
         index > 0
-          ? `<button type="submit" name="action" value="up:${index}" aria-label="Move reviewer ${index + 1} up">↑</button>`
+          ? `<button class="if-button if-button--sm" type="submit" name="action" value="up:${index}" aria-label="Move reviewer ${index + 1} up">↑</button>`
           : "";
       const downButton =
         index < values.reviewers.length - 1
-          ? `<button type="submit" name="action" value="down:${index}" aria-label="Move reviewer ${index + 1} down">↓</button>`
+          ? `<button class="if-button if-button--sm" type="submit" name="action" value="down:${index}" aria-label="Move reviewer ${index + 1} down">↓</button>`
           : "";
       return `<fieldset class="profile-reviewer">
         <legend>Reviewer ${index + 1}</legend>
         ${rowErrors.length > 0 ? `<p class="error" role="alert" id="${escapeHtml(`reviewer_row_${index}`)}-error">${rowErrors.map((message) => escapeHtml(message)).join("<br/>")}</p>` : ""}
-        <label>Role
-          <select name="${key("role")}" ${roleError ? `aria-invalid="true" aria-describedby="reviewer_row_${index}-error"` : ""}>${roleOptions(row.role)}</select>
+        <label class="if-field"><span class="if-label">Role</span>
+<select name="${key("role")}" ${roleError ? `aria-invalid="true" aria-describedby="reviewer_row_${index}-error"` : ""}>${roleOptions(row.role)}</select>
         </label>
-        <label>Model override (optional; provider/model)
-          ${modelPicker({
+        <label class="if-field"><span class="if-label">Model override (optional; provider/model)</span>
+${modelPicker({
             name: key("model"),
             value: row.model,
             models: options.modelCatalog,
@@ -1812,14 +1817,14 @@ export function renderProfileForm(
             buttonAttrs: modelError ? `aria-invalid="true"` : "",
           })}
         </label>
-        <label>Timeout in seconds (optional, decimals allowed — caps this reviewer's run time; falls back to OPENCODE_TIMEOUT_MS)
-          <input type="number" step="any" min="0" name="${key("timeout")}" value="${escapeHtml(row.timeoutSeconds)}"
+        <label class="if-field"><span class="if-label">Timeout in seconds (optional, decimals allowed — caps this reviewer's run time; falls back to OPENCODE_TIMEOUT_MS)</span>
+<input type="number" step="any" min="0" name="${key("timeout")}" value="${escapeHtml(row.timeoutSeconds)}"
             ${timeoutError ? `aria-invalid="true" aria-describedby="reviewer_row_${index}-error"` : ""}/>
         </label>
         <div class="config-actions">
           ${upButton}
           ${downButton}
-          <button type="submit" name="action" value="remove:${index}" aria-label="Remove reviewer ${index + 1}">Remove</button>
+          <button class="if-button if-button--sm" type="submit" name="action" value="remove:${index}" aria-label="Remove reviewer ${index + 1}">Remove</button>
         </div>
       </fieldset>`;
     })
@@ -1837,7 +1842,7 @@ export function renderProfileForm(
           <p class="muted">${escapeHtml(line)}</p>
           <form method="post" action="/config/models/refresh" class="inline-form">
             ${csrfInput(options.csrfToken)}
-            <button type="submit" class="btn-secondary">Refresh model list</button>
+            <button type="submit" class="btn-secondary if-button if-button--sm">Refresh model list</button>
           </form>
         </div>`;
       })()
@@ -1860,20 +1865,20 @@ export function renderProfileForm(
       <input type="hidden" name="reviewer_count" value="${values.reviewers.length}"/>
       <fieldset>
         <legend>Profile</legend>
-        <label>Name (lowercase letters, digits, dashes)
-          <input name="name" value="${escapeHtml(values.name)}" pattern="[a-z0-9][a-z0-9-]{0,48}" required
+        <label class="if-field"><span class="if-label">Name (lowercase letters, digits, dashes)</span>
+<input name="name" value="${escapeHtml(values.name)}" pattern="[a-z0-9][a-z0-9-]{0,48}" required
             ${invalidAttr("name")} ${describedBy("name")}/>
         </label>
         <p class="muted">Jobs use the active profile whose name a repo route targets; <code>default</code> is the fallback when no route matches.</p>
         ${err("name")}
-        <label>Revision note (optional)
-          <input name="note" value="${escapeHtml(values.note)}"/>
+        <label class="if-field"><span class="if-label">Revision note (optional)</span>
+<input name="note" value="${escapeHtml(values.note)}"/>
         </label>
       </fieldset>
       <fieldset>
         <legend>Reviewers (in order; roles not listed are disabled)</legend>
         ${reviewerRows}
-        <button type="submit" name="action" value="add">Add reviewer</button>
+        <button class="if-button if-button--sm" type="submit" name="action" value="add">Add reviewer</button>
       </fieldset>
       <fieldset>
         <legend>Alert overrides (optional)</legend>
@@ -1885,8 +1890,8 @@ export function renderProfileForm(
       <fieldset>
         <legend>Verifier (reconciliation pass — optional)</legend>
         <p class="hint">Re-checks prior findings against the new head before specialists run. Blank fields fall back to <code>OPENCODE_VERIFIER_MODEL</code> / <code>OPENCODE_VERIFIER_TIMEOUT_MS</code>.</p>
-        <label>Verifier model override (optional; provider/model)
-          ${modelPicker({
+        <label class="if-field"><span class="if-label">Verifier model override (optional; provider/model)</span>
+${modelPicker({
             name: "verifier_model",
             value: values.verifierModel,
             models: options.modelCatalog,
@@ -1897,20 +1902,20 @@ export function renderProfileForm(
           })}
         </label>
         ${err("verifier_model")}
-        <label>Verifier timeout in seconds (optional, decimals allowed)
-          <input type="number" step="any" min="0" name="verifier_timeout" value="${escapeHtml(values.verifierTimeoutSeconds)}" ${invalidAttr("verifier_timeout")} ${describedBy("verifier_timeout")}/>
+        <label class="if-field"><span class="if-label">Verifier timeout in seconds (optional, decimals allowed)</span>
+<input type="number" step="any" min="0" name="verifier_timeout" value="${escapeHtml(values.verifierTimeoutSeconds)}" ${invalidAttr("verifier_timeout")} ${describedBy("verifier_timeout")}/>
         </label>
         ${err("verifier_timeout")}
       </fieldset>
       <fieldset>
         <legend>Publishing</legend>
-        <label>Minimum publishable severity
-          <select name="min_severity">
+        <label class="if-field"><span class="if-label">Minimum publishable severity</span>
+<select name="min_severity">
             ${SEVERITIES.map((severity) => `<option value="${severity}"${severity === values.minSeverity ? " selected" : ""}>${severity}</option>`).join("")}
           </select>
         </label>
-        <label>Router model override (optional; provider/model)
-          ${modelPicker({
+        <label class="if-field"><span class="if-label">Router model override (optional; provider/model)</span>
+${modelPicker({
             name: "router_model",
             value: values.routerModel,
             models: options.modelCatalog,
@@ -1921,23 +1926,23 @@ export function renderProfileForm(
           })}
         </label>
         ${err("router_model")}
-        <label>Total cost ceiling in USD (optional — enforced per job across reviewer, aggregation, and verification spend)
-          <input type="number" step="0.01" min="0" name="max_cost_usd" value="${escapeHtml(values.maxCostUsd)}" ${invalidAttr("max_cost_usd")} ${describedBy("max_cost_usd")}/>
+        <label class="if-field"><span class="if-label">Total cost ceiling in USD (optional — enforced per job across reviewer, aggregation, and verification spend)</span>
+<input type="number" step="0.01" min="0" name="max_cost_usd" value="${escapeHtml(values.maxCostUsd)}" ${invalidAttr("max_cost_usd")} ${describedBy("max_cost_usd")}/>
         </label>
         ${err("max_cost_usd")}
-        <label>Total token ceiling (optional — enforced per job across reviewer, aggregation, and verification spend)
-          <input type="number" min="0" name="max_tokens" value="${escapeHtml(values.maxTokens)}" ${invalidAttr("max_tokens")} ${describedBy("max_tokens")}/>
+        <label class="if-field"><span class="if-label">Total token ceiling (optional — enforced per job across reviewer, aggregation, and verification spend)</span>
+<input type="number" min="0" name="max_tokens" value="${escapeHtml(values.maxTokens)}" ${invalidAttr("max_tokens")} ${describedBy("max_tokens")}/>
         </label>
         ${err("max_tokens")}
-        <label>When a budget ceiling is hit
-          <select name="budget_behavior">
+        <label class="if-field"><span class="if-label">When a budget ceiling is hit</span>
+<select name="budget_behavior">
             <option value="degrade"${values.budgetBehavior === "degrade" ? " selected" : ""}>Degrade — skip remaining paid stages, publish partial results</option>
             <option value="fail"${values.budgetBehavior === "fail" ? " selected" : ""}>Fail — abort the job</option>
           </select>
         </label>
       </fieldset>
       <button type="submit" name="action" value="save" class="btn">Save draft</button>
-      <button type="submit" name="action" value="test" class="btn-secondary"
+      <button type="submit" name="action" value="test" class="btn-secondary if-button if-button--sm"
         title="Probe every non-empty provider/model field sequentially (60s each) — does not save the draft">Test models</button>
       <a href="/config/profiles">Cancel</a>
     </form>
@@ -1985,7 +1990,7 @@ function repoRoutingSection(data: ConfigPageData): string {
           data.canWrite
             ? `<form method="post" action="/config/routes/${route.id}/delete" class="inline-form">
           ${csrf}
-          <button type="submit" class="btn-secondary">Remove</button>
+          <button type="submit" class="btn-secondary if-button if-button--sm">Remove</button>
         </form>`
             : ""
         }</p>`,
@@ -2041,7 +2046,7 @@ export function roleFormValuesFromRole(role: CustomRoleRow): RoleFormValues {
 function readOnlyPromptDetails(summary: string, text: string, extraClass = ""): string {
   return `<details${extraClass ? ` class="${escapeHtml(extraClass)}"` : ""}>
       <summary>${escapeHtml(summary)}</summary>
-      <pre class="log-panel">${escapeHtml(text)}</pre>
+      <pre class="log-panel if-log">${escapeHtml(text)}</pre>
     </details>`;
 }
 
@@ -2060,7 +2065,7 @@ function customRolesSection(data: PromptConfigPageData): string {
         <a href="/config/prompts?duplicate_role=${encodeURIComponent(role.slug)}">Duplicate</a>
         <form method="post" action="/config/roles/${encodeURIComponent(role.slug)}/delete" class="inline-form">
           ${csrf}
-          <button type="submit" class="btn-secondary">Delete</button>
+          <button type="submit" class="btn-secondary if-button if-button--sm">Delete</button>
         </form>`
             : ""
         }</p>
@@ -2404,7 +2409,7 @@ function promptRevisionCard(revision: PromptRevisionView, data: PromptConfigPage
   if (data.canWrite && revision.status === "retired") {
     actions.push(`<form method="post" action="/config/prompts/${revision.id}/rollback" class="inline-form">
       ${csrf}
-      <button type="submit" class="btn-secondary">Roll back to this revision</button>
+      <button type="submit" class="btn-secondary if-button if-button--sm">Roll back to this revision</button>
     </form>`);
   }
   return `<article class="card config-revision" data-prompt-revision="${revision.id}">
@@ -2415,7 +2420,7 @@ function promptRevisionCard(revision: PromptRevisionView, data: PromptConfigPage
     ${revision.note ? `<p class="muted">${escapeHtml(revision.note)}</p>` : ""}
     <details>
       <summary>Editable instructions</summary>
-      <pre class="log-panel">${escapeHtml(revision.body)}</pre>
+      <pre class="log-panel if-log">${escapeHtml(revision.body)}</pre>
     </details>
     ${readOnlyPromptDetails("Composed built-in", composeReviewerPrompt(revision.body), "prompt-composed")}
     ${revision.status === "draft" && data.canWrite ? `<details>
@@ -2451,7 +2456,7 @@ export function promptRoleCard(
     active && data.canWrite
       ? `<form method="post" action="/config/prompts/${active.id}/deactivate" class="inline-form">
           ${csrf}
-          <button type="submit" class="btn-secondary">Disable override</button>
+          <button type="submit" class="btn-secondary if-button if-button--sm">Disable override</button>
         </form>`
       : "";
   const overrideForm =
@@ -2485,7 +2490,7 @@ export function promptRoleCard(
     <p class="prompt-preview muted">${escapeHtml(previewPromptBody(currentBody))}</p>
     <details>
       <summary>${active ? "Current override" : "Built-in instructions"}</summary>
-      <pre class="log-panel">${escapeHtml(currentBody)}</pre>
+      <pre class="log-panel if-log">${escapeHtml(currentBody)}</pre>
     </details>
     ${readOnlyPromptDetails("Composed built-in", composeReviewerPrompt(currentBody), "prompt-composed")}
     ${disableOverride}

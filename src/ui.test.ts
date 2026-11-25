@@ -55,8 +55,8 @@ describe("theme tokens", () => {
     expect(THEME_CSS).toContain("@keyframes spin");
     // The Dequeue and Cancel review controls wear the same small-outline style as Retry.
     expect(THEME_CSS).toContain("form.retry, form.retry-job, form.dequeue {");
-    expect(THEME_CSS).toContain(".retry button, .retry-job button, .dequeue button, a.cancel-review {");
-    expect(THEME_CSS).toContain(".dequeue button:hover, a.cancel-review:hover");
+    expect(THEME_CSS).toContain(".retry button:not(.if-button), .retry-job button:not(.if-button), .dequeue button:not(.if-button), a.cancel-review {");
+    expect(THEME_CSS).toContain(".dequeue button:not(.if-button):hover, a.cancel-review:hover");
     expect(THEME_CSS).toMatch(/a\.cancel-review \{[^}]*text-decoration: none/);
     expect(THEME_CSS).toContain(".section-head");
     expect(THEME_CSS).toMatch(/\.tick\.running[\s\S]*var\(--working\)/);
@@ -263,11 +263,12 @@ describe("monitoring pages", () => {
     const findingsSection = html.slice(html.indexOf('id="findings"'));
     expect(findingsSection).toContain("Session cookie Secure flag can be dropped");
     expect(findingsSection).toContain("Finding requires attention");
-    expect(findingsSection).toMatch(/<article class="finding(?![^"]*(?:is-buried|is-resolved))/);
+    expect(findingsSection).toMatch(/<details class="finding if-finding(?![^"]*(?:is-buried|is-resolved))[ "^]*" open>/);
     expect(findingsSection).toContain("<details class=\"finding is-buried");
     expect(findingsSection).toContain("<details class=\"finding is-resolved");
     expect(findingsSection).toContain("<summary>");
-    expect(findingsSection).not.toMatch(/<details[^>]*\sopen[\s>]/);
+    // Active findings render open; only settled ones stay collapsed.
+    expect(findingsSection).not.toMatch(/<details class="finding is-(?:buried|resolved)[^"]*" open>/);
     expect(findingsSection).toContain("Dismissed");
     expect(findingsSection).toContain("Production cookie note omits the forwarded-proto caveat");
     expect(findingsSection).toContain("Buried by octocat via @maomao bury");

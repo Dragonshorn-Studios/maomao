@@ -226,6 +226,21 @@ a.if-rail__button { display: grid; place-items: center; text-decoration: none; }
   margin-top: 0.18rem;
 }
 
+.stack-progress {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  margin: 0.5rem 0 0.4rem;
+}
+
+.stack-progress .if-progress {
+  flex: 0 1 240px;
+}
+
+.stack-progress .muted {
+  margin: 0;
+}
+
 /* Merge lifecycle panel — infernal inspector rows on top of if-panel. The
  * library owns the panel chrome (head band, surface, radius); these rows lay
  * the facts out label-left / value-right like the example inspector. */
@@ -309,6 +324,47 @@ a.if-rail__button { display: grid; place-items: center; text-decoration: none; }
 .merge-lifecycle-note {
   margin: 2px 0 0;
 }
+
+/* if-field error variant: the config form marks invalid controls with
+   aria-invalid rather than a wrapper class, so key the danger treatment off
+   the attribute — same visual as the library's if-field--error .if-input. */
+body.operator main input[aria-invalid="true"],
+body.operator main select[aria-invalid="true"],
+body.operator main textarea[aria-invalid="true"],
+body.operator main .model-picker [aria-invalid="true"] {
+  border-color: var(--if-danger);
+}
+
+body.operator main input[aria-invalid="true"]:focus,
+body.operator main select[aria-invalid="true"]:focus,
+body.operator main textarea[aria-invalid="true"]:focus {
+  outline-color: var(--if-danger);
+}
+
+/* if-label inside converted config fields — quiet 12px library treatment. */
+label.if-field {
+  margin-bottom: 0.7rem;
+}
+
+/* infernal component adaptations — the vendored if-log/if-diff colors are
+   hardcoded for dark; key them to the theme tokens instead. Placed late so
+   they win over both the vendored rules and the legacy .log-panel frame. */
+.if-log {
+  background: var(--code-bg);
+  border-color: var(--line);
+  color: var(--code-fg);
+  /* maomao reviewer output is longer than the library's 160px default. */
+  max-height: 22rem;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+/* Reviewer run cards on the job detail: vertical rhythm for the adopted
+   if-reviewer-card chrome. */
+.run-card { display: flex; flex-direction: column; gap: 10px; margin-bottom: 12px; }
+.run-card .if-metric-strip { margin: 2px 0; }
+.run-card .if-reviewer-card__icon svg { width: 15px; height: 15px; }
+.run-card form.retry { margin: 0; }
 
 @media (max-width: 720px) {
   .shell, .shell.has-context { display: block; }
@@ -436,7 +492,7 @@ button, summary {
   border-radius: var(--if-radius-sm, 7px);
 }
 
-.btn, .login button, .trigger button, .logout button.primary, .chat-send {
+.btn:not(.if-button), .login button:not(.if-button), .trigger button:not(.if-button), .logout button.primary, .chat-send {
   background: var(--action);
   color: var(--btn-fg);
   border: 1px solid color-mix(in srgb, var(--action) 70%, var(--ink));
@@ -445,7 +501,7 @@ button, summary {
   cursor: pointer;
   letter-spacing: 0.02em;
 }
-.btn:hover, .login button:hover, .trigger button:hover, .chat-send:hover {
+.btn:not(.if-button):hover, .login button:not(.if-button):hover, .trigger button:not(.if-button):hover, .chat-send:hover {
   filter: brightness(1.05);
 }
 
@@ -1107,7 +1163,7 @@ form.retry, form.retry-job, form.dequeue {
   gap: 0.45rem;
 }
 /* a.cancel-review is an anchor styled as a button — see the anchor resets below. */
-.retry button, .retry-job button, .dequeue button, a.cancel-review {
+.retry button:not(.if-button), .retry-job button:not(.if-button), .dequeue button:not(.if-button), a.cancel-review {
   background: var(--paper);
   color: var(--ink);
   border: 1px solid var(--line-strong);
@@ -1118,7 +1174,7 @@ form.retry, form.retry-job, form.dequeue {
   cursor: pointer;
   white-space: nowrap;
 }
-.retry button:hover, .retry-job button:hover, .dequeue button:hover, a.cancel-review:hover {
+.retry button:not(.if-button):hover, .retry-job button:not(.if-button):hover, .dequeue button:not(.if-button):hover, a.cancel-review:hover {
   color: var(--action);
   border-color: var(--action);
 }
@@ -1135,8 +1191,53 @@ a.cancel-review { text-decoration: none; display: inline-block; }
 .role-agg svg { color: var(--plum); }
 
 .finding {
-  padding: 0.85rem 1rem;
   margin: 0 0 0.75rem;
+}
+
+/* Adopted if-finding chrome: summary/body own the padding, the card is a
+   borderless-at-rest disclosure. Theme layer keeps status-driven border
+   treatments working on top. */
+.finding.if-finding {
+  padding: 0;
+  background: var(--surface);
+}
+
+.finding.if-finding summary {
+  gap: 14px;
+}
+
+.finding-summary-text {
+  min-width: 0;
+  font-size: 12.5px;
+}
+
+.finding-summary-text .finding-title {
+  font-size: 13px;
+}
+
+.finding-summary-text .loc {
+  display: inline-block;
+  margin-top: 3px;
+}
+
+.finding-summary-badges {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  flex: none;
+  margin-left: auto;
+}
+
+/* The library chevron sits after the badges; keep it compact. */
+.finding.if-finding summary::after {
+  flex: none;
+}
+
+.finding.if-finding .if-finding__body {
+  color: var(--ink-weak);
+  font-size: 12.5px;
 }
 .finding.is-unconfirmed {
   border-style: dashed;
@@ -1236,9 +1337,25 @@ a.cancel-review { text-decoration: none; display: inline-block; }
   position: relative;
 }
 /* Server-rendered line spans (no-JS fallback) share the panel pre's newlines —
-   they must stay inline or every line renders double-spaced. */
-.diff-panel .diff-add { color: var(--jade); }
-.diff-panel .diff-del { color: var(--cinnabar); }
+   they must stay inline or every line renders double-spaced. The soft tinted
+   backgrounds mirror the infernal if-diff--add/--remove line treatment, keyed
+   to theme tokens (the vendored component colors are hardcoded for dark). */
+.diff-panel {
+  font-size: 11px;
+  line-height: 1.75;
+}
+.diff-panel .diff-add {
+  color: var(--jade);
+  background: var(--jade-soft);
+  box-decoration-break: clone;
+  -webkit-box-decoration-break: clone;
+}
+.diff-panel .diff-del {
+  color: var(--cinnabar);
+  background: var(--cinnabar-soft);
+  box-decoration-break: clone;
+  -webkit-box-decoration-break: clone;
+}
 .diff-panel .diff-ctx { color: var(--ink-muted); }
 .diff-note { font-size: 0.8rem; }
 
@@ -1462,47 +1579,15 @@ details.finding-diff > summary {
 details.finding:not([open]) {
   opacity: 0.82;
 }
-details.finding {
-  padding: 0.45rem 0.75rem;
-  margin: 0 0 0.4rem;
-}
-details.finding > summary {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 0.3rem 0.55rem;
-  align-items: baseline;
-  cursor: pointer;
-  color: var(--ink);
-  list-style: none;
-}
+/* The infernal if-finding component owns disclosure chrome (summary padding,
+   ::after chevron, body hairline). These rules only cover what the library
+   misses: Firefox's ::marker and the maomao severity/status typography. */
 details.finding > summary::-webkit-details-marker,
 details.finding > summary::marker {
   display: none;
 }
-details.finding > summary::before {
-  content: "▸";
-  color: var(--ash);
-  font-size: 0.72rem;
-  width: 0.7rem;
-  flex: none;
-}
-details.finding[open] > summary::before {
-  content: "▾";
-}
-details.finding[open] > summary {
-  margin-bottom: 0.35rem;
-  padding-bottom: 0.35rem;
-  border-bottom: 1px dashed var(--line);
-}
-details.finding .finding-title {
-  flex: 1 1 10rem;
-  font-family: var(--font-ui);
-  font-weight: 600;
-  font-size: 0.92rem;
-}
-details.finding .loc {
-  margin: 0;
-  font-size: 0.78rem;
+details.finding > summary {
+  list-style: none;
 }
 .settled-findings-label {
   margin: 1rem 0 0.45rem;
@@ -1781,8 +1866,8 @@ details summary { cursor: pointer; color: var(--ink-muted); }
 }
 .account-logout { margin: 0.15rem 0 0; padding: 0.15rem 0 0; border-top: 1px solid var(--line); }
 
-.btn, .btn-secondary, .btn-danger,
-body.operator main form:not(.chat-composer) button {
+.btn:not(.if-button), .btn-secondary:not(.if-button), .btn-danger:not(.if-button),
+body.operator main form:not(.chat-composer) button:not(.if-button):not(.model-picker-btn) {
   font: inherit;
   font-weight: 600;
   letter-spacing: 0.02em;
@@ -1792,20 +1877,20 @@ body.operator main form:not(.chat-composer) button {
   background: var(--action);
   color: var(--btn-fg);
 }
-.btn-secondary,
-body.operator main form:not(.chat-composer) button.btn-secondary {
+.btn-secondary:not(.if-button),
+body.operator main form:not(.chat-composer) button.btn-secondary:not(.if-button):not(.model-picker-btn) {
   background: var(--paper);
   color: var(--ink);
   border: 1px solid var(--line-strong);
 }
-.btn-danger,
-body.operator main form:not(.chat-composer) button.btn-danger {
+.btn-danger:not(.if-button),
+body.operator main form:not(.chat-composer) button.btn-danger:not(.if-button):not(.model-picker-btn) {
   background: var(--cinnabar);
   color: var(--btn-fg);
   border: 1px solid color-mix(in srgb, var(--cinnabar) 70%, var(--ink));
 }
-.btn:hover, body.operator main form:not(.chat-composer) button:hover { filter: brightness(1.05); }
-.btn-secondary:hover, body.operator main form:not(.chat-composer) button.btn-secondary:hover {
+.btn:not(.if-button):hover, body.operator main form:not(.chat-composer) button:not(.if-button):not(.model-picker-btn):hover { filter: brightness(1.05); }
+.btn-secondary:not(.if-button):hover, body.operator main form:not(.chat-composer) button.btn-secondary:not(.if-button):hover {
   color: var(--action);
   border-color: var(--action);
   filter: none;
