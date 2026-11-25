@@ -4916,6 +4916,31 @@ describe("home queue family views", () => {
   });
 });
 
+describe("static asset caching", () => {
+  it("revalidates every load with a content etag and answers 304s", async () => {
+    const { app } = testApp();
+    for (const path of ["/assets/maomao.css", "/assets/infernal.css", "/assets/favicon.svg", "/assets/typeahead.js", "/assets/model-picker.js"]) {
+      const first = await app.request(path);
+      expect(first.status).toBe(200);
+      // Unversioned URLs must never be cached across deploys: the browser
+      // revalidates every time and the etag keeps that answer a cheap 304.
+      expect(first.headers.get("cache-control")).toBe("no-cache");
+      const etag = first.headers.get("etag");
+      expect(etag).toBeTruthy();
+      const revalidated = await app.request(path, { headers: { "if-none-match": etag! } });
+      expect(revalidated.status).toBe(304);
+      expect(await revalidated.text()).toBe("");
+    }
+  });
+
+  it("varies the etag with the content, so a deploy invalidates caches", async () => {
+    const { app } = testApp();
+    const css = await app.request("/assets/maomao.css");
+    const svg = await app.request("/assets/favicon.svg");
+    expect(css.headers.get("etag")).not.toBe(svg.headers.get("etag"));
+  });
+});
+
 describe("navigation reorganization", () => {
   function seededOne() {
     const { app, store } = testApp();
