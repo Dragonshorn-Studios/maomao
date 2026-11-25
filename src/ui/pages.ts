@@ -387,6 +387,30 @@ export type JobPageOptions = PageOptions & {
 };
 
 
+/** Lifecycle states map onto infernal badge variants: success for terminal
+ * good states, running accent for in-flight ones, warning/danger for the
+ * states an operator should look at. */
+function lifecycleBadge(state: MergeLifecycle["state"], label: string): string {
+  const variant =
+    state === "merged" || state === "ready"
+      ? "success"
+      : state === "blocked" || state === "failed"
+        ? "danger"
+        : state === "stale"
+          ? "warning"
+          : state === "scheduled_auto_merge"
+            ? "info"
+            : "running";
+  const pulse = variant === "running" ? '<span class="if-dot if-dot--pulse" aria-hidden="true"></span>' : "";
+  return `<span class="if-badge if-badge--${variant}">${pulse}${escapeHtml(label)}</span>`;
+}
+
+/** One fact row in the lifecycle panel: quiet label left, value right, in
+ * the infernal inspector-row pattern. */
+function lifecycleFact(label: string, valueHtml: string): string {
+  return `<div class="if-row if-row--between merge-fact"><span class="if-label">${escapeHtml(label)}</span><span class="merge-fact-value">${valueHtml}</span></div>`;
+}
+
 function renderMergeLifecycle(lifecycle: MergeLifecycle, job: JobRow, capabilities?: MergeCapabilityReport): string {
   const labels: Record<MergeLifecycle["state"], string> = {
     reviewing: "reviewing",
@@ -402,29 +426,65 @@ function renderMergeLifecycle(lifecycle: MergeLifecycle, job: JobRow, capabiliti
   };
   const readiness = lifecycle.readiness;
   const nativeUrl = lifecycle.nativeUrl && /^https?:\/\//i.test(lifecycle.nativeUrl) ? lifecycle.nativeUrl : undefined;
+  const readinessBadge = readiness
+    ? `<span class="if-badge if-badge--${readiness.conclusion === "success" ? "success" : readiness.conclusion === "failure" ? "danger" : "running"}">${escapeHtml(readiness.status)}${readiness.conclusion ? ` · ${escapeHtml(readiness.conclusion)}` : ""}</span>`
+    : `<span class="muted">not published</span>`;
+  const capabilityFacts = capabilities
+    ? [
+        lifecycleFact("Merge mode", `<code>${escapeHtml(capabilities.mergeMode)}</code> <span class="muted">read-only</span>`),
+        lifecycleFact(
+          "Native auto-merge",
+          `<code>${escapeHtml(capabilities.nativeAutoMerge)}</code>${capabilities.nativeMergeScheduled != null ? ` <span class="muted">· ${capabilities.nativeMergeScheduled ? "scheduled after latest head push" : "not scheduled for current head"}</span>` : ""}`,
+        ),
+        lifecycleFact("GitHub native queue", `<code>${escapeHtml(capabilities.githubNativeQueue)}</code>`),
+        lifecycleFact(
+          "Merge methods",
+          capabilities.mergeMethods.length
+            ? capabilities.mergeMethods.map((method) => `<span class="if-badge">${escapeHtml(method)}</span>`).join(" ")
+            : `<span class="muted">none detected</span>`,
+        ),
+        capabilities.baseRef
+          ? lifecycleFact("Base branch", `<code>${escapeHtml(capabilities.baseRef)}</code>${capabilities.draft ? ' <span class="if-badge if-badge--warning">draft PR</span>' : ""}`)
+          : "",
+        capabilities.pullState || capabilities.mergeable
+          ? lifecycleFact("Pull state", escapeHtml([capabilities.pullState, capabilities.mergeable].filter(Boolean).join(" · ")))
+          : "",
+        lifecycleFact(
+          "Forge",
+          `<code>${escapeHtml(job.provider ?? "github")}</code>${job.provider_instance ? ` · <code>${escapeHtml(job.provider_instance)}</code>` : ""}${capabilities.forgeVersion ? ` <span class="muted">· <code>${escapeHtml(capabilities.forgeVersion)}</code></span>` : ""}`,
+        ),
+        lifecycleFact(
+          "Protected branch",
+          capabilities.protectedBranch == null
+            ? `<span class="muted">unknown</span>`
+            : `<span class="if-badge if-badge--${capabilities.protectedBranch ? "info" : ""}">${capabilities.protectedBranch ? "yes" : "no"}</span>`,
+        ),
+        lifecycleFact(
+          "Branch protection",
+          capabilities.requiredStatusContexts.length
+            ? `${escapeHtml(capabilities.requiredStatusContexts.join(", "))}${capabilities.requiredApprovals ? `; ${capabilities.requiredApprovals} approval(s)` : ""}`
+            : `<span class="muted">none detected</span>${capabilities.requiredApprovals ? `; ${capabilities.requiredApprovals} approval(s)` : ""}`,
+        ),
+      ]
+        .filter(Boolean)
+        .join("")
+    : "";
   return `<h2>Merge lifecycle</h2>
-    <section class="card merge-lifecycle">
-      <dl class="config-grid">
-        <dt>State</dt><dd><strong>${escapeHtml(labels[lifecycle.state])}</strong></dd>
-        <dt>Exact head</dt><dd><code class="sha">${escapeHtml(shortSha(job.head_sha, 12))}</code></dd>
-        <dt>Readiness check</dt><dd>${readiness ? `<code>${escapeHtml(readiness.status)}</code>${readiness.conclusion ? ` / <code>${escapeHtml(readiness.conclusion)}</code>` : ""}` : "not published"}</dd>
-        <dt>Native merge</dt><dd>${job.pr_html_url ? `<a href="${escapeHtml(job.pr_html_url)}">open the forge pull request</a>` : "—"}</dd>
-        ${nativeUrl ? `<dt>Native check</dt><dd><a href="${escapeHtml(nativeUrl)}" target="_blank" rel="noopener noreferrer">open forge check/status</a></dd>` : ""}
-        ${capabilities ? `<dt>Merge mode</dt><dd><code>${escapeHtml(capabilities.mergeMode)}</code> <span class="muted">read-only detection; no merge control</span></dd>
-        <dt>Native auto-merge</dt><dd><code>${escapeHtml(capabilities.nativeAutoMerge)}</code>${capabilities.nativeMergeScheduled != null ? ` · ${capabilities.nativeMergeScheduled ? "scheduled after latest head push" : "not scheduled for current head"}` : ""}</dd>
-        <dt>GitHub native queue</dt><dd><code>${escapeHtml(capabilities.githubNativeQueue)}</code></dd>
-        <dt>Merge methods</dt><dd>${capabilities.mergeMethods.length ? escapeHtml(capabilities.mergeMethods.join(", ")) : "none detected"}</dd>
-        ${capabilities.baseRef ? `<dt>Base branch</dt><dd><code>${escapeHtml(capabilities.baseRef)}</code>${capabilities.draft ? " · draft PR" : ""}</dd>` : ""}
-        ${capabilities.pullState || capabilities.mergeable ? `<dt>Pull state</dt><dd>${escapeHtml([capabilities.pullState, capabilities.mergeable].filter(Boolean).join(" · "))}</dd>` : ""}
-        ${capabilities.forgeVersion ? `<dt>Forge version</dt><dd><code>${escapeHtml(capabilities.forgeVersion)}</code></dd>` : ""}
-        <dt>Forge</dt><dd><code>${escapeHtml(job.provider ?? "github")}</code>${job.provider_instance ? ` · <code>${escapeHtml(job.provider_instance)}</code>` : ""}</dd>
-        <dt>Protected branch</dt><dd>${capabilities.protectedBranch == null ? "unknown" : capabilities.protectedBranch ? "yes" : "no"}</dd>
-        <dt>Branch protection</dt><dd>${capabilities.requiredStatusContexts.length ? escapeHtml(capabilities.requiredStatusContexts.join(", ")) : "none detected"}${capabilities.requiredApprovals ? `; ${capabilities.requiredApprovals} approval(s)` : ""}</dd>` : ""}
-      </dl>
-      ${capabilities?.reasons.length ? `<details><summary>Merge capability diagnostics</summary><ul>${capabilities.reasons.map((reason) => `<li>${escapeHtml(reason)}</li>`).join("")}</ul></details>` : ""}
-      <p class="muted">${escapeHtml(lifecycle.detail)} Maomao reports native merge state only; it does not merge or bypass branch protection.</p>
-      ${readiness?.summary ? `<details><summary>Readiness policy details</summary><pre>${escapeHtml(readiness.summary)}</pre></details>` : ""}
-      ${readiness?.publish_error ? `<p class="error" role="alert">Publication error: ${escapeHtml(readiness.publish_error)}</p>` : ""}
+    <section class="if-panel merge-lifecycle">
+      <div class="if-panel__head">
+        <span class="if-row"><span class="if-eyebrow">Exact head</span><code class="sha">${escapeHtml(shortSha(job.head_sha, 12))}</code></span>
+        ${lifecycleBadge(lifecycle.state, labels[lifecycle.state])}
+      </div>
+      <div class="if-panel__body if-stack if-stack--sm">
+        ${lifecycleFact("Readiness check", readinessBadge)}
+        ${lifecycleFact("Native merge", job.pr_html_url ? `<a href="${escapeHtml(job.pr_html_url)}">open the forge pull request</a>` : "—")}
+        ${nativeUrl ? lifecycleFact("Native check", `<a href="${escapeHtml(nativeUrl)}" target="_blank" rel="noopener noreferrer">open forge check/status</a>`) : ""}
+        ${capabilities ? `<hr class="if-divider"/>${capabilityFacts}` : ""}
+        ${capabilities?.reasons.length ? `<details class="merge-diagnostics"><summary>Merge capability diagnostics</summary><ul>${capabilities.reasons.map((reason) => `<li>${escapeHtml(reason)}</li>`).join("")}</ul></details>` : ""}
+        <p class="if-caption merge-lifecycle-note">${escapeHtml(lifecycle.detail)} Maomao reports native merge state only; it does not merge or bypass branch protection.</p>
+        ${readiness?.summary ? `<details class="merge-diagnostics"><summary>Readiness policy details</summary><pre>${escapeHtml(readiness.summary)}</pre></details>` : ""}
+        ${readiness?.publish_error ? `<p class="error" role="alert">Publication error: ${escapeHtml(readiness.publish_error)}</p>` : ""}
+      </div>
     </section>`;
 }
 

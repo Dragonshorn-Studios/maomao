@@ -212,9 +212,11 @@ describe("HTTP app", () => {
 
     const olderHtml = await (await app.request(`/jobs/${older.job.id}`)).text();
     const currentHtml = await (await app.request(`/jobs/${current.job.id}`)).text();
-    expect(olderHtml).toContain("<strong>stale</strong>");
-    expect(olderHtml).not.toContain("<strong>merged</strong>");
-    expect(currentHtml).toContain("<strong>merged</strong>");
+    expect(olderHtml).toContain("if-badge if-badge--warning");
+    expect(olderHtml).toContain(">stale</span>");
+    expect(olderHtml).not.toContain(">merged</span>");
+    expect(currentHtml).toContain("if-badge if-badge--success");
+    expect(currentHtml).toContain(">merged</span>");
   });
 
   it("renders read-only merge capability diagnostics from the job forge", async () => {

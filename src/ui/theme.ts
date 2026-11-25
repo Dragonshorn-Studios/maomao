@@ -128,25 +128,30 @@ a:hover { color: var(--action); filter: brightness(1.12); }
 .appearance {
   display: inline-flex;
   border: 1px solid var(--line);
+  border-radius: 9px;
   background: var(--surface);
-  padding: 0.1rem;
-  gap: 0.1rem;
+  padding: 3px;
+  gap: 2px;
 }
 .appearance button {
   appearance: none;
   border: 0;
+  border-radius: 6px;
   background: transparent;
   color: var(--ink-muted);
   font: inherit;
-  font-size: 0.75rem;
+  font-weight: 600;
+  font-size: 0.72rem;
   letter-spacing: 0.04em;
   text-transform: uppercase;
-  padding: 0.28rem 0.5rem;
+  padding: 0.28rem 0.6rem;
   cursor: pointer;
 }
+.appearance button:hover { color: var(--ink); }
 .appearance button[aria-pressed="true"] {
   background: var(--action-soft);
   color: var(--ink);
+  box-shadow: inset 0 0 0 1px var(--line);
 }
 
 
@@ -219,6 +224,90 @@ a.if-rail__button { display: grid; place-items: center; text-decoration: none; }
   text-transform: uppercase;
   color: var(--ash);
   margin-top: 0.18rem;
+}
+
+/* Merge lifecycle panel — infernal inspector rows on top of if-panel. The
+ * library owns the panel chrome (head band, surface, radius); these rows lay
+ * the facts out label-left / value-right like the example inspector. */
+.merge-lifecycle .if-panel__head code.sha {
+  font-family: var(--if-mono);
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.merge-fact {
+  padding: 7px 0;
+  border-bottom: 1px solid var(--rule);
+  align-items: baseline;
+  gap: 18px;
+}
+
+.merge-fact:last-of-type {
+  border-bottom: 0;
+}
+
+.merge-fact .if-label {
+  flex: none;
+  min-width: 132px;
+}
+
+.merge-fact-value {
+  text-align: right;
+  font-size: 12.5px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
+  flex-wrap: wrap;
+  min-width: 0;
+}
+
+.merge-fact-value code {
+  font-family: var(--if-mono);
+  font-size: 11.5px;
+}
+
+.merge-fact-value a {
+  color: var(--if-accent);
+  font-weight: 600;
+}
+
+.merge-diagnostics {
+  font-size: 12.5px;
+  color: var(--muted);
+}
+
+.merge-diagnostics summary {
+  cursor: pointer;
+  font-weight: 600;
+  color: var(--ink-weak);
+  border-radius: var(--radius);
+}
+
+.merge-diagnostics summary:hover {
+  color: var(--if-accent);
+}
+
+.merge-diagnostics ul {
+  margin: 8px 0 0;
+  padding-left: 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.merge-diagnostics pre {
+  margin-top: 8px;
+  padding: 12px 14px;
+  background: var(--well);
+  border: 1px solid var(--rule);
+  border-radius: var(--radius);
+  font-size: 11.5px;
+  overflow-x: auto;
+}
+
+.merge-lifecycle-note {
+  margin: 2px 0 0;
 }
 
 @media (max-width: 720px) {
@@ -344,7 +433,7 @@ button, input, textarea {
 }
 button, summary {
   appearance: none;
-  border-radius: 0;
+  border-radius: var(--if-radius-sm, 7px);
 }
 
 .btn, .login button, .trigger button, .logout button.primary, .chat-send {
@@ -429,11 +518,11 @@ button, summary {
   gap: 0.8rem;
   padding: 1rem 1.1rem;
 }
-.login input, .trigger input {
+.login input, .trigger input, .trigger select {
   width: 100%;
   margin-top: 0.3rem;
-  padding: 0.45rem 0.5rem;
-  background: var(--paper);
+  padding: 0.45rem 0.6rem;
+  background: var(--if-bg-raised, var(--paper));
   color: var(--ink);
   border: 1px solid var(--line-strong);
 }
@@ -471,20 +560,31 @@ button, summary {
   border-radius: var(--if-radius, 10px);
   overflow: hidden;
 }
-/* Live jobs wear the ember accent as a full border plus the breathing bar —
-   the infernal if-card--ember treatment. */
+/* Live jobs wear the infernal if-card--ember treatment: an accent-line
+   border, a faint ember glow pooled at the card's floor, and a thin glint
+   running along the bottom edge — no side bar. */
 .specimen.is-live {
   border-color: var(--if-accent-line, var(--live));
 }
 .specimen.is-live::before {
   content: "";
   position: absolute;
-  left: 0;
-  top: 0;
+  pointer-events: none;
+  inset: 40% -20% -45%;
+  background: radial-gradient(ellipse 55% 60% at 30% 90%, color-mix(in srgb, var(--live) 30%, transparent), transparent 78%);
+  filter: blur(16px);
+  animation: breathe 4.5s ease-in-out infinite;
+}
+.specimen.is-live::after {
+  content: "";
+  position: absolute;
+  pointer-events: none;
+  left: 10%;
+  right: 10%;
   bottom: 0;
-  width: 3px;
-  background: var(--live);
-  animation: breathe 2.6s ease-in-out infinite;
+  height: 1px;
+  background: linear-gradient(90deg, transparent, var(--live), transparent);
+  opacity: 0.65;
 }
 
 /* Kind chips borrow the .state badge shape (flat, small caps) in plum. */
@@ -928,8 +1028,8 @@ h1 a.pr-external { font-size: 0.72em; }
 .job-filters select {
   width: 100%;
   margin-top: 0.3rem;
-  padding: 0.45rem 0.5rem;
-  background: var(--paper);
+  padding: 0.45rem 0.6rem;
+  background: var(--if-bg-raised, var(--paper));
   color: var(--ink);
   border: 1px solid var(--line-strong);
 }
@@ -983,6 +1083,7 @@ form.retry, form.retry-job, form.dequeue {
   background: var(--paper);
   color: var(--ink);
   border: 1px solid var(--line-strong);
+  border-radius: var(--if-radius-sm, 7px);
   padding: 0.22rem 0.65rem;
   font-size: 0.78rem;
   font-weight: 600;
@@ -1098,6 +1199,7 @@ a.cancel-review { text-decoration: none; display: inline-block; }
   line-height: 1.45;
   background: var(--surface-2);
   border: 1px solid var(--line-strong);
+  border-radius: var(--if-radius-sm, 7px);
   padding: 0.5rem 0.75rem;
   overflow-x: auto;
   white-space: pre;
@@ -1396,6 +1498,7 @@ pre, .log-panel {
   line-height: 1.45;
   padding: 0.8rem;
   border: 1px solid var(--line);
+  border-radius: var(--if-radius-sm, 7px);
   overflow: auto;
   max-height: 22rem;
 }
@@ -1589,10 +1692,12 @@ details summary { cursor: pointer; color: var(--ink-muted); }
   cursor: pointer;
   font: inherit;
   font-size: 0.85rem;
+  font-weight: 600;
   color: var(--ink);
   background: var(--surface);
   border: 1px solid var(--line);
-  padding: 0.1rem 0.5rem 0.1rem 0.28rem;
+  border-radius: var(--if-radius-sm, 7px);
+  padding: 0.22rem 0.6rem 0.22rem 0.35rem;
 }
 .account-menu-summary::-webkit-details-marker,
 .account-menu-summary::marker { display: none; }
@@ -1611,6 +1716,7 @@ details summary { cursor: pointer; color: var(--ink-muted); }
   display: grid;
   background: var(--surface);
   border: 1px solid var(--line);
+  border-radius: var(--if-radius-sm, 7px);
   box-shadow: var(--shadow);
   padding: 0.3rem;
   z-index: 8;
@@ -1675,13 +1781,19 @@ body.operator main form:not(.chat-composer) button.btn-danger {
   filter: none;
 }
 
+input:not([type="hidden"]):not([type="checkbox"]):not([type="radio"]),
+textarea,
+select {
+  border-radius: var(--if-radius-sm, 7px);
+}
+
 body.operator main input:not([type="hidden"]):not([type="checkbox"]):not([type="radio"]):not(.chat-composer-input),
 body.operator main textarea:not(.chat-composer-input),
 body.operator main select {
   width: 100%;
   margin-top: 0.3rem;
-  padding: 0.45rem 0.5rem;
-  background: var(--paper);
+  padding: 0.45rem 0.6rem;
+  background: var(--if-bg-raised, var(--paper));
   color: var(--ink);
   border: 1px solid var(--line-strong);
   border-radius: var(--radius);
@@ -1700,9 +1812,12 @@ body.operator main legend {
 }
 body.operator main table {
   width: 100%;
-  border-collapse: collapse;
+  border-collapse: separate;
+  border-spacing: 0;
   background: var(--surface);
   border: 1px solid var(--line);
+  border-radius: var(--if-radius-sm, 7px);
+  overflow: hidden;
 }
 body.operator main th,
 body.operator main td {

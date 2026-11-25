@@ -452,7 +452,7 @@ export function renderFrame(
   ${frozenStyle}
   ${scripts}
 </head>
-<body${options.frozen ? " data-workbench-frozen" : ""} data-workbench-story="${escapeHtml(story.id)}" data-workbench-variant="${escapeHtml(variant.id)}" data-workbench-family="${escapeHtml(story.family)}" data-workbench-viewport="${escapeHtml(options.viewport)}">
+<body${story.surface === "operator" ? ' class="operator"' : ""}${options.frozen ? " data-workbench-frozen" : ""} data-workbench-story="${escapeHtml(story.id)}" data-workbench-variant="${escapeHtml(variant.id)}" data-workbench-family="${escapeHtml(story.family)}" data-workbench-viewport="${escapeHtml(options.viewport)}">
 <main id="main">${fragment}</main>
 <script>${FRAME_SANDBOX_JS}</script>
 </body>

@@ -45,6 +45,12 @@ export interface WorkbenchStory {
   title: string;
   category: string;
   family: StoryFamily;
+  /**
+   * The application surface the fragment is production markup of. Operator
+   * components (config forms, audit tables) only render faithfully inside
+   * `body.operator`; the frame emulates it so the preview matches production.
+   */
+  surface?: "default" | "operator";
   variants: WorkbenchVariant[];
   /**
    * Repository-relative paths shown in the gallery and checked by
