@@ -31,6 +31,7 @@ import {
 } from "../routing/escalation.js";
 import { enqueueClaimResult, emitWebhookHandled, recordWebhookDelivery } from "../forge/deliveries.js";
 import { logForgeWrite } from "../telemetry/forge-log.js";
+import { mergeGroupMetadata, mergeGroupPrimaryPrNumber, parseMergeGroupPayload } from "./merge-group.js";
 
 export interface WebhookRequest {
   event: string;
@@ -383,6 +384,58 @@ async function handleGithubWebhookRequest(input: GithubWebhookInput): Promise<We
 
   if (input.request.event === "ping") {
     return { status: 200, body: { ok: true, event: "ping" } };
+  }
+
+  if (input.request.event === "merge_group") {
+    let payload: { action?: string };
+    try {
+      payload = JSON.parse(input.request.rawBody) as { action?: string };
+    } catch {
+      return { status: 400, body: { error: "invalid JSON" } };
+    }
+    if (payload.action !== "checks_requested") {
+      return ignored(`ignored merge_group action ${payload.action ?? "unknown"}`);
+    }
+    try {
+      const parsed = parseMergeGroupPayload(JSON.parse(input.request.rawBody));
+      const auth = rejectUnauthorized(input.config, {
+        installationId: parsed.installationId,
+        accountId: parsed.githubAccountId,
+        repositoryId: parsed.githubRepositoryId,
+      });
+      if (!auth.ok) return ignored(auth.reason);
+      const first = parsed.participants[0]!;
+      const enqueue = input.store.enqueue({
+        repoFullName: parsed.repoFullName,
+        repoOwner: parsed.repoOwner,
+        repoName: parsed.repoName,
+        installationId: parsed.installationId,
+        ...(parsed.githubAccountId ? { githubAccountId: parsed.githubAccountId } : {}),
+        ...(parsed.githubRepositoryId ? { githubRepositoryId: parsed.githubRepositoryId } : {}),
+        prNumber: mergeGroupPrimaryPrNumber(parsed.headRef, parsed.participants),
+        prTitle: `GitHub merge group for ${parsed.baseRef}`,
+        prBody: `Native merge-group validation for ${parsed.participants.map((pr) => `#${pr.number}@${pr.headSha.slice(0, 12)}`).join(", ")}`,
+        prHtmlUrl: first?.htmlUrl ?? "",
+        prAuthor: "github-merge-queue",
+        baseSha: parsed.baseSha,
+        headSha: parsed.headSha,
+        baseRef: parsed.baseRef,
+        headRef: parsed.headRef,
+        webhookDeliveryId: input.request.deliveryId,
+        webhookEvent: `${input.request.event}.${payload.action}`,
+        reviewers: [],
+        jobType: "merge_group_check",
+        mergeGroupJson: mergeGroupMetadata(parsed),
+      });
+      input.store.claimWebhookDelivery(input.request.deliveryId, input.request.event, enqueueClaimResult(enqueue));
+      return {
+        status: enqueue.created ? 202 : 200,
+        body: { ok: true, jobId: enqueue.job.id, created: enqueue.created, skippedReason: enqueue.skippedReason, headSha: enqueue.job.head_sha },
+        enqueue,
+      };
+    } catch (error) {
+      return { status: 400, body: { error: error instanceof Error ? error.message : String(error) } };
+    }
   }
 
   if (input.request.event === "issue_comment") {

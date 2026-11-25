@@ -7944,3 +7944,79 @@ describe("forge write app-log events", () => {
     );
   });
 });
+
+describe("merge-group checks", () => {
+  it("runs trusted checks on the synthetic group tree and publishes results to that SHA", async () => {
+    const store = new JobStore(openDb(":memory:"));
+    const config = loadConfig({});
+    const job = store.enqueue({
+      repoFullName: "acme/widgets",
+      repoOwner: "acme",
+      repoName: "widgets",
+      installationId: 42,
+      prNumber: 7,
+      prTitle: "GitHub merge group for main",
+      prBody: "",
+      prHtmlUrl: "",
+      prAuthor: "github-merge-queue",
+      baseSha: "base999",
+      headSha: "synthetic888",
+      baseRef: "main",
+      headRef: "refs/heads/gh-readonly-queue/main/pr-7-x",
+      reviewers: [],
+      jobType: "merge_group_check",
+      mergeGroupJson: JSON.stringify({ pullRequests: [{ number: 7, headSha: "prhead222" }] }),
+    }).job;
+
+    const commitDiffs: string[] = [];
+    const checkRuns: Array<{ headSha?: string; name?: string; status?: string }> = [];
+    const github = githubPort({
+      getCommitDiff: async (_installationId: number, _owner: string, _repo: string, sha: string) => {
+        commitDiffs.push(sha);
+        return "diff --git a/example.ts b/example.ts\n";
+      },
+      upsertCheckRun: async (input: { headSha?: string; name?: string; status?: string }) => {
+        checkRuns.push(input);
+        return { id: `check-${checkRuns.length}`, url: "" };
+      },
+    } as unknown as Partial<GithubPort>);
+    const trustedRuns: Array<{ name: string; repoDir: string; diffPath: string }> = [];
+    const trustedCheckRunner = {
+      enabledFor: () => true,
+      policyForRepo: async () => ({ requireReview: false, requiredChecks: [], revision: "trustedrev", source: "test" as const }),
+      run: async (input: { name: "secrets" | "security"; repoDir: string; diffPath: string }) => {
+        trustedRuns.push(input);
+        return {
+          name: input.name,
+          nativeName: `maomao/${input.name}`,
+          status: "success" as const,
+          conclusion: "success" as const,
+          findings: [],
+          diagnostics: "",
+          scannerName: input.name,
+          revision: "trustedrev",
+          durationMs: 1,
+        };
+      },
+    };
+    const pipeline = createPipeline({
+      config,
+      store,
+      github,
+      checkout: await fixtureCheckout(),
+      opencode: {} as OpenCodePort,
+      trustedCheckRunner: trustedCheckRunner as never,
+    });
+
+    await pipeline.run(job.id);
+
+    expect(commitDiffs).toEqual(["synthetic888"]);
+    expect(trustedRuns.map((run) => run.name)).toEqual(["secrets", "security"]);
+    const diffText = await import("node:fs/promises").then((fs) => fs.readFile(trustedRuns[0]!.diffPath, "utf8"));
+    expect(diffText).toContain("diff --git");
+    expect(checkRuns.some((run) => run.headSha === "synthetic888" && run.name === "maomao/secrets")).toBe(true);
+    expect(checkRuns.some((run) => run.headSha === "synthetic888" && run.name === "maomao/security")).toBe(true);
+    expect(checkRuns.some((run) => run.headSha === "synthetic888" && run.name === "maomao/merge-readiness")).toBe(true);
+    expect(store.getJob(job.id)?.state).toBe("completed");
+  });
+});

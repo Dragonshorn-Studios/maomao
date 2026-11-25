@@ -279,3 +279,45 @@ describe("ReviewCheckPublisher", () => {
     expect(reviewConclusionForJob({ ...job, state: "failed", failure_reason: "OpenCode timed out" })).toBe("timed_out");
   });
 });
+
+describe("merge-group check publication", () => {
+  it("publishes merge_group_check results to the synthetic SHA without PR-head supersession", async () => {
+    const store = new JobStore(openDb(":memory:"));
+    const job = store.enqueue({
+      repoFullName: "acme/widgets",
+      repoOwner: "acme",
+      repoName: "widgets",
+      installationId: 7,
+      prNumber: 12,
+      prTitle: "GitHub merge group for main",
+      prBody: "",
+      prHtmlUrl: "",
+      prAuthor: "github-merge-queue",
+      baseSha: "base",
+      headSha: "synthetic999",
+      baseRef: "main",
+      headRef: "refs/heads/gh-readonly-queue/main/pr-12-x",
+      reviewers: [],
+      jobType: "merge_group_check",
+      mergeGroupJson: JSON.stringify({ pullRequests: [{ number: 12, headSha: "prhead111" }] }),
+    }).job;
+    const sent: ForgeCheckPublishInput[] = [];
+    const publisher = publisherFor(
+      store,
+      fakePort({
+        // The participant PR head deliberately differs: validating against it
+        // must not cancel a check whose subject is the immutable merge-group SHA.
+        headSha: "prhead111",
+        publish: async (check) => {
+          sent.push(check);
+          return { id: "mg-check" };
+        },
+      }),
+    );
+
+    await publisher.publish(job, { status: "completed", conclusion: "success", validateHead: true });
+
+    expect(sent).toHaveLength(1);
+    expect(sent[0]).toMatchObject({ commitSha: "synthetic999", conclusion: "success" });
+  });
+});
