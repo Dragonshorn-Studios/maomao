@@ -18,6 +18,7 @@ import type {
   ForgePublishResult,
   ForgeRepoTarget,
   ForgeSummary,
+  ForgeMergeCapabilities,
 } from "../forge/types.js";
 import { reviewMarker } from "../prompts.js";
 
@@ -30,6 +31,9 @@ interface ForgejoPull {
   base?: { sha?: string; ref?: string };
   head?: { sha?: string; ref?: string };
   draft?: boolean;
+  merged?: boolean;
+  mergeable?: boolean;
+  state?: string;
 }
 
 interface ForgejoComment {
@@ -110,6 +114,72 @@ export class ForgejoProvider implements ForgePort {
       baseRef: pull.base.ref ?? "",
       headRef: pull.head.ref ?? "",
       draft: Boolean(pull.draft),
+    };
+  }
+
+  async probeMergeCapabilities(target: ForgeRepoTarget): Promise<ForgeMergeCapabilities> {
+    const pull = await this.request<ForgejoPull>("GET", `${this.repoPath(target)}/pulls/${target.changeNumber}`);
+    const change = { baseRef: pull.base?.ref ?? "main", draft: Boolean(pull.draft) };
+    const pullState = pull.state;
+    const mergeable = pull.mergeable;
+    let contexts: string[] = [];
+    let requiredApprovals: number | undefined;
+    let protectedBranch: boolean | undefined;
+    let mergeMethods: string[] = [];
+    let forgeVersion: string | undefined;
+    const reasons: string[] = [];
+    try {
+      const repo = await this.request<{
+        allow_merge_commits?: boolean;
+        allow_rebase?: boolean;
+        allow_rebase_explicit?: boolean;
+        allow_squash_merge?: boolean;
+        allow_fast_forward_only_merge?: boolean;
+      }>("GET", this.repoPath(target));
+      mergeMethods = [repo.allow_merge_commits ? "merge" : "", repo.allow_squash_merge ? "squash" : "", repo.allow_rebase || repo.allow_rebase_explicit ? "rebase" : "", repo.allow_fast_forward_only_merge ? "fast-forward" : ""].filter(Boolean) as string[];
+    } catch (error) {
+      reasons.push(`Forgejo repository merge methods could not be read: ${error instanceof Error ? error.message : String(error)}`);
+    }
+    try {
+      const version = await this.request<{ version?: string }>("GET", `${this.connection.instance.apiBaseUrl}/version`);
+      forgeVersion = version.version;
+    } catch {
+      reasons.push("Forgejo server version could not be read");
+    }
+    try {
+      const branchInfo = await this.request<{
+        protected?: boolean;
+        enable_status_check?: boolean;
+        status_check_contexts?: string[];
+        required_approvals?: number;
+      }>("GET", `${this.repoPath(target)}/branches/${encodeURIComponent(change.baseRef || "main")}`);
+      protectedBranch = Boolean(branchInfo.protected);
+      if (branchInfo.protected) {
+        contexts = branchInfo.enable_status_check ? [...(branchInfo.status_check_contexts ?? [])].sort() : [];
+        requiredApprovals = branchInfo.required_approvals;
+      } else {
+        reasons.push(`Forgejo branch ${change.baseRef || "main"} is not protected`);
+      }
+    } catch (error) {
+      const status = error instanceof SafeHttpError ? error.status : 0;
+      reasons.push(status === 404 ? `No Forgejo branch protection rule is configured for ${change.baseRef || "main"}` : `Forgejo branch protection could not be read: ${error instanceof Error ? error.message : String(error)}`);
+    }
+    reasons.push("Forgejo merge-when-checks-succeed support depends on the deployed server version and user action; Maomao does not infer or trigger it");
+    return {
+      mergeMode: "manual",
+      nativeAutoMerge: "unknown",
+      githubNativeQueue: "unavailable",
+      requiredStatusContexts: contexts,
+      mergeMethods,
+      baseRef: change.baseRef || "main",
+      draft: change.draft,
+      ...(pullState ? { pullState } : {}),
+      ...(mergeable != null ? { mergeable: mergeable ? "MERGEABLE" : "CONFLICTING_OR_BLOCKED" } : {}),
+      ...(forgeVersion ? { forgeVersion } : {}),
+      ...(requiredApprovals ? { requiredApprovals } : {}),
+      ...(protectedBranch != null ? { protectedBranch } : {}),
+      reasons,
+      source: "forgejo-api",
     };
   }
 

@@ -37,6 +37,18 @@ function fixtureServer(state: { statuses: unknown[]; comments: Array<{ id: numbe
         res.writeHead(status, { "content-type": "application/json" });
         res.end(JSON.stringify(value));
       };
+      if (url === "/api/v1/repos/acme/widgets" && req.method === "GET") {
+        json(200, { allow_merge_commits: true, allow_squash_merge: true, allow_rebase: false, allow_fast_forward_only_merge: false });
+        return;
+      }
+      if (url === "/api/v1/repos/acme/widgets/branches/main" && req.method === "GET") {
+        json(200, { protected: true, enable_status_check: true, status_check_contexts: ["test", "maomao/merge-readiness"], required_approvals: 2 });
+        return;
+      }
+      if (url === "/api/v1/version" && req.method === "GET") {
+        json(200, { version: "17.0.1" });
+        return;
+      }
       if (url === "/api/v1/repos/acme/widgets/pulls/7") {
         json(200, {
           number: 7,
@@ -112,6 +124,26 @@ describe("ForgejoProvider", () => {
     await expect(provider.getChange(TARGET)).resolves.toMatchObject({ headSha: "head222", baseSha: "base111", draft: false });
     await expect(provider.getChangeDiff(TARGET)).resolves.toContain("diff --git a/a.ts");
     expect(state.requests).toContain("GET /api/v1/repos/acme/widgets/pulls/7.diff");
+  });
+
+  it("reads merge capabilities without exposing a merge control", async () => {
+    const state = { statuses: [] as unknown[], comments: [] as Array<{ id: number; body: string; html_url?: string }>, requests: [] as string[] };
+    server = fixtureServer(state);
+    const { provider } = await providerOn(server);
+    await expect(provider.probeMergeCapabilities(TARGET)).resolves.toMatchObject({
+      mergeMode: "manual",
+      nativeAutoMerge: "unknown",
+      githubNativeQueue: "unavailable",
+      requiredStatusContexts: ["maomao/merge-readiness", "test"],
+      requiredApprovals: 2,
+      protectedBranch: true,
+      mergeMethods: ["merge", "squash"],
+      baseRef: "main",
+      draft: false,
+      forgeVersion: "17.0.1",
+      source: "forgejo-api",
+    });
+    expect(state.requests).toContain("GET /api/v1/repos/acme/widgets/branches/main");
   });
 
   it("posts summaries with inline findings retained in the body", async () => {

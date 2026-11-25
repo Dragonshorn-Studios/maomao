@@ -115,6 +115,72 @@ describe("GithubClient.upsertCheckRun", () => {
   });
 });
 
+describe("GithubClient.getMergeCapabilities", () => {
+  function clientWithGraphql(repository: unknown, protection?: { data?: unknown; error?: unknown }, observeVariables?: (variables: Record<string, unknown>) => void) {
+    const client = new GithubClient(loadConfig({ GITHUB_APP_ID: "1" }));
+    (client as unknown as { installationOctokit: () => unknown }).installationOctokit = () => ({
+      graphql: async (_query: string, variables: Record<string, unknown>) => {
+        observeVariables?.(variables);
+        return { repository };
+      },
+      rest: {
+        repos: {
+          getBranchRules: async () => {
+            if (protection?.error) throw protection.error;
+            return { data: protection?.data ?? {} };
+          },
+        },
+      },
+    });
+    return client;
+  }
+
+  it("reports native queue, auto-merge, and matching protection as read-only capabilities", async () => {
+    let variables: Record<string, unknown> | undefined;
+    const client = clientWithGraphql({
+      autoMergeAllowed: true,
+      mergeCommitAllowed: true,
+      squashMergeAllowed: true,
+      rebaseMergeAllowed: false,
+      mergeQueue: { url: "https://github.com/acme/widgets/queue/main" },
+      pullRequest: { state: "OPEN", isDraft: false, mergeable: "MERGEABLE", mergeStateStatus: "BLOCKED" },
+    }, {
+      data: [
+        { type: "required_status_checks", parameters: { required_status_checks: [{ context: "test" }, { context: "maomao/merge-readiness" }] } },
+        { type: "pull_request", parameters: { required_approving_review_count: 2, allowed_merge_methods: ["squash"] } },
+      ],
+    }, (seen) => { variables = seen; });
+    expect(variables).toBeUndefined();
+    await expect(client.getMergeCapabilities(9, "acme", "widgets", "main", 7)).resolves.toMatchObject({
+      mergeMode: "manual",
+      nativeAutoMerge: "available",
+      githubNativeQueue: "available",
+      requiredStatusContexts: ["maomao/merge-readiness", "test"],
+      requiredApprovals: 2,
+      protectedBranch: true,
+      mergeMethods: ["squash"],
+      source: "github-graphql+rules",
+      pullState: "OPEN",
+      mergeable: "BLOCKED",
+    });
+    expect(variables).toMatchObject({ owner: "acme", repo: "widgets", branch: "main", pullNumber: 7 });
+  });
+
+  it("explains missing native queue and branch-rule visibility without enabling writes", async () => {
+    const client = clientWithGraphql({ autoMergeAllowed: false, mergeQueue: null }, { error: Object.assign(new Error("forbidden"), { status: 403 }) });
+    const capabilities = await client.getMergeCapabilities(9, "acme", "widgets", "main", 7);
+    expect(capabilities).toMatchObject({ mergeMode: "manual", nativeAutoMerge: "unavailable", githubNativeQueue: "unavailable", requiredStatusContexts: [] });
+    expect(capabilities.protectedBranch).toBeUndefined();
+    expect(capabilities.reasons.join(" ")).toContain("merge queue is not configured");
+    expect(capabilities.reasons.join(" ")).toContain("branch rules could not be read");
+  });
+
+  it("reports an unprotected branch when the branch-rule response is empty", async () => {
+    const client = clientWithGraphql({ autoMergeAllowed: false, mergeQueue: null }, { data: [] });
+    await expect(client.getMergeCapabilities(9, "acme", "widgets", "main", 7)).resolves.toMatchObject({ protectedBranch: false, requiredStatusContexts: [] });
+  });
+});
+
 describe("finding thread markers", () => {
   it("finds the marker even when a reply is listed first", () => {
     const marker = findingMarker("deadbeefdeadbeef", "abc");

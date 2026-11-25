@@ -215,6 +215,51 @@ describe("HTTP app", () => {
     expect(currentHtml).toContain("<strong>merged</strong>");
   });
 
+  it("renders read-only merge capability diagnostics from the job forge", async () => {
+    const forge = {
+      forJob: () => ({
+        provider: "github",
+        probeMergeCapabilities: async () => ({
+          mergeMode: "manual",
+          nativeAutoMerge: "available",
+          githubNativeQueue: "unavailable",
+          requiredStatusContexts: ["maomao/merge-readiness"],
+          requiredApprovals: 1,
+          mergeMethods: ["squash"],
+          baseRef: "main",
+          draft: false,
+          pullState: "OPEN",
+          mergeable: "MERGEABLE",
+          reasons: ["GitHub merge queue is not configured for main"],
+          source: "test",
+        }),
+      }),
+    };
+    const { app, store } = testApp({}, undefined, undefined, { forge: forge as never });
+    const created = store.enqueue({
+      repoFullName: "acme/widgets",
+      repoOwner: "acme",
+      repoName: "widgets",
+      installationId: 1,
+      prNumber: 8,
+      prTitle: "Hello",
+      prBody: "",
+      prHtmlUrl: "https://example.test",
+      prAuthor: "dev",
+      baseSha: "b",
+      headSha: "h",
+      baseRef: "main",
+      headRef: "f",
+      reviewers: [{ role: "correctness", title: "Correctness" }],
+    });
+
+    const html = await (await app.request(`/jobs/${created.job.id}`)).text();
+    expect(html).toContain("Merge capability diagnostics");
+    expect(html).toContain("GitHub merge queue is not configured for main");
+    expect(html).toContain("squash");
+    expect(html).toContain("OPEN · MERGEABLE");
+  });
+
   it("protects UI/API/events with a session cookie and leaves webhook/health public", async () => {
     const { app, enqueued, webhookSecret } = testApp({
       UI_PASSWORD: "hunter2",
