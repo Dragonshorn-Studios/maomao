@@ -44,7 +44,7 @@ if (forgeConnections) {
 // Counted without the key so a connection present but unopenable still
 // produces the right diagnosis (MAOMAO_FORGE_KEY missing), never a GitHub one.
 assertRuntimeConfig(config, {
-  gitlabConnections: countConnections(db, "gitlab"),
+  forgeConnections: countConnections(db, "gitlab") + countConnections(db, "forgejo"),
   gitlabBootstrap: Boolean(config.gitlabBootstrap),
 });
 // Operator-managed OpenObserve settings: /config/telemetry persists per-channel

@@ -39,7 +39,7 @@ function hostnameOf(url: string): string {
 
 function providerLabel(row: ForgeConnectionView): string {
   const host = hostnameOf(row.instance_base_url);
-  const name = row.provider === "gitlab" ? "GitLab" : row.provider;
+  const name = row.provider === "gitlab" ? "GitLab" : row.provider === "forgejo" ? "Forgejo" : row.provider;
   return host && host !== "gitlab.com" ? `${name} · ${host}` : name;
 }
 
@@ -86,7 +86,7 @@ function connectionCard(row: ForgeConnectionView, csrfToken?: string): string {
       ${scopes ? `<div><dt>Token scopes</dt><dd>${escapeHtml(scopes.join(", "))}</dd></div>` : ""}
       <div>
         <dt>Webhook</dt>
-        <dd><code>POST /webhooks/gitlab/${escapeHtml(row.id)}</code></dd>
+        <dd><code>POST /webhooks/${escapeHtml(row.provider)}/${escapeHtml(row.id)}</code></dd>
       </div>
     </dl>
     <div class="connection-flags">${flagChip("Private network", Boolean(row.allow_private_network))} ${flagChip("Plain HTTP", Boolean(row.allow_insecure_http))} ${flagChip("Approval", Boolean(row.allow_approve))}</div>
@@ -104,7 +104,7 @@ export function renderConnectionsPage(data: ConnectionsPageData): string {
     ? `<ul class="queue connection-list">${data.connections.map((row) => `<li>${connectionCard(row, data.csrfToken)}</li>`).join("")}</ul>`
     : `<div class="empty" role="status">
         <p><strong>No forge connections yet.</strong></p>
-        <p class="muted">Maomao reviews GitHub through the environment-configured GitHub App. Add a GitLab connection below to review merge requests on that instance.</p>
+        <p class="muted">Maomao reviews GitHub through the environment-configured GitHub App. Add a GitLab or Forgejo connection below to review changes on that instance.</p>
       </div>`;
   const body = `
   <section>
@@ -115,18 +115,23 @@ export function renderConnectionsPage(data: ConnectionsPageData): string {
     ${list}
   </section>
   <section class="connection-create">
-    <h2>Add a GitLab connection</h2>
+    <h2>Add a forge connection</h2>
     <form method="post" action="/connections" class="operator-form">
       ${csrf}
       <fieldset>
         <legend>Identity</legend>
+        <p><label>Provider
+          <select name="provider">
+            <option value="gitlab">GitLab</option>
+            <option value="forgejo">Forgejo</option>
+          </select></label></p>
         <p><label>Label <input name="label" placeholder="acme-gitlab" required/></label></p>
         <p><label>Instance URL <input name="instanceUrl" placeholder="https://gitlab.com" required/></label></p>
       </fieldset>
       <fieldset>
         <legend>Credentials</legend>
-        <p><label>Access token <input name="token" type="password" required autocomplete="off"/> <span class="muted">project or group access token preferred; needs api + read_repository</span></label></p>
-        <p><label>Token type
+        <p><label>Access token <input name="token" type="password" required autocomplete="off"/> <span class="muted">GitLab: api + read_repository. Forgejo: read:user + write:repository + write:issue</span></label></p>
+        <p><label>Token type (GitLab; Forgejo connections always use a service token/PAT)
           <select name="tokenType">
             <option value="project">project access token</option>
             <option value="group">group access token</option>
@@ -142,14 +147,14 @@ export function renderConnectionsPage(data: ConnectionsPageData): string {
             <option value="group">one group</option>
             <option value="project">one project</option>
           </select></label>
-          <label>Group/project path <input name="scopePath" placeholder="acme/widgets"/></label></p>
+          <label>Group/owner/project path <input name="scopePath" placeholder="acme/widgets"/></label></p>
         <p><label>Custom CA bundle (PEM, optional) <textarea name="caPem" rows="4"></textarea></label></p>
       </fieldset>
       <fieldset>
         <legend>Policy</legend>
         <p><label><input type="checkbox" name="allowPrivateNetwork" value="1"/> allow private-network addresses (self-managed hosts)</label></p>
         <p><label><input type="checkbox" name="allowInsecureHttp" value="1"/> allow plain HTTP (discouraged)</label></p>
-        <p><label><input type="checkbox" name="allowApprove" value="1"/> allow approval verdicts on clean reviews</label></p>
+        <p><label><input type="checkbox" name="allowApprove" value="1"/> allow approval verdicts on clean GitLab reviews</label></p>
       </fieldset>
       <p><button type="submit" class="btn">Create connection</button></p>
     </form>

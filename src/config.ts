@@ -388,8 +388,8 @@ function parseGitLabBootstrap(env: NodeJS.ProcessEnv): Config["gitlabBootstrap"]
 
 export function assertRuntimeConfig(
   config: Config,
-  forgeState: { gitlabConnections: number; gitlabBootstrap: boolean } = {
-    gitlabConnections: 0,
+  forgeState: { forgeConnections: number; gitlabBootstrap: boolean } = {
+    forgeConnections: 0,
     gitlabBootstrap: Boolean(config.gitlabBootstrap),
   },
 ): void {
@@ -397,7 +397,7 @@ export function assertRuntimeConfig(
   // receive events: a GitLab-only deployment (persisted connections or the
   // env bootstrap) boots without GitHub credentials. Operator OAuth login
   // still requires them below, since it is GitHub-based.
-  const hasForgePath = forgeState.gitlabConnections > 0 || forgeState.gitlabBootstrap;
+  const hasForgePath = forgeState.forgeConnections > 0 || forgeState.gitlabBootstrap;
   const missing: string[] = [];
   if (!hasForgePath) {
     if (!config.github.appId) missing.push("GITHUB_APP_ID");
@@ -443,7 +443,7 @@ export function assertRuntimeConfig(
   if (config.uiLocalLogin && (!passwordSet || !secretSet)) {
     throw new Error("UI_LOCAL_LOGIN requires both UI_PASSWORD and UI_SESSION_SECRET");
   }
-  if ((forgeState.gitlabConnections > 0 || forgeState.gitlabBootstrap) && !config.forgeKey) {
+  if ((forgeState.forgeConnections > 0 || forgeState.gitlabBootstrap) && !config.forgeKey) {
     throw new Error("Forge connections require MAOMAO_FORGE_KEY (64 hex chars) or MAOMAO_FORGE_KEY_FILE");
   }
 }

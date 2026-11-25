@@ -5739,7 +5739,8 @@ describe("forge connection routes", () => {
     expect(response.status).toBe(200);
     const html = await response.text();
     expect(html).toContain("Forge connections");
-    expect(html).toContain("Add a GitLab connection");
+    expect(html).toContain("Add a forge connection");
+    expect(html).toContain("option value=\"forgejo\"");
   });
 
   it("rejects a connection whose URL violates the policy, without persisting", async () => {
@@ -5783,6 +5784,33 @@ describe("forge connection routes", () => {
     expect(response.status).toBe(303);
     expect(decodeURIComponent(response.headers.get("location") ?? "")).toContain("validation failed");
     expect(extras.forgeConnections!.list("gitlab")).toHaveLength(1);
+  });
+
+  it("creates Forgejo connections with the v1 API base and GitLab-only policy fields disabled", async () => {
+    const extras = forgeExtras();
+    const { app } = testApp(gateEnv, undefined, undefined, extras);
+    const session = await loginSession(app);
+    const response = await app.request("/connections", {
+      method: "POST",
+      headers: { cookie: session.cookies, "content-type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({
+        provider: "forgejo",
+        label: "forgejo-acme",
+        instanceUrl: "http://127.0.0.1:9",
+        token: "forgejo-token-value-1",
+        tokenType: "project",
+        webhookSecret: "whsec-value-1",
+        allowPrivateNetwork: "1",
+        allowInsecureHttp: "1",
+        allowApprove: "1",
+        csrf_token: session.csrfToken,
+      }).toString(),
+    });
+    expect(response.status).toBe(303);
+    const rows = extras.forgeConnections!.list("forgejo");
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ provider: "forgejo", token_type: "pat", allow_approve: 0 });
+    expect(rows[0]?.api_base_url).toBe("http://127.0.0.1:9/api/v1");
   });
 
   it("refuses duplicate label + origin connections", async () => {

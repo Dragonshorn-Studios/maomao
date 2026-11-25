@@ -22,6 +22,8 @@ export function providerLabel(provider: string): string {
       return "GitHub";
     case "gitlab":
       return "GitLab";
+    case "forgejo":
+      return "Forgejo";
     default:
       return provider;
   }

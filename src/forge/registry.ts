@@ -11,6 +11,7 @@ import type { GithubPortWithPulls } from "./github-provider.js";
 import { GitHubProvider } from "./github-provider.js";
 import type { ForgeConnectionStore } from "./connections.js";
 import { GitLabProvider } from "../gitlab/provider.js";
+import { ForgejoProvider } from "../forgejo/provider.js";
 import type { ForgePort } from "./port.js";
 import { GITHUB_INSTANCE, GITHUB_PROVIDER, normalizeScope } from "./types.js";
 
@@ -66,7 +67,7 @@ export class ForgeRegistry {
         `forge connection ${opened.row.id} serves ${opened.instance.hostname}, not ${scope.instance}`,
       );
     }
-    const forge = new GitLabProvider(opened);
+    const forge = scope.provider === "forgejo" ? new ForgejoProvider(opened) : new GitLabProvider(opened);
     if (forge.provider !== scope.provider || forge.instance !== scope.instance) {
       throw new Error(`forge adapter identity ${forge.provider}:${forge.instance} does not match job scope`);
     }

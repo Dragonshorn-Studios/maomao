@@ -1555,7 +1555,7 @@ describe("connections operator page", () => {
     expect(html).toContain("No forge connections yet.");
     expect(html).toContain('class="empty"');
     expect(html).toContain('class="operator"');
-    expect(html).toContain("Add a GitLab connection");
+    expect(html).toContain("Add a forge connection");
     expect(html).toContain("Create connection");
     expect(html).toContain('class="error"');
     expect(html).not.toContain("glpat-");

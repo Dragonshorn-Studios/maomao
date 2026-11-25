@@ -237,6 +237,39 @@ The connection id is shown on the connections page. Subscribe **Merge request ev
 - If every review stops arriving, check that the webhook shows recent deliveries in GitLab (a row of failures usually means the token was rotated without updating the connection) and that the connection is still enabled.
 - Discussion listing is capped at **2000** threads (100 per page). Webhook `@maomao` commands on a truncated listing are **not applied** (a redelivery can retry). Review reconciliation logs when the cap is hit; threads past it are invisible, so late buries and forge-resolved priors on very large MRs can be missed.
 
+## Configure Forgejo
+
+Forgejo uses the same forge-connection model as GitLab. Open `/connections`, choose **Forgejo**, and provide the instance origin, access token, webhook secret, and scope. Forgejo instances are self-hosted, so private-network access and plain HTTP remain explicit opt-ins.
+
+Minimum token scopes depend on the instance's token-scope version; use the narrowest available form of:
+
+- `read:user` — probe the service-account identity;
+- `write:repository` — read pull requests/diffs, clone the exact head, and publish commit statuses;
+- `write:issue` — post the human-facing review summary comment (pull requests use Forgejo's issue-comment API).
+
+Repository/organization access should be restricted to the repositories Maomao reviews. Maomao never pushes or merges; do not grant unrelated package, organization, or admin scopes.
+
+Create a **Forgejo** webhook (not a workflow) in each repository, organization, or instance scope:
+
+```text
+https://<your-host>/webhooks/forgejo/<connection-id>
+```
+
+Use `POST` with `application/json`, set the same secret as the connection, and subscribe at least to **pull request** events. Maomao verifies `X-Forgejo-Signature` (with GitHub/Gitea-compatible signature headers also accepted), deduplicates delivery ids, handles `opened`, `reopened`, and `synchronized`/`synchronize`, and cancels active review jobs when a close event reports `merged: true`. Form-encoded or GET webhooks are not supported because their signed bytes differ from the raw JSON body.
+
+Forgejo does not expose GitHub Check Runs or portable line annotations. Maomao instead publishes named commit statuses such as `maomao/review` with `POST /api/v1/repos/{owner}/{repo}/statuses/{sha}`:
+
+| Maomao lifecycle/conclusion | Forgejo status |
+| --- | --- |
+| `queued` / `in_progress` | `pending` |
+| `success` | `success` |
+| `failure` | `failure` |
+| `neutral` | `warning` |
+| `skipped` | `skipped` |
+| `error` / `cancelled` / `timed_out` / `action_required` | `error` |
+
+The complete human-facing review is posted as a pull-request comment; inline findings are retained in that comment body rather than pretending Forgejo supports GitHub-style line anchors. Review-thread resolution and approval/request-changes verdicts are not currently available through this adapter; those degrade to comments while the native status still records Maomao's deterministic lifecycle outcome.
+
 ## Configure OpenCode models
 
 Maomao does not embed a model vendor. It runs:

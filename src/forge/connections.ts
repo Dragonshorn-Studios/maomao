@@ -11,8 +11,10 @@ import { nowIso } from "../util.js";
 import { canonicalizeInstanceUrl, type CanonicalInstance } from "./safe-http.js";
 import { openSecret, sealSecret, secretFingerprint } from "./secretbox.js";
 
-export type ForgeConnectionProvider = "gitlab";
-export type GitLabTokenType = "project" | "group" | "pat";
+export type ForgeConnectionProvider = "gitlab" | "forgejo";
+export type ForgeTokenType = "project" | "group" | "pat";
+/** Historical name from the GitLab-only connection slice. */
+export type GitLabTokenType = ForgeTokenType;
 
 export interface ForgeConnectionRow {
   id: string;
@@ -22,7 +24,7 @@ export interface ForgeConnectionRow {
   api_base_url: string;
   token_sealed: string;
   token_fingerprint: string;
-  token_type: GitLabTokenType;
+  token_type: ForgeTokenType;
   scope_type: "instance" | "group" | "project";
   scope_path: string;
   webhook_secret_sealed: string;
@@ -50,11 +52,11 @@ export function toView(row: ForgeConnectionRow): ForgeConnectionView {
 }
 
 export interface ForgeConnectionInput {
-  provider: "gitlab";
+  provider: ForgeConnectionProvider;
   label: string;
   instanceUrl: string;
   token: string;
-  tokenType: GitLabTokenType;
+  tokenType: ForgeTokenType;
   scopeType: "instance" | "group" | "project";
   scopePath: string;
   webhookSecret: string;
@@ -70,6 +72,17 @@ export interface OpenedConnection {
   instance: CanonicalInstance;
   token: string;
   webhookSecret: string;
+}
+
+export function apiBaseUrlForProvider(provider: string, origin: string): string {
+  return `${origin}${provider === "forgejo" ? "/api/v1" : "/api/v4"}`;
+}
+
+function instanceForRow(row: ForgeConnectionRow): CanonicalInstance {
+  const instance = canonicalizeInstanceUrl(row.instance_base_url, {
+    allowInsecureHttp: row.allow_insecure_http === 1,
+  });
+  return { ...instance, apiBaseUrl: apiBaseUrlForProvider(row.provider, instance.origin) };
 }
 
 export class ForgeConnectionStore {
@@ -95,9 +108,7 @@ export class ForgeConnectionStore {
   open(id: string): OpenedConnection {
     const row = this.get(id);
     if (!row) throw new Error(`forge connection ${id} does not exist`);
-    const instance = canonicalizeInstanceUrl(row.instance_base_url, {
-      allowInsecureHttp: row.allow_insecure_http === 1,
-    });
+    const instance = instanceForRow(row);
     return {
       row,
       instance,
@@ -107,7 +118,7 @@ export class ForgeConnectionStore {
   }
 
   create(input: ForgeConnectionInput): ForgeConnectionRow {
-    if (input.provider !== "gitlab") {
+    if (input.provider !== "gitlab" && input.provider !== "forgejo") {
       throw new Error(`unsupported forge provider: ${input.provider}`);
     }
     if (!input.token || input.token.length < 8) {
@@ -119,10 +130,11 @@ export class ForgeConnectionStore {
     if ((input.scopeType === "group" || input.scopeType === "project") && !input.scopePath.trim()) {
       throw new Error(`a group/project path is required for scope type ${input.scopeType}`);
     }
-    const instance = canonicalizeInstanceUrl(input.instanceUrl, {
+    const canonical = canonicalizeInstanceUrl(input.instanceUrl, {
       allowInsecureHttp: input.allowInsecureHttp,
     });
-    const duplicate = this.list("gitlab").find(
+    const instance = { ...canonical, apiBaseUrl: apiBaseUrlForProvider(input.provider, canonical.origin) };
+    const duplicate = this.list(input.provider).find(
       (row) => row.instance_base_url === instance.origin && row.label === input.label.trim(),
     );
     if (duplicate) {
@@ -137,10 +149,11 @@ export class ForgeConnectionStore {
           token_sealed, token_fingerprint, token_type, scope_type, scope_path,
           webhook_secret_sealed, webhook_secret_fingerprint, ca_pem, allow_private_network, allow_insecure_http,
           allow_approve, enabled, created_at, updated_at
-        ) VALUES (?, 'gitlab', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)`,
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)`,
       )
       .run(
         id,
+        input.provider,
         input.label.trim(),
         instance.origin,
         instance.apiBaseUrl,
@@ -206,7 +219,7 @@ export class ForgeConnectionStore {
     if ((projected.scope_type === "group" || projected.scope_type === "project") && !projected.scope_path) {
       throw new Error(`a group/project path is required for scope type ${projected.scope_type}`);
     }
-    const duplicate = this.list("gitlab").find(
+    const duplicate = this.list(row.provider).find(
       (candidate) =>
         candidate.id !== id &&
         candidate.instance_base_url === row.instance_base_url &&

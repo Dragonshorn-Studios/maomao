@@ -53,7 +53,7 @@ export function canonicalizeInstanceUrl(
   }
   // Trailing slashes are paste artifacts, not paths; any other segment is a misconfiguration.
   if (url.pathname.replaceAll("/", "") !== "") {
-    throw new InstanceUrlError("instance URL must not include a path (GitLab serves from the origin)");
+    throw new InstanceUrlError("instance URL must not include a path (forge instances serve from the origin)");
   }
   if (url.search || url.hash) {
     throw new InstanceUrlError("instance URL must not include a query string or fragment");
