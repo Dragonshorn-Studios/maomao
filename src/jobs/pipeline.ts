@@ -164,6 +164,9 @@ export function createPipeline(deps: PipelineDeps) {
     () => deps.trustedCheckSettings?.effective() ?? { ...deps.config.trustedChecks, enabledChecks: [...TRUSTED_CHECK_NAMES] },
   );
   const activeTrustedCheckNames = () => TRUSTED_CHECK_NAMES.filter((name) => trustedChecks.enabledFor(name));
+  const trustedPublicationMemory = new Set<string>();
+  const trustedMemoryKey = (job: JobRow, name: (typeof TRUSTED_CHECK_NAMES)[number]) =>
+    JSON.stringify([job.provider, job.provider_instance, job.repo_full_name, job.pr_number, job.head_sha, name]);
 
   const trustedPublishers = new Map<string, ReviewCheckPublisher>();
   function trustedPublisher(name: (typeof TRUSTED_CHECK_NAMES)[number]): ReviewCheckPublisher {
@@ -192,7 +195,7 @@ export function createPipeline(deps: PipelineDeps) {
   function trustedNamesWithPublications(job: JobRow): typeof TRUSTED_CHECK_NAMES {
     const active = new Set(activeTrustedCheckNames());
     for (const name of TRUSTED_CHECK_NAMES) {
-      if (deps.store.getCheckPublication(trustedKey(job, name))) active.add(name);
+      if (deps.store.getCheckPublication(trustedKey(job, name)) || trustedPublicationMemory.has(trustedMemoryKey(job, name))) active.add(name);
     }
     return TRUSTED_CHECK_NAMES.filter((name) => active.has(name));
   }
@@ -275,13 +278,14 @@ export function createPipeline(deps: PipelineDeps) {
       const job = deps.store.getJob(jobId);
       if (!job || job.state !== "queued" || !trustedChecks.enabled()) return;
       await Promise.all(
-        activeTrustedCheckNames().map((name) =>
-          trustedPublisher(name).publish(job, {
+        activeTrustedCheckNames().map((name) => {
+          trustedPublicationMemory.add(trustedMemoryKey(job, name));
+          return trustedPublisher(name).publish(job, {
             status: "queued",
             title: `Maomao ${name} check queued`,
             summary: `Maomao queued the pinned deterministic ${name} check for PR #${job.pr_number} at ${job.head_sha.slice(0, 12)}.`,
-          }),
-        ),
+          });
+        }),
       );
     },
     async publishCancelledCheck(jobId: number): Promise<void> {
