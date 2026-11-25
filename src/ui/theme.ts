@@ -3,38 +3,56 @@
 export const THEME_HREF = "/assets/maomao.css";
 
 export const THEME_CSS = `
+/*
+ * Mergehenna is themed by the vendored Infernal SaaS stylesheet
+ * (assets/infernal.css, loaded before this one): data-if-theme and
+ * data-if-brand="mergehenna" on the root element resolve every --if-* token,
+ * so these aliases track the active theme with no per-mode duplication. The
+ * app's historical token names map onto the library so existing components
+ * pick up the Infernal palette without rewrites. Interactive chrome uses
+ * --action*; semantic state colors keep their own names so a completed state
+ * never reads as a clickable accent.
+ */
 :root {
-  color-scheme: light;
-  --paper: #f3efe3;
-  --surface: #faf7ee;
-  --surface-2: #ece6d6;
-  --ink: #1a221c;
-  --ink-muted: #5a6258;
-  --jade: #1f6a4e;
-  --jade-soft: #d5eadc;
-  --herb: #4a6b58;
-  --plum: #6b3a58;
-  --plum-soft: #eadbe3;
-  --cinnabar: #9c2432;
-  --cinnabar-soft: #f3d6d6;
-  --amber: #8a5a10;
-  --amber-soft: #f1e4c4;
-  --working: var(--plum);
-  --working-soft: var(--plum-soft);
-  --ash: #7a776b;
-  --line: #cfc8b6;
-  --line-strong: #b7b09c;
-  --focus: #1f6a4e;
-  --shadow: 0 1px 0 rgba(26, 34, 28, 0.04);
-  --code-bg: #eae4d4;
-  --code-fg: #1a221c;
+  --paper: var(--if-bg);
+  --surface: var(--if-surface);
+  --surface-2: var(--if-surface-2);
+  --ink: var(--if-text);
+  --ink-muted: var(--if-text-soft);
+  --jade: var(--if-success);
+  --jade-soft: var(--if-success-soft);
+  --herb: var(--if-success);
+  --plum: var(--if-accent);
+  --plum-soft: var(--if-accent-soft);
+  --cinnabar: var(--if-danger);
+  --cinnabar-soft: var(--if-danger-soft);
+  --amber: var(--if-warning);
+  --amber-soft: var(--if-warning-soft);
+  --working: var(--if-accent);
+  --working-soft: var(--if-accent-soft);
+  --action: var(--if-accent);
+  --action-ink: var(--if-accent-ink);
+  --action-soft: var(--if-accent-soft);
+  --ash: var(--if-muted);
+  --muted: var(--if-muted);
+  --ink-weak: var(--if-text-soft);
+  --ink-soft: var(--if-text-soft);
+  --rule: var(--if-line);
+  --well: var(--if-bg-raised);
+  --font-body: var(--if-font);
+  --line: var(--if-line);
+  --line-strong: var(--if-line-strong);
+  --focus: var(--if-accent);
+  --shadow: var(--if-shadow);
+  --code-bg: var(--if-bg);
+  --code-fg: var(--if-text);
   --live: var(--working);
-  --btn-fg: #f3efe3;
+  --btn-fg: var(--if-accent-ink);
   --chat-thought: var(--plum);
-  --radius: 3px;
-  --font-display: "Iowan Old Style", Palatino, "Palatino Linotype", "Book Antiqua", Georgia, "Times New Roman", serif;
-  --font-ui: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-  --font-mono: ui-monospace, "SFMono-Regular", "Cascadia Mono", "Cascadia Code", "Liberation Mono", Menlo, Monaco, Consolas, monospace;
+  --radius: var(--if-radius-sm);
+  --font-display: var(--if-display);
+  --font-ui: var(--if-font);
+  --font-mono: var(--if-mono);
   --space-1: 0.25rem;
   --space-2: 0.5rem;
   --space-3: 0.75rem;
@@ -42,65 +60,42 @@ export const THEME_CSS = `
   --space-5: 1.5rem;
   --space-6: 2.25rem;
   --measure: 72rem;
+
 }
 
-html[data-theme="dark"] {
-  color-scheme: dark;
-  --paper: #121612;
-  --surface: #1a1f1a;
-  --surface-2: #232a23;
-  --ink: #e8e4d6;
-  --ink-muted: #a8a494;
-  --jade: #7dcea0;
-  --jade-soft: #1c3328;
-  --herb: #9bb8a6;
-  --plum: #d4a8c2;
-  --plum-soft: #33232c;
-  --cinnabar: #e88989;
-  --cinnabar-soft: #3a2224;
-  --amber: #e0b45c;
-  --amber-soft: #3a3220;
-  --working: var(--plum);
-  --working-soft: var(--plum-soft);
-  --ash: #8c8a7e;
-  --line: #2e352e;
-  --line-strong: #4a524a;
-  --focus: #7dcea0;
-  --shadow: 0 1px 0 rgba(0, 0, 0, 0.25);
-  --code-bg: #0e120e;
-  --code-fg: #d9d4c4;
-  --live: var(--working);
-  --btn-fg: #121612;
-}
-
-@media (prefers-color-scheme: dark) {
-  html:not([data-theme="light"]):not([data-theme="dark"]) {
-    color-scheme: dark;
-    --paper: #121612;
-    --surface: #1a1f1a;
-    --surface-2: #232a23;
-    --ink: #e8e4d6;
-    --ink-muted: #a8a494;
-    --jade: #7dcea0;
-    --jade-soft: #1c3328;
-    --herb: #9bb8a6;
-    --plum: #d4a8c2;
-    --plum-soft: #33232c;
-    --cinnabar: #e88989;
-    --cinnabar-soft: #3a2224;
-    --amber: #e0b45c;
-    --amber-soft: #3a3220;
-    --working: var(--plum);
-    --working-soft: var(--plum-soft);
-    --ash: #8c8a7e;
-    --line: #2e352e;
-    --line-strong: #4a524a;
-    --focus: #7dcea0;
-    --shadow: 0 1px 0 rgba(0, 0, 0, 0.25);
-    --code-bg: #0e120e;
-    --code-fg: #d9d4c4;
-    --live: var(--working);
-    --btn-fg: #121612;
+/* No-JS light fallback: the shell's theme is applied by the appearance boot
+   script setting data-if-theme, and infernal's :root base is dark — so a
+   client without JavaScript would be locked to dark regardless of OS
+   preference. When the attribute is absent (only possible without JS) and
+   the OS prefers light, re-state the library's light + mergehenna-brand
+   token values. Keep in sync with the infernal.css [data-if-theme="light"]
+   block and its mergehenna brand override when re-vendoring. */
+@media (prefers-color-scheme: light) {
+  :root:not([data-if-theme]) {
+    color-scheme: light;
+    --if-bg: #f2eff4;
+    --if-bg-raised: #f9f7fb;
+    --if-surface: #ffffff;
+    --if-surface-2: #f4f2f8;
+    --if-surface-hover: #eae7f1;
+    --if-line: #dfdce8;
+    --if-line-strong: #c5bfd3;
+    --if-text: #282334;
+    --if-text-soft: #5c586b;
+    --if-muted: #777383;
+    --if-success: #14784a;
+    --if-success-soft: #ddf5e7;
+    --if-warning: #8f580e;
+    --if-warning-soft: #fff1d9;
+    --if-danger: #b72d47;
+    --if-danger-soft: #ffe5e9;
+    --if-info: #2b67b2;
+    --if-info-soft: #e1efff;
+    --if-shadow: 0 20px 55px rgba(56, 39, 71, 0.09);
+    --if-accent: #a95523;
+    --if-accent-ink: #fff;
+    --if-accent-soft: #fff0e3;
+    --if-accent-line: #e7c4aa;
   }
 }
 
@@ -114,21 +109,12 @@ body {
   font-family: var(--font-ui);
   font-size: 0.95rem;
   line-height: 1.5;
-  background:
-    repeating-linear-gradient(
-      to bottom,
-      transparent 0,
-      transparent calc(1.4rem - 1px),
-      color-mix(in srgb, var(--line) 32%, transparent) calc(1.4rem - 1px),
-      color-mix(in srgb, var(--line) 32%, transparent) 1.4rem
-    ),
-    var(--paper);
-  background-attachment: local;
+  background: var(--paper);
   color: var(--ink);
 }
 
-a { color: var(--jade); text-underline-offset: 0.15em; }
-a:hover { color: var(--herb); }
+a { color: var(--action); text-decoration: underline; text-underline-offset: 0.15em; }
+a:hover { color: var(--action); filter: brightness(1.12); }
 
 :focus-visible {
   outline: 2px solid var(--focus);
@@ -178,32 +164,294 @@ a:hover { color: var(--herb); }
   flex: none;
   object-fit: contain;
 }
-.brand svg { width: 1.15rem; height: 1.15rem; color: var(--jade); flex: none; }
+.brand svg { width: 1.15rem; height: 1.15rem; color: var(--action); flex: none; }
 .tag { color: var(--ink-muted); font-size: 0.82rem; }
 .grow { flex: 1 1 6rem; }
 
 .appearance {
   display: inline-flex;
   border: 1px solid var(--line);
+  border-radius: 9px;
   background: var(--surface);
-  padding: 0.1rem;
-  gap: 0.1rem;
+  padding: 3px;
+  gap: 2px;
 }
 .appearance button {
   appearance: none;
   border: 0;
+  border-radius: 6px;
   background: transparent;
   color: var(--ink-muted);
   font: inherit;
-  font-size: 0.75rem;
+  font-weight: 600;
+  font-size: 0.72rem;
   letter-spacing: 0.04em;
   text-transform: uppercase;
-  padding: 0.28rem 0.5rem;
+  padding: 0.28rem 0.6rem;
   cursor: pointer;
 }
+.appearance button:hover { color: var(--ink); }
 .appearance button[aria-pressed="true"] {
-  background: var(--jade-soft);
+  background: var(--action-soft);
   color: var(--ink);
+  box-shadow: inset 0 0 0 1px var(--line);
+}
+
+
+/* ---- App shell: global icon rail + optional contextual side nav ----
+   Composition over the library's .if-rail / .if-context-nav piece classes:
+   these rules only position them as a full-height application shell and add
+   the link-active state (the library expresses it with aria-pressed on its
+   JS-driven buttons; the shell uses plain navigation links). */
+.shell {
+  display: grid;
+  grid-template-columns: 3.75rem minmax(0, 1fr);
+  min-height: 100vh;
+}
+.shell.has-context { grid-template-columns: 3.75rem 14.5rem minmax(0, 1fr); }
+/* Rail-less pages (login) have no rail child — without this their content
+   would land in the 3.75rem first column and render unusably narrow. */
+.shell--railless, .shell--railless.has-context { grid-template-columns: minmax(0, 1fr); }
+.shell-rail {
+  position: sticky;
+  top: 0;
+  height: 100vh;
+  z-index: 6;
+}
+.shell-context {
+  position: sticky;
+  top: 0;
+  height: 100vh;
+  z-index: 6;
+}
+.shell-content { min-width: 0; }
+a.if-rail__button { display: grid; place-items: center; text-decoration: none; }
+.shell-rail .if-rail__button.is-active {
+  background: var(--if-accent-soft);
+  color: var(--if-accent);
+}
+.shell-rail .if-rail__button.is-active::before {
+  content: "";
+  position: absolute;
+  left: -7px;
+  top: 10px;
+  height: 20px;
+  width: 3px;
+  border-radius: 4px;
+  background: var(--if-accent);
+}
+.shell-rail__logo svg { width: 22px; height: 22px; display: block; }
+.shell-context .if-context-nav__item { text-decoration: none; }
+.shell-context .if-context-nav__item[aria-current] { font-weight: 600; }
+
+/* Queue family switcher: links wearing the library's tab visuals. */
+.ops-actions {
+  display: flex;
+  gap: 0.5rem;
+  align-items: center;
+  margin: 0.7rem 0 1rem;
+}
+.ops-actions .if-button { text-decoration: none; }
+.recent-job { justify-content: space-between; gap: 0.5rem; }
+.recent-job__title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+.recent-job__state {
+  flex: none;
+  font-family: var(--font-mono);
+  font-size: 0.58rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--ink-muted);
+}
+.recent-job__state[data-state="completed"] { color: var(--ok-text); }
+.recent-job__state[data-state="failed"], .recent-job__state[data-state="cancelled"] { color: var(--bad); }
+.recent-job__state[data-state="reviewing"], .recent-job__state[data-state="running"] { color: var(--accent); }
+
+
+.brand-text { display: inline-flex; flex-direction: column; line-height: 1.05; }
+.brand-name { font-family: var(--font-display); font-size: 1.15rem; font-weight: 600; letter-spacing: 0.01em; }
+.brand-caption {
+  font-family: var(--font-mono);
+  font-size: 0.58rem;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--ash);
+  margin-top: 0.18rem;
+}
+
+.stack-progress {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  margin: 0.5rem 0 0.4rem;
+}
+
+.stack-progress .if-progress {
+  flex: 0 1 240px;
+}
+
+.stack-progress .muted {
+  margin: 0;
+}
+
+/* Merge lifecycle panel — infernal inspector rows on top of if-panel. The
+ * library owns the panel chrome (head band, surface, radius); these rows lay
+ * the facts out label-left / value-right like the example inspector. */
+.merge-lifecycle .if-panel__head code.sha {
+  font-family: var(--if-mono);
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.merge-fact {
+  padding: 7px 0;
+  border-bottom: 1px solid var(--rule);
+  align-items: baseline;
+  gap: 18px;
+}
+
+.merge-fact:last-of-type {
+  border-bottom: 0;
+}
+
+.merge-fact .if-label {
+  flex: none;
+  min-width: 132px;
+}
+
+.merge-fact-value {
+  text-align: right;
+  font-size: 12.5px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
+  flex-wrap: wrap;
+  min-width: 0;
+}
+
+.merge-fact-value code {
+  font-family: var(--if-mono);
+  font-size: 11.5px;
+}
+
+.merge-fact-value a {
+  color: var(--if-accent);
+  font-weight: 600;
+}
+
+.merge-diagnostics {
+  font-size: 12.5px;
+  color: var(--muted);
+}
+
+.merge-diagnostics summary {
+  cursor: pointer;
+  font-weight: 600;
+  color: var(--ink-weak);
+  border-radius: var(--radius);
+}
+
+.merge-diagnostics summary:hover {
+  color: var(--if-accent);
+}
+
+.merge-diagnostics ul {
+  margin: 8px 0 0;
+  padding-left: 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.merge-diagnostics pre {
+  margin-top: 8px;
+  padding: 12px 14px;
+  background: var(--well);
+  border: 1px solid var(--rule);
+  border-radius: var(--radius);
+  font-size: 11.5px;
+  overflow-x: auto;
+}
+
+.merge-lifecycle-note {
+  margin: 2px 0 0;
+}
+
+/* if-field error variant: the config form marks invalid controls with
+   aria-invalid rather than a wrapper class, so key the danger treatment off
+   the attribute — same visual as the library's if-field--error .if-input. */
+body.operator main input[aria-invalid="true"],
+body.operator main select[aria-invalid="true"],
+body.operator main textarea[aria-invalid="true"],
+body.operator main .model-picker [aria-invalid="true"] {
+  border-color: var(--if-danger);
+}
+
+body.operator main input[aria-invalid="true"]:focus,
+body.operator main select[aria-invalid="true"]:focus,
+body.operator main textarea[aria-invalid="true"]:focus {
+  outline-color: var(--if-danger);
+}
+
+/* if-label inside converted config fields — quiet 12px library treatment. */
+label.if-field {
+  margin-bottom: 0.7rem;
+}
+
+/* infernal component adaptations — the vendored if-log/if-diff colors are
+   hardcoded for dark; key them to the theme tokens instead. Placed late so
+   they win over both the vendored rules and the legacy .log-panel frame. */
+.if-log {
+  background: var(--code-bg);
+  border-color: var(--line);
+  color: var(--code-fg);
+  /* maomao reviewer output is longer than the library's 160px default. */
+  max-height: 22rem;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+/* Reviewer run cards on the job detail: vertical rhythm for the adopted
+   if-reviewer-card chrome. */
+.run-card { display: flex; flex-direction: column; gap: 10px; margin-bottom: 12px; }
+.run-card .if-metric-strip { margin: 2px 0; }
+.run-card .if-reviewer-card__icon svg { width: 15px; height: 15px; }
+.run-card form.retry { margin: 0; }
+
+@media (max-width: 720px) {
+  .shell, .shell.has-context { display: block; }
+  .shell-rail {
+    position: static;
+    height: auto;
+    flex-direction: row;
+    overflow-x: auto;
+    border-right: 0;
+    border-bottom: 1px solid var(--if-line, var(--line));
+    padding: 0.4rem 0.5rem;
+    gap: 4px;
+  }
+  .shell-rail .if-rail__spacer { display: none; }
+  .shell-rail .if-rail__logo { width: 34px; height: 34px; margin-bottom: 0; }
+  .shell-rail .if-rail__button.is-active::before {
+    left: 10px;
+    top: auto;
+    bottom: -4px;
+    height: 3px;
+    width: 20px;
+  }
+  .shell-context {
+    position: static;
+    height: auto;
+    border-right: 0;
+    border-bottom: 1px solid var(--if-line, var(--line));
+    padding: 0.6rem 0.7rem;
+  }
+  .shell-context .if-context-nav__head { padding-bottom: 8px; }
 }
 
 .logout { margin: 0; }
@@ -298,19 +546,19 @@ button, input, textarea {
 }
 button, summary {
   appearance: none;
-  border-radius: 0;
+  border-radius: var(--if-radius-sm, 7px);
 }
 
-.btn, .login button, .trigger button, .logout button.primary, .chat-send {
-  background: var(--jade);
+.btn:not(.if-button), .login button:not(.if-button), .trigger button:not(.if-button), .logout button.primary, .chat-send {
+  background: var(--action);
   color: var(--btn-fg);
-  border: 1px solid color-mix(in srgb, var(--jade) 70%, var(--ink));
+  border: 1px solid color-mix(in srgb, var(--action) 70%, var(--ink));
   padding: 0.45rem 0.85rem;
   font-weight: 600;
   cursor: pointer;
   letter-spacing: 0.02em;
 }
-.btn:hover, .login button:hover, .trigger button:hover, .chat-send:hover {
+.btn:not(.if-button):hover, .login button:not(.if-button):hover, .trigger button:not(.if-button):hover, .chat-send:hover {
   filter: brightness(1.05);
 }
 
@@ -337,13 +585,16 @@ button, summary {
 }
 .jobs-pagination .jobs-pagination-note { margin: 0 0 0.35rem; }
 
+.if-banner { margin: 0.8rem 0; border-radius: var(--radius); }
 .notice, .error, .warn {
   border: 1px solid var(--line);
   padding: 0.65rem 0.8rem;
   margin: 0.8rem 0;
   background: var(--surface);
 }
-.notice { border-color: var(--jade); background: var(--jade-soft); }
+.notice:not(.if-banner) { border-color: var(--jade); background: var(--jade-soft); }
+/* Flash banners are infernal if-banner instances; the legacy frame rules
+   above only cover inline notices that have not adopted the component. */
 .pause-banner {
   background: var(--amber-soft);
   border-bottom: 1px solid var(--amber);
@@ -365,7 +616,7 @@ button, summary {
   border-color: var(--amber);
   background: var(--amber-soft);
 }
-.error { border-color: var(--cinnabar); background: var(--cinnabar-soft); color: var(--ink); }
+.error:not(.if-banner) { border-color: var(--cinnabar); background: var(--cinnabar-soft); color: var(--ink); }
 .warn { border-color: var(--amber); background: var(--amber-soft); }
 .usage-incomplete { color: var(--amber); font-size: 0.9em; margin: 0.35rem 0 0; }
 .usage-breakdown, .usage-note { font-size: 0.9em; margin: 0.25rem 0 0; }
@@ -383,11 +634,11 @@ button, summary {
   gap: 0.8rem;
   padding: 1rem 1.1rem;
 }
-.login input, .trigger input {
+.login input, .trigger input, .trigger select {
   width: 100%;
   margin-top: 0.3rem;
-  padding: 0.45rem 0.5rem;
-  background: var(--paper);
+  padding: 0.45rem 0.6rem;
+  background: var(--if-bg-raised, var(--paper));
   color: var(--ink);
   border: 1px solid var(--line-strong);
 }
@@ -422,16 +673,34 @@ button, summary {
 .specimen {
   padding: 0.85rem 1rem 0.95rem;
   position: relative;
+  border-radius: var(--if-radius, 10px);
+  overflow: hidden;
+}
+/* Live jobs wear the infernal if-card--ember treatment: an accent-line
+   border, a faint ember glow pooled at the card's floor, and a thin glint
+   running along the bottom edge — no side bar. */
+.specimen.is-live {
+  border-color: var(--if-accent-line, var(--live));
 }
 .specimen.is-live::before {
   content: "";
   position: absolute;
-  left: 0;
-  top: 0.65rem;
-  bottom: 0.65rem;
-  width: 3px;
-  background: var(--live);
-  animation: breathe 2.6s ease-in-out infinite;
+  pointer-events: none;
+  inset: 40% -20% -45%;
+  background: radial-gradient(ellipse 55% 60% at 30% 90%, color-mix(in srgb, var(--live) 30%, transparent), transparent 78%);
+  filter: blur(16px);
+  animation: breathe 4.5s ease-in-out infinite;
+}
+.specimen.is-live::after {
+  content: "";
+  position: absolute;
+  pointer-events: none;
+  left: 10%;
+  right: 10%;
+  bottom: 0;
+  height: 1px;
+  background: linear-gradient(90deg, transparent, var(--live), transparent);
+  opacity: 0.65;
 }
 
 /* Kind chips borrow the .state badge shape (flat, small caps) in plum. */
@@ -439,12 +708,15 @@ button, summary {
   display: inline-flex;
   align-items: center;
   gap: 0.3rem;
-  padding: 0.08rem 0.45rem;
-  border: 1px solid var(--plum);
+  padding: 2px 7px;
+  border: 1px solid transparent;
+  border-radius: 5px;
   background: var(--plum-soft);
-  color: var(--ink);
-  font-size: 0.75rem;
-  letter-spacing: 0.04em;
+  color: var(--plum);
+  font-family: var(--font-mono);
+  font-size: 0.63rem;
+  font-weight: 600;
+  letter-spacing: 0.06em;
   text-transform: uppercase;
   vertical-align: middle;
   white-space: nowrap;
@@ -455,22 +727,31 @@ button, summary {
   display: flex;
   flex-wrap: wrap;
   gap: 0.4rem 0.8rem;
-  align-items: baseline;
+  align-items: center;
   justify-content: space-between;
+  /* The infernal screen-job head band: a separated strip bleeding to the
+     card edges, so the state badge reads as card chrome, not content. */
+  margin: -0.85rem -1rem 0.65rem;
+  padding: 0.65rem 1rem;
+  border-bottom: 1px solid var(--line);
+  background: color-mix(in srgb, var(--surface-2) 50%, transparent);
 }
 .specimen-id {
-  font-size: 0.7rem;
-  letter-spacing: 0.14em;
+  font-family: var(--font-mono);
+  font-size: 0.63rem;
+  font-weight: 700;
+  letter-spacing: 0.12em;
   text-transform: uppercase;
   color: var(--ash);
 }
 .specimen-title {
-  margin: 0.25rem 0 0.15rem;
-  font-size: 1.05rem;
-  font-weight: 600;
+  margin: 0.1rem 0 0.15rem;
+  font-size: 1rem;
+  font-weight: 700;
+  letter-spacing: -0.01em;
 }
 .specimen-title a { color: var(--ink); text-decoration: none; }
-.specimen-title a:hover { color: var(--jade); text-decoration: underline; }
+.specimen-title a:hover { color: var(--action); text-decoration: underline; }
 .forge-mark {
   display: inline-flex;
   vertical-align: -0.2em;
@@ -490,20 +771,27 @@ a.pr-external {
   text-decoration: none;
   vertical-align: middle;
 }
-a.pr-external:hover { color: var(--jade); text-decoration: none; }
+a.pr-external:hover { color: var(--action); text-decoration: none; }
 a.pr-external svg { width: 1em; height: 1em; display: block; }
 h1 a.pr-external { font-size: 0.72em; }
 
 .meta-row {
   display: flex;
   flex-wrap: wrap;
-  gap: 0.35rem 1rem;
+  gap: 0.35rem 1.1rem;
   align-items: center;
-  margin-top: 0.45rem;
+  margin-top: 0.55rem;
   font-size: 0.88rem;
+}
+/* Inside job cards the meta row is the infernal screen-job__meta pattern:
+   small mono, quiet labels, brighter values. */
+.specimen .meta-row, .member-card .meta-row {
+  font-family: var(--font-mono);
+  font-size: 0.68rem;
 }
 .meta-row .pair { color: var(--ink-muted); }
 .meta-row .pair strong { color: var(--ink); font-weight: 600; }
+.specimen .meta-row .pair strong, .member-card .meta-row .pair strong { font-weight: 500; }
 
 .diagnosis {
   display: flex;
@@ -537,23 +825,26 @@ h1 a.pr-external { font-size: 0.72em; }
 .state {
   display: inline-flex;
   align-items: center;
-  gap: 0.3rem;
-  padding: 0.08rem 0.45rem;
-  border: 1px solid var(--line);
+  gap: 0.35rem;
+  padding: 3px 8px;
+  border: 1px solid transparent;
+  border-radius: 5px;
   background: var(--surface-2);
-  font-size: 0.75rem;
-  letter-spacing: 0.04em;
+  font-family: var(--font-mono);
+  font-size: 0.63rem;
+  font-weight: 600;
+  letter-spacing: 0.06em;
   text-transform: uppercase;
-  color: var(--ink);
+  color: var(--ink-soft, var(--ink));
   white-space: nowrap;
 }
 .state .mark { font-size: 0.7rem; }
-.state-completed, .state-done { background: var(--jade-soft); border-color: var(--jade); }
-.state-failed { background: var(--cinnabar-soft); border-color: var(--cinnabar); }
-.state-stale, .state-cancelled { background: var(--amber-soft); border-color: var(--amber); }
+.state-completed, .state-done { color: var(--jade); background: var(--jade-soft); }
+.state-failed { color: var(--cinnabar); background: var(--cinnabar-soft); }
+.state-stale, .state-cancelled { color: var(--amber); background: var(--amber-soft); }
 .state-reviewing, .state-aggregating, .state-sniffing, .state-publishing, .state-running, .state-preparing, .state-routing, .state-reconciling {
+  color: var(--working);
   background: var(--working-soft);
-  border-color: var(--working);
 }
 .state-preparing .mark,
 .state-reconciling .mark,
@@ -583,15 +874,17 @@ h1 a.pr-external { font-size: 0.72em; }
   align-items: center;
   gap: 0.25rem;
   font-family: var(--font-mono);
-  font-size: 0.75rem;
-  letter-spacing: 0.04em;
-  padding: 0.05rem 0.4rem;
-  border: 1px solid var(--line);
+  font-size: 0.63rem;
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  padding: 2px 7px;
+  border: 1px solid transparent;
+  border-radius: 5px;
   background: var(--surface-2);
 }
-.sev-blocker, .sev-high { background: var(--cinnabar-soft); border-color: var(--cinnabar); }
-.sev-medium { background: var(--amber-soft); border-color: var(--amber); }
-.sev-low, .sev-info { background: var(--jade-soft); border-color: var(--herb); }
+.sev-blocker, .sev-high { color: var(--cinnabar); background: var(--cinnabar-soft); }
+.sev-medium { color: var(--amber); background: var(--amber-soft); }
+.sev-low, .sev-info { color: var(--herb); background: var(--jade-soft); }
 
 /* Stack members on a stack_review job page: numbered nodes on a connecting
    rail, in the bottom-up order the runner reviews them. */
@@ -710,7 +1003,7 @@ h1 a.pr-external { font-size: 0.72em; }
   margin: 0 0.35rem;
 }
 .stack-mini-member a { color: inherit; text-decoration: none; }
-.stack-mini-member a:hover { color: var(--jade); text-decoration: underline; }
+.stack-mini-member a:hover { color: var(--action); text-decoration: underline; }
 .stack-mini-node {
   width: 1.15rem;
   height: 1.15rem;
@@ -747,18 +1040,35 @@ h1 a.pr-external { font-size: 0.72em; }
 
 /* Stack member jobs nest under their stack card on the home list — one
    glued block (no gap, no rail), each member a compact two-line row. */
+/* Stack members hang off the stack card on the infernal screen-rail
+   pattern: one vertical line, a dot per member, no nested boxes. */
 .member-cards {
   list-style: none;
-  margin: 0 0 0 1.2rem;
+  margin: 0.25rem 0 0.4rem 1.4rem;
   padding: 0;
-  background: var(--surface);
-  border: 1px solid var(--line);
-  border-top: none;
-  border-radius: 0 0 var(--radius) var(--radius);
+  border-left: 1px solid var(--line-strong, var(--line));
 }
-.member-card { padding: 0.35rem 0.7rem; font-size: 0.88rem; }
-.member-card + .member-card { border-top: 1px solid var(--line); }
-.member-card.is-live { box-shadow: inset 3px 0 0 var(--live); }
+.member-card {
+  position: relative;
+  padding: 0.45rem 0.7rem 0.5rem 1.15rem;
+  font-size: 0.88rem;
+}
+.member-card::before {
+  content: "";
+  position: absolute;
+  left: -5.5px;
+  top: 0.85rem;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--surface);
+  border: 2px solid var(--line-strong, var(--line));
+}
+.member-card.is-live::before {
+  border-color: var(--working);
+  background: var(--working-soft);
+}
+.member-card + .member-card { border-top: 1px solid color-mix(in srgb, var(--line) 55%, transparent); }
 .member-row {
   display: flex;
   align-items: baseline;
@@ -784,47 +1094,72 @@ h1 a.pr-external { font-size: 0.72em; }
 
 /* /reviewers board: dense one-line rows — role · PR title · owning job ·
    mode · head · elapsed · state. */
+/* Reviewer runs board — an infernal if-table with fixed columns so every
+   row's meta lines up. The library owns the chrome (wrap, header band, row
+   hover); these rules size the columns and truncate the change title. */
 .run-board {
-  list-style: none;
-  margin: 0;
-  padding: 0;
   background: var(--surface);
-  border: 1px solid var(--line);
-  border-radius: var(--radius);
-  /* Dense rows can't reflow (nowrap meta pieces) — confine the scroll
-     to the board instead of letting it push the page wide. */
-  overflow-x: auto;
+  margin-bottom: 0.4rem;
 }
-.run-row {
-  display: flex;
-  align-items: baseline;
-  gap: 0.6rem;
-  padding: 0.4rem 0.8rem;
-  font-size: 0.9rem;
-  min-width: 0;
-}
-.run-row + .run-row { border-top: 1px solid var(--line); }
-.run-row .role { white-space: nowrap; }
-.run-row .role svg { width: 0.9em; height: 0.9em; vertical-align: -0.1em; }
-.run-title {
-  font-weight: 600;
+.run-board .if-table { table-layout: fixed; min-width: 760px; }
+.run-board .col-role { width: 9.5rem; }
+.run-board .col-title { width: auto; }
+.run-board .col-owner { width: 12rem; }
+.run-board .col-mode { width: 5.5rem; }
+.run-board .col-sha { width: 6.5rem; }
+.run-board .col-elapsed { width: 4.5rem; }
+.run-board .col-state { width: 7.5rem; }
+.run-row td { vertical-align: middle; }
+.run-row .role { white-space: nowrap; display: inline-flex; align-items: center; gap: 0.35rem; }
+.run-row .role svg { width: 0.9em; height: 0.9em; flex: none; }
+.run-title a {
+  display: block;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  flex: 1 1 auto;
-  min-width: 0;
+  font-weight: 600;
 }
 .run-row .run-owner,
 .run-row .run-elapsed,
 .run-row .sha { white-space: nowrap; }
-.run-row .state { margin-left: auto; white-space: nowrap; }
+.run-row .run-owner {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.run-row .run-state .state { white-space: nowrap; }
+.run-row td.muted, .run-row .muted { font-size: 11.5px; }
 .pager {
   display: flex;
   justify-content: space-between;
-  align-items: baseline;
+  align-items: center;
   gap: 1rem;
-  margin: 0.5rem 0.2rem;
+  margin: 0.55rem 0.1rem 0;
   font-size: 0.88rem;
+}
+
+.pager > a {
+  display: inline-flex;
+  align-items: center;
+  padding: 5px 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--surface);
+  color: var(--if-accent);
+  font-weight: 600;
+  font-size: 12px;
+  text-decoration: none;
+  transition: border-color 0.15s ease, background 0.15s ease;
+}
+
+.pager > a:hover {
+  border-color: var(--if-accent);
+  background: var(--if-accent-soft, var(--well));
+}
+
+.pager > .muted {
+  font-family: var(--if-mono);
+  font-size: 11px;
+  letter-spacing: 0.02em;
 }
 
 /* Repo / job-type filter bar on the home job list; it reuses the .trigger
@@ -834,8 +1169,8 @@ h1 a.pr-external { font-size: 0.72em; }
 .job-filters select {
   width: 100%;
   margin-top: 0.3rem;
-  padding: 0.45rem 0.5rem;
-  background: var(--paper);
+  padding: 0.45rem 0.6rem;
+  background: var(--if-bg-raised, var(--paper));
   color: var(--ink);
   border: 1px solid var(--line-strong);
 }
@@ -885,19 +1220,20 @@ form.retry, form.retry-job, form.dequeue {
   gap: 0.45rem;
 }
 /* a.cancel-review is an anchor styled as a button — see the anchor resets below. */
-.retry button, .retry-job button, .dequeue button, a.cancel-review {
+.retry button:not(.if-button), .retry-job button:not(.if-button), .dequeue button:not(.if-button), a.cancel-review {
   background: var(--paper);
   color: var(--ink);
   border: 1px solid var(--line-strong);
+  border-radius: var(--if-radius-sm, 7px);
   padding: 0.22rem 0.65rem;
   font-size: 0.78rem;
   font-weight: 600;
   cursor: pointer;
   white-space: nowrap;
 }
-.retry button:hover, .retry-job button:hover, .dequeue button:hover, a.cancel-review:hover {
-  color: var(--jade);
-  border-color: var(--jade);
+.retry button:not(.if-button):hover, .retry-job button:not(.if-button):hover, .dequeue button:not(.if-button):hover, a.cancel-review:hover {
+  color: var(--action);
+  border-color: var(--action);
 }
 /* The cancel entry point is an anchor styled as a button: match the form controls. */
 a.cancel-review { text-decoration: none; display: inline-block; }
@@ -908,12 +1244,57 @@ a.cancel-review { text-decoration: none; display: inline-block; }
   gap: 0.45rem;
   font-weight: 600;
 }
-.role svg { width: 1rem; height: 1rem; color: var(--herb); flex: none; }
+.role svg { width: 1rem; height: 1rem; color: var(--action); flex: none; }
 .role-agg svg { color: var(--plum); }
 
 .finding {
-  padding: 0.85rem 1rem;
   margin: 0 0 0.75rem;
+}
+
+/* Adopted if-finding chrome: summary/body own the padding, the card is a
+   borderless-at-rest disclosure. Theme layer keeps status-driven border
+   treatments working on top. */
+.finding.if-finding {
+  padding: 0;
+  background: var(--surface);
+}
+
+.finding.if-finding summary {
+  gap: 14px;
+}
+
+.finding-summary-text {
+  min-width: 0;
+  font-size: 12.5px;
+}
+
+.finding-summary-text .finding-title {
+  font-size: 13px;
+}
+
+.finding-summary-text .loc {
+  display: inline-block;
+  margin-top: 3px;
+}
+
+.finding-summary-badges {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  flex: none;
+  margin-left: auto;
+}
+
+/* The library chevron sits after the badges; keep it compact. */
+.finding.if-finding summary::after {
+  flex: none;
+}
+
+.finding.if-finding .if-finding__body {
+  color: var(--ink-weak);
+  font-size: 12.5px;
 }
 .finding.is-unconfirmed {
   border-style: dashed;
@@ -1004,6 +1385,7 @@ a.cancel-review { text-decoration: none; display: inline-block; }
   line-height: 1.45;
   background: var(--surface-2);
   border: 1px solid var(--line-strong);
+  border-radius: var(--if-radius-sm, 7px);
   padding: 0.5rem 0.75rem;
   overflow-x: auto;
   white-space: pre;
@@ -1012,9 +1394,25 @@ a.cancel-review { text-decoration: none; display: inline-block; }
   position: relative;
 }
 /* Server-rendered line spans (no-JS fallback) share the panel pre's newlines —
-   they must stay inline or every line renders double-spaced. */
-.diff-panel .diff-add { color: var(--jade); }
-.diff-panel .diff-del { color: var(--cinnabar); }
+   they must stay inline or every line renders double-spaced. The soft tinted
+   backgrounds mirror the infernal if-diff--add/--remove line treatment, keyed
+   to theme tokens (the vendored component colors are hardcoded for dark). */
+.diff-panel {
+  font-size: 11px;
+  line-height: 1.75;
+}
+.diff-panel .diff-add {
+  color: var(--jade);
+  background: var(--jade-soft);
+  box-decoration-break: clone;
+  -webkit-box-decoration-break: clone;
+}
+.diff-panel .diff-del {
+  color: var(--cinnabar);
+  background: var(--cinnabar-soft);
+  box-decoration-break: clone;
+  -webkit-box-decoration-break: clone;
+}
 .diff-panel .diff-ctx { color: var(--ink-muted); }
 .diff-note { font-size: 0.8rem; }
 
@@ -1113,7 +1511,7 @@ details.finding-diff > summary {
   border-radius: 6px;
 }
 .typeahead-option.is-active,
-.typeahead-option[aria-selected="true"] { background: color-mix(in srgb, var(--herb) 26%, transparent); }
+.typeahead-option[aria-selected="true"] { background: color-mix(in srgb, var(--action) 26%, transparent); }
 .typeahead-empty,
 .typeahead-empty.is-active {
   cursor: default;
@@ -1144,8 +1542,8 @@ details.finding-diff > summary {
   text-align: left;
   cursor: pointer;
 }
-.model-picker-btn:hover { border-color: var(--jade); }
-.model-picker-btn[aria-expanded="true"] { border-color: var(--jade); }
+.model-picker-btn:hover { border-color: var(--action); }
+.model-picker-btn[aria-expanded="true"] { border-color: var(--action); }
 .model-picker-btn[aria-invalid="true"] { border-color: var(--cinnabar); }
 .model-picker-label {
   overflow: hidden;
@@ -1211,8 +1609,8 @@ details.finding-diff > summary {
   border-radius: 6px;
   cursor: pointer;
 }
-.model-picker-option.is-active { background: color-mix(in srgb, var(--herb) 26%, transparent); }
-.model-picker-check { flex: none; width: 1em; color: var(--jade); visibility: hidden; }
+.model-picker-option.is-active { background: color-mix(in srgb, var(--action) 26%, transparent); }
+.model-picker-check { flex: none; width: 1em; color: var(--action); visibility: hidden; }
 .model-picker-option[aria-selected="true"] .model-picker-check { visibility: visible; }
 .model-picker-text { display: flex; flex-direction: column; min-width: 0; }
 .model-picker-name {
@@ -1238,47 +1636,15 @@ details.finding-diff > summary {
 details.finding:not([open]) {
   opacity: 0.82;
 }
-details.finding {
-  padding: 0.45rem 0.75rem;
-  margin: 0 0 0.4rem;
-}
-details.finding > summary {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 0.3rem 0.55rem;
-  align-items: baseline;
-  cursor: pointer;
-  color: var(--ink);
-  list-style: none;
-}
+/* The infernal if-finding component owns disclosure chrome (summary padding,
+   ::after chevron, body hairline). These rules only cover what the library
+   misses: Firefox's ::marker and the maomao severity/status typography. */
 details.finding > summary::-webkit-details-marker,
 details.finding > summary::marker {
   display: none;
 }
-details.finding > summary::before {
-  content: "▸";
-  color: var(--ash);
-  font-size: 0.72rem;
-  width: 0.7rem;
-  flex: none;
-}
-details.finding[open] > summary::before {
-  content: "▾";
-}
-details.finding[open] > summary {
-  margin-bottom: 0.35rem;
-  padding-bottom: 0.35rem;
-  border-bottom: 1px dashed var(--line);
-}
-details.finding .finding-title {
-  flex: 1 1 10rem;
-  font-family: var(--font-ui);
-  font-weight: 600;
-  font-size: 0.92rem;
-}
-details.finding .loc {
-  margin: 0;
-  font-size: 0.78rem;
+details.finding > summary {
+  list-style: none;
 }
 .settled-findings-label {
   margin: 1rem 0 0.45rem;
@@ -1302,6 +1668,7 @@ pre, .log-panel {
   line-height: 1.45;
   padding: 0.8rem;
   border: 1px solid var(--line);
+  border-radius: var(--if-radius-sm, 7px);
   overflow: auto;
   max-height: 22rem;
 }
@@ -1322,9 +1689,14 @@ pre, .log-panel {
 .logs .lvl { text-transform: uppercase; letter-spacing: 0.04em; }
 
 .empty {
-  padding: 1.4rem 1.1rem;
-  text-align: left;
+  padding: 1.6rem 1.2rem;
+  text-align: center;
+  border-style: dashed;
+  border-color: var(--line-strong, var(--line));
+  color: var(--muted);
 }
+
+.empty strong { color: var(--ink); }
 .empty p { margin: 0.3rem 0; }
 
 details { margin: 0.45rem 0; }
@@ -1402,9 +1774,6 @@ details summary { cursor: pointer; color: var(--ink-muted); }
   .member-row .member-title { order: -1; flex: 1 1 100%; }
   /* Same for dense reviewer runs: the title owns line one and the role,
      owner, mode, sha and state flow onto the following lines. */
-  .run-row { flex-wrap: wrap; }
-  .run-row .run-title { order: -1; flex: 1 1 100%; }
-  .run-board { overflow-x: visible; }
 }
 
 @media (min-resolution: 1.4dppx) {
@@ -1422,8 +1791,8 @@ details summary { cursor: pointer; color: var(--ink-muted); }
   max-width: 60rem;
 }
 .chat-bubble p { margin: var(--space-1) 0 0; overflow-wrap: anywhere; }
-.chat-bubble-user { border-left: 3px solid var(--herb); }
-.chat-bubble-assistant { border-left: 3px solid var(--jade); }
+.chat-bubble-user { border-left: 3px solid var(--if-info, var(--herb)); }
+.chat-bubble-assistant { border-left: 3px solid var(--action); }
 .chat-thread { display: grid; gap: var(--space-3); margin-top: var(--space-4); }
 .chat-viewport {
   display: grid;
@@ -1468,7 +1837,7 @@ details summary { cursor: pointer; color: var(--ink-muted); }
   font-weight: 600;
   letter-spacing: 0.02em;
 }
-.chat-cancel:hover { color: var(--jade); border-color: var(--jade); }
+.chat-cancel:hover { color: var(--action); border-color: var(--action); }
 .chat-send:disabled, .chat-cancel:disabled { opacity: 0.5; cursor: default; }
 .chat-error { border: 1px solid var(--cinnabar); background: var(--cinnabar-soft); color: var(--ink); border-radius: var(--radius); padding: var(--space-2); }
 .chat-suggestions { display: flex; flex-wrap: wrap; gap: var(--space-2); }
@@ -1483,7 +1852,7 @@ details summary { cursor: pointer; color: var(--ink-muted); }
   font-size: 0.85rem;
   font-weight: 600;
 }
-.chat-suggestion:hover { color: var(--jade); border-color: var(--jade); }
+.chat-suggestion:hover { color: var(--action); border-color: var(--action); }
 
 /* ---- Operator chrome (header menu + secondary pages) ---- */
 .account-menu { position: relative; }
@@ -1495,10 +1864,12 @@ details summary { cursor: pointer; color: var(--ink-muted); }
   cursor: pointer;
   font: inherit;
   font-size: 0.85rem;
+  font-weight: 600;
   color: var(--ink);
   background: var(--surface);
   border: 1px solid var(--line);
-  padding: 0.1rem 0.5rem 0.1rem 0.28rem;
+  border-radius: var(--if-radius-sm, 7px);
+  padding: 0.22rem 0.6rem 0.22rem 0.35rem;
 }
 .account-menu-summary::-webkit-details-marker,
 .account-menu-summary::marker { display: none; }
@@ -1517,6 +1888,7 @@ details summary { cursor: pointer; color: var(--ink-muted); }
   display: grid;
   background: var(--surface);
   border: 1px solid var(--line);
+  border-radius: var(--if-radius-sm, 7px);
   box-shadow: var(--shadow);
   padding: 0.3rem;
   z-index: 8;
@@ -1546,39 +1918,45 @@ details summary { cursor: pointer; color: var(--ink-muted); }
 }
 .account-menu-panel a:hover,
 .account-logout button:hover {
-  background: var(--jade-soft);
+  background: var(--action-soft);
   color: var(--ink);
 }
 .account-logout { margin: 0.15rem 0 0; padding: 0.15rem 0 0; border-top: 1px solid var(--line); }
 
-.btn, .btn-secondary, .btn-danger,
-body.operator main form:not(.chat-composer) button {
+.btn:not(.if-button), .btn-secondary:not(.if-button), .btn-danger:not(.if-button),
+body.operator main form:not(.chat-composer) button:not(.if-button):not(.model-picker-btn) {
   font: inherit;
   font-weight: 600;
   letter-spacing: 0.02em;
   cursor: pointer;
   padding: 0.45rem 0.85rem;
-  border: 1px solid color-mix(in srgb, var(--jade) 70%, var(--ink));
-  background: var(--jade);
+  border: 1px solid color-mix(in srgb, var(--action) 70%, var(--ink));
+  background: var(--action);
   color: var(--btn-fg);
 }
-.btn-secondary,
-body.operator main form:not(.chat-composer) button.btn-secondary {
+.btn-secondary:not(.if-button),
+body.operator main form:not(.chat-composer) button.btn-secondary:not(.if-button):not(.model-picker-btn) {
   background: var(--paper);
   color: var(--ink);
   border: 1px solid var(--line-strong);
 }
-.btn-danger,
-body.operator main form:not(.chat-composer) button.btn-danger {
+.btn-danger:not(.if-button),
+body.operator main form:not(.chat-composer) button.btn-danger:not(.if-button):not(.model-picker-btn) {
   background: var(--cinnabar);
   color: var(--btn-fg);
   border: 1px solid color-mix(in srgb, var(--cinnabar) 70%, var(--ink));
 }
-.btn:hover, body.operator main form:not(.chat-composer) button:hover { filter: brightness(1.05); }
-.btn-secondary:hover, body.operator main form:not(.chat-composer) button.btn-secondary:hover {
-  color: var(--jade);
-  border-color: var(--jade);
+.btn:not(.if-button):hover, body.operator main form:not(.chat-composer) button:not(.if-button):not(.model-picker-btn):hover { filter: brightness(1.05); }
+.btn-secondary:not(.if-button):hover, body.operator main form:not(.chat-composer) button.btn-secondary:not(.if-button):hover {
+  color: var(--action);
+  border-color: var(--action);
   filter: none;
+}
+
+input:not([type="hidden"]):not([type="checkbox"]):not([type="radio"]),
+textarea,
+select {
+  border-radius: var(--if-radius-sm, 7px);
 }
 
 body.operator main input:not([type="hidden"]):not([type="checkbox"]):not([type="radio"]):not(.chat-composer-input),
@@ -1586,8 +1964,8 @@ body.operator main textarea:not(.chat-composer-input),
 body.operator main select {
   width: 100%;
   margin-top: 0.3rem;
-  padding: 0.45rem 0.5rem;
-  background: var(--paper);
+  padding: 0.45rem 0.6rem;
+  background: var(--if-bg-raised, var(--paper));
   color: var(--ink);
   border: 1px solid var(--line-strong);
   border-radius: var(--radius);
@@ -1606,9 +1984,12 @@ body.operator main legend {
 }
 body.operator main table {
   width: 100%;
-  border-collapse: collapse;
+  border-collapse: separate;
+  border-spacing: 0;
   background: var(--surface);
   border: 1px solid var(--line);
+  border-radius: var(--if-radius-sm, 7px);
+  overflow: hidden;
 }
 body.operator main th,
 body.operator main td {
@@ -1660,10 +2041,10 @@ body.operator main th {
   border-radius: 50%;
   border: 1px solid var(--line-strong);
 }
-.role-check:hover { border-color: var(--jade); color: var(--ink); }
+.role-check:hover { border-color: var(--action); color: var(--ink); }
 .role-check input { position: absolute; opacity: 0; width: 1px; height: 1px; margin: 0; }
-.role-check:has(input:checked) { background: var(--jade-soft); border-color: var(--jade); color: var(--ink); font-weight: 600; }
-.role-check:has(input:checked)::before { background: var(--jade); border-color: var(--jade); }
+.role-check:has(input:checked) { background: var(--action-soft); border-color: var(--action); color: var(--ink); font-weight: 600; }
+.role-check:has(input:checked)::before { background: var(--action); border-color: var(--action); }
 .role-check:has(input:focus-visible) { outline: 2px solid var(--focus); outline-offset: 2px; }
 .alert-level[aria-invalid="true"] .role-check { border-color: var(--cinnabar); }
 .connection-flags { display: flex; flex-wrap: wrap; gap: 0.35rem; margin-top: 0.6rem; }
@@ -1819,8 +2200,8 @@ body.operator main th {
   padding: 0.22rem 0.65rem;
   cursor: pointer;
 }
-.chat-action:hover { color: var(--jade); border-color: var(--jade); }
-.chat-action[data-copied] { color: var(--jade); }
+.chat-action:hover { color: var(--action); border-color: var(--action); }
+.chat-action[data-copied] { color: var(--action); }
 .chat-footer { display: grid; gap: var(--space-3); }
 .chat-scroll-bottom {
   justify-self: center;
@@ -1834,7 +2215,7 @@ body.operator main th {
   padding: 0.22rem 0.65rem;
   cursor: pointer;
 }
-.chat-scroll-bottom:hover { color: var(--jade); border-color: var(--jade); }
+.chat-scroll-bottom:hover { color: var(--action); border-color: var(--action); }
 .chat-indicator { margin: 0; }
 .chat-toolbar {
   display: flex;
@@ -1881,9 +2262,9 @@ body.operator main th {
   display: inline-block;
   margin: 0.35rem 0;
   font-weight: 600;
-  background: var(--jade);
+  background: var(--action);
   color: var(--btn-fg);
-  border: 1px solid color-mix(in srgb, var(--jade) 70%, var(--ink));
+  border: 1px solid color-mix(in srgb, var(--action) 70%, var(--ink));
   padding: 0.45rem 0.85rem;
   text-decoration: none;
 }

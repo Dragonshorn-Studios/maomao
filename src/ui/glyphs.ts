@@ -17,6 +17,15 @@ export function roleGlyph(role: string): string {
   return GLYPHS[role] ?? GLYPHS.correctness;
 }
 
+/**
+ * Mergehenna product mark: two branches merging into a single pinned node —
+ * the merge queue compressed into one glyph. currentColor, so it inherits the
+ * accent wherever the chrome places it.
+ */
+export function mergehennaMark(): string {
+  return `<svg width="16" height="16" viewBox="0 0 24 24" aria-hidden="true" focusable="false" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"><path d="M6 2.8v5.4c0 2.9 2.5 4.4 6 5.9"/><path d="M18 2.8v5.4c0 2.9-2.5 4.4-6 5.9"/><path d="M12 14.1v4.1"/><circle cx="12" cy="20.2" r="1.7" fill="currentColor" stroke="none"/></svg>`;
+}
+
 export function brandMark(): string {
   return GLYPHS.mark;
 }

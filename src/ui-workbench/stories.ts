@@ -564,6 +564,53 @@ export const STORIES: WorkbenchStory[] = [
       };
       const { job, runs } = byId(table, variant.id);
       const options: JobPageOptions = { csrfToken: WORKBENCH_CSRF, chatEnabled: true };
+      if (variant.id === "completed-with-findings") {
+        options.mergeLifecycle = {
+          state: "ready",
+          detail: "Merge readiness is green across the required contexts.",
+          nativeUrl: "https://github.com/acme/apothecary/runs/9101",
+          readiness: {
+            id: 1,
+            provider: "github",
+            provider_instance: "",
+            repo_full_name: "acme/apothecary",
+            pr_number: 412,
+            head_sha: "b7c9e2f",
+            name: "maomao/merge-readiness",
+            external_id: "ext-1",
+            job_id: job.id,
+            status: "completed",
+            conclusion: "success",
+            native_id: null,
+            native_url: null,
+            details_url: null,
+            title: "Ready to merge",
+            summary: "All required contexts passed at the pinned head.",
+            publish_error: null,
+            attempts: 1,
+            created_at: "2026-03-02T09:00:00Z",
+            updated_at: "2026-03-02T09:00:00Z",
+            published_at: "2026-03-02T09:00:00Z",
+          },
+        };
+        options.mergeCapabilities = {
+          mergeMode: "github_native_queue",
+          nativeAutoMerge: "available",
+          nativeMergeScheduled: true,
+          githubNativeQueue: "available",
+          requiredStatusContexts: ["maomao/merge-readiness", "ci/tests"],
+          requiredApprovals: 2,
+          mergeMethods: ["squash", "rebase"],
+          baseRef: "main",
+          draft: false,
+          pullState: "open",
+          mergeable: "mergeable",
+          forgeVersion: "17.0.1",
+          protectedBranch: true,
+          reasons: ["queue available for main", "readiness context required by protection"],
+          source: "workbench",
+        };
+      }
       return layoutBody(renderJob(job, runs, [], options));
     },
   },
@@ -582,7 +629,11 @@ export const STORIES: WorkbenchStory[] = [
     ],
     preview: (variant) => {
       const rows = variant.id === "empty" ? [] : BOARD_MIXED_ROWS;
-      return layoutBody(renderReviewerBoard(rows as Parameters<typeof renderReviewerBoard>[0], {}));
+      return layoutBody(
+        renderReviewerBoard(rows as Parameters<typeof renderReviewerBoard>[0], {
+          runPagination: variant.id === "empty" ? undefined : { page: 2, pageSize: 25, total: 118 },
+        }),
+      );
     },
   },
   {
@@ -590,6 +641,7 @@ export const STORIES: WorkbenchStory[] = [
     title: "Profile configuration form",
     category: "Configuration",
     family: "ssr",
+    surface: "operator",
     sourceFiles: ["src/ui/pages.ts", "src/config-form.ts", "src/ui/model-picker.ts"],
     defaultViewport: "desktop",
     uses: ["model-picker"],
@@ -637,6 +689,7 @@ export const STORIES: WorkbenchStory[] = [
     title: "Ask Maomao chat island",
     category: "React islands",
     family: "react",
+    surface: "operator",
     sourceFiles: ["src/ui/chat-entry.tsx", "src/ui/chat-page.ts", "src/ui/chat-stream.ts"],
     defaultViewport: "desktop",
     notes: "The assistant-ui island. Its stream endpoint is a fake in-process handler — no model is ever called.",
@@ -834,6 +887,7 @@ export const STORIES: WorkbenchStory[] = [
     title: "Configuration audit table",
     category: "Configuration",
     family: "ssr",
+    surface: "operator",
     sourceFiles: ["src/ui/pages.ts"],
     defaultViewport: "desktop",
     notes: "The configuration audit trail — who changed which profile revision, and when.",
@@ -848,6 +902,7 @@ export const STORIES: WorkbenchStory[] = [
     title: "Webhook deliveries table",
     category: "Configuration",
     family: "ssr",
+    surface: "operator",
     sourceFiles: ["src/ui/pages.ts"],
     defaultViewport: "desktop",
     notes: "The webhook delivery log — what maomao saw, what it did with it, and what it ignored.",
@@ -863,6 +918,7 @@ export const STORIES: WorkbenchStory[] = [
     title: "Prompt role card",
     category: "Configuration",
     family: "ssr",
+    surface: "operator",
     sourceFiles: ["src/ui/pages.ts"],
     defaultViewport: "desktop",
     notes: "One reviewer role on the prompt page: the built-in instructions or the active override.",
@@ -880,6 +936,7 @@ export const STORIES: WorkbenchStory[] = [
     title: "Model picker",
     category: "Configuration",
     family: "ssr",
+    surface: "operator",
     sourceFiles: ["src/ui/model-picker.ts"],
     defaultViewport: "desktop",
     notes: "The model dropdown every model field uses: the input, the button, and the grouped options.",

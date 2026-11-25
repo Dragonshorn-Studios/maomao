@@ -1,4 +1,5 @@
 import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
+import { INFERNAL_HREF } from "./ui/infernal.js";
 import { CHAT_BUNDLE_HREF, PIERRE_DIFFS_HREF } from "./ui/paths.js";
 
 export const SESSION_COOKIE = "maomao_session";
@@ -67,6 +68,7 @@ export function isPublicPath(path: string): boolean {
     path === "/login/github/callback" ||
     // Stylesheet and brand icons: fixed constants served by src/server.ts.
     path === "/assets/maomao.css" ||
+    path === INFERNAL_HREF ||
     path === PIERRE_DIFFS_HREF ||
     path === CHAT_BUNDLE_HREF ||
     path === "/assets/typeahead.js" ||

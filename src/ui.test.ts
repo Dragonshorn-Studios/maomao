@@ -3,6 +3,7 @@ import { openDb } from "./db.js";
 import { seedDemoJobs } from "./demo/fixtures.js";
 import { JobStore } from "./jobs/store.js";
 import { THEME_CSS } from "./ui/theme.js";
+import { INFERNAL_CSS } from "./ui/infernal.js";
 import { TYPEAHEAD_JS } from "./ui/typeahead.js";
 import { renderConfigAuditPage, renderConfigPage, renderDraftEditPage, renderHome, renderJob, renderLogin, renderProfilesPage, renderPromptConfigPage, renderReviewerBoard, renderScanConfirmPage, renderScanIssuePreviewPage, renderScanPage } from "./ui/pages.js";
 import { layout } from "./ui/layout.js";
@@ -29,7 +30,7 @@ describe("theme tokens", () => {
     expect(THEME_CSS).toContain("--cinnabar:");
     expect(THEME_CSS).toContain("--amber:");
     expect(THEME_CSS).toContain("--working:");
-    expect(THEME_CSS).toContain("--working: var(--plum)");
+    expect(THEME_CSS).toContain("--working: var(--if-accent)");
     expect(THEME_CSS).not.toContain("#6ecad6");
     expect(THEME_CSS).toContain(".finding.is-unconfirmed");
     expect(THEME_CSS).toContain("details.finding");
@@ -54,15 +55,20 @@ describe("theme tokens", () => {
     expect(THEME_CSS).toContain("@keyframes spin");
     // The Dequeue and Cancel review controls wear the same small-outline style as Retry.
     expect(THEME_CSS).toContain("form.retry, form.retry-job, form.dequeue {");
-    expect(THEME_CSS).toContain(".retry button, .retry-job button, .dequeue button, a.cancel-review {");
-    expect(THEME_CSS).toContain(".dequeue button:hover, a.cancel-review:hover");
+    expect(THEME_CSS).toContain(".retry button:not(.if-button), .retry-job button:not(.if-button), .dequeue button:not(.if-button), a.cancel-review {");
+    expect(THEME_CSS).toContain(".dequeue button:not(.if-button):hover, a.cancel-review:hover");
     expect(THEME_CSS).toMatch(/a\.cancel-review \{[^}]*text-decoration: none/);
     expect(THEME_CSS).toContain(".section-head");
     expect(THEME_CSS).toMatch(/\.tick\.running[\s\S]*var\(--working\)/);
     expect(THEME_CSS).toMatch(/\.state-reviewing[\s\S]*var\(--working-soft\)/);
     expect(THEME_CSS).not.toMatch(/\.tick\.running \{ background: var\(--amber\)/);
     expect(THEME_CSS).toContain("--ash:");
-    expect(THEME_CSS).toContain('html[data-theme="dark"]');
+    // Light/dark theming is owned by the vendored Infernal stylesheet,
+    // keyed on data-if-theme; the app theme only aliases its tokens.
+    expect(INFERNAL_CSS).toContain('[data-if-theme="dark"]');
+    expect(INFERNAL_CSS).toContain('[data-if-theme="light"]');
+    expect(INFERNAL_CSS).toContain('[data-if-brand="mergehenna"]');
+    expect(THEME_CSS).toContain("--paper: var(--if-bg)");
     expect(THEME_CSS).toContain("prefers-reduced-motion");
     expect(THEME_CSS).toContain("--font-mono:");
     expect(THEME_CSS).toContain(".account-menu");
@@ -106,6 +112,9 @@ describe("monitoring pages", () => {
     expect(html).toContain('<script src="/assets/vendor/pierre-diffs.js" defer></script>');
     expect(html).not.toContain('<details class="account-menu">');
     expect(html).not.toContain('href="/connections"');
+    // Rail-less pages must opt out of the rail grid column entirely —
+    // regressing this squeezed the login into the 3.75rem icon column.
+    expect(html).toContain("shell--railless");
   });
 
   it("renders the empty queue with restrained flavor", () => {
@@ -113,7 +122,7 @@ describe("monitoring pages", () => {
     const html = renderHome([], store);
     expect(html).toContain("Nothing is under examination.");
     expect(html).toContain("Queue a GitHub pull request");
-    expect(html).toContain("Review jobs");
+    expect(html).toContain("Merge queue");
   });
 
   it("renders scannable specimen cards with SHA, progress, and severity text", () => {
@@ -257,11 +266,12 @@ describe("monitoring pages", () => {
     const findingsSection = html.slice(html.indexOf('id="findings"'));
     expect(findingsSection).toContain("Session cookie Secure flag can be dropped");
     expect(findingsSection).toContain("Finding requires attention");
-    expect(findingsSection).toMatch(/<article class="finding(?![^"]*(?:is-buried|is-resolved))/);
+    expect(findingsSection).toMatch(/<details class="finding if-finding(?![^"]*(?:is-buried|is-resolved))[ "^]*" open>/);
     expect(findingsSection).toContain("<details class=\"finding is-buried");
     expect(findingsSection).toContain("<details class=\"finding is-resolved");
     expect(findingsSection).toContain("<summary>");
-    expect(findingsSection).not.toMatch(/<details[^>]*\sopen[\s>]/);
+    // Active findings render open; only settled ones stay collapsed.
+    expect(findingsSection).not.toMatch(/<details class="finding is-(?:buried|resolved)[^"]*" open>/);
     expect(findingsSection).toContain("Dismissed");
     expect(findingsSection).toContain("Production cookie note omits the forwarded-proto caveat");
     expect(findingsSection).toContain("Buried by octocat via @maomao bury");

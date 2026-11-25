@@ -17,6 +17,8 @@ import { elapsedMs, escapeHtml, formatDuration, shortSha } from "../util.js";
 import { KNOWN_REVIEWER_ROLES, composeReviewerPrompt, promptBodyFromRolePrompt } from "../prompts.js";
 import { composedPipelineStages } from "../prompt-previews.js";
 import {
+  OPERATOR_NAME,
+  PRODUCT_NAME,
   cancelledBannerCopy,
   diffUnavailableCopy,
   emptyQueueCopy,
@@ -43,7 +45,7 @@ import {
 } from "./copy.js";
 import { externalLinkGlyph, pancakeMark, roleGlyph, stackMark } from "./glyphs.js";
 import { TYPEAHEAD_HREF } from "./typeahead.js";
-import { csrfInput, layout, type PageOptions, type UiIdentity } from "./layout.js";
+import { csrfInput, layout, type PageOptions, type QueueView, type UiIdentity } from "./layout.js";
 import {
   findingLocation,
   formatCost,
@@ -95,17 +97,17 @@ export function renderLogin(options: LoginOptions = {}): string {
         Password
         <input type="password" name="password" autocomplete="current-password" autofocus required/>
       </label>
-      <button type="submit">Sign in</button>
+      <button class="if-button if-button--primary" type="submit">Sign in</button>
     </form>`
     : "";
   const body = `
     <h1>Sign in</h1>
-    <p class="lede">Sign in to view jobs, logs, and APIs.</p>
+    <p class="lede">Sign in to ${escapeHtml(PRODUCT_NAME)} — the merge gate operated by ${escapeHtml(OPERATOR_NAME)} — to view jobs, logs, and APIs.</p>
     ${errorCopy ? `<p class="error" role="alert">${escapeHtml(errorCopy)}</p>` : ""}
     ${githubButton}
     ${githubButton && passwordForm ? `<p class="muted">or</p>` : ""}
     ${passwordForm}`;
-  return layout("Maomao sign in", body, { live: false, accountMenu: false });
+  return layout(`${PRODUCT_NAME} sign in`, body, { live: false, accountMenu: false, rail: false });
 }
 
 const JOB_TYPE_FILTERS: { value: JobRow["job_type"]; label: string }[] = [
@@ -116,8 +118,63 @@ const JOB_TYPE_FILTERS: { value: JobRow["job_type"]; label: string }[] = [
   { value: "merge_group_check", label: "Merge groups" },
 ];
 
+/**
+ * The home queue's family split. The merge queue — reviews and merge-group
+ * checks that gate merging — is the product's default surface; operations
+ * collects the operator-triggered maintenance jobs; `all` is the undivided
+ * history. `types` undefined means no family restriction.
+ */
+export const QUEUE_VIEWS: Array<{
+  id: QueueView,
+  label: string,
+  h1: string,
+  lede: string,
+  types?: Array<JobRow["job_type"]>,
+}> = [
+  {
+    id: "merge",
+    label: "Merge queue",
+    h1: "Merge queue",
+    lede: "Reviews and merge-group checks gating the merge. Each job is anchored to an exact head SHA.",
+    types: ["pr_review", "stack_review", "merge_group_check"],
+  },
+  {
+    id: "ops",
+    label: "Operations",
+    h1: "Operations",
+    lede: "Health scans and repo briefs — operator-triggered maintenance work, newest first.",
+    types: ["health_scan", "repo_brief"],
+  },
+  {
+    id: "all",
+    label: "All jobs",
+    h1: "All jobs",
+    lede: "The undivided job history, newest first. Each job is anchored to an exact head SHA.",
+  },
+];
+
+/** Query string carrying the queue-view state that is *not* the job-type
+ * refinement: the family view, forge scope, superseded history and repo
+ * filter. Type is deliberately dropped across views — it may not exist in
+ * the target family. The default merge view keeps clean URLs. */
+function queueParams(input: { view?: QueueView; forge?: string; superseded?: boolean; repo?: string }): string {
+  const params = new URLSearchParams();
+  if (input.view && input.view !== "merge") params.set("view", input.view);
+  if (input.forge) params.set("forge", input.forge);
+  if (input.superseded) params.set("superseded", "1");
+  if (input.repo) params.set("repo", input.repo);
+  const text = params.toString();
+  return text ? `?${text}` : "";
+}
+
 export function renderHome(jobs: JobRow[], store: JobStore, options: PageOptions = {}): string {
   const empty = emptyQueueCopy();
+  const view = options.queueView?.active ?? "merge";
+  const viewDef = QUEUE_VIEWS.find((entry) => entry.id === view) ?? QUEUE_VIEWS[0];
+  const viewTypes = viewDef.types as readonly string[] | undefined;
+  // The job-type select refines inside the active family: a type the view
+  // cannot contain would only render an empty list.
+  const typeFilters = JOB_TYPE_FILTERS.filter((entry) => !viewTypes || viewTypes.includes(entry.value));
   const stackSummaries = store.stackMemberSummaries(
     jobs.filter((job) => job.job_type === "stack_review").map((job) => job.id),
   );
@@ -153,29 +210,31 @@ export function renderHome(jobs: JobRow[], store: JobStore, options: PageOptions
     superseded: options.superseded?.active === true,
     repo: options.jobFilters?.repo,
     jobType: options.jobFilters?.type,
+    view,
   });
   const pancakeChip = pancakeChipFor(store, options.uiFlavor);
   // data-forge is scaffolding for future client-side filtering; nothing
   // consumes it yet. An explicit All chip clears the active filter.
+  const chipBase = { view, repo: options.jobFilters?.repo };
   const allChip = options.activeForge
-    ? `<a class="top-link" href="/">All forges</a>`
+    ? `<a class="top-link" href="/${queueParams({ ...chipBase, superseded: options.superseded?.active === true })}">All forges</a>`
     : "";
   const forgeChips = (options.forgeScopes ?? [])
     .map((scope) => {
       const key = `${scope.provider}:${scope.instance}`;
       const active = options.activeForge === key;
-      return `<a class="top-link" data-forge="${escapeHtml(key)}" href="/?forge=${encodeURIComponent(key)}" ${active ? 'aria-current="true"' : ""}>${escapeHtml(forgeChipLabel({ provider: scope.provider, provider_instance: scope.instance }))}</a>`;
+      const href = `/${queueParams({ ...chipBase, forge: key, superseded: options.superseded?.active === true })}`;
+      return `<a class="top-link" data-forge="${escapeHtml(key)}" href="${href}" ${active ? 'aria-current="true"' : ""}>${escapeHtml(forgeChipLabel({ provider: scope.provider, provider_instance: scope.instance }))}</a>`;
     })
     .join("\n      ");
   const forgeNav = options.forgeScopes && options.forgeScopes.length > 1 ? `${allChip}${forgeChips}` : "";
   // Superseded rows are filtered server-side; the chip toggles the full
   // history back on and reports how many cards the default view hides.
   const superseded = options.superseded;
-  const forgeQuery = options.activeForge ? `&forge=${encodeURIComponent(options.activeForge)}` : "";
   const supersededChip = superseded?.active
-    ? `<a class="top-link" href="/?${forgeQuery ? forgeQuery.slice(1) : ""}" aria-current="true">Hide superseded</a>`
+    ? `<a class="top-link" href="/${queueParams({ ...chipBase, forge: options.activeForge })}" aria-current="true">Hide superseded</a>`
     : superseded && superseded.hidden > 0
-      ? `<a class="top-link" href="/?superseded=1${forgeQuery}">Show superseded (${superseded.hidden})</a>`
+      ? `<a class="top-link" href="/${queueParams({ ...chipBase, forge: options.activeForge, superseded: true })}">Show superseded (${superseded.hidden})</a>`
       : "";
   const filterNav = [forgeNav, supersededChip].filter(Boolean).join("\n      ");
 
@@ -184,6 +243,7 @@ export function renderHome(jobs: JobRow[], store: JobStore, options: PageOptions
   const jobFilters = options.jobFilters;
   const filterForm = jobFilters
     ? `<form class="trigger job-filters" method="get" action="/">
+      ${view !== "merge" ? `<input type="hidden" name="view" value="${view}"/>` : ""}
       ${options.activeForge ? `<input type="hidden" name="forge" value="${escapeHtml(options.activeForge)}"/>` : ""}
       ${superseded?.active ? `<input type="hidden" name="superseded" value="1"/>` : ""}
       <label>
@@ -202,42 +262,62 @@ export function renderHome(jobs: JobRow[], store: JobStore, options: PageOptions
         Job type
         <select name="type">
           <option value="">All types</option>
-          ${JOB_TYPE_FILTERS.map(
+          ${typeFilters.map(
             (entry) =>
               `<option value="${entry.value}"${jobFilters.type === entry.value ? " selected" : ""}>${escapeHtml(entry.label)}</option>`,
           ).join("")}
         </select>
       </label>
-      <button type="submit">Filter</button>
-      ${jobFilters.repo || jobFilters.type ? `<a class="top-link" href="/${options.activeForge ? `?forge=${encodeURIComponent(options.activeForge)}` : ""}">Clear filters</a>` : ""}
+      <button class="if-button if-button--sm" type="submit">Filter</button>
+      ${jobFilters.repo || jobFilters.type ? `<a class="top-link" href="/${queueParams({ view, forge: options.activeForge, superseded: superseded?.active === true })}">Clear filters</a>` : ""}
     </form>`
     : "";
 
-  const body = `
-    <h1>Review jobs</h1>
-    <p class="lede">Recent pull request reviews. Each job is anchored to an exact head SHA.${pancakeChip ? ` ${pancakeChip}` : ""}</p>
-    ${filterNav ? `<div class="meta-row" role="navigation" aria-label="Filter jobs">${filterNav}</div>` : ""}
-    ${filterForm}
-    ${options.notice ? `<p class="notice" role="status">${escapeHtml(options.notice)}</p>` : ""}
-    ${options.error ? `<p class="error" role="alert">${escapeHtml(options.error)}</p>` : ""}
-    <form class="trigger" method="post" action="/reviews">
+  // The rail is the family switcher now — merge and operations are its
+  // areas. "All jobs" survives as a quiet escape hatch for undivided
+  // history, tucked next to the filters rather than competing as a tab.
+  const allJobsLink =
+    view === "all"
+      ? ""
+      : `<a class="top-link" href="/${queueParams({ view: "all" })}">All jobs</a>`;
+  // Each surface leads with its own primary action: the merge queue queues
+  // reviews; the operations surface launches scans and briefs. The "all"
+  // view is a debugging surface and gets neither.
+  const primaryAction =
+    view === "ops"
+      ? `<div class="ops-actions">
+          <a class="if-button if-button--primary" href="/scan">New health scan</a>
+          <a class="if-button" href="/brief">New repo brief</a>
+        </div>`
+      : view === "merge"
+        ? `<form class="trigger" method="post" action="/reviews">
       ${csrfInput(options.csrfToken)}
       <label>
         Queue a GitHub pull request
         <input type="url" name="url" placeholder="https://github.com/owner/repo/pull/123" value="${escapeHtml(options.reviewUrl ?? "")}" required/>
       </label>
-      <button type="submit">Queue review</button>
-    </form>
+      <button class="if-button if-button--primary" type="submit">Queue review</button>
+    </form>`
+        : "";
+  const body = `
+    <h1>${escapeHtml(viewDef.h1)}</h1>
+    <p class="lede">${escapeHtml(viewDef.lede)}${pancakeChip ? ` ${pancakeChip}` : ""}</p>
+    ${allJobsLink}
+    ${filterNav ? `<div class="meta-row" role="navigation" aria-label="Filter jobs">${filterNav}</div>` : ""}
+    ${filterForm}
+    ${options.notice ? `<p class="notice if-banner if-banner--success" role="status">${escapeHtml(options.notice)}</p>` : ""}
+    ${options.error ? `<p class="error if-banner if-banner--danger" role="alert">${escapeHtml(options.error)}</p>` : ""}
+    ${primaryAction}
     ${
       cards
         ? `<ol class="queue">${cards}</ol>`
         : `<div class="empty" role="status">
-            <p><strong>${escapeHtml(empty.title)}</strong></p>
-            <p class="muted">${escapeHtml(empty.body)}</p>
+            <p><strong>${escapeHtml(view === "ops" ? "No operations have run yet." : empty.title)}</strong></p>
+            <p class="muted">${escapeHtml(view === "ops" ? "Health scans and repo briefs land here once the operator runs them." : empty.body)}</p>
           </div>`
     }
     ${paginationNav}`;
-  return layout("Maomao", body, options);
+  return layout(PRODUCT_NAME, body, { nav: view === "ops" ? "operations" : "queue", ...options });
 }
 
 /**
@@ -263,9 +343,10 @@ function pancakeChipFor(store: JobStore, flavor?: UiFlavor): string {
 function renderJobsPagination(
   jobs: JobRow[],
   pagination?: { hasOlder: boolean; hasNewer: boolean },
-  filters?: { forge?: string; superseded?: boolean; repo?: string; jobType?: string },
+  filters?: { forge?: string; superseded?: boolean; repo?: string; jobType?: string; view?: QueueView },
 ): string {
-  const forgeParam = filters?.forge ? `&forge=${encodeURIComponent(filters.forge)}` : "";
+  const viewParam = filters?.view && filters.view !== "merge" ? `&view=${filters.view}` : "";
+  const forgeParam = `${viewParam}${filters?.forge ? `&forge=${encodeURIComponent(filters.forge)}` : ""}`;
   const supersededParam = filters?.superseded ? `&superseded=1` : "";
   const repoParam = filters?.repo ? `&repo=${encodeURIComponent(filters.repo)}` : "";
   const typeParam = filters?.jobType ? `&type=${encodeURIComponent(filters.jobType)}` : "";
@@ -313,6 +394,30 @@ export type JobPageOptions = PageOptions & {
 };
 
 
+/** Lifecycle states map onto infernal badge variants: success for terminal
+ * good states, running accent for in-flight ones, warning/danger for the
+ * states an operator should look at. */
+function lifecycleBadge(state: MergeLifecycle["state"], label: string): string {
+  const variant =
+    state === "merged" || state === "ready"
+      ? "success"
+      : state === "blocked" || state === "failed"
+        ? "danger"
+        : state === "stale"
+          ? "warning"
+          : state === "scheduled_auto_merge"
+            ? "info"
+            : "running";
+  const pulse = variant === "running" ? '<span class="if-dot if-dot--pulse" aria-hidden="true"></span>' : "";
+  return `<span class="if-badge if-badge--${variant}">${pulse}${escapeHtml(label)}</span>`;
+}
+
+/** One fact row in the lifecycle panel: quiet label left, value right, in
+ * the infernal inspector-row pattern. */
+function lifecycleFact(label: string, valueHtml: string): string {
+  return `<div class="if-row if-row--between merge-fact"><span class="if-label">${escapeHtml(label)}</span><span class="merge-fact-value">${valueHtml}</span></div>`;
+}
+
 function renderMergeLifecycle(lifecycle: MergeLifecycle, job: JobRow, capabilities?: MergeCapabilityReport): string {
   const labels: Record<MergeLifecycle["state"], string> = {
     reviewing: "reviewing",
@@ -328,29 +433,65 @@ function renderMergeLifecycle(lifecycle: MergeLifecycle, job: JobRow, capabiliti
   };
   const readiness = lifecycle.readiness;
   const nativeUrl = lifecycle.nativeUrl && /^https?:\/\//i.test(lifecycle.nativeUrl) ? lifecycle.nativeUrl : undefined;
+  const readinessBadge = readiness
+    ? `<span class="if-badge if-badge--${readiness.conclusion === "success" ? "success" : readiness.conclusion === "failure" ? "danger" : "running"}">${escapeHtml(readiness.status)}${readiness.conclusion ? ` · ${escapeHtml(readiness.conclusion)}` : ""}</span>`
+    : `<span class="muted">not published</span>`;
+  const capabilityFacts = capabilities
+    ? [
+        lifecycleFact("Merge mode", `<code>${escapeHtml(capabilities.mergeMode)}</code> <span class="muted">read-only</span>`),
+        lifecycleFact(
+          "Native auto-merge",
+          `<code>${escapeHtml(capabilities.nativeAutoMerge)}</code>${capabilities.nativeMergeScheduled != null ? ` <span class="muted">· ${capabilities.nativeMergeScheduled ? "scheduled after latest head push" : "not scheduled for current head"}</span>` : ""}`,
+        ),
+        lifecycleFact("GitHub native queue", `<code>${escapeHtml(capabilities.githubNativeQueue)}</code>`),
+        lifecycleFact(
+          "Merge methods",
+          capabilities.mergeMethods.length
+            ? capabilities.mergeMethods.map((method) => `<span class="if-badge">${escapeHtml(method)}</span>`).join(" ")
+            : `<span class="muted">none detected</span>`,
+        ),
+        capabilities.baseRef
+          ? lifecycleFact("Base branch", `<code>${escapeHtml(capabilities.baseRef)}</code>${capabilities.draft ? ' <span class="if-badge if-badge--warning">draft PR</span>' : ""}`)
+          : "",
+        capabilities.pullState || capabilities.mergeable
+          ? lifecycleFact("Pull state", escapeHtml([capabilities.pullState, capabilities.mergeable].filter(Boolean).join(" · ")))
+          : "",
+        lifecycleFact(
+          "Forge",
+          `<code>${escapeHtml(job.provider ?? "github")}</code>${job.provider_instance ? ` · <code>${escapeHtml(job.provider_instance)}</code>` : ""}${capabilities.forgeVersion ? ` <span class="muted">· <code>${escapeHtml(capabilities.forgeVersion)}</code></span>` : ""}`,
+        ),
+        lifecycleFact(
+          "Protected branch",
+          capabilities.protectedBranch == null
+            ? `<span class="muted">unknown</span>`
+            : `<span class="if-badge if-badge--${capabilities.protectedBranch ? "info" : ""}">${capabilities.protectedBranch ? "yes" : "no"}</span>`,
+        ),
+        lifecycleFact(
+          "Branch protection",
+          capabilities.requiredStatusContexts.length
+            ? `${escapeHtml(capabilities.requiredStatusContexts.join(", "))}${capabilities.requiredApprovals ? `; ${capabilities.requiredApprovals} approval(s)` : ""}`
+            : `<span class="muted">none detected</span>${capabilities.requiredApprovals ? `; ${capabilities.requiredApprovals} approval(s)` : ""}`,
+        ),
+      ]
+        .filter(Boolean)
+        .join("")
+    : "";
   return `<h2>Merge lifecycle</h2>
-    <section class="card merge-lifecycle">
-      <dl class="config-grid">
-        <dt>State</dt><dd><strong>${escapeHtml(labels[lifecycle.state])}</strong></dd>
-        <dt>Exact head</dt><dd><code class="sha">${escapeHtml(shortSha(job.head_sha, 12))}</code></dd>
-        <dt>Readiness check</dt><dd>${readiness ? `<code>${escapeHtml(readiness.status)}</code>${readiness.conclusion ? ` / <code>${escapeHtml(readiness.conclusion)}</code>` : ""}` : "not published"}</dd>
-        <dt>Native merge</dt><dd>${job.pr_html_url ? `<a href="${escapeHtml(job.pr_html_url)}">open the forge pull request</a>` : "—"}</dd>
-        ${nativeUrl ? `<dt>Native check</dt><dd><a href="${escapeHtml(nativeUrl)}" target="_blank" rel="noopener noreferrer">open forge check/status</a></dd>` : ""}
-        ${capabilities ? `<dt>Merge mode</dt><dd><code>${escapeHtml(capabilities.mergeMode)}</code> <span class="muted">read-only detection; no merge control</span></dd>
-        <dt>Native auto-merge</dt><dd><code>${escapeHtml(capabilities.nativeAutoMerge)}</code>${capabilities.nativeMergeScheduled != null ? ` · ${capabilities.nativeMergeScheduled ? "scheduled after latest head push" : "not scheduled for current head"}` : ""}</dd>
-        <dt>GitHub native queue</dt><dd><code>${escapeHtml(capabilities.githubNativeQueue)}</code></dd>
-        <dt>Merge methods</dt><dd>${capabilities.mergeMethods.length ? escapeHtml(capabilities.mergeMethods.join(", ")) : "none detected"}</dd>
-        ${capabilities.baseRef ? `<dt>Base branch</dt><dd><code>${escapeHtml(capabilities.baseRef)}</code>${capabilities.draft ? " · draft PR" : ""}</dd>` : ""}
-        ${capabilities.pullState || capabilities.mergeable ? `<dt>Pull state</dt><dd>${escapeHtml([capabilities.pullState, capabilities.mergeable].filter(Boolean).join(" · "))}</dd>` : ""}
-        ${capabilities.forgeVersion ? `<dt>Forge version</dt><dd><code>${escapeHtml(capabilities.forgeVersion)}</code></dd>` : ""}
-        <dt>Forge</dt><dd><code>${escapeHtml(job.provider ?? "github")}</code>${job.provider_instance ? ` · <code>${escapeHtml(job.provider_instance)}</code>` : ""}</dd>
-        <dt>Protected branch</dt><dd>${capabilities.protectedBranch == null ? "unknown" : capabilities.protectedBranch ? "yes" : "no"}</dd>
-        <dt>Branch protection</dt><dd>${capabilities.requiredStatusContexts.length ? escapeHtml(capabilities.requiredStatusContexts.join(", ")) : "none detected"}${capabilities.requiredApprovals ? `; ${capabilities.requiredApprovals} approval(s)` : ""}</dd>` : ""}
-      </dl>
-      ${capabilities?.reasons.length ? `<details><summary>Merge capability diagnostics</summary><ul>${capabilities.reasons.map((reason) => `<li>${escapeHtml(reason)}</li>`).join("")}</ul></details>` : ""}
-      <p class="muted">${escapeHtml(lifecycle.detail)} Maomao reports native merge state only; it does not merge or bypass branch protection.</p>
-      ${readiness?.summary ? `<details><summary>Readiness policy details</summary><pre>${escapeHtml(readiness.summary)}</pre></details>` : ""}
-      ${readiness?.publish_error ? `<p class="error" role="alert">Publication error: ${escapeHtml(readiness.publish_error)}</p>` : ""}
+    <section class="if-panel merge-lifecycle">
+      <div class="if-panel__head">
+        <span class="if-row"><span class="if-eyebrow">Exact head</span><code class="sha">${escapeHtml(shortSha(job.head_sha, 12))}</code></span>
+        ${lifecycleBadge(lifecycle.state, labels[lifecycle.state])}
+      </div>
+      <div class="if-panel__body if-stack if-stack--sm">
+        ${lifecycleFact("Readiness check", readinessBadge)}
+        ${lifecycleFact("Native merge", job.pr_html_url ? `<a href="${escapeHtml(job.pr_html_url)}">open the forge pull request</a>` : "—")}
+        ${nativeUrl ? lifecycleFact("Native check", `<a href="${escapeHtml(nativeUrl)}" target="_blank" rel="noopener noreferrer">open forge check/status</a>`) : ""}
+        ${capabilities ? `<hr class="if-divider"/>${capabilityFacts}` : ""}
+        ${capabilities?.reasons.length ? `<details class="merge-diagnostics"><summary>Merge capability diagnostics</summary><ul>${capabilities.reasons.map((reason) => `<li>${escapeHtml(reason)}</li>`).join("")}</ul></details>` : ""}
+        <p class="if-caption merge-lifecycle-note">${escapeHtml(lifecycle.detail)} Maomao reports native merge state only; it does not merge or bypass branch protection.</p>
+        ${readiness?.summary ? `<details class="merge-diagnostics"><summary>Readiness policy details</summary><pre>${escapeHtml(readiness.summary)}</pre></details>` : ""}
+        ${readiness?.publish_error ? `<p class="error if-banner if-banner--danger" role="alert">Publication error: ${escapeHtml(readiness.publish_error)}</p>` : ""}
+      </div>
     </section>`;
 }
 
@@ -389,9 +530,13 @@ function renderStackMembers(members: NonNullable<JobPageOptions["stackMembers"]>
       </li>`;
     })
     .join("");
+  const pct = members.length ? Math.round((doneCount / members.length) * 100) : 0;
   return `<h2>Stack members</h2>
     <ol class="stack-rail" aria-label="Pull requests in stack review order">${rows}</ol>
-    <p class="muted">Reviewed bottom-up; each member is pinned to the head SHA shown. ${doneCount} / ${members.length} done.</p>`;
+    <div class="stack-progress">
+      <div class="if-progress${pct === 100 ? " if-progress--success" : ""}" role="progressbar" aria-valuenow="${pct}" aria-valuemin="0" aria-valuemax="100" aria-label="${doneCount} of ${members.length} member reviews done"><span style="width:${pct}%"></span></div>
+      <p class="muted">Reviewed bottom-up; each member is pinned to the head SHA shown. ${doneCount} / ${members.length} done.</p>
+    </div>`;
 }
 
 function renderScanIssuesAudit(rows: NonNullable<JobPageOptions["scanIssues"]>): string {
@@ -442,8 +587,8 @@ export function renderJob(
   const jobActions = renderJobActions(job, options.csrfToken);
   const body = `
     <p class="crumb"><a href="/">Jobs</a> / job ${job.id}</p>
-    ${options.notice ? `<p class="notice" role="status">${escapeHtml(options.notice)}</p>` : ""}
-    ${options.error ? `<p class="error" role="alert">${escapeHtml(options.error)}</p>` : ""}
+    ${options.notice ? `<p class="notice if-banner if-banner--success" role="status">${escapeHtml(options.notice)}</p>` : ""}
+    ${options.error ? `<p class="error if-banner if-banner--danger" role="alert">${escapeHtml(options.error)}</p>` : ""}
     ${cancelledBanner}
     ${stale ? `<p class="warn" role="status">${escapeHtml(staleBanner())}</p>` : ""}
     <h1>${heading}${prExternalLinkHtml(job)}</h1>
@@ -559,7 +704,10 @@ export function renderJob(
           ? `Merge group · ${job.repo_full_name}`
           : forgeBadgeTitle(job, job.repo_full_name, job.pr_number),
     body,
-    options,
+    {
+      nav: job.job_type === "health_scan" || job.job_type === "repo_brief" ? "operations" : "queue",
+      ...options,
+    },
   );
 }
 
@@ -604,7 +752,7 @@ function renderCancelledBanner(job: JobRow): string {
 function dequeueForm(jobId: number, csrfToken?: string, hint?: string): string {
   return `<form class="dequeue" method="post" action="/jobs/${jobId}/dequeue">
       ${csrfInput(csrfToken)}
-      <button type="submit">Dequeue</button>
+      <button class="if-button if-button--sm" type="submit">Dequeue</button>
       ${hint ? `<span class="muted">${escapeHtml(hint)}</span>` : ""}
     </form>`;
 }
@@ -774,15 +922,15 @@ export function renderReviewerBoard(
           : row.stack_job_id != null
             ? `job ${row.job_id} · member of stack ${row.stack_job_id}`
             : `job ${row.job_id}`;
-      return `<li class="run-row">
-        <span class="role">${roleGlyph(row.role)}<strong>${escapeHtml(row.role)}</strong></span>
-        <a class="run-title" href="/jobs/${row.job_id}">${forgeBadgeTitleHtml({ provider: row.forge_provider, provider_instance: row.provider_instance }, row.repo_full_name, row.pr_number)} · ${escapeHtml(row.pr_title || "(no title)")}</a>
-        <span class="muted run-owner">${escapeHtml(owner)}</span>
-        <span class="muted">${escapeHtml(row.job_type === "stack_review" ? "stack" : row.review_mode === "verify" ? "verify-first" : "full")}</span>
-        <code class="sha">${escapeHtml(shortSha(row.head_sha, 10))}</code>
-        <span class="muted run-elapsed">${escapeHtml(formatDuration(elapsedMs(row.started_at, row.finished_at)))}</span>
-        ${renderState(row.state, state.text, state.hint, state.mark)}
-      </li>`;
+      return `<tr class="run-row">
+        <td class="run-role"><span class="role">${roleGlyph(row.role)}<strong>${escapeHtml(row.role)}</strong></span></td>
+        <td class="run-title"><a href="/jobs/${row.job_id}">${forgeBadgeTitleHtml({ provider: row.forge_provider, provider_instance: row.provider_instance }, row.repo_full_name, row.pr_number)} · ${escapeHtml(row.pr_title || "(no title)")}</a></td>
+        <td class="run-owner muted">${escapeHtml(owner)}</td>
+        <td class="muted">${escapeHtml(row.job_type === "stack_review" ? "stack" : row.review_mode === "verify" ? "verify-first" : "full")}</td>
+        <td><code class="sha">${escapeHtml(shortSha(row.head_sha, 10))}</code></td>
+        <td class="run-elapsed muted">${escapeHtml(formatDuration(elapsedMs(row.started_at, row.finished_at)))}</td>
+        <td class="run-state">${renderState(row.state, state.text, state.hint, state.mark)}</td>
+      </tr>`;
     })
     .join("");
   const stateParam = stateFilter ? `&amp;state=${encodeURIComponent(stateFilter)}` : "";
@@ -809,17 +957,21 @@ export function renderReviewerBoard(
           ${RUN_STATE_FILTERS.map((filter) => `<option value="${filter.value}"${stateFilter === filter.value ? " selected" : ""}>${filter.label}</option>`).join("")}
         </select>
       </label>
-      <button type="submit">Filter</button>
+      <button class="if-button if-button--sm" type="submit">Filter</button>
       ${stateFilter ? `<a class="top-link" href="/reviewers">Clear filters</a>` : ""}
     </form>
     ${
       items
-        ? `<ol class="run-board">${items}</ol>${pagerNav}`
+        ? `<div class="if-table-wrap run-board"><table class="if-table">
+          <colgroup><col class="col-role"/><col class="col-title"/><col class="col-owner"/><col class="col-mode"/><col class="col-sha"/><col class="col-elapsed"/><col class="col-state"/></colgroup>
+          <thead><tr><th>Specialist</th><th>Change</th><th>Owner</th><th>Mode</th><th>Head</th><th>Elapsed</th><th>State</th></tr></thead>
+          <tbody>${items}</tbody>
+        </table></div>${pagerNav}`
         : pagination && pagination.total > 0
           ? `<div class="empty" role="status"><p><strong>Page ${pagination.page} is beyond the last page (${totalPages}).</strong></p><p class="muted">${pagination.total} runs${stateFilter ? ` with status ${escapeHtml(stateFilter)}` : ""} — <a href="/reviewers?page=${totalPages}${stateParam}">back to page ${totalPages}</a>.</p></div>`
           : `<div class="empty" role="status"><p><strong>No reviewer runs${stateFilter ? ` with status ${escapeHtml(stateFilter)}` : ""}.</strong></p><p class="muted">Runs appear here as soon as a review job picks specialists.</p></div>`
     }`;
-  return layout("Maomao reviewers", body, options);
+  return layout(`${PRODUCT_NAME} reviewers`, body, { nav: "reviewers", ...options });
 }
 
 function renderRouting(job: JobRow): string {
@@ -1084,37 +1236,38 @@ export function renderRun(
     cacheReadTokens: run.cache_read_tokens ?? 0,
     cacheWriteTokens: run.cache_write_tokens ?? 0,
   });
-  return `<article class="card">
-    <header>
-      <span class="role"${hint ? ` title="${escapeHtml(hint)}"` : ""}>${roleGlyph(run.role)} <strong>${escapeHtml(run.title || run.role)}</strong> <span class="muted">(${escapeHtml(run.role)})</span></span>
+  const metric = (label: string, value: string) => `<div><small>${label}</small><strong>${escapeHtml(value)}</strong></div>`;
+  return `<article class="if-reviewer-card run-card">
+    <div class="if-row if-row--between">
+      <span class="if-row"><span class="if-reviewer-card__icon" aria-hidden="true">${roleGlyph(run.role)}</span><span class="role"${hint ? ` title="${escapeHtml(hint)}"` : ""}><strong>${escapeHtml(run.title || run.role)}</strong> <span class="muted">(${escapeHtml(run.role)})</span></span></span>
       ${renderState(run.state, state.text, state.hint, state.mark)}
-    </header>
+    </div>
     ${hunt ? `<p class="muted">${escapeHtml(hunt)}</p>` : ""}
-    <p class="muted">
-      model <code class="metric">${escapeHtml(run.model || "default model")}</code>
-      ${run.provider ? ` · provider <code class="metric">${escapeHtml(run.provider)}</code>` : ""}
-      · attempt ${run.attempt}
-      · <span class="metric">${escapeHtml(formatDuration(run.duration_ms))}</span>
-      ${tokens ? ` · <span class="metric">${escapeHtml(tokens)}</span>` : ""}
-      ${run.cost != null ? ` · <span class="metric">${escapeHtml(formatCost(run.cost))}</span>` : ""}
-      · ${findingCount} finding(s)
-    </p>
+    <div class="if-metric-strip">
+      ${metric("Model", run.model || "default model")}
+      ${run.provider ? metric("Provider", run.provider) : ""}
+      ${metric("Attempt", String(run.attempt))}
+      ${metric("Duration", formatDuration(run.duration_ms))}
+      ${tokens ? metric("Tokens", tokens) : ""}
+      ${run.cost != null ? metric("Cost", formatCost(run.cost)) : ""}
+      ${metric("Findings", `${findingCount} finding(s)`)}
+    </div>
     ${breakdown ? `<p class="muted usage-breakdown">${escapeHtml(breakdown)}</p>` : ""}
     ${run.usage_complete === 0 ? `<p class="usage-incomplete">${escapeHtml(run.usage_warning || usageIncompleteCopy())}</p>` : ""}
-    ${run.validation_error ? `<p class="error" role="alert"><strong>Validation error:</strong> ${escapeHtml(run.validation_error)}</p>` : ""}
+    ${run.validation_error ? `<p class="error if-banner if-banner--danger" role="alert"><strong>Validation error:</strong> ${escapeHtml(run.validation_error)}</p>` : ""}
     ${
       showRetry
         ? `<form class="retry" method="post" action="/jobs/${run.job_id}/reviewers/${run.id}/retry">
              ${csrfInput(csrfToken)}
-             <button type="submit">Retry</button>
+             <button class="if-button if-button--sm" type="submit">Retry</button>
            </form>`
         : ""
     }
     ${parsed?.summary ? `<p>${escapeHtml(parsed.summary)}</p>` : ""}
-    ${run.normalized_json ? `<details><summary>Normalized JSON</summary><pre class="log-panel">${escapeHtml(run.normalized_json)}</pre></details>` : ""}
-    ${run.raw_output && run.raw_output !== run.normalized_json ? `<details><summary>Raw output</summary><pre class="log-panel">${escapeHtml(run.raw_output)}</pre></details>` : ""}
-    ${run.stdout ? `<details><summary>stdout</summary><pre class="log-panel">${escapeHtml(run.stdout)}</pre></details>` : ""}
-    ${run.stderr ? `<details><summary>stderr</summary><pre class="log-panel">${escapeHtml(run.stderr)}</pre></details>` : ""}
+    ${run.normalized_json ? `<details><summary>Normalized JSON</summary><pre class="log-panel if-log">${escapeHtml(run.normalized_json)}</pre></details>` : ""}
+    ${run.raw_output && run.raw_output !== run.normalized_json ? `<details><summary>Raw output</summary><pre class="log-panel if-log">${escapeHtml(run.raw_output)}</pre></details>` : ""}
+    ${run.stdout ? `<details><summary>stdout</summary><pre class="log-panel if-log">${escapeHtml(run.stdout)}</pre></details>` : ""}
+    ${run.stderr ? `<details><summary>stderr</summary><pre class="log-panel if-log">${escapeHtml(run.stderr)}</pre></details>` : ""}
   </article>`;
 }
 
@@ -1127,21 +1280,21 @@ function renderAggregator(job: JobRow, metrics: JobMetrics): string {
       : agg?.findings?.length
         ? observationsCopy(agg.findings.length)
         : "Aggregator result";
-  return `<article class="card">
-    <header>
-      <span class="role role-agg">${roleGlyph("aggregator")} <strong>Aggregator</strong></span>
+  return `<article class="if-reviewer-card run-card">
+    <div class="if-row if-row--between">
+      <span class="if-row"><span class="if-reviewer-card__icon" aria-hidden="true">${roleGlyph("aggregator")}</span><span class="role role-agg"><strong>Aggregator</strong></span></span>
       ${renderState(job.aggregator_state, state.text, state.hint, state.mark)}
-    </header>
-    <p class="muted">
-      ${job.aggregator_model ? `model <code class="metric">${escapeHtml(job.aggregator_model)}</code>` : "model pending"}
-      ${job.aggregator_provider ? ` · provider <code class="metric">${escapeHtml(job.aggregator_provider)}</code>` : ""}
-      · <span class="metric">${escapeHtml(formatDuration(job.aggregator_duration_ms))}</span>
-      · <span class="metric">${escapeHtml(aggregatorUsageCopy(job))}</span>
-    </p>
+    </div>
+    <div class="if-metric-strip">
+      <div><small>Model</small><strong>${escapeHtml(job.aggregator_model || "pending")}</strong></div>
+      ${job.aggregator_provider ? `<div><small>Provider</small><strong>${escapeHtml(job.aggregator_provider)}</strong></div>` : ""}
+      <div><small>Duration</small><strong>${escapeHtml(formatDuration(job.aggregator_duration_ms))}</strong></div>
+      <div><small>Usage</small><strong>${escapeHtml(aggregatorUsageCopy(job))}</strong></div>
+    </div>
     <p><strong>${escapeHtml(heading)}</strong></p>
-    ${agg?.summary ? `<pre class="log-panel">${escapeHtml(agg.summary)}</pre>` : job.aggregator_normalized || job.aggregator_raw ? "" : `<p class="muted">(pending)</p>`}
-    ${job.aggregator_normalized ? `<details><summary>Normalized JSON</summary><pre class="log-panel">${escapeHtml(job.aggregator_normalized)}</pre></details>` : ""}
-    ${job.aggregator_raw ? `<details><summary>Raw output</summary><pre class="log-panel">${escapeHtml(job.aggregator_raw)}</pre></details>` : ""}
+    ${agg?.summary ? `<pre class="log-panel if-log">${escapeHtml(agg.summary)}</pre>` : job.aggregator_normalized || job.aggregator_raw ? "" : `<p class="muted">(pending)</p>`}
+    ${job.aggregator_normalized ? `<details><summary>Normalized JSON</summary><pre class="log-panel if-log">${escapeHtml(job.aggregator_normalized)}</pre></details>` : ""}
+    ${job.aggregator_raw ? `<details><summary>Raw output</summary><pre class="log-panel if-log">${escapeHtml(job.aggregator_raw)}</pre></details>` : ""}
   </article>`;
 }
 
@@ -1299,36 +1452,36 @@ export function renderFindingCard(
         ${attention ? `<p><strong>${attention}</strong></p>` : ""}
         ${displayReason ? `<p>${escapeHtml(displayReason)}</p>` : ""}
         ${input.suggested ? `<p class="muted">Suggested check: ${escapeHtml(input.suggested)}</p>` : ""}
-        ${input.agreed?.length ? `<p class="muted">reviewers: ${escapeHtml(input.agreed.join(", "))}</p>` : ""}
         ${record?.confidence != null ? `<p class="muted">Aggregator confidence: ${Math.round(record.confidence * 100)}%</p>` : ""}
         ${diffBlock}
         ${markerNote}`;
-  if (collapsed) {
-    return `<details class="${classes}">
+  // Unified infernal if-finding disclosure: active findings render open,
+  // settled (buried/resolved) ones collapsed — the library's finding
+  // lifecycle pattern. All semantic classes stay as hooks for tests and the
+  // status-driven styling in theme.ts.
+  const captionBits = [
+    loc ? escapeHtml(loc) : "",
+    input.category ? escapeHtml(input.category) : "",
+    input.agreed?.length ? `reviewers: ${escapeHtml(input.agreed.join(", "))}` : "",
+  ].filter(Boolean);
+  return `<details class="${classes} if-finding"${collapsed ? "" : " open"}>
         <summary>
-          ${statusBadge}
-          ${staleBadge}
-          <span class="sev sev-${escapeHtml(input.severity)}"><span class="mark" aria-hidden="true">${sev.mark}</span> ${sev.text}</span>
-          ${loc ? `<span class="loc">${escapeHtml(loc)}</span>` : ""}
-          <span class="finding-title">${escapeHtml(displaySummary)}</span>
+          <span class="finding-summary-text">
+            <strong class="finding-title">${escapeHtml(displaySummary)}</strong>
+            ${captionBits.length ? `<br><span class="if-caption if-mono loc">${captionBits.join(" · ")}</span>` : ""}
+          </span>
+          <span class="finding-summary-badges">
+            ${input.unconfirmed ? `<span class="unconfirmed">Unconfirmed</span>` : ""}
+            ${statusBadge}
+            ${staleBadge}
+            <span class="sev sev-${escapeHtml(input.severity)}"><span class="mark" aria-hidden="true">${sev.mark}</span> ${sev.text}</span>
+          </span>
         </summary>
-        ${input.category ? `<p class="muted">${escapeHtml(input.category)}</p>` : ""}
-        ${body}
-      </details>`;
-  }
-  return `<article class="${classes}">
-        <div class="finding-head">
-          <span class="sev sev-${escapeHtml(input.severity)}"><span class="mark" aria-hidden="true">${sev.mark}</span> ${sev.text}</span>
-          ${statusBadge}
-          ${staleBadge}
-          ${input.unconfirmed ? `<span class="unconfirmed">Unconfirmed</span>` : ""}
-          ${input.category ? `<span>· ${escapeHtml(input.category)}</span>` : ""}
-          ${input.agreed?.length ? `<span class="muted">reviewers: ${escapeHtml(input.agreed.join(", "))}</span>` : ""}
+        <div class="if-finding__body">
+          ${locLink ? `<p class="loc">${locLink}</p>` : ""}
+          ${body}
         </div>
-        ${loc ? `<p class="loc">${escapeHtml(loc)}${locLink}</p>` : ""}
-        <h3>${escapeHtml(displaySummary)}</h3>
-        ${body}
-      </article>`;
+      </details>`;
 }
 
 function renderFindingDiff(record?: FindingRow): string {
@@ -1463,28 +1616,6 @@ function renderEffectiveConfigSection(entries: EffectiveConfigEntry[]): string {
     ${sections}`;
 }
 
-/** Shared sub-nav across the /config pages so each section is one click away. */
-export type ConfigSection = "effective" | "profiles" | "providers" | "telemetry" | "trusted-checks" | "merge-modes" | "prompts" | "audit" | "deliveries";
-
-export function configSubNav(active: ConfigSection): string {
-  const links: Array<[ConfigSection, string, string]> = [
-    ["effective", "/config", "Effective configuration"],
-    ["profiles", "/config/profiles", "Profiles"],
-    ["providers", "/config/providers", "Provider keys"],
-    ["telemetry", "/config/telemetry", "Telemetry"],
-    ["trusted-checks", "/config/trusted-checks", "Trusted checks"],
-    ["merge-modes", "/config/merge-modes", "Merge modes"],
-    ["prompts", "/config/prompts", "Specialist prompts"],
-    ["audit", "/config/audit", "Audit"],
-    ["deliveries", "/config/deliveries", "Deliveries"],
-  ];
-  return `<p class="config-nav">${links
-    .map(([id, href, label]) =>
-      id === active ? `<strong>${escapeHtml(label)}</strong>` : `<a href="${href}">${escapeHtml(label)}</a>`,
-    )
-    .join(" · ")}</p>`;
-}
-
 /** One-line summary of what a profile definition configures. */
 function profileSummary(definition: ProfileDefinition): string {
   const reviewers = definition.reviewers
@@ -1518,51 +1649,51 @@ function revisionCard(revision: ConfigRevisionView, data: ConfigPageData): strin
   const csrf = csrfInput(data.csrfToken);
   const actions: string[] = [];
   if (data.canWrite && revision.status === "draft") {
-    actions.push(`<a href="/config/profiles/drafts/${revision.id}/edit" class="btn-secondary">Edit draft</a>`);
+    actions.push(`<a href="/config/profiles/drafts/${revision.id}/edit" class="btn-secondary if-button if-button--sm">Edit draft</a>`);
     actions.push(`<form method="post" action="/config/revisions/${revision.id}/activate" class="inline-form">
       ${csrf}
-      <button type="submit" class="btn">Activate</button>
+      <button type="submit" class="btn if-button if-button--primary if-button--sm">Activate</button>
     </form>`);
     actions.push(`<form method="post" action="/config/revisions/${revision.id}/discard" class="inline-form">
       ${csrf}
-      <button type="submit" class="btn-secondary">Discard</button>
+      <button type="submit" class="btn-secondary if-button if-button--sm">Discard</button>
     </form>`);
   }
   if (data.canWrite && (revision.status === "active" || revision.status === "retired")) {
     actions.push(`<form method="post" action="/config/revisions/${revision.id}/edit" class="inline-form">
       ${csrf}
-      <button type="submit" class="btn-secondary">Edit</button>
+      <button type="submit" class="btn-secondary if-button if-button--sm">Edit</button>
     </form>`);
   }
   if (data.canWrite && revision.status === "active") {
     actions.push(`<form method="post" action="/config/revisions/${revision.id}/deactivate" class="inline-form">
       ${csrf}
-      <button type="submit" class="btn-secondary">Deactivate</button>
+      <button type="submit" class="btn-secondary if-button if-button--sm">Deactivate</button>
     </form>`);
   }
   if (data.canWrite && revision.status === "retired") {
     actions.push(`<form method="post" action="/config/revisions/${revision.id}/rollback" class="inline-form">
       ${csrf}
-      <button type="submit" class="btn-secondary">Roll back to this revision</button>
+      <button type="submit" class="btn-secondary if-button if-button--sm">Roll back to this revision</button>
     </form>`);
     actions.push(`<form method="post" action="/config/revisions/${revision.id}/delete" class="inline-form">
       ${csrf}
-      <button type="submit" class="btn-secondary">Delete</button>
+      <button type="submit" class="btn-secondary if-button if-button--sm">Delete</button>
     </form>`);
   }
   if (data.canWrite) {
     actions.push(`<form method="post" action="/config/revisions/${revision.id}/duplicate" class="inline-form">
       ${csrf}
-      <button type="submit" class="btn-secondary">Duplicate</button>
+      <button type="submit" class="btn-secondary if-button if-button--sm">Duplicate</button>
     </form>`);
   }
   const routedPatterns = (data.profileRoutes ?? []).filter((route) => route.profile_name === revision.name);
   const effectNote =
     revision.status === "active"
       ? revision.name === "default"
-        ? `<p class="notice" role="status">In effect — drives every new job whose repo matches no route rule.</p>`
+        ? `<p class="notice if-banner if-banner--success" role="status">In effect — drives every new job whose repo matches no route rule.</p>`
         : routedPatterns.length > 0
-          ? `<p class="notice" role="status">In effect — drives new jobs for repos matching ${routedPatterns
+          ? `<p class="notice if-banner if-banner--success" role="status">In effect — drives new jobs for repos matching ${routedPatterns
               .map((route) => `<code>${escapeHtml(route.pattern)}</code>`)
               .join(", ")}.</p>`
           : `<p class="error" role="alert">Active, but no repo route targets it — nothing uses this profile until a rule below points at <code>${escapeHtml(revision.name)}</code>.</p>`
@@ -1578,7 +1709,7 @@ function revisionCard(revision: ConfigRevisionView, data: ConfigPageData): strin
     ${effectNote}
     <details>
       <summary>Definition</summary>
-      <pre class="log-panel">${escapeHtml(definitionJson)}</pre>
+      <pre class="log-panel if-log">${escapeHtml(definitionJson)}</pre>
     </details>
     <div class="config-actions">${actions.join("")}</div>
   </article>`;
@@ -1670,20 +1801,20 @@ export function renderProfileForm(
       // click that does nothing. Boundary rows simply have fewer buttons.
       const upButton =
         index > 0
-          ? `<button type="submit" name="action" value="up:${index}" aria-label="Move reviewer ${index + 1} up">↑</button>`
+          ? `<button class="if-button if-button--sm" type="submit" name="action" value="up:${index}" aria-label="Move reviewer ${index + 1} up">↑</button>`
           : "";
       const downButton =
         index < values.reviewers.length - 1
-          ? `<button type="submit" name="action" value="down:${index}" aria-label="Move reviewer ${index + 1} down">↓</button>`
+          ? `<button class="if-button if-button--sm" type="submit" name="action" value="down:${index}" aria-label="Move reviewer ${index + 1} down">↓</button>`
           : "";
       return `<fieldset class="profile-reviewer">
         <legend>Reviewer ${index + 1}</legend>
         ${rowErrors.length > 0 ? `<p class="error" role="alert" id="${escapeHtml(`reviewer_row_${index}`)}-error">${rowErrors.map((message) => escapeHtml(message)).join("<br/>")}</p>` : ""}
-        <label>Role
-          <select name="${key("role")}" ${roleError ? `aria-invalid="true" aria-describedby="reviewer_row_${index}-error"` : ""}>${roleOptions(row.role)}</select>
+        <label class="if-field"><span class="if-label">Role</span>
+<select name="${key("role")}" ${roleError ? `aria-invalid="true" aria-describedby="reviewer_row_${index}-error"` : ""}>${roleOptions(row.role)}</select>
         </label>
-        <label>Model override (optional; provider/model)
-          ${modelPicker({
+        <label class="if-field"><span class="if-label">Model override (optional; provider/model)</span>
+${modelPicker({
             name: key("model"),
             value: row.model,
             models: options.modelCatalog,
@@ -1693,14 +1824,14 @@ export function renderProfileForm(
             buttonAttrs: modelError ? `aria-invalid="true"` : "",
           })}
         </label>
-        <label>Timeout in seconds (optional, decimals allowed — caps this reviewer's run time; falls back to OPENCODE_TIMEOUT_MS)
-          <input type="number" step="any" min="0" name="${key("timeout")}" value="${escapeHtml(row.timeoutSeconds)}"
+        <label class="if-field"><span class="if-label">Timeout in seconds (optional, decimals allowed — caps this reviewer's run time; falls back to OPENCODE_TIMEOUT_MS)</span>
+<input type="number" step="any" min="0" name="${key("timeout")}" value="${escapeHtml(row.timeoutSeconds)}"
             ${timeoutError ? `aria-invalid="true" aria-describedby="reviewer_row_${index}-error"` : ""}/>
         </label>
         <div class="config-actions">
           ${upButton}
           ${downButton}
-          <button type="submit" name="action" value="remove:${index}" aria-label="Remove reviewer ${index + 1}">Remove</button>
+          <button class="if-button if-button--sm" type="submit" name="action" value="remove:${index}" aria-label="Remove reviewer ${index + 1}">Remove</button>
         </div>
       </fieldset>`;
     })
@@ -1718,7 +1849,7 @@ export function renderProfileForm(
           <p class="muted">${escapeHtml(line)}</p>
           <form method="post" action="/config/models/refresh" class="inline-form">
             ${csrfInput(options.csrfToken)}
-            <button type="submit" class="btn-secondary">Refresh model list</button>
+            <button type="submit" class="btn-secondary if-button if-button--sm">Refresh model list</button>
           </form>
         </div>`;
       })()
@@ -1741,20 +1872,20 @@ export function renderProfileForm(
       <input type="hidden" name="reviewer_count" value="${values.reviewers.length}"/>
       <fieldset>
         <legend>Profile</legend>
-        <label>Name (lowercase letters, digits, dashes)
-          <input name="name" value="${escapeHtml(values.name)}" pattern="[a-z0-9][a-z0-9-]{0,48}" required
+        <label class="if-field"><span class="if-label">Name (lowercase letters, digits, dashes)</span>
+<input name="name" value="${escapeHtml(values.name)}" pattern="[a-z0-9][a-z0-9-]{0,48}" required
             ${invalidAttr("name")} ${describedBy("name")}/>
         </label>
         <p class="muted">Jobs use the active profile whose name a repo route targets; <code>default</code> is the fallback when no route matches.</p>
         ${err("name")}
-        <label>Revision note (optional)
-          <input name="note" value="${escapeHtml(values.note)}"/>
+        <label class="if-field"><span class="if-label">Revision note (optional)</span>
+<input name="note" value="${escapeHtml(values.note)}"/>
         </label>
       </fieldset>
       <fieldset>
         <legend>Reviewers (in order; roles not listed are disabled)</legend>
         ${reviewerRows}
-        <button type="submit" name="action" value="add">Add reviewer</button>
+        <button class="if-button if-button--sm" type="submit" name="action" value="add">Add reviewer</button>
       </fieldset>
       <fieldset>
         <legend>Alert overrides (optional)</legend>
@@ -1766,8 +1897,8 @@ export function renderProfileForm(
       <fieldset>
         <legend>Verifier (reconciliation pass — optional)</legend>
         <p class="hint">Re-checks prior findings against the new head before specialists run. Blank fields fall back to <code>OPENCODE_VERIFIER_MODEL</code> / <code>OPENCODE_VERIFIER_TIMEOUT_MS</code>.</p>
-        <label>Verifier model override (optional; provider/model)
-          ${modelPicker({
+        <label class="if-field"><span class="if-label">Verifier model override (optional; provider/model)</span>
+${modelPicker({
             name: "verifier_model",
             value: values.verifierModel,
             models: options.modelCatalog,
@@ -1778,20 +1909,20 @@ export function renderProfileForm(
           })}
         </label>
         ${err("verifier_model")}
-        <label>Verifier timeout in seconds (optional, decimals allowed)
-          <input type="number" step="any" min="0" name="verifier_timeout" value="${escapeHtml(values.verifierTimeoutSeconds)}" ${invalidAttr("verifier_timeout")} ${describedBy("verifier_timeout")}/>
+        <label class="if-field"><span class="if-label">Verifier timeout in seconds (optional, decimals allowed)</span>
+<input type="number" step="any" min="0" name="verifier_timeout" value="${escapeHtml(values.verifierTimeoutSeconds)}" ${invalidAttr("verifier_timeout")} ${describedBy("verifier_timeout")}/>
         </label>
         ${err("verifier_timeout")}
       </fieldset>
       <fieldset>
         <legend>Publishing</legend>
-        <label>Minimum publishable severity
-          <select name="min_severity">
+        <label class="if-field"><span class="if-label">Minimum publishable severity</span>
+<select name="min_severity">
             ${SEVERITIES.map((severity) => `<option value="${severity}"${severity === values.minSeverity ? " selected" : ""}>${severity}</option>`).join("")}
           </select>
         </label>
-        <label>Router model override (optional; provider/model)
-          ${modelPicker({
+        <label class="if-field"><span class="if-label">Router model override (optional; provider/model)</span>
+${modelPicker({
             name: "router_model",
             value: values.routerModel,
             models: options.modelCatalog,
@@ -1802,23 +1933,23 @@ export function renderProfileForm(
           })}
         </label>
         ${err("router_model")}
-        <label>Total cost ceiling in USD (optional — enforced per job across reviewer, aggregation, and verification spend)
-          <input type="number" step="0.01" min="0" name="max_cost_usd" value="${escapeHtml(values.maxCostUsd)}" ${invalidAttr("max_cost_usd")} ${describedBy("max_cost_usd")}/>
+        <label class="if-field"><span class="if-label">Total cost ceiling in USD (optional — enforced per job across reviewer, aggregation, and verification spend)</span>
+<input type="number" step="0.01" min="0" name="max_cost_usd" value="${escapeHtml(values.maxCostUsd)}" ${invalidAttr("max_cost_usd")} ${describedBy("max_cost_usd")}/>
         </label>
         ${err("max_cost_usd")}
-        <label>Total token ceiling (optional — enforced per job across reviewer, aggregation, and verification spend)
-          <input type="number" min="0" name="max_tokens" value="${escapeHtml(values.maxTokens)}" ${invalidAttr("max_tokens")} ${describedBy("max_tokens")}/>
+        <label class="if-field"><span class="if-label">Total token ceiling (optional — enforced per job across reviewer, aggregation, and verification spend)</span>
+<input type="number" min="0" name="max_tokens" value="${escapeHtml(values.maxTokens)}" ${invalidAttr("max_tokens")} ${describedBy("max_tokens")}/>
         </label>
         ${err("max_tokens")}
-        <label>When a budget ceiling is hit
-          <select name="budget_behavior">
+        <label class="if-field"><span class="if-label">When a budget ceiling is hit</span>
+<select name="budget_behavior">
             <option value="degrade"${values.budgetBehavior === "degrade" ? " selected" : ""}>Degrade — skip remaining paid stages, publish partial results</option>
             <option value="fail"${values.budgetBehavior === "fail" ? " selected" : ""}>Fail — abort the job</option>
           </select>
         </label>
       </fieldset>
       <button type="submit" name="action" value="save" class="btn">Save draft</button>
-      <button type="submit" name="action" value="test" class="btn-secondary"
+      <button type="submit" name="action" value="test" class="btn-secondary if-button if-button--sm"
         title="Probe every non-empty provider/model field sequentially (60s each) — does not save the draft">Test models</button>
       <a href="/config/profiles">Cancel</a>
     </form>
@@ -1830,15 +1961,14 @@ export function renderProfileForm(
 /**
  * /config landing: the effective configuration with per-row provenance and a
  * "how to change this" pointer. Profiles, provider keys, prompts, and the audit
- * trail each live on their own page (see configSubNav) so no single render can
+ * trail each live on their own page (see the settings side nav) so no single render can
  * derail an unrelated flow.
  */
 export function renderConfigPage(data: ConfigPageData): string {
   const body = `
     <h1>Review configuration</h1>
     <p class="lede">What this process is actually running, with the source of every value and where to change it.</p>
-    ${configSubNav("effective")}
-    ${data.notice ? `<p class="notice" role="status">${escapeHtml(data.notice)}</p>` : ""}
+    ${data.notice ? `<p class="notice if-banner if-banner--success" role="status">${escapeHtml(data.notice)}</p>` : ""}
     ${data.error ? `<p class="error" role="alert">${escapeHtml(data.error)}</p>` : ""}
     ${data.effectiveConfig ? renderEffectiveConfigSection(data.effectiveConfig) : ""}
     <p class="muted">Service status and uptime live on the <a href="/health">health page</a>.</p>`;
@@ -1847,6 +1977,8 @@ export function renderConfigPage(data: ConfigPageData): string {
     csrfToken: data.csrfToken,
     identity: data.identity,
     surface: "operator",
+    nav: "settings",
+    settingsSection: "effective",
   });
 }
 
@@ -1865,7 +1997,7 @@ function repoRoutingSection(data: ConfigPageData): string {
           data.canWrite
             ? `<form method="post" action="/config/routes/${route.id}/delete" class="inline-form">
           ${csrf}
-          <button type="submit" class="btn-secondary">Remove</button>
+          <button type="submit" class="btn-secondary if-button if-button--sm">Remove</button>
         </form>`
             : ""
         }</p>`,
@@ -1921,7 +2053,7 @@ export function roleFormValuesFromRole(role: CustomRoleRow): RoleFormValues {
 function readOnlyPromptDetails(summary: string, text: string, extraClass = ""): string {
   return `<details${extraClass ? ` class="${escapeHtml(extraClass)}"` : ""}>
       <summary>${escapeHtml(summary)}</summary>
-      <pre class="log-panel">${escapeHtml(text)}</pre>
+      <pre class="log-panel if-log">${escapeHtml(text)}</pre>
     </details>`;
 }
 
@@ -1940,7 +2072,7 @@ function customRolesSection(data: PromptConfigPageData): string {
         <a href="/config/prompts?duplicate_role=${encodeURIComponent(role.slug)}">Duplicate</a>
         <form method="post" action="/config/roles/${encodeURIComponent(role.slug)}/delete" class="inline-form">
           ${csrf}
-          <button type="submit" class="btn-secondary">Delete</button>
+          <button type="submit" class="btn-secondary if-button if-button--sm">Delete</button>
         </form>`
             : ""
         }</p>
@@ -2011,8 +2143,7 @@ export function renderProfilesPage(data: ConfigPageData): string {
   const body = `
     <h1>Review profiles</h1>
     <p class="lede">A profile bundles reviewer roles, models, publish floor, and budgets. New jobs run with the active revision of the profile their repo routes to below; unmatched repos use the active <code>default</code>, and with nothing active the env configuration applies. Credentials are never part of a profile.</p>
-    ${configSubNav("profiles")}
-    ${data.notice ? `<p class="notice" role="status">${escapeHtml(data.notice)}</p>` : ""}
+    ${data.notice ? `<p class="notice if-banner if-banner--success" role="status">${escapeHtml(data.notice)}</p>` : ""}
     ${data.error ? `<p class="error" role="alert">${escapeHtml(data.error)}</p>` : ""}
     ${createLink}
     <h2>Active</h2>
@@ -2029,6 +2160,8 @@ export function renderProfilesPage(data: ConfigPageData): string {
     csrfToken: data.csrfToken,
     identity: data.identity,
     surface: "operator",
+    nav: "settings",
+    settingsSection: "profiles",
   });
 }
 
@@ -2067,9 +2200,8 @@ export function renderDraftEditPage(data: DraftEditPageData): string {
       )
     : `<p class="muted">Writing configuration requires an operator OAuth identity.</p>`;
   const body = `
-    ${configSubNav("profiles")}
     <p class="crumb"><a href="/config/profiles">Profiles</a> / Draft #${data.revision.id}</p>
-    ${data.notice ? `<p class="notice" role="status">${escapeHtml(data.notice)}</p>` : ""}
+    ${data.notice ? `<p class="notice if-banner if-banner--success" role="status">${escapeHtml(data.notice)}</p>` : ""}
     ${data.error ? `<p class="error" role="alert">${escapeHtml(data.error)}</p>` : ""}
     ${editor}`;
   return layout(`Edit draft #${data.revision.id}`, body, {
@@ -2077,6 +2209,8 @@ export function renderDraftEditPage(data: DraftEditPageData): string {
     csrfToken: data.csrfToken,
     identity: data.identity,
     surface: "operator",
+    nav: "settings",
+    settingsSection: "profiles",
   });
 }
 
@@ -2112,9 +2246,8 @@ export function renderNewProfilePage(data: ConfigPageData): string {
       )
     : `<p class="muted">Writing configuration requires an operator OAuth identity.</p>`;
   const body = `
-    ${configSubNav("profiles")}
     <p class="crumb"><a href="/config/profiles">Profiles</a> / New draft</p>
-    ${data.notice ? `<p class="notice" role="status">${escapeHtml(data.notice)}</p>` : ""}
+    ${data.notice ? `<p class="notice if-banner if-banner--success" role="status">${escapeHtml(data.notice)}</p>` : ""}
     ${data.error ? `<p class="error" role="alert">${escapeHtml(data.error)}</p>` : ""}
     ${editor}`;
   return layout("New draft", body, {
@@ -2122,6 +2255,8 @@ export function renderNewProfilePage(data: ConfigPageData): string {
     csrfToken: data.csrfToken,
     identity: data.identity,
     surface: "operator",
+    nav: "settings",
+    settingsSection: "profiles",
   });
 }
 
@@ -2163,8 +2298,7 @@ export function renderConfigDeliveriesPage(data: ConfigPageData): string {
   const body = `
     <h1>Webhook deliveries</h1>
     <p class="lede">Every verified webhook delivery maomao answered — most recent first. <span class="muted">Dimmed rows were ignored</span>; the result column carries the reason (stack chatter, unsupported events, non-command comments) alongside handled outcomes.</p>
-    ${configSubNav("deliveries")}
-    ${data.notice ? `<p class="notice" role="status">${escapeHtml(data.notice)}</p>` : ""}
+    ${data.notice ? `<p class="notice if-banner if-banner--success" role="status">${escapeHtml(data.notice)}</p>` : ""}
     ${data.error ? `<p class="error" role="alert">${escapeHtml(data.error)}</p>` : ""}
     ${deliveriesTable(deliveries)}
     ${older}`;
@@ -2173,6 +2307,8 @@ export function renderConfigDeliveriesPage(data: ConfigPageData): string {
     csrfToken: data.csrfToken,
     identity: data.identity,
     surface: "operator",
+    nav: "settings",
+    settingsSection: "deliveries",
   });
 }
 
@@ -2181,8 +2317,7 @@ export function renderConfigAuditPage(data: ConfigPageData): string {
   const body = `
     <h1>Configuration audit</h1>
     <p class="lede">The most recent configuration changes — who did what, and when.</p>
-    ${configSubNav("audit")}
-    ${data.notice ? `<p class="notice" role="status">${escapeHtml(data.notice)}</p>` : ""}
+    ${data.notice ? `<p class="notice if-banner if-banner--success" role="status">${escapeHtml(data.notice)}</p>` : ""}
     ${data.error ? `<p class="error" role="alert">${escapeHtml(data.error)}</p>` : ""}
     ${configAuditTable(data.audit)}`;
   return layout("Configuration audit", body, {
@@ -2190,6 +2325,8 @@ export function renderConfigAuditPage(data: ConfigPageData): string {
     csrfToken: data.csrfToken,
     identity: data.identity,
     surface: "operator",
+    nav: "settings",
+    settingsSection: "audit",
   });
 }
 
@@ -2279,7 +2416,7 @@ function promptRevisionCard(revision: PromptRevisionView, data: PromptConfigPage
   if (data.canWrite && revision.status === "retired") {
     actions.push(`<form method="post" action="/config/prompts/${revision.id}/rollback" class="inline-form">
       ${csrf}
-      <button type="submit" class="btn-secondary">Roll back to this revision</button>
+      <button type="submit" class="btn-secondary if-button if-button--sm">Roll back to this revision</button>
     </form>`);
   }
   return `<article class="card config-revision" data-prompt-revision="${revision.id}">
@@ -2290,7 +2427,7 @@ function promptRevisionCard(revision: PromptRevisionView, data: PromptConfigPage
     ${revision.note ? `<p class="muted">${escapeHtml(revision.note)}</p>` : ""}
     <details>
       <summary>Editable instructions</summary>
-      <pre class="log-panel">${escapeHtml(revision.body)}</pre>
+      <pre class="log-panel if-log">${escapeHtml(revision.body)}</pre>
     </details>
     ${readOnlyPromptDetails("Composed built-in", composeReviewerPrompt(revision.body), "prompt-composed")}
     ${revision.status === "draft" && data.canWrite ? `<details>
@@ -2326,7 +2463,7 @@ export function promptRoleCard(
     active && data.canWrite
       ? `<form method="post" action="/config/prompts/${active.id}/deactivate" class="inline-form">
           ${csrf}
-          <button type="submit" class="btn-secondary">Disable override</button>
+          <button type="submit" class="btn-secondary if-button if-button--sm">Disable override</button>
         </form>`
       : "";
   const overrideForm =
@@ -2360,7 +2497,7 @@ export function promptRoleCard(
     <p class="prompt-preview muted">${escapeHtml(previewPromptBody(currentBody))}</p>
     <details>
       <summary>${active ? "Current override" : "Built-in instructions"}</summary>
-      <pre class="log-panel">${escapeHtml(currentBody)}</pre>
+      <pre class="log-panel if-log">${escapeHtml(currentBody)}</pre>
     </details>
     ${readOnlyPromptDetails("Composed built-in", composeReviewerPrompt(currentBody), "prompt-composed")}
     ${disableOverride}
@@ -2453,10 +2590,9 @@ export function renderPromptConfigPage(data: PromptConfigPageData): string {
     )
     .join("");
   const body = `
-    ${configSubNav("prompts")}
     <h1>Specialist prompts</h1>
     <p class="lede">Each specialist ships with built-in instructions. Override a role when you need different focus; the live override is the active revision, drafts stay private until you activate them. Security guardrails are composed at runtime and are not editable — expand <strong>Composed built-in</strong> to read guardrails plus the current body. Evaluation never publishes to GitHub.</p>
-    ${data.notice ? `<p class="notice" role="status">${escapeHtml(data.notice)}</p>` : ""}
+    ${data.notice ? `<p class="notice if-banner if-banner--success" role="status">${escapeHtml(data.notice)}</p>` : ""}
     ${data.error ? `<p class="error" role="alert">${escapeHtml(data.error)}</p>` : ""}
     ${writeGate}
     <h2>Roles</h2>
@@ -2477,6 +2613,8 @@ export function renderPromptConfigPage(data: PromptConfigPageData): string {
     csrfToken: data.csrfToken,
     identity: data.identity,
     surface: "operator",
+    nav: "settings",
+    settingsSection: "prompts",
   });
 }
 
@@ -2585,6 +2723,7 @@ export function renderScanConfirmPage(data: ScanConfirmData): string {
     csrfToken: data.csrfToken,
     identity: data.identity,
     surface: "operator",
+    nav: "operations",
   });
 }
 
@@ -2630,6 +2769,7 @@ export function renderScanPage(data: ScanPageData): string {
     csrfToken: data.csrfToken,
     identity: data.identity,
     surface: "operator",
+    nav: "operations",
   });
 }
 
@@ -2763,6 +2903,7 @@ export function renderScanIssuePreviewPage(data: ScanIssuePreviewData): string {
     csrfToken: data.csrfToken,
     identity: data.identity,
     surface: "operator",
+    nav: "operations",
   });
 }
 
@@ -2856,6 +2997,7 @@ export function renderBriefConfirmPage(data: BriefConfirmData): string {
     csrfToken: data.csrfToken,
     identity: data.identity,
     surface: "operator",
+    nav: "operations",
   });
 }
 
@@ -2904,6 +3046,7 @@ export function renderBriefPage(data: BriefPageData): string {
     csrfToken: data.csrfToken,
     identity: data.identity,
     surface: "operator",
+    nav: "operations",
   });
 }
 
@@ -2964,7 +3107,7 @@ export function renderPausePage(data: PausePageData): string {
     <p class="lede">Pause automatic pull-request reviews for one repository while a stack is being built. Expiring a pause resumes normal handling of future webhooks — it does not backfill intermediate states. A repository pause still allows manual reviews, scans, briefs, and explicit stack triggers; the global switch above stops every kind of review.</p>
     ${globalCard}
     ${data.error ? `<p class="error" role="alert">${escapeHtml(data.error)}</p>` : ""}
-    ${data.notice ? `<p class="notice" role="status">${escapeHtml(data.notice)}</p>` : ""}
+    ${data.notice ? `<p class="notice if-banner if-banner--success" role="status">${escapeHtml(data.notice)}</p>` : ""}
     ${data.canOperate ? `
     <form class="trigger" method="post" action="/pause">
       ${csrf}
@@ -2993,6 +3136,7 @@ export function renderPausePage(data: PausePageData): string {
     csrfToken: data.csrfToken,
     identity: data.identity,
     surface: "operator",
+    nav: "queue",
   });
 }
 
@@ -3044,6 +3188,7 @@ export function renderBriefTabPage(data: BriefTabData): string {
     csrfToken: data.csrfToken,
     identity: data.identity,
     surface: "operator",
+    nav: "operations",
   });
 }
 

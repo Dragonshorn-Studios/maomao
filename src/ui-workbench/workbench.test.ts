@@ -353,6 +353,21 @@ describe("rendering", () => {
     }
   });
 
+  it("emulates the operator surface on the frame body for operator stories", async () => {
+    const operatorStory = STORIES.find((story) => story.surface === "operator");
+    expect(operatorStory).toBeTruthy();
+    const operatorFrame = await (
+      await app.request(frameUrl(operatorStory!.id, operatorStory!.variants[0]!.id))
+    ).text();
+    expect(operatorFrame).toContain('<body class="operator"');
+    const plainStory = STORIES.find((story) => story.surface !== "operator");
+    expect(plainStory).toBeTruthy();
+    const plainFrame = await (
+      await app.request(frameUrl(plainStory!.id, plainStory!.variants[0]!.id))
+    ).text();
+    expect(plainFrame).not.toContain('<body class="operator"');
+  });
+
   it("shows the real job card with its state", async () => {
     const html = await (await app.request("/dev/ui/job-card/completed/frame")).text();
     expect(html).toContain("Harden session cookie flags on /api");
@@ -456,8 +471,9 @@ describe("design tokens", () => {
       .find((group) => group.title === "Colors")
       ?.tokens.find((token) => token.name === "paper");
     expect(paper).toBeDefined();
-    expect(paper?.light).toBe("#f3efe3");
-    expect(paper?.dark).toBe("#121612");
+    expect(paper?.light).toBe("var(--if-bg)");
+    expect(paper?.resolvedLight).toBe("#f2eff4");
+    expect(paper?.resolvedDark).toBe("#0c0d13");
   });
 
   it("resolves var() aliases to the value of the theme they sit in", () => {
@@ -465,16 +481,17 @@ describe("design tokens", () => {
       .find((group) => group.title === "Colors")
       ?.tokens.find((token) => token.name === "chat-thought");
     expect(thought?.light).toBe("var(--plum)");
-    expect(thought?.resolvedLight).toBe("#6b3a58");
-    expect(thought?.resolvedDark).toBe("#d4a8c2");
+    expect(thought?.resolvedLight).toBe("#a95523");
+    expect(thought?.resolvedDark).toBe("#f4a86d");
   });
 
   it("keeps a token that the dark set does not redeclare", () => {
     const radius = tokens.groups
       .find((group) => group.title === "Spacing & sizing")
       ?.tokens.find((token) => token.name === "radius");
-    expect(radius?.light).toBe("3px");
-    expect(radius?.dark).toBe("3px");
+    expect(radius?.light).toBe("var(--if-radius-sm)");
+    expect(radius?.resolvedLight).toBe("7px");
+    expect(radius?.resolvedDark).toBe("7px");
   });
 
   it("groups colors, typography, spacing, and the rest", () => {
@@ -486,6 +503,7 @@ describe("design tokens", () => {
     ]);
     const fonts = tokens.groups.find((group) => group.title === "Typography");
     expect(fonts?.tokens.map((token) => token.name).sort()).toEqual([
+      "font-body",
       "font-display",
       "font-mono",
       "font-ui",
@@ -504,8 +522,9 @@ describe("design tokens", () => {
     expect(html).toContain("--paper");
     expect(html).toContain("workbench-token-light");
     expect(html).toContain("workbench-token-dark");
-    expect(html).toContain("--paper: #f3efe3;");
-    expect(html).toContain("--paper: #121612;");
+    expect(html).toContain("--paper: var(--if-bg);");
+    expect(html).toContain("#f2eff4");
+    expect(html).toContain("#0c0d13");
   });
 
   it("themes the tokens page", async () => {

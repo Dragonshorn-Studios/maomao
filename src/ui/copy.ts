@@ -1,8 +1,12 @@
 import type { CancelReason, JobState, ReviewerState } from "../config.js";
 import type { Severity } from "../schema.js";
 
-export const PRODUCT_TAGLINE = "PR examination console";
-export const PRODUCT_DESCRIPTION = "Self-hosted multi-agent pull request review powered by OpenCode.";
+/** Mergehenna is the product; maomao stays on as the operator running it. */
+export const PRODUCT_NAME = "Mergehenna";
+export const OPERATOR_NAME = "maomao";
+export const PRODUCT_TAGLINE = "Merge gate review console";
+export const PRODUCT_DESCRIPTION =
+  "Self-hosted multi-agent pull request review, operated by maomao and powered by OpenCode.";
 
 export interface LabeledState {
   text: string;

@@ -3,7 +3,7 @@ import { isIP } from "node:net";
 import { streamSSE } from "hono/streaming";
 import { deleteCookie, getCookie, setCookie } from "hono/cookie";
 import type { Config } from "./config.js";
-import type { JobStore } from "./jobs/store.js";
+import { JOB_TYPES, type JobStore, type JobType } from "./jobs/store.js";
 import { handleGithubWebhook } from "./github/webhooks.js";
 import { handleGitLabWebhook } from "./gitlab/webhooks.js";
 import { handleForgejoWebhook } from "./forgejo/webhooks.js";
@@ -55,6 +55,7 @@ import {
   renderConfigAuditPage,
   renderConfigDeliveriesPage,
   renderProfileForm,
+  QUEUE_VIEWS,
   renderHome,
   renderJob,
   renderReviewerBoard,
@@ -63,17 +64,19 @@ import {
   renderPromptConfigPage,
   renderHealthPage,
   THEME_CSS,
+  INFERNAL_CSS,
+  INFERNAL_HREF,
   PIERRE_DIFFS_HREF,
   CHAT_BUNDLE_HREF,
   TYPEAHEAD_HREF,
   TYPEAHEAD_JS,
   MODEL_PICKER_HREF,
   MODEL_PICKER_JS,
-  FAVICON_SVG,
+  MERGEHENNA_FAVICON_SVG,
   FAVICON_PNG_BASE64,
-  LARGE_ICON_SVG,
   LARGE_ICON_PNG_BASE64,
   type PageOptions,
+  type QueueView,
   type ScanConfirmNotice,
   type ScanIssueCreationData,
   type ScanIssuePreviewItem,
@@ -316,6 +319,41 @@ function setSessionCookie(c: Context<AppEnv>, value: string): void {
     path: "/",
     maxAge: Math.floor(SESSION_TTL_MS / 1000),
   });
+}
+
+/** Recently-viewed jobs, most-recent first, as a dot-separated id list. The
+ * cookie is self-referential convenience state — worst-case tampering shows
+ * the operator their own jobs in a funny order — so it is not signed. */
+const RECENT_COOKIE = "mh_recent";
+const RECENT_LIMIT = 8;
+
+function parseRecentCookie(value: string | undefined): number[] {
+  if (!value) return [];
+  return value
+    .split(".")
+    .map((part) => (/^[0-9]{1,10}$/.test(part) ? Number(part) : 0))
+    .filter((id) => id > 0)
+    .slice(0, RECENT_LIMIT);
+}
+
+function recordRecentJob(c: Context<AppEnv>, id: number): void {
+  const existing = parseRecentCookie(getCookie(c, RECENT_COOKIE));
+  const next = [id, ...existing.filter((entry) => entry !== id)].slice(0, RECENT_LIMIT);
+  setCookie(c, RECENT_COOKIE, next.join("."), {
+    httpOnly: true,
+    sameSite: "Lax",
+    secure: cookieSecure(c.req.url, c.req.header("x-forwarded-proto")),
+    path: "/",
+  });
+}
+
+function recentJobsFor(c: Context<AppEnv>, ctx: ServerContext): Array<{ id: number; title: string; state: string }> {
+  const jobs: Array<{ id: number; title: string; state: string }> = [];
+  for (const id of parseRecentCookie(getCookie(c, RECENT_COOKIE))) {
+    const job = ctx.store.getJob(id);
+    if (job) jobs.push({ id: job.id, title: job.pr_title, state: job.state });
+  }
+  return jobs;
 }
 
 export function createApp(ctx: ServerContext): Hono<AppEnv> {
@@ -587,6 +625,13 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
     }),
   );
 
+  app.get(INFERNAL_HREF, (c) =>
+    c.newResponse(INFERNAL_CSS, 200, {
+      "content-type": "text/css; charset=utf-8",
+      "cache-control": "public, max-age=3600",
+    }),
+  );
+
   // The @pierre/diffs browser bundle (built by `npm run build:vendor`). Read
   // once from disk and cached; 404 before the first build so pages fall back
   // to the server-rendered diff markup.
@@ -649,8 +694,8 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
   // Brand icons: fixed constants from src/ui/icons.ts (no filesystem, no traversal).
   const iconAssets: Array<[string, string, string]> = [
     // [path, content-type, source]
-    ["/assets/favicon.svg", "image/svg+xml", FAVICON_SVG],
-    ["/assets/icon.svg", "image/svg+xml", LARGE_ICON_SVG],
+    ["/assets/favicon.svg", "image/svg+xml", MERGEHENNA_FAVICON_SVG],
+    ["/assets/icon.svg", "image/svg+xml", MERGEHENNA_FAVICON_SVG],
   ];
   for (const [path, contentType, body] of iconAssets) {
     app.get(path, (c) =>
@@ -768,7 +813,9 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
     const rawUrl = typeof body.url === "string" ? body.url : "";
     const csrfToken = gateOn ? ensureCsrfToken(c, ctx.config.uiSessionSecret) : undefined;
     const identity = c.get("identity");
-    const homePage = ctx.store.listJobsPage({});
+    // The error re-render is the default merge-queue view: scope the page
+    // to that family so operations jobs don't leak onto it.
+    const homePage = ctx.store.listJobsPage({ jobTypes: [...(QUEUE_VIEWS[0].types ?? [])] });
     const home = (extra: { error?: string; notice?: string; reviewUrl?: string } = {}) =>
       c.html(
         renderHome(homePage.jobs, ctx.store, {
@@ -914,7 +961,6 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
     }
   });
 
-  const JOB_TYPE_VALUES = ["pr_review", "stack_review", "repo_brief", "health_scan", "merge_group_check"] as const;
   app.get("/", (c) => {
     const cursor = jobsPageCursor(c.req.query("before"), c.req.query("after"));
     // Forge filter: `?forge=provider:instance`, validated against the scopes
@@ -928,16 +974,27 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
     // `?superseded=1` includes stale (superseded) rows; the default view hides
     // them so tip-thrashed stacks show one card, not a wall of history.
     const showSuperseded = c.req.query("superseded") === "1";
+    // `?view=` splits the queue by job family: the merge queue (the reviews
+    // and merge-group checks that gate merging) is the default surface;
+    // operations collects scans and briefs; `all` is the undivided history.
+    const requestedView = c.req.query("view");
+    const view: QueueView = requestedView === "ops" || requestedView === "all" ? requestedView : "merge";
+    const viewDef = QUEUE_VIEWS.find((entry) => entry.id === view) ?? QUEUE_VIEWS[0];
     // `?repo=` / `?type=` — validated against what the jobs table actually
-    // holds so stale links degrade to the unfiltered view.
+    // holds so stale links degrade to the unfiltered view. A type outside
+    // the active view's family is dropped: it could only render empty.
     const repoNames = ctx.store.listRepoNames();
     const requestedRepo = c.req.query("repo");
     const repo = requestedRepo && repoNames.includes(requestedRepo) ? requestedRepo : undefined;
     const requestedType = c.req.query("type");
-    const jobType = (JOB_TYPE_VALUES as readonly string[]).includes(requestedType ?? "")
-      ? (requestedType as (typeof JOB_TYPE_VALUES)[number])
-      : undefined;
-    let page = ctx.store.listJobsPage({ ...cursor, forge, includeStale: showSuperseded, repo, jobType });
+    const jobType =
+      (JOB_TYPES as readonly string[]).includes(requestedType ?? "") &&
+      (!viewDef.types || (viewDef.types as readonly string[]).includes(requestedType ?? ""))
+        ? (requestedType as JobType)
+        : undefined;
+    const jobTypes = jobType ? undefined : viewDef.types ? [...viewDef.types] : undefined;
+    const pageInput = { forge, includeStale: showSuperseded, repo, jobType, jobTypes };
+    let page = ctx.store.listJobsPage({ ...cursor, ...pageInput });
     // Only out-of-range cursors empty the page: after at/past the newest id,
     // or before at/below the oldest id. (A before cursor past the newest id
     // never gets here empty — the store's id< query already returns the
@@ -945,7 +1002,7 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
     // first page and say why instead of a dead end.
     let staleCursorNotice: string | undefined;
     if (page.jobs.length === 0) {
-      page = ctx.store.listJobsPage({ forge, includeStale: showSuperseded, repo, jobType });
+      page = ctx.store.listJobsPage(pageInput);
       if (page.jobs.length > 0 && (cursor.before != null || cursor.after != null)) {
         staleCursorNotice = forge
           ? "That page no longer exists — showing the newest matching jobs instead."
@@ -964,8 +1021,13 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
         activeForge: forge ? `${forge.provider}:${forge.instance}` : undefined,
         superseded: showSuperseded
           ? { active: true, hidden: 0 }
-          : { active: false, hidden: ctx.store.supersededJobCount(forge) },
+          : // The count mirrors what the toggle can actually reveal: the
+            // active job-type refinement when one is set, else the view's
+            // job family — never stale rows of other families.
+            { active: false, hidden: ctx.store.supersededJobCount(forge, jobType ? [jobType] : viewDef.types, repo) },
         jobFilters: { repos: repoNames, repo, type: jobType },
+        queueView: { active: view },
+        recentJobs: recentJobsFor(c, ctx),
       }),
     );
   });
@@ -989,6 +1051,7 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
         csrfToken: gateOn ? ensureCsrfToken(c, ctx.config.uiSessionSecret) : undefined,
         runFilters: { state },
         runPagination: { page, pageSize, total: board.total },
+        recentJobs: recentJobsFor(c, ctx),
       }),
     );
   });
@@ -1138,6 +1201,7 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
     const id = Number(c.req.param("id"));
     const job = ctx.store.getJob(id);
     if (!job) return c.text("Not found", 404);
+    recordRecentJob(c, id);
     const latest = ctx.store.findLatestJobForPull(job.repo_full_name, job.pr_number, undefined, {
       provider: job.provider,
       instance: job.provider_instance,
@@ -4002,6 +4066,7 @@ const CSRF_FAILURE_HTML = `<!doctype html>
   <meta charset="utf-8"/>
   <meta name="viewport" content="width=device-width, initial-scale=1"/>
   <title>Maomao — form expired</title>
+  <link rel="stylesheet" href="${INFERNAL_HREF}"/>
   <link rel="stylesheet" href="/assets/maomao.css"/>
 </head>
 <body>

@@ -17,6 +17,12 @@ import { resolveChannelUrl } from "../telemetry/settings.js";
 import { ReviewConfigStore } from "../config-revisions.js";
 import { PromptRevisionStore } from "../prompt-revisions.js";
 
+/** Every job type the queue can hold — the single source of truth for the
+ * union. Runtime validation and queue-family definitions derive from this
+ * list so a new type can never compile while validation silently drops it. */
+export const JOB_TYPES = ["pr_review", "health_scan", "repo_brief", "stack_review", "merge_group_check"] as const;
+export type JobType = (typeof JOB_TYPES)[number];
+
 export interface JobRow {
   id: number;
   repo_full_name: string;
@@ -52,7 +58,7 @@ export interface JobRow {
   cancelled_reason: CancelReason | null;
   cancelled_by: string | null;
   profile_revision_id: number | null;
-  job_type: "pr_review" | "health_scan" | "repo_brief" | "stack_review" | "merge_group_check";
+  job_type: JobType;
   /** "full" runs the specialist pipeline; "verify" only reconciles open findings (issue #123). */
   review_mode: "full" | "verify";
   scan_branch: string | null;
@@ -319,7 +325,7 @@ export interface NewJobInput {
   webhookDeliveryId?: string;
   webhookEvent?: string;
   reviewers: { role: string; title: string; model?: string }[];
-  jobType?: "pr_review" | "health_scan" | "repo_brief" | "stack_review" | "merge_group_check";
+  jobType?: JobType;
   /** Only meaningful for pr_review jobs; other types ignore it. */
   reviewMode?: "full" | "verify";
   scanBranch?: string | null;
@@ -1563,7 +1569,7 @@ export class JobStore {
    * malformed values and re-renders the first page when a cursor yields
    * nothing).
    */
-  listJobsPage(input: { before?: number; after?: number; limit?: number; forge?: { provider: string; instance: string }; includeStale?: boolean; repo?: string; jobType?: JobRow["job_type"] }): {
+  listJobsPage(input: { before?: number; after?: number; limit?: number; forge?: { provider: string; instance: string }; includeStale?: boolean; repo?: string; jobType?: JobRow["job_type"]; jobTypes?: Array<JobRow["job_type"]> }): {
     jobs: JobRow[];
     hasOlder: boolean;
     hasNewer: boolean;
@@ -1583,6 +1589,11 @@ export class JobStore {
     if (input.jobType) {
       whereParts.push("job_type = ?");
       whereParams.push(input.jobType);
+    } else if (input.jobTypes?.length) {
+      // The home queue's family views (merge queue vs operations) filter to a
+      // fixed set of types; a single jobType always wins when both are given.
+      whereParts.push(`job_type IN (${input.jobTypes.map(() => "?").join(", ")})`);
+      whereParams.push(...input.jobTypes);
     }
     // Superseded rows outnumber live ones on tip-thrashed stacks; the list
     // hides them unless the caller asks for the full history.
@@ -1626,11 +1637,19 @@ export class JobStore {
   }
 
   /** Stale rows hidden by the default list view, scoped like `listJobsPage`. */
-  supersededJobCount(forge?: { provider: string; instance: string }): number {
+  supersededJobCount(
+    forge?: { provider: string; instance: string },
+    types?: readonly string[],
+    repo?: string,
+  ): number {
     const where = forge ? `AND provider = ? AND provider_instance = ?` : "";
+    const typeWhere = types?.length ? `AND job_type IN (${types.map(() => "?").join(", ")})` : "";
+    const repoWhere = repo ? `AND repo_full_name = ?` : "";
     const row = this.db
-      .prepare(`SELECT COUNT(*) AS count FROM jobs WHERE state = 'stale' ${where}`)
-      .get(...(forge ? [forge.provider, forge.instance] : [])) as { count: number };
+      .prepare(`SELECT COUNT(*) AS count FROM jobs WHERE state = 'stale' ${where} ${typeWhere} ${repoWhere}`)
+      .get(...(forge ? [forge.provider, forge.instance] : []), ...(types ?? []), ...(repo ? [repo] : [])) as {
+      count: number;
+    };
     return row.count;
   }
 
