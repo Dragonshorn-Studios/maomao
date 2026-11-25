@@ -37,7 +37,7 @@ describe("GithubClient.upsertCheckRun", () => {
     create: (input: Record<string, unknown>) => Promise<{ data: { id: number; html_url?: string } }>;
     update: (input: Record<string, unknown>) => Promise<{ data: { id: number; html_url?: string } }>;
   }) {
-    const client = new GithubClient(loadConfig({}));
+    const client = new GithubClient(loadConfig({ GITHUB_APP_ID: "1" }));
     (client as unknown as { installationOctokit: () => unknown }).installationOctokit = () => ({
       rest: { checks: checks },
     });
@@ -61,7 +61,7 @@ describe("GithubClient.upsertCheckRun", () => {
     const calls = { create: 0, update: 0 };
     const client = clientWithChecks({
       listForRef: async () => ({
-        data: { check_runs: [{ id: 1, name: "maomao/review", external_id: "other-app" }] },
+        data: { check_runs: [{ id: 1, name: "maomao/review", external_id: input.externalId, app: { id: 2 } }] },
       }),
       create: async () => {
         calls.create += 1;
@@ -91,8 +91,8 @@ describe("GithubClient.upsertCheckRun", () => {
               request.page === 1
                 ? filler
                 : [
-                    { id: 200, external_id: input.externalId },
-                    { id: 201, external_id: input.externalId },
+                    { id: 200, external_id: input.externalId, app: { id: 1 } },
+                    { id: 201, external_id: input.externalId, app: { id: 1 } },
                   ],
           },
         };

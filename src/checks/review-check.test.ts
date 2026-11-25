@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { loadConfig } from "../config.js";
 import { openDb } from "../db.js";
 import type { ForgePort } from "../forge/port.js";
 import type { ForgeCheckPublishInput } from "../forge/types.js";
@@ -25,9 +26,9 @@ function enqueueJob(store: JobStore, headSha = "abc123456789") {
   }).job;
 }
 
-function publisherFor(store: JobStore, provider: ForgePort, publicUrl = "https://maomao.example") {
+function publisherFor(store: JobStore, provider: ForgePort, publicUrl = "https://maomao.example", config = loadConfig({})) {
   const forge = { forJob: () => provider } as unknown as ForgeRegistry;
-  return new ReviewCheckPublisher({ store, forge, publicUrl });
+  return new ReviewCheckPublisher({ store, forge, config, publicUrl });
 }
 
 function fakePort(input: {
@@ -195,6 +196,50 @@ describe("ReviewCheckPublisher", () => {
     });
   });
 
+  it("does not reopen a completed job as queued for escalation dispatch", async () => {
+    const store = new JobStore(openDb(":memory:"));
+    const job = enqueueJob(store);
+    store.setJobState(job.id, "completed");
+    const sent: ForgeCheckPublishInput[] = [];
+    const publisher = publisherFor(
+      store,
+      fakePort({
+        headSha: job.head_sha,
+        publish: async (check) => {
+          sent.push(check);
+          return { id: "check-1" };
+        },
+      }),
+    );
+
+    await publisher.publishQueuedJobId(job.id);
+
+    expect(sent).toEqual([]);
+  });
+
+  it("does not write checks after the repository becomes unauthorized", async () => {
+    const store = new JobStore(openDb(":memory:"));
+    const job = enqueueJob(store);
+    const sent: ForgeCheckPublishInput[] = [];
+    const publisher = publisherFor(
+      store,
+      fakePort({
+        headSha: job.head_sha,
+        publish: async (check) => {
+          sent.push(check);
+          return { id: "check-1" };
+        },
+      }),
+      "https://maomao.example",
+      loadConfig({ ALLOWED_GITHUB_REPOSITORY_IDS: "12345" }),
+    );
+
+    await publisher.publishQueuedJobId(job.id);
+
+    expect(sent).toEqual([]);
+    expect(store.listLogs(job.id).map((log) => log.message).join("\n")).toContain("unauthorized");
+  });
+
   it("records provider publication failures without throwing or changing review work", async () => {
     const store = new JobStore(openDb(":memory:"));
     const job = enqueueJob(store);
@@ -228,6 +273,8 @@ describe("ReviewCheckPublisher", () => {
     expect(reviewConclusionForJob({ ...job, state: "completed", review_event: "REQUEST_CHANGES" })).toBe("failure");
     expect(reviewConclusionForJob({ ...job, state: "completed", review_event: "APPROVE" })).toBe("success");
     expect(reviewConclusionForJob({ ...job, state: "completed", review_event: "COMMENT" })).toBe("neutral");
+    expect(reviewConclusionForJob({ ...job, state: "completed", review_event: "COMMENT" }, true)).toBe("success");
+    expect(reviewConclusionForJob({ ...job, state: "completed", review_event: "COMMENT" }, false, "REQUEST_CHANGES")).toBe("failure");
     expect(reviewConclusionForJob({ ...job, state: "cancelled" })).toBe("cancelled");
     expect(reviewConclusionForJob({ ...job, state: "failed", failure_reason: "OpenCode timed out" })).toBe("timed_out");
   });

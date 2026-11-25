@@ -487,8 +487,9 @@ export class GithubClient implements GithubPort, ManualTriggerPort {
     // Only the stable external id identifies Maomao's logical check. Falling
     // back to the display name could hijack a same-named check owned by a
     // different GitHub App.
+    const ownAppId = this.config.github.appId;
     const existing = runs
-      .filter((run) => run.external_id === input.externalId)
+      .filter((run) => run.external_id === input.externalId && String(run.app?.id ?? "") === ownAppId)
       .reduce<(typeof runs)[number] | undefined>((latest, run) => (latest == null || run.id > latest.id ? run : latest), undefined);
     if (existing) {
       const updated = await octokit.rest.checks.update({

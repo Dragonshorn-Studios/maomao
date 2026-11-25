@@ -1,6 +1,8 @@
 import { createHash } from "node:crypto";
+import type { Config } from "../config.js";
 import type { ForgeRegistry } from "../forge/registry.js";
-import type { ForgeCheckConclusion, ForgeCheckState } from "../forge/types.js";
+import { authorizeGithubTarget } from "../github/authorize.js";
+import type { ForgeCheckConclusion, ForgeCheckState, ForgeVerdict } from "../forge/types.js";
 import { forgeTargetOf } from "../forge/types.js";
 import type { CheckPublicationKey, JobRow, JobStore } from "../jobs/store.js";
 
@@ -60,10 +62,11 @@ function defaultSummary(job: JobRow, input: ReviewCheckInput): string {
 }
 
 /** Terminal job state → native-check conclusion for the existing human review result. */
-export function reviewConclusionForJob(job: JobRow, aggregateVerdict?: string): ForgeCheckConclusion {
+export function reviewConclusionForJob(job: JobRow, reviewIsClean = false, reviewEvent?: ForgeVerdict): ForgeCheckConclusion {
   if (job.state === "completed") {
-    if (job.review_event === "REQUEST_CHANGES") return "failure";
-    if (job.review_event === "APPROVE" || aggregateVerdict === "clean") return "success";
+    const event = reviewEvent ?? job.review_event;
+    if (event === "REQUEST_CHANGES") return "failure";
+    if (event === "APPROVE" || reviewIsClean) return "success";
     return "neutral";
   }
   if (job.state === "stale" || job.state === "cancelled") return "cancelled";
@@ -84,6 +87,7 @@ export class ReviewCheckPublisher {
     private readonly deps: {
       store: JobStore;
       forge: ForgeRegistry;
+      config: Config;
       publicUrl?: string;
     },
   ) {}
@@ -114,7 +118,7 @@ export class ReviewCheckPublisher {
 
   publishQueuedJobId(jobId: number): Promise<void> {
     const job = this.deps.store.getJob(jobId);
-    if (!job) return Promise.resolve();
+    if (!job || job.state !== "queued") return Promise.resolve();
     return this.publish(job, { status: "queued" });
   }
 
@@ -134,6 +138,17 @@ export class ReviewCheckPublisher {
     const key = keyFor(job);
     const detailsUrl = this.detailsUrl(job);
     let effective = input;
+    if (job.provider === "github") {
+      const auth = authorizeGithubTarget(this.deps.config, {
+        installationId: job.installation_id,
+        accountId: job.github_account_id ?? undefined,
+        repositoryId: job.github_repository_id ?? undefined,
+      });
+      if (!auth.ok) {
+        this.deps.store.log(job.id, `Not publishing ${REVIEW_CHECK_NAME}: unauthorized: ${auth.reason}`, "warn");
+        return;
+      }
+    }
     let provider;
     try {
       provider = this.deps.forge.forJob(job);
@@ -224,8 +239,8 @@ export class ReviewCheckPublisher {
   }
 }
 
-export function reviewCheckInputForState(job: JobRow, aggregateVerdict?: string): ReviewCheckInput {
-  const conclusion = reviewConclusionForJob(job, aggregateVerdict);
+export function reviewCheckInputForState(job: JobRow, reviewIsClean = false, reviewEvent?: ForgeVerdict): ReviewCheckInput {
+  const conclusion = reviewConclusionForJob(job, reviewIsClean, reviewEvent);
   return {
     status: "completed",
     conclusion,

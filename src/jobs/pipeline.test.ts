@@ -10,6 +10,7 @@ import type { OpenCodePort } from "../opencode/parse.js";
 import { OpenCodeTimeoutError } from "../opencode/spawn.js";
 import { profileBudgetExceeded } from "../routing/policy.js";
 import { findingMarker, fingerprintFinding } from "../findings/identity.js";
+import type { ReviewCheckInput, ReviewCheckPublisher } from "../checks/review-check.js";
 import { createPipeline } from "./pipeline.js";
 import { parseBriefPayload } from "./brief.js";
 import { JobStore } from "./store.js";
@@ -890,8 +891,21 @@ describe("pipeline", () => {
   });
 
   it("does not post a second review when a marker already exists", async () => {
-    const config = loadConfig({ REVIEWER_ROLES: "correctness", POST_EMPTY_REVIEW: "true" });
+    const config = loadConfig({
+      REVIEWER_ROLES: "correctness",
+      POST_EMPTY_REVIEW: "true",
+      GITHUB_REVIEW_ALLOW_REQUEST_CHANGES: "true",
+      GITHUB_REVIEW_REQUEST_CHANGES_MIN_SEVERITY: "high",
+    });
     const store = new JobStore(openDb(":memory:"));
+    const publishedChecks: ReviewCheckInput[] = [];
+    const checkPublisher = {
+      publish: async (_job: object, input: ReviewCheckInput) => {
+        publishedChecks.push(input);
+      },
+      publishQueuedJobId: async () => {},
+      publishCancelledJobId: async () => {},
+    } as unknown as ReviewCheckPublisher;
     let creates = 0;
     const github: GithubPort = githubPort({
       getInstallationToken: async () => "token",
@@ -905,7 +919,21 @@ describe("pipeline", () => {
     const opencode: OpenCodePort = {
       async run(input) {
         const text = input.prompt.includes("aggregator")
-          ? JSON.stringify({ verdict: "clean", summary: "ok", findings: [] })
+          ? JSON.stringify({
+              verdict: "comment",
+              summary: "high finding",
+              findings: [
+                {
+                  severity: "high",
+                  confidence: 0.9,
+                  category: "correctness",
+                  file: "example.ts",
+                  line: 1,
+                  summary: "high bug",
+                  body: "details",
+                },
+              ],
+            })
           : JSON.stringify({ reviewer: "correctness", verdict: "clean", findings: [] });
         return { stdout: text, stderr: "", exitCode: 0, text, usage: {} };
       },
@@ -930,11 +958,13 @@ describe("pipeline", () => {
       config,
       store,
       github,
+      checkPublisher,
       checkout: await fixtureCheckout(),
       opencode,
     }).run(created.job.id);
     expect(creates).toBe(0);
     expect(store.getJob(created.job.id)?.github_review_id).toBe("5");
+    expect(publishedChecks.at(-1)).toMatchObject({ status: "completed", conclusion: "failure" });
   });
 
   it("marks leftover reviewers failed when checkout throws", async () => {
@@ -2262,7 +2292,7 @@ describe("inline comment anchoring", () => {
             stdout: "",
             stderr: "",
             exitCode: 0,
-            text: JSON.stringify({ verdict: "comment", summary: "moved", findings: [] }),
+            text: JSON.stringify({ verdict: "clean", summary: "moved", findings: [] }),
             usage: {},
           };
         },
@@ -2453,9 +2483,18 @@ describe("finding reconciliation", () => {
     const created = enqueueJob(store, config, "movedsha");
     const resolved: string[] = [];
     const posted: { path: string; line: number }[] = [];
+    const publishedChecks: ReviewCheckInput[] = [];
+    const checkPublisher = {
+      publish: async (_job: object, input: ReviewCheckInput) => {
+        publishedChecks.push(input);
+      },
+      publishQueuedJobId: async () => {},
+      publishCancelledJobId: async () => {},
+    } as unknown as ReviewCheckPublisher;
     await createPipeline({
       config,
       store,
+      checkPublisher,
       github: githubPort({
         getPullDiff: async () =>
           "diff --git a/example.ts b/example.ts\n--- a/example.ts\n+++ b/example.ts\n@@ -8,1 +8,1 @@\n-old line\n+new line\n",
@@ -2506,6 +2545,7 @@ describe("finding reconciliation", () => {
     }).run(created.job.id);
     expect(posted).toEqual([{ path: "example.ts", line: 8 }]);
     expect(resolved).toEqual([`thread-${fingerprint}`]);
+    expect(publishedChecks.at(-1)).toMatchObject({ status: "completed", conclusion: "neutral" });
   });
 
   it("does not re-verify a stored resolved finding when no thread is open", async () => {
