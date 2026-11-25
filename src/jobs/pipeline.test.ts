@@ -313,6 +313,160 @@ describe("pipeline", () => {
     expect(JSON.parse(job?.aggregator_normalized ?? "{}").verdict).toBe("comment");
   });
 
+  it("publishes the review lifecycle to a stable GitHub check run", async () => {
+    const config = loadConfig({
+      REVIEWER_ROLES: "correctness",
+      OPENCODE_REVIEWER_MODEL: "test/model",
+      OPENCODE_TIMEOUT_MS: "5000",
+      POST_EMPTY_REVIEW: "true",
+      MAOMAO_PUBLIC_URL: "https://maomao.example",
+    });
+    const store = new JobStore(openDb(":memory:"));
+    const checks: Array<{ status?: string; conclusion?: string; externalId: string; detailsUrl?: string }> = [];
+    const github = {
+      ...githubPort(),
+      getPull: async () => ({
+        installationId: 9,
+        accountId: 1001,
+        repositoryId: 2002,
+        repoOwner: "acme",
+        repoName: "widgets",
+        repoFullName: "acme/widgets",
+        prNumber: 4,
+        prTitle: "Change example",
+        prBody: "",
+        prHtmlUrl: "https://example.test/pull/4",
+        prAuthor: "dev",
+        baseSha: "base",
+        headSha: "cafebabe",
+        baseRef: "main",
+        headRef: "feat",
+        draft: false,
+      }),
+      upsertCheckRun: async (input: { status?: string; conclusion?: string; externalId: string; detailsUrl?: string }) => {
+        checks.push(input);
+        return { id: "check-1", url: "https://example.test/checks/1" };
+      },
+    } as unknown as GithubPort;
+    const opencode: OpenCodePort = {
+      async run(input) {
+        const roleMatch = input.prompt.match(/Role id: (\w+)/);
+        const text = roleMatch
+          ? reviewerJson(roleMatch[1])
+          : JSON.stringify({ schema_version: 1, verdict: "comment", summary: "Please fix the finding.", findings: [] });
+        return { stdout: text, stderr: "", exitCode: 0, text, usage: { promptTokens: 3, completionTokens: 2 } };
+      },
+    };
+    const created = store.enqueue({
+      repoFullName: "acme/widgets",
+      repoOwner: "acme",
+      repoName: "widgets",
+      installationId: 9,
+      prNumber: 4,
+      prTitle: "Change example",
+      prBody: "",
+      prHtmlUrl: "",
+      prAuthor: "dev",
+      baseSha: "base",
+      headSha: "cafebabe",
+      baseRef: "main",
+      headRef: "feat",
+      reviewers: config.reviewers.map((role) => ({ role: role.id, title: role.title })),
+    });
+
+    const pipeline = createPipeline({ config, store, github, checkout: await fixtureCheckout(), opencode });
+    await pipeline.publishQueuedCheck(created.job.id);
+    await pipeline.run(created.job.id);
+
+    expect(store.getJob(created.job.id)?.state).toBe("completed");
+    expect(checks[0]).toMatchObject({ status: "queued", detailsUrl: `https://maomao.example/jobs/${created.job.id}` });
+    expect(checks.at(-1)).toMatchObject({ status: "completed", conclusion: "success" });
+    expect(new Set(checks.map((check) => check.externalId)).size).toBe(1);
+    const stored = store.getCheckPublication({
+      provider: "github",
+      providerInstance: "github.com",
+      repoFullName: "acme/widgets",
+      prNumber: 4,
+      headSha: "cafebabe",
+      name: "maomao/review",
+    });
+    expect(stored).toMatchObject({ native_id: "check-1", conclusion: "success", publish_error: null });
+  });
+
+  it("does not overwrite a cancellation that wins during final check publication", async () => {
+    const config = loadConfig({
+      REVIEWER_ROLES: "correctness",
+      OPENCODE_REVIEWER_MODEL: "test/model",
+      OPENCODE_TIMEOUT_MS: "5000",
+      POST_EMPTY_REVIEW: "true",
+    });
+    const store = new JobStore(openDb(":memory:"));
+    const checks: Array<{ status?: string; conclusion?: string }> = [];
+    const created = store.enqueue({
+      repoFullName: "acme/widgets",
+      repoOwner: "acme",
+      repoName: "widgets",
+      installationId: 9,
+      prNumber: 4,
+      prTitle: "Change example",
+      prBody: "",
+      prHtmlUrl: "",
+      prAuthor: "dev",
+      baseSha: "base",
+      headSha: "cafebabe",
+      baseRef: "main",
+      headRef: "feat",
+      reviewers: config.reviewers.map((role) => ({ role: role.id, title: role.title })),
+    });
+    const github = {
+      ...githubPort(),
+      getPull: async () => ({
+        installationId: 9,
+        accountId: 1001,
+        repositoryId: 2002,
+        repoOwner: "acme",
+        repoName: "widgets",
+        repoFullName: "acme/widgets",
+        prNumber: 4,
+        prTitle: "Change example",
+        prBody: "",
+        prHtmlUrl: "https://example.test/pull/4",
+        prAuthor: "dev",
+        baseSha: "base",
+        headSha: "cafebabe",
+        baseRef: "main",
+        headRef: "feat",
+        draft: false,
+      }),
+      upsertCheckRun: async (input: { status?: string; conclusion?: string }) => {
+        checks.push(input);
+        if (input.status === "completed" && input.conclusion === "success") {
+          store.cancelJobs(
+            { jobId: created.job.id, scope: { provider: "github", instance: "github.com" } },
+            "manual_cancel",
+            null,
+          );
+        }
+        return { id: "check-1" };
+      },
+    } as unknown as GithubPort;
+    const opencode: OpenCodePort = {
+      async run(input) {
+        const roleMatch = input.prompt.match(/Role id: (\w+)/);
+        const text = roleMatch
+          ? reviewerJson(roleMatch[1])
+          : JSON.stringify({ schema_version: 1, verdict: "clean", summary: "Clean.", findings: [] });
+        return { stdout: text, stderr: "", exitCode: 0, text, usage: { promptTokens: 3, completionTokens: 2 } };
+      },
+    };
+
+    const pipeline = createPipeline({ config, store, github, checkout: await fixtureCheckout(), opencode });
+    await pipeline.run(created.job.id);
+
+    expect(store.getJob(created.job.id)?.state).toBe("cancelled");
+    expect(checks.at(-1)).toMatchObject({ status: "completed", conclusion: "cancelled" });
+  });
+
   it("withholds findings referencing paths outside the checkout from the published review", async () => {
     const config = loadConfig({
       REVIEWER_ROLES: "correctness",

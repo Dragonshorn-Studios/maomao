@@ -129,6 +129,26 @@ describe("stack job helpers", () => {
 });
 
 describe("JobQueue cancellation", () => {
+  it("invokes the abort lifecycle hook when a pending job is dropped", () => {
+    const store = makeStore();
+    const jobId = seedJob(store, 4, "aaa");
+    const aborted: number[] = [];
+    const queue = new JobQueue(
+      store,
+      1,
+      async () => {},
+      undefined,
+      true,
+      undefined,
+      (id) => aborted.push(id),
+    );
+
+    queue.enqueue(jobId);
+    queue.abort(jobId);
+
+    expect(aborted).toEqual([jobId]);
+  });
+
   it("never runs a cancelled job that was still pending", async () => {
     const store = makeStore();
     const first = seedJob(store, 4, "aaa");

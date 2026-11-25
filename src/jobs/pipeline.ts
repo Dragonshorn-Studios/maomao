@@ -85,6 +85,7 @@ import {
   sanitizePublicReason,
   targetKey,
 } from "../routing/escalation.js";
+import { ReviewCheckPublisher, reviewCheckInputForState } from "../checks/review-check.js";
 import {
   assignFindingIds,
   findingsMeetThreshold,
@@ -104,6 +105,8 @@ export interface PipelineDeps {
   forge?: ForgeRegistry;
   /** Persisted forge connections backing the default registry's GitLab bindings. */
   connections?: ForgeConnectionStore;
+  /** Optional check publisher override for focused tests; production uses the default review publisher. */
+  checkPublisher?: ReviewCheckPublisher;
   checkout: CheckoutPort;
   opencode: OpenCodePort;
   getInstallationToken?: (installationId: number) => Promise<string>;
@@ -120,8 +123,21 @@ export function abortJob(jobId: number): void {
 export function createPipeline(deps: PipelineDeps) {
   const forge =
     deps.forge ?? new ForgeRegistry(deps.github, deps.config.github.appSlug, deps.getInstallationToken, deps.connections);
+  const checks =
+    deps.checkPublisher ??
+    new ReviewCheckPublisher({
+      store: deps.store,
+      forge,
+      publicUrl: deps.config.publicUrl,
+    });
   return {
     abortJob,
+    publishQueuedCheck(jobId: number): Promise<void> {
+      return checks.publishQueuedJobId(jobId);
+    },
+    publishCancelledCheck(jobId: number): Promise<void> {
+      return checks.publishCancelledJobId(jobId);
+    },
     async run(jobId: number): Promise<void> {
       const existing = aborts.get(jobId);
       if (existing) existing.abort();
@@ -146,6 +162,7 @@ export function createPipeline(deps: PipelineDeps) {
             cancelled.length ? "info" : "warn",
           );
           if (cancelled.length) {
+            await checks.publishCancelledJobId(jobId);
             publish({ type: "job", jobId });
             publish({ type: "jobs" });
           }
@@ -156,9 +173,9 @@ export function createPipeline(deps: PipelineDeps) {
         } else if (job?.job_type === "repo_brief") {
           await runBriefJob(deps, forge, jobId, controller.signal);
         } else if (job?.job_type === "stack_review") {
-          await runStackJob(deps, forge, jobId, controller.signal);
+          await runStackJob(deps, forge, jobId, controller.signal, checks);
         } else {
-          await runJob(deps, forge, jobId, controller.signal);
+          await runJob(deps, forge, jobId, controller.signal, checks);
         }
       } finally {
         if (aborts.get(jobId) === controller) aborts.delete(jobId);
@@ -356,7 +373,13 @@ async function runBudgetedAggregation(
   return aggregated;
 }
 
-async function runJob(deps: PipelineDeps, forge: ForgeRegistry, jobId: number, signal: AbortSignal): Promise<void> {
+async function runJob(
+  deps: PipelineDeps,
+  forge: ForgeRegistry,
+  jobId: number,
+  signal: AbortSignal,
+  checks: ReviewCheckPublisher,
+): Promise<void> {
   const { store, config } = deps;
   const job = store.getJob(jobId);
   if (!job) {
@@ -412,6 +435,7 @@ async function runJob(deps: PipelineDeps, forge: ForgeRegistry, jobId: number, s
 
   try {
     store.setJobState(jobId, "preparing", { started_at: nowIso() });
+    void checks.publish(store.getJob(jobId) ?? job, { status: "in_progress", stage: "preparing" });
     store.log(jobId, `Preparing isolated workspace for ${job.repo_full_name}#${job.pr_number} @ ${job.head_sha}`);
     throwIfStale(store, jobId, signal);
 
@@ -475,6 +499,7 @@ async function runJob(deps: PipelineDeps, forge: ForgeRegistry, jobId: number, s
       throwIfStale(store, jobId, signal);
 
       store.setJobState(jobId, "reviewing");
+      void checks.publish(store.getJob(jobId) ?? job, { status: "in_progress", stage: "reviewing" });
       const runs = store.listReviewerRuns(jobId).filter((run) => run.state !== "done");
       await runProfileReviewers(
         deps,
@@ -542,6 +567,7 @@ async function runJob(deps: PipelineDeps, forge: ForgeRegistry, jobId: number, s
     }
 
     store.setJobState(jobId, "publishing", { aggregator_state: "done" });
+    void checks.publish(store.getJob(jobId) ?? job, { status: "in_progress", stage: "publishing" });
     const posted = await publishReview(deps, provider, job, aggregated, reviewerCount, snapshot, diff, workspace.repoDir, signal);
     const afterPublish = store.getJob(jobId) ?? job;
     if (posted) {
@@ -608,6 +634,16 @@ async function runJob(deps: PipelineDeps, forge: ForgeRegistry, jobId: number, s
 
     throwIfStale(store, jobId, signal);
     await dispatchExternalEscalation(deps, store.getJob(jobId) ?? afterPublish, aggregated);
+    // Cancellation/supersession can win during the escalation network call.
+    // Re-check before claiming a successful terminal check, and again after it
+    // before writing the terminal job state.
+    throwIfStale(store, jobId, signal);
+    const latestBeforeCompletion = store.getJob(jobId) ?? job;
+    await checks.publish(
+      { ...latestBeforeCompletion, state: "completed" },
+      reviewCheckInputForState({ ...latestBeforeCompletion, state: "completed" }, aggregated.verdict),
+    );
+    throwIfStale(store, jobId, signal);
     store.setJobState(jobId, "completed", {
       github_review_id: posted?.id ?? store.getJob(jobId)?.github_review_id ?? null,
       github_review_url: posted?.url ?? store.getJob(jobId)?.github_review_url ?? null,
@@ -634,6 +670,11 @@ async function runJob(deps: PipelineDeps, forge: ForgeRegistry, jobId: number, s
           internal_escalation_reason: "job ended before the internal pass finished",
         });
       }
+      const latest = store.getJob(jobId) ?? job;
+      await checks.publish(
+        { ...latest, state: cancelled ? "cancelled" : "stale" },
+        reviewCheckInputForState({ ...latest, state: cancelled ? "cancelled" : "stale" }),
+      );
       if (!store.isStale(jobId)) store.setJobState(jobId, "stale", { finished_at: nowIso() });
       return;
     }
@@ -647,6 +688,11 @@ async function runJob(deps: PipelineDeps, forge: ForgeRegistry, jobId: number, s
         });
       }
     }
+    const latest = store.getJob(jobId) ?? job;
+    await checks.publish(
+      { ...latest, state: "failed", failure_reason: message },
+      reviewCheckInputForState({ ...latest, state: "failed", failure_reason: message }),
+    );
     store.setJobState(jobId, "failed", {
       failure_reason: message,
       finished_at: nowIso(),
@@ -1154,7 +1200,13 @@ function memberJobSpend(store: JobStore, jobId: number): { cost: number; tokens:
   return { cost: spend.costUsd ?? 0, tokens: spend.totalTokens };
 }
 
-async function runStackJob(deps: PipelineDeps, forge: ForgeRegistry, jobId: number, signal: AbortSignal): Promise<void> {
+async function runStackJob(
+  deps: PipelineDeps,
+  forge: ForgeRegistry,
+  jobId: number,
+  signal: AbortSignal,
+  checks: ReviewCheckPublisher,
+): Promise<void> {
   const { store, config } = deps;
   const job = store.getJob(jobId);
   if (!job) return;
@@ -1327,7 +1379,7 @@ async function runStackJob(deps: PipelineDeps, forge: ForgeRegistry, jobId: numb
         store.patchStackMember(member.id, { memberJobId, state: "reviewing" });
         if (enqueued.created) {
           store.log(jobId, `Reviewing stack member #${member.pr_number} as job ${memberJobId}`);
-          await runJob(deps, forge, memberJobId, signal);
+          await runJob(deps, forge, memberJobId, signal, checks);
           outcome = await waitForJob(deps.store, memberJobId, jobId, signal);
           // Run envelope (issue #136): only spend this run itself enqueued
           // counts — a reused job's recorded tokens belong to the run that

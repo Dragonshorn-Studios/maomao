@@ -16,6 +16,10 @@ export class JobQueue {
     private readonly telemetry?: TelemetrySettingsStore,
     /** Same gate as job summaries — JOB_SUMMARIES=false silences app logs too. */
     private readonly emitAppLogs = true,
+    /** Best-effort lifecycle hook for newly queued work (native check pending state). */
+    private readonly onEnqueue?: (jobId: number) => void,
+    /** Best-effort lifecycle hook after superseded/cancelled work is dropped or aborted. */
+    private readonly onAbort?: (jobId: number) => void,
   ) {}
 
   private metricsConfig() {
@@ -108,6 +112,13 @@ export class JobQueue {
     if (this.pending.includes(jobId) || this.active.has(jobId)) return;
     this.pending.push(jobId);
     this.logJobEnqueued(jobId);
+    if (this.onEnqueue) {
+      try {
+        this.onEnqueue(jobId);
+      } catch (error) {
+        console.warn(`queue: enqueue lifecycle hook failed for job ${jobId}: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
     // Gauge on change: depth grows even when no slot is free for pump to act.
     this.exportMetrics();
     if (this.started) this.pump();
@@ -120,6 +131,12 @@ export class JobQueue {
       this.exportMetrics();
     }
     abortJob(jobId);
+    if (!this.onAbort) return;
+    try {
+      this.onAbort(jobId);
+    } catch (error) {
+      console.warn(`queue: abort lifecycle hook failed for job ${jobId}: ${error instanceof Error ? error.message : String(error)}`);
+    }
   }
 
   abortMany(jobIds: number[]): void {

@@ -16,6 +16,8 @@ import type {
   ForgeConversationComment,
   ForgeDiscussion,
   ForgePermission,
+  ForgeCheckPublishInput,
+  ForgeCheckPublishResult,
   ForgePublishInput,
   ForgePublishResult,
   ForgeRepoTarget,
@@ -109,6 +111,32 @@ export class GitHubProvider implements ForgePort {
       comments: input.comments,
       event: input.verdict,
       forgeLabel: "GitHub",
+    });
+  }
+
+  supportsNativeChecks(): boolean {
+    return typeof this.client.upsertCheckRun === "function";
+  }
+
+  async publishCheck(input: ForgeCheckPublishInput): Promise<ForgeCheckPublishResult> {
+    if (!this.client.upsertCheckRun) {
+      throw new Error("GitHub client does not support check runs");
+    }
+    const state =
+      input.status === "completed"
+        ? { status: input.status, conclusion: input.conclusion }
+        : { status: input.status };
+    return this.client.upsertCheckRun({
+      installationId: this.installationId,
+      owner: input.target.repoOwner,
+      repo: input.target.repoName,
+      headSha: input.commitSha,
+      name: input.name,
+      externalId: input.externalId,
+      ...state,
+      title: input.title,
+      summary: input.summary,
+      ...(input.detailsUrl ? { detailsUrl: input.detailsUrl } : {}),
     });
   }
 
