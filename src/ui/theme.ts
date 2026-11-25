@@ -978,47 +978,72 @@ h1 a.pr-external { font-size: 0.72em; }
 
 /* /reviewers board: dense one-line rows — role · PR title · owning job ·
    mode · head · elapsed · state. */
+/* Reviewer runs board — an infernal if-table with fixed columns so every
+   row's meta lines up. The library owns the chrome (wrap, header band, row
+   hover); these rules size the columns and truncate the change title. */
 .run-board {
-  list-style: none;
-  margin: 0;
-  padding: 0;
   background: var(--surface);
-  border: 1px solid var(--line);
-  border-radius: var(--radius);
-  /* Dense rows can't reflow (nowrap meta pieces) — confine the scroll
-     to the board instead of letting it push the page wide. */
-  overflow-x: auto;
+  margin-bottom: 0.4rem;
 }
-.run-row {
-  display: flex;
-  align-items: baseline;
-  gap: 0.6rem;
-  padding: 0.4rem 0.8rem;
-  font-size: 0.9rem;
-  min-width: 0;
-}
-.run-row + .run-row { border-top: 1px solid var(--line); }
-.run-row .role { white-space: nowrap; }
-.run-row .role svg { width: 0.9em; height: 0.9em; vertical-align: -0.1em; }
-.run-title {
-  font-weight: 600;
+.run-board .if-table { table-layout: fixed; min-width: 760px; }
+.run-board .col-role { width: 9.5rem; }
+.run-board .col-title { width: auto; }
+.run-board .col-owner { width: 12rem; }
+.run-board .col-mode { width: 5.5rem; }
+.run-board .col-sha { width: 6.5rem; }
+.run-board .col-elapsed { width: 4.5rem; }
+.run-board .col-state { width: 7.5rem; }
+.run-row td { vertical-align: middle; }
+.run-row .role { white-space: nowrap; display: inline-flex; align-items: center; gap: 0.35rem; }
+.run-row .role svg { width: 0.9em; height: 0.9em; flex: none; }
+.run-title a {
+  display: block;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  flex: 1 1 auto;
-  min-width: 0;
+  font-weight: 600;
 }
 .run-row .run-owner,
 .run-row .run-elapsed,
 .run-row .sha { white-space: nowrap; }
-.run-row .state { margin-left: auto; white-space: nowrap; }
+.run-row .run-owner {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.run-row .run-state .state { white-space: nowrap; }
+.run-row td.muted, .run-row .muted { font-size: 11.5px; }
 .pager {
   display: flex;
   justify-content: space-between;
-  align-items: baseline;
+  align-items: center;
   gap: 1rem;
-  margin: 0.5rem 0.2rem;
+  margin: 0.55rem 0.1rem 0;
   font-size: 0.88rem;
+}
+
+.pager > a {
+  display: inline-flex;
+  align-items: center;
+  padding: 5px 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--surface);
+  color: var(--if-accent);
+  font-weight: 600;
+  font-size: 12px;
+  text-decoration: none;
+  transition: border-color 0.15s ease, background 0.15s ease;
+}
+
+.pager > a:hover {
+  border-color: var(--if-accent);
+  background: var(--if-accent-soft, var(--well));
+}
+
+.pager > .muted {
+  font-family: var(--if-mono);
+  font-size: 11px;
+  letter-spacing: 0.02em;
 }
 
 /* Repo / job-type filter bar on the home job list; it reuses the .trigger
@@ -1599,9 +1624,6 @@ details summary { cursor: pointer; color: var(--ink-muted); }
   .member-row .member-title { order: -1; flex: 1 1 100%; }
   /* Same for dense reviewer runs: the title owns line one and the role,
      owner, mode, sha and state flow onto the following lines. */
-  .run-row { flex-wrap: wrap; }
-  .run-row .run-title { order: -1; flex: 1 1 100%; }
-  .run-board { overflow-x: visible; }
 }
 
 @media (min-resolution: 1.4dppx) {

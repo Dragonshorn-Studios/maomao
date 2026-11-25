@@ -629,7 +629,11 @@ export const STORIES: WorkbenchStory[] = [
     ],
     preview: (variant) => {
       const rows = variant.id === "empty" ? [] : BOARD_MIXED_ROWS;
-      return layoutBody(renderReviewerBoard(rows as Parameters<typeof renderReviewerBoard>[0], {}));
+      return layoutBody(
+        renderReviewerBoard(rows as Parameters<typeof renderReviewerBoard>[0], {
+          runPagination: variant.id === "empty" ? undefined : { page: 2, pageSize: 25, total: 118 },
+        }),
+      );
     },
   },
   {

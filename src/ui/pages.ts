@@ -911,15 +911,15 @@ export function renderReviewerBoard(
           : row.stack_job_id != null
             ? `job ${row.job_id} · member of stack ${row.stack_job_id}`
             : `job ${row.job_id}`;
-      return `<li class="run-row">
-        <span class="role">${roleGlyph(row.role)}<strong>${escapeHtml(row.role)}</strong></span>
-        <a class="run-title" href="/jobs/${row.job_id}">${forgeBadgeTitleHtml({ provider: row.forge_provider, provider_instance: row.provider_instance }, row.repo_full_name, row.pr_number)} · ${escapeHtml(row.pr_title || "(no title)")}</a>
-        <span class="muted run-owner">${escapeHtml(owner)}</span>
-        <span class="muted">${escapeHtml(row.job_type === "stack_review" ? "stack" : row.review_mode === "verify" ? "verify-first" : "full")}</span>
-        <code class="sha">${escapeHtml(shortSha(row.head_sha, 10))}</code>
-        <span class="muted run-elapsed">${escapeHtml(formatDuration(elapsedMs(row.started_at, row.finished_at)))}</span>
-        ${renderState(row.state, state.text, state.hint, state.mark)}
-      </li>`;
+      return `<tr class="run-row">
+        <td class="run-role"><span class="role">${roleGlyph(row.role)}<strong>${escapeHtml(row.role)}</strong></span></td>
+        <td class="run-title"><a href="/jobs/${row.job_id}">${forgeBadgeTitleHtml({ provider: row.forge_provider, provider_instance: row.provider_instance }, row.repo_full_name, row.pr_number)} · ${escapeHtml(row.pr_title || "(no title)")}</a></td>
+        <td class="run-owner muted">${escapeHtml(owner)}</td>
+        <td class="muted">${escapeHtml(row.job_type === "stack_review" ? "stack" : row.review_mode === "verify" ? "verify-first" : "full")}</td>
+        <td><code class="sha">${escapeHtml(shortSha(row.head_sha, 10))}</code></td>
+        <td class="run-elapsed muted">${escapeHtml(formatDuration(elapsedMs(row.started_at, row.finished_at)))}</td>
+        <td class="run-state">${renderState(row.state, state.text, state.hint, state.mark)}</td>
+      </tr>`;
     })
     .join("");
   const stateParam = stateFilter ? `&amp;state=${encodeURIComponent(stateFilter)}` : "";
@@ -951,7 +951,11 @@ export function renderReviewerBoard(
     </form>
     ${
       items
-        ? `<ol class="run-board">${items}</ol>${pagerNav}`
+        ? `<div class="if-table-wrap run-board"><table class="if-table">
+          <colgroup><col class="col-role"/><col class="col-title"/><col class="col-owner"/><col class="col-mode"/><col class="col-sha"/><col class="col-elapsed"/><col class="col-state"/></colgroup>
+          <thead><tr><th>Specialist</th><th>Change</th><th>Owner</th><th>Mode</th><th>Head</th><th>Elapsed</th><th>State</th></tr></thead>
+          <tbody>${items}</tbody>
+        </table></div>${pagerNav}`
         : pagination && pagination.total > 0
           ? `<div class="empty" role="status"><p><strong>Page ${pagination.page} is beyond the last page (${totalPages}).</strong></p><p class="muted">${pagination.total} runs${stateFilter ? ` with status ${escapeHtml(stateFilter)}` : ""} — <a href="/reviewers?page=${totalPages}${stateParam}">back to page ${totalPages}</a>.</p></div>`
           : `<div class="empty" role="status"><p><strong>No reviewer runs${stateFilter ? ` with status ${escapeHtml(stateFilter)}` : ""}.</strong></p><p class="muted">Runs appear here as soon as a review job picks specialists.</p></div>`
