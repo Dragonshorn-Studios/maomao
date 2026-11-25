@@ -36,6 +36,19 @@ interface ForgejoPull {
   state?: string;
 }
 
+export interface ForgejoTimelineEvent {
+  type?: string;
+  created_at?: string;
+}
+
+export function forgejoTimelineMergeScheduled(timeline: ForgejoTimelineEvent[]): boolean | undefined {
+  const relevant = new Set(["pull_scheduled_merge", "pull_cancel_scheduled_merge", "pull_push"]);
+  if (timeline.some((event) => relevant.has(event.type ?? "") && !Date.parse(event.created_at ?? ""))) return undefined;
+  const time = (type: string) => Math.max(0, ...timeline.filter((event) => event.type === type).map((event) => Date.parse(event.created_at ?? "") || 0));
+  const scheduledAt = time("pull_scheduled_merge");
+  return scheduledAt > 0 && scheduledAt > time("pull_cancel_scheduled_merge") && scheduledAt > time("pull_push");
+}
+
 interface ForgejoComment {
   id?: number;
   body?: string;
@@ -170,10 +183,10 @@ export class ForgejoProvider implements ForgePort {
       // ordering is sufficient for exact-head evidence because Forgejo records
       // `pull_push` events: a schedule newer than the latest push is bound to
       // the current head, while a push newer than the schedule cannot merge.
-      const timeline: Array<{ type?: string; created_at?: string }> = [];
+      const timeline: ForgejoTimelineEvent[] = [];
       let truncated = false;
       for (let page = 1; page <= 5; page += 1) {
-        const batch = await this.request<Array<{ type?: string; created_at?: string }>>(
+        const batch = await this.request<ForgejoTimelineEvent[]>(
           "GET",
           `${this.repoPath(target)}/issues/${target.changeNumber}/timeline?limit=100&page=${page}`,
           { maxBytes: 8 * 1024 * 1024 },
@@ -183,11 +196,7 @@ export class ForgejoProvider implements ForgePort {
         if (page === 5) truncated = true;
       }
       if (truncated) throw new Error("timeline exceeds 500 events; scheduled-merge state cannot be established conservatively");
-      const time = (type: string) => Math.max(0, ...timeline.filter((event) => event.type === type).map((event) => Date.parse(event.created_at ?? "") || 0));
-      const scheduledAt = time("pull_scheduled_merge");
-      const cancelledAt = time("pull_cancel_scheduled_merge");
-      const pushedAt = time("pull_push");
-      nativeMergeScheduled = scheduledAt > 0 && scheduledAt > cancelledAt && scheduledAt > pushedAt;
+      nativeMergeScheduled = forgejoTimelineMergeScheduled(timeline);
     } catch (error) {
       reasons.push(`Forgejo scheduled-merge timeline could not be read: ${error instanceof Error ? error.message : String(error)}`);
     }
