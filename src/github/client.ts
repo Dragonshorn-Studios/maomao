@@ -555,43 +555,55 @@ export class GithubClient implements GithubPort, ManualTriggerPort {
     let contexts: string[] = [];
     let requiredApprovals: number | undefined;
     let protectedBranch: boolean | undefined;
+    let mergeMethods: string[] = [];
     const reasons: string[] = [];
+    mergeMethods = [repository.mergeCommitAllowed ? "merge" : "", repository.squashMergeAllowed ? "squash" : "", repository.rebaseMergeAllowed ? "rebase" : ""].filter(Boolean) as string[];
     try {
-      const protection = await octokit.rest.repos.getBranchProtection({ owner, repo, branch: baseRef });
-      protectedBranch = true;
-      const statusChecks = protection.data.required_status_checks as
-        | { contexts?: string[]; checks?: Array<{ context?: string }> }
-        | undefined;
-      contexts = [
-        ...(statusChecks?.contexts ?? []),
-        ...(statusChecks?.checks ?? []).map((check) => check.context ?? ""),
-      ].filter(Boolean).sort();
-      const reviews = protection.data.required_pull_request_reviews as { required_approving_review_count?: number } | undefined;
-      requiredApprovals = reviews?.required_approving_review_count;
+      const rulesResponse = await octokit.rest.repos.getBranchRules({ owner, repo, branch: baseRef });
+      const rules = rulesResponse.data as unknown as Array<{
+        type?: string;
+        parameters?: {
+          required_status_checks?: Array<{ context?: string }>;
+          required_approving_review_count?: number;
+          allowed_merge_methods?: string[];
+        };
+      }>;
+      protectedBranch = rules.length > 0;
+      contexts = [...new Set(rules.flatMap((rule) =>
+        rule.type === "required_status_checks"
+          ? (rule.parameters?.required_status_checks ?? []).map((check) => check.context ?? "")
+          : [],
+      ).filter(Boolean))].sort();
+      let ruleAllowedMethods: string[] | undefined;
+      for (const rule of rules) {
+        if (rule.type !== "pull_request") continue;
+        if (rule.parameters?.required_approving_review_count != null) {
+          requiredApprovals = Math.max(requiredApprovals ?? 0, rule.parameters.required_approving_review_count);
+        }
+        if (rule.parameters?.allowed_merge_methods) {
+          ruleAllowedMethods = ruleAllowedMethods
+            ? ruleAllowedMethods.filter((method) => rule.parameters?.allowed_merge_methods?.includes(method))
+            : rule.parameters.allowed_merge_methods;
+        }
+      }
+      mergeMethods = ruleAllowedMethods ? mergeMethods.filter((method) => ruleAllowedMethods.includes(method)) : mergeMethods;
     } catch (error) {
-      const status = error && typeof error === "object" && "status" in error ? Number(error.status) : 0;
-      if (status === 404) protectedBranch = false;
-      reasons.push(
-        status === 404
-          ? `No exact branch protection rule was visible for ${baseRef}`
-          : `GitHub branch protection could not be read for ${baseRef}; the GitHub App needs Administration: read for exact protection details: ${error instanceof Error ? error.message : String(error)}`,
-      );
+      reasons.push(`GitHub branch rules could not be read for ${baseRef}: ${error instanceof Error ? error.message : String(error)}`);
     }
 
     if (!repository.mergeQueue) reasons.push(`GitHub merge queue is not configured for ${baseRef}`);
-    reasons.push("GitHub ruleset-based status and approval requirements are not expanded by this probe; native protection remains authoritative");
     return {
       mergeMode: "manual",
       nativeAutoMerge: repository.autoMergeAllowed ? "available" : "unavailable",
       githubNativeQueue: repository.mergeQueue ? "available" : "unavailable",
       requiredStatusContexts: contexts,
-      mergeMethods: [repository.mergeCommitAllowed ? "merge" : "", repository.squashMergeAllowed ? "squash" : "", repository.rebaseMergeAllowed ? "rebase" : ""].filter(Boolean) as string[],
+      mergeMethods,
       ...(repository.pullRequest?.state ? { pullState: repository.pullRequest.state } : {}),
       ...(repository.pullRequest?.mergeable ? { mergeable: repository.pullRequest.mergeStateStatus ?? repository.pullRequest.mergeable } : {}),
       ...(requiredApprovals ? { requiredApprovals } : {}),
       ...(protectedBranch != null ? { protectedBranch } : {}),
       reasons,
-      source: "github-graphql+rest",
+      source: "github-graphql+rules",
     };
   }
 
