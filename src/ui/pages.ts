@@ -683,6 +683,7 @@ export function renderQueueCard(
   const elapsed = formatDuration(elapsedMs(job.started_at, job.finished_at) ?? elapsedMs(job.created_at));
   const isLive = LIVE_JOB_STATES.includes(job.state);
   const isStack = job.job_type === "stack_review";
+  const isMergeGroup = job.job_type === "merge_group_check";
   const flavor = flavorForJob(job.state, job.pr_number, uiFlavor);
   const memberCount = stackMembers?.length;
   const stackChip = isStack
@@ -697,19 +698,19 @@ export function renderQueueCard(
   return `<li>
     <article class="specimen${isLive ? " is-live" : ""}${isStack ? " specimen-stack" : ""}">
       <div class="specimen-head">
-        <span class="specimen-id">${isStack ? "Stack" : "Specimen"} · job ${job.id}</span>
+        <span class="specimen-id">${isStack ? "Stack" : isMergeGroup ? "Merge group" : "Specimen"} · job ${job.id}</span>
         ${renderState(job.state, state.text, state.hint, state.mark)}
       </div>
-      <p class="specimen-title">${stackChip}<a href="/jobs/${job.id}">${forgeBadgeTitleHtml(job, job.repo_full_name, job.pr_number)} · ${escapeHtml(job.pr_title || "(no title)")}</a>${prExternalLinkHtml(job)}</p>
+      <p class="specimen-title">${stackChip}<a href="/jobs/${job.id}">${isMergeGroup ? escapeHtml(job.repo_full_name) : forgeBadgeTitleHtml(job, job.repo_full_name, job.pr_number)} · ${escapeHtml(job.pr_title || "(no title)")}</a>${prExternalLinkHtml(job)}</p>
       ${flavor ? `<p class="muted">${escapeHtml(flavor)}</p>` : ""}
       ${isStack && stackMembers?.length ? renderStackStrip(stackMembers) : ""}
       <div class="meta-row">
         <span class="pair">SHA <strong><code class="sha">${escapeHtml(shortSha(job.head_sha, 10))}</code></strong></span>
         <span class="pair">Elapsed <strong class="metric">${escapeHtml(elapsed)}</strong></span>
-        <span class="pair">Model <strong><code class="metric">${escapeHtml(metrics.model || "—")}</code></strong></span>
+        ${isMergeGroup ? "" : `<span class="pair">Model <strong><code class="metric">${escapeHtml(metrics.model || "—")}</code></strong></span>
         ${metrics.provider ? `<span class="pair">Provider <strong><code class="metric">${escapeHtml(metrics.provider)}</code></strong></span>` : ""}
         <span class="pair">Tokens <strong class="metric">${escapeHtml(formatTokens(metrics.tokens))}${metrics.usageComplete ? "" : "+"}</strong></span>
-        <span class="pair">Cost <strong class="metric">${escapeHtml(formatCost(metrics.cost))}</strong></span>
+        <span class="pair">Cost <strong class="metric">${escapeHtml(formatCost(metrics.cost))}</strong></span>`}
         ${cardAction}
       </div>
       ${renderDiagnosis(metrics, job.aggregator_state)}

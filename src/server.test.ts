@@ -7214,6 +7214,9 @@ describe("merge-group job UI", () => {
     expect(html).not.toContain("View on GitHub");
 
     const home = await app.request("/");
-    expect((await home.text())).toContain('value="merge_group_check"');
+    const homeHtml = await home.text();
+    expect(homeHtml).toContain('value="merge_group_check"');
+    expect(homeHtml).toContain('Merge group · job');
+    expect(homeHtml).not.toContain('acme/widgets #8 · GitHub merge group');
   });
 });
