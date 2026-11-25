@@ -49,7 +49,7 @@ function fixtureServer(state: { statuses: unknown[]; comments: Array<{ id: numbe
         json(200, { version: "17.0.1" });
         return;
       }
-      if (url === "/api/v1/repos/acme/widgets/issues/7/timeline?limit=100" && req.method === "GET") {
+      if (url === "/api/v1/repos/acme/widgets/issues/7/timeline?limit=100&page=1" && req.method === "GET") {
         json(200, [{ type: "pull_push", created_at: "2026-01-01T00:00:00Z" }, { type: "pull_scheduled_merge", created_at: "2026-01-01T00:01:00Z" }]);
         return;
       }
@@ -148,7 +148,7 @@ describe("ForgejoProvider", () => {
       source: "forgejo-api",
     });
     expect(state.requests).toContain("GET /api/v1/repos/acme/widgets/branches/main");
-    expect(state.requests).toContain("GET /api/v1/repos/acme/widgets/issues/7/timeline?limit=100");
+    expect(state.requests).toContain("GET /api/v1/repos/acme/widgets/issues/7/timeline?limit=100&page=1");
   });
 
   it("posts summaries with inline findings retained in the body", async () => {

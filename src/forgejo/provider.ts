@@ -170,11 +170,19 @@ export class ForgejoProvider implements ForgePort {
       // ordering is sufficient for exact-head evidence because Forgejo records
       // `pull_push` events: a schedule newer than the latest push is bound to
       // the current head, while a push newer than the schedule cannot merge.
-      const timeline = await this.request<Array<{ type?: string; created_at?: string }>>(
-        "GET",
-        `${this.repoPath(target)}/issues/${target.changeNumber}/timeline?limit=100`,
-        { maxBytes: 8 * 1024 * 1024 },
-      );
+      const timeline: Array<{ type?: string; created_at?: string }> = [];
+      let truncated = false;
+      for (let page = 1; page <= 5; page += 1) {
+        const batch = await this.request<Array<{ type?: string; created_at?: string }>>(
+          "GET",
+          `${this.repoPath(target)}/issues/${target.changeNumber}/timeline?limit=100&page=${page}`,
+          { maxBytes: 8 * 1024 * 1024 },
+        );
+        timeline.push(...batch);
+        if (batch.length < 100) break;
+        if (page === 5) truncated = true;
+      }
+      if (truncated) throw new Error("timeline exceeds 500 events; scheduled-merge state cannot be established conservatively");
       const time = (type: string) => Math.max(0, ...timeline.filter((event) => event.type === type).map((event) => Date.parse(event.created_at ?? "") || 0));
       const scheduledAt = time("pull_scheduled_merge");
       const cancelledAt = time("pull_cancel_scheduled_merge");
