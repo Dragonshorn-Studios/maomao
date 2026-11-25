@@ -126,9 +126,12 @@ export function abortJob(jobId: number): void {
   aborts.get(jobId)?.abort();
 }
 
+const MERGE_READINESS_CHECK_NAME = "maomao/merge-readiness";
+
 type TrustedPipelineHooks = {
   run: (job: JobRow, workspace: { repoDir: string; dir: string; diffPath: string }, signal: AbortSignal) => Promise<void>;
   finish: (job: JobRow, conclusion: "cancelled" | "action_required", reason: string) => Promise<void>;
+  complete: (job: JobRow, reviewConclusion: string | undefined) => Promise<void>;
 };
 
 function trustedCheckPublicationInput(result: TrustedCheckResult): Parameters<ReviewCheckPublisher["publish"]>[1] {
@@ -159,6 +162,11 @@ export function createPipeline(deps: PipelineDeps) {
     publicUrl: deps.config.publicUrl,
   };
   const checks = deps.checkPublisher ?? new ReviewCheckPublisher(publisherDeps);
+  const readinessPublisher = new ReviewCheckPublisher(publisherDeps, {
+    name: MERGE_READINESS_CHECK_NAME,
+    label: "Maomao merge readiness",
+    externalPrefix: "maomao-merge-readiness",
+  });
   const trustedChecks = deps.trustedCheckRunner ?? new TrustedCheckRunner(
     deps.config,
     () => deps.trustedCheckSettings?.effective() ?? { ...deps.config.trustedChecks, enabledChecks: [...TRUSTED_CHECK_NAMES] },
@@ -204,6 +212,58 @@ export function createPipeline(deps: PipelineDeps) {
     return TRUSTED_CHECK_NAMES.filter((name) => active.has(name));
   }
 
+  async function publishReadinessTerminal(job: JobRow, conclusion: "cancelled" | "action_required", reason: string): Promise<void> {
+    await readinessPublisher.publish(job, {
+      status: "completed",
+      conclusion,
+      title: `Maomao merge readiness ${conclusion === "cancelled" ? "cancelled" : "requires action"}`,
+      summary: `Merge readiness for PR #${job.pr_number} at ${job.head_sha.slice(0, 12)} is non-success: ${reason}`,
+      validateHead: conclusion !== "cancelled",
+    });
+  }
+
+  async function publishMergeReadiness(job: JobRow, reviewConclusion: string | undefined): Promise<void> {
+    let policy;
+    try {
+      policy = typeof trustedChecks.policyForRepo === "function"
+        ? await trustedChecks.policyForRepo(job.repo_full_name)
+        : { requireReview: false, requiredChecks: activeTrustedCheckNames(), revision: "unconfigured", source: "default" as const };
+    } catch (error) {
+      await publishReadinessTerminal(job, "action_required", `trusted policy could not be read: ${error instanceof Error ? error.message : String(error)}`);
+      return;
+    }
+    const failures: string[] = [];
+    const errors: string[] = [];
+    if (reviewConclusion === "failure" || reviewConclusion === "timed_out") failures.push("review");
+    if (policy.requireReview && reviewConclusion !== "success") failures.push("review did not pass required policy");
+    const rows = deps.store.listTrustedCheckResults(job.id);
+    for (const name of policy.requiredChecks) {
+      const native = trustedCheckNativeName(name);
+      const row = rows.find((candidate) => candidate.name === native);
+      if (!row) {
+        errors.push(`${native} missing`);
+      } else if (row.status === "failure") {
+        failures.push(native);
+      } else if (row.status !== "success") {
+        errors.push(`${native} ${row.status}`);
+      }
+    }
+    const conclusion = failures.length ? "failure" as const : errors.length ? "action_required" as const : "success" as const;
+    const detail = failures.length || errors.length
+      ? [...failures.map((item) => `blocking: ${item}`), ...errors.map((item) => `unavailable: ${item}`)].join("; ")
+      : "all required review and deterministic check inputs passed";
+    await readinessPublisher.publish(job, {
+      status: "completed",
+      conclusion,
+      title: `Maomao merge readiness ${conclusion === "success" ? "passed" : conclusion === "failure" ? "failed" : "requires action"}`,
+      summary: [
+        `${detail} for PR #${job.pr_number} at exact head ${job.head_sha.slice(0, 12)}.`,
+        `Policy source: ${policy.source}; trusted revision: ${policy.revision}; review required: ${policy.requireReview ? "yes" : "no"}.`,
+      ].join("\n\n"),
+      validateHead: true,
+    });
+  }
+
   async function publishTrustedTerminal(job: JobRow, conclusion: "cancelled" | "action_required", reason: string): Promise<void> {
     if (job.job_type !== "pr_review") return;
     for (const name of trustedNamesWithPublications(job)) {
@@ -218,10 +278,17 @@ export function createPipeline(deps: PipelineDeps) {
         validateHead: conclusion !== "cancelled",
       });
     }
+    await publishReadinessTerminal(job, conclusion, reason);
     forgetTrustedPublicationMemory(job);
   }
 
   async function runTrustedChecks(job: JobRow, workspace: { repoDir: string; dir: string; diffPath: string }, signal: AbortSignal): Promise<void> {
+    await readinessPublisher.publish(job, {
+      status: "in_progress",
+      stage: "evaluating",
+      title: "Maomao merge readiness evaluating",
+      summary: `Maomao is evaluating review and deterministic check results for PR #${job.pr_number} at ${job.head_sha.slice(0, 12)}.`,
+    });
     const active = new Set(activeTrustedCheckNames());
     for (const name of trustedNamesWithPublications(job)) {
       if (active.has(name)) continue;
@@ -249,6 +316,7 @@ export function createPipeline(deps: PipelineDeps) {
         repoDir: workspace.repoDir,
         workspaceDir: workspace.dir,
         diffPath: workspace.diffPath,
+        repoFullName: job.repo_full_name,
         signal,
       });
       deps.store.recordTrustedCheckResult({
@@ -282,7 +350,13 @@ export function createPipeline(deps: PipelineDeps) {
     async publishQueuedCheck(jobId: number): Promise<void> {
       await checks.publishQueuedJobId(jobId);
       const job = deps.store.getJob(jobId);
-      if (!job || job.state !== "queued" || !trustedChecks.enabled()) return;
+      if (!job || job.state !== "queued") return;
+      await readinessPublisher.publish(job, {
+        status: "queued",
+        title: "Maomao merge readiness queued",
+        summary: `Maomao queued merge-readiness evaluation for PR #${job.pr_number} at ${job.head_sha.slice(0, 12)}.`,
+      });
+      if (!trustedChecks.enabled()) return;
       await Promise.all(
         activeTrustedCheckNames().map((name) => {
           trustedPublicationMemory.add(trustedMemoryKey(job, name));
@@ -334,9 +408,9 @@ export function createPipeline(deps: PipelineDeps) {
         } else if (job?.job_type === "repo_brief") {
           await runBriefJob(deps, forge, jobId, controller.signal);
         } else if (job?.job_type === "stack_review") {
-          await runStackJob(deps, forge, jobId, controller.signal, checks, { run: runTrustedChecks, finish: publishTrustedTerminal });
+          await runStackJob(deps, forge, jobId, controller.signal, checks, { run: runTrustedChecks, finish: publishTrustedTerminal, complete: publishMergeReadiness });
         } else {
-          await runJob(deps, forge, jobId, controller.signal, checks, { run: runTrustedChecks, finish: publishTrustedTerminal });
+          await runJob(deps, forge, jobId, controller.signal, checks, { run: runTrustedChecks, finish: publishTrustedTerminal, complete: publishMergeReadiness });
         }
       } finally {
         if (aborts.get(jobId) === controller) aborts.delete(jobId);
@@ -807,10 +881,14 @@ async function runJob(
     // before writing the terminal job state.
     throwIfStale(store, jobId, signal);
     const latestBeforeCompletion = store.getJob(jobId) ?? job;
+    const terminalCheckInput = reviewCheckInputForState({ ...latestBeforeCompletion, state: "completed" }, publication.clean, publication.event);
     await checks.publish(
       { ...latestBeforeCompletion, state: "completed" },
-      reviewCheckInputForState({ ...latestBeforeCompletion, state: "completed" }, publication.clean, publication.event),
+      terminalCheckInput,
     );
+    if (terminalCheckInput.status === "completed") {
+      await trustedHooks.complete(latestBeforeCompletion, terminalCheckInput.conclusion);
+    }
     throwIfStale(store, jobId, signal);
     store.setJobState(jobId, "completed", {
       github_review_id: posted?.id ?? store.getJob(jobId)?.github_review_id ?? null,

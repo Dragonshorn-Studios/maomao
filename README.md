@@ -324,6 +324,35 @@ Production execution requires `bwrap` (bubblewrap). The sandbox unshares the net
 
 When trusted checks are configured, PR jobs publish queued/in-progress/native terminal states for both checks. Scanner results and pinned revisions are persisted in `trusted_check_results`, and native-check publication remains bound to the immutable PR head SHA. A cancelled, stale, timed-out, crashed, missing, or otherwise incomplete scan can never become a success.
 
+### Repository policy and merge readiness
+
+The pinned trusted checkout may also contain `maomao-policy.json`; because it is inside the pinned revision, every policy change is reviewed and audited as part of the trusted-check promotion workflow:
+
+```json
+{
+  "version": 1,
+  "defaults": {
+    "requireReview": false,
+    "requiredChecks": ["secrets", "security"],
+    "severityThreshold": "high",
+    "suppressions": []
+  },
+  "repositories": {
+    "org/repo": {
+      "requireReview": true,
+      "severityThreshold": "medium",
+      "suppressions": [
+        { "check": "security", "fingerprint": "<64 lowercase hex sha256>", "reason": "reviewed false positive" }
+      ]
+    }
+  }
+}
+```
+
+`defaults` applies to every repository and an exact `owner/repo` entry may refine it. `severityThreshold` filters scanner findings before the deterministic check conclusion is computed. A suppression is auditable, check-scoped, and matched by Maomao's SHA-256 finding fingerprint over the check name, category, file, line, and summary; every suppression requires a human reason. Malformed policy fails closed rather than being guessed.
+
+Maomao publishes `maomao/merge-readiness` for each PR head SHA. It starts queued/in-progress with the review job and completes only after the review and required deterministic inputs for that exact SHA are present. Review `failure`/`timed_out`, required scanner failures, missing results, scanner errors, skipped scans, malformed policy, and stale-head validation failures are non-success. `success` means the policy-required inputs all passed for that immutable head; a later push receives a fresh evaluation and can never inherit the old SHA's passing decision. This signal is publication only in this phase — Maomao does not merge or bypass branch protection.
+
 ## Configure OpenCode models
 
 Maomao does not embed a model vendor. It runs:
