@@ -638,7 +638,7 @@ function renderJobActions(job: JobRow, csrfToken?: string): string {
  */
 function prExternalLinkHtml(job: JobRow): string {
   // A merge-group job can span multiple pull requests; linking only the
-  // participant encoded in the queue ref would misrepresent the check subject.
+  // participant would misrepresent the check subject.
   if (job.job_type === "merge_group_check" || !job.pr_html_url || !job.pr_number) return "";
   const label = `View on ${providerLabel(job.provider)}`;
   return `<a class="pr-external" href="${escapeHtml(job.pr_html_url)}" target="_blank" rel="noopener noreferrer" title="${escapeHtml(label)}" aria-label="${escapeHtml(label)}">${externalLinkGlyph()}</a>`;
