@@ -36,6 +36,19 @@ interface ForgejoPull {
   state?: string;
 }
 
+export interface ForgejoTimelineEvent {
+  type?: string;
+  created_at?: string;
+}
+
+export function forgejoTimelineMergeScheduled(timeline: ForgejoTimelineEvent[]): boolean | undefined {
+  const relevant = new Set(["pull_scheduled_merge", "pull_cancel_scheduled_merge", "pull_push"]);
+  if (timeline.some((event) => relevant.has(event.type ?? "") && !Date.parse(event.created_at ?? ""))) return undefined;
+  const time = (type: string) => Math.max(0, ...timeline.filter((event) => event.type === type).map((event) => Date.parse(event.created_at ?? "") || 0));
+  const scheduledAt = time("pull_scheduled_merge");
+  return scheduledAt > 0 && scheduledAt > time("pull_cancel_scheduled_merge") && scheduledAt > time("pull_push");
+}
+
 interface ForgejoComment {
   id?: number;
   body?: string;
@@ -127,6 +140,7 @@ export class ForgejoProvider implements ForgePort {
     let protectedBranch: boolean | undefined;
     let mergeMethods: string[] = [];
     let forgeVersion: string | undefined;
+    let nativeMergeScheduled: boolean | undefined;
     const reasons: string[] = [];
     try {
       const repo = await this.request<{
@@ -164,9 +178,35 @@ export class ForgejoProvider implements ForgePort {
       const status = error instanceof SafeHttpError ? error.status : 0;
       reasons.push(status === 404 ? `No Forgejo branch protection rule is configured for ${change.baseRef || "main"}` : `Forgejo branch protection could not be read: ${error instanceof Error ? error.message : String(error)}`);
     }
-    reasons.push("Forgejo merge-when-checks-succeed support depends on the deployed server version and user action; Maomao does not infer or trigger it");
+    try {
+      // Forgejo does not expose the scheduled-merge row directly. Timeline
+      // ordering is sufficient for exact-head evidence because Forgejo records
+      // `pull_push` events: a schedule newer than the latest push is bound to
+      // the current head, while a push newer than the schedule cannot merge.
+      const timeline: ForgejoTimelineEvent[] = [];
+      let truncated = false;
+      for (let page = 1; page <= 5; page += 1) {
+        const batch = await this.request<ForgejoTimelineEvent[]>(
+          "GET",
+          `${this.repoPath(target)}/issues/${target.changeNumber}/timeline?limit=100&page=${page}`,
+          { maxBytes: 8 * 1024 * 1024 },
+        );
+        timeline.push(...batch);
+        if (batch.length < 100) break;
+        if (page === 5) truncated = true;
+      }
+      if (truncated) throw new Error("timeline exceeds 500 events; scheduled-merge state cannot be established conservatively");
+      nativeMergeScheduled = forgejoTimelineMergeScheduled(timeline);
+    } catch (error) {
+      reasons.push(`Forgejo scheduled-merge timeline could not be read: ${error instanceof Error ? error.message : String(error)}`);
+    }
+    if (contexts.includes("maomao/merge-readiness")) {
+      reasons.push("Forgejo branch protection requires maomao/merge-readiness, so native merge-when-checks-succeed can consume Maomao's exact-head status");
+    } else if (protectedBranch) {
+      reasons.push("Forgejo branch protection does not require maomao/merge-readiness; add that exact context before relying on merge-when-checks-succeed");
+    }
     return {
-      nativeAutoMerge: "unknown",
+      nativeAutoMerge: forgeVersion ? "available" : "unknown",
       githubNativeQueue: "unavailable",
       requiredStatusContexts: contexts,
       mergeMethods,
@@ -175,6 +215,7 @@ export class ForgejoProvider implements ForgePort {
       ...(pullState ? { pullState } : {}),
       ...(mergeable != null ? { mergeable: mergeable ? "MERGEABLE" : "CONFLICTING_OR_BLOCKED" } : {}),
       ...(forgeVersion ? { forgeVersion } : {}),
+      ...(nativeMergeScheduled != null ? { nativeMergeScheduled } : {}),
       ...(requiredApprovals ? { requiredApprovals } : {}),
       ...(protectedBranch != null ? { protectedBranch } : {}),
       reasons,

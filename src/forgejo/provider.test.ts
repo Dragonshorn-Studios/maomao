@@ -14,7 +14,7 @@ import { createPipeline } from "../jobs/pipeline.js";
 import { JobStore } from "../jobs/store.js";
 import type { CheckoutPort } from "../checkout.js";
 import type { OpenCodePort } from "../opencode/parse.js";
-import { ForgejoProvider, forgejoStatusState } from "./provider.js";
+import { ForgejoProvider, forgejoStatusState, forgejoTimelineMergeScheduled } from "./provider.js";
 import type { TrustedCheckRunner } from "../checks/trusted.js";
 
 const TARGET = {
@@ -47,6 +47,10 @@ function fixtureServer(state: { statuses: unknown[]; comments: Array<{ id: numbe
       }
       if (url === "/api/v1/version" && req.method === "GET") {
         json(200, { version: "17.0.1" });
+        return;
+      }
+      if (url === "/api/v1/repos/acme/widgets/issues/7/timeline?limit=100&page=1" && req.method === "GET") {
+        json(200, [{ type: "pull_push", created_at: "2026-01-01T00:00:00Z" }, { type: "pull_scheduled_merge", created_at: "2026-01-01T00:01:00Z" }]);
         return;
       }
       if (url === "/api/v1/repos/acme/widgets/pulls/7") {
@@ -131,7 +135,8 @@ describe("ForgejoProvider", () => {
     server = fixtureServer(state);
     const { provider } = await providerOn(server);
     await expect(provider.probeMergeCapabilities(TARGET)).resolves.toMatchObject({
-      nativeAutoMerge: "unknown",
+      nativeAutoMerge: "available",
+      nativeMergeScheduled: true,
       githubNativeQueue: "unavailable",
       requiredStatusContexts: ["maomao/merge-readiness", "test"],
       requiredApprovals: 2,
@@ -143,6 +148,16 @@ describe("ForgejoProvider", () => {
       source: "forgejo-api",
     });
     expect(state.requests).toContain("GET /api/v1/repos/acme/widgets/branches/main");
+    expect(state.requests).toContain("GET /api/v1/repos/acme/widgets/issues/7/timeline?limit=100&page=1");
+  });
+
+  it("treats later pushes, cancellations, and missing timestamps as unscheduled", () => {
+    const scheduled = { type: "pull_scheduled_merge", created_at: "2026-01-01T00:01:00Z" };
+    expect(forgejoTimelineMergeScheduled([scheduled])).toBe(true);
+    expect(forgejoTimelineMergeScheduled([scheduled, { type: "pull_push", created_at: "2026-01-01T00:02:00Z" }])).toBe(false);
+    expect(forgejoTimelineMergeScheduled([scheduled, { type: "pull_cancel_scheduled_merge", created_at: "2026-01-01T00:02:00Z" }])).toBe(false);
+    expect(forgejoTimelineMergeScheduled([{ type: "pull_scheduled_merge" }])).toBeUndefined();
+    expect(forgejoTimelineMergeScheduled([{ type: "pull_scheduled_merge", created_at: "2026-01-01T00:01:00Z" }, { type: "pull_push" }])).toBeUndefined();
   });
 
   it("posts summaries with inline findings retained in the body", async () => {

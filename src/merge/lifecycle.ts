@@ -22,7 +22,7 @@ export interface MergeLifecycle {
 }
 
 /** Derives the operator-visible lifecycle from durable exact-SHA state. */
-export function mergeLifecycleFor(job: JobRow, readiness: CheckPublicationRow | undefined, merged: boolean): MergeLifecycle {
+export function mergeLifecycleFor(job: JobRow, readiness: CheckPublicationRow | undefined, merged: boolean, nativeMergeScheduled = false): MergeLifecycle {
   if (merged) return { state: "merged", detail: "The forge confirmed this pull request merged.", readiness, nativeUrl: readiness?.native_url ?? undefined };
   if (job.state === "stale" || job.state === "cancelled") {
     return { state: "stale", detail: `This exact head is ${job.state}; a newer or cancelled evaluation cannot authorize a merge.`, readiness };
@@ -35,6 +35,9 @@ export function mergeLifecycleFor(job: JobRow, readiness: CheckPublicationRow | 
     };
   }
   if (readiness.status !== "completed") {
+    if (nativeMergeScheduled) {
+      return { state: "scheduled_auto_merge", detail: "The forge-native merge-when-checks-succeed schedule was created after the latest observed head push; the forge still waits for required checks and branch protection.", readiness };
+    }
     const evaluating = readiness.status === "in_progress" || job.state === "publishing" || job.state === "completed";
     return { state: evaluating ? "waiting_checks" : "reviewing", detail: `Merge readiness is ${readiness.status} for this exact head SHA.`, readiness };
   }
@@ -45,6 +48,9 @@ export function mergeLifecycleFor(job: JobRow, readiness: CheckPublicationRow | 
     return { state: "failed", detail: "Merge readiness was computed but native publication never completed; treat this exact head as unevaluated until publication is retried.", readiness };
   }
   if (readiness.conclusion === "success") {
+    if (nativeMergeScheduled) {
+      return { state: "scheduled_auto_merge", detail: "The forge-native merge-when-checks-succeed schedule was created after the latest observed head push; the forge still performs final branch-protection validation.", readiness, nativeUrl: readiness.native_url ?? undefined };
+    }
     return { state: "ready", detail: "Policy-required review and deterministic checks passed for this exact head SHA.", readiness, nativeUrl: readiness.native_url ?? undefined };
   }
   if (readiness.conclusion === "failure") {
