@@ -14,6 +14,7 @@ import type {
   ForgeDiscussion,
   ForgeInlineComment,
   ForgePermission,
+  ForgeMergeCapabilities,
   ForgeCheckPublishInput,
   ForgeCheckPublishResult,
   ForgePublishInput,
@@ -47,6 +48,9 @@ export interface ForgePort {
   listDiscussions(target: ForgeRepoTarget): Promise<ForgeDiscussion[]>;
   resolveDiscussion(target: ForgeRepoTarget, discussionId: string): Promise<void>;
   unresolveDiscussion(target: ForgeRepoTarget, discussionId: string): Promise<void>;
+
+  /** Read-only probe of native merge machinery and protection for the change's base branch. */
+  probeMergeCapabilities?(target: ForgeRepoTarget): Promise<ForgeMergeCapabilities>;
 
   /** Effective permission of an actor on the repository, in the neutral vocabulary. */
   getActorPermission(target: ForgeRepoTarget, username: string): Promise<ForgePermission>;

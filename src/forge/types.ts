@@ -92,6 +92,28 @@ export function forgeTargetOf(row: {
   };
 }
 
+export type ForgeMergeMode = "disabled" | "manual" | "native_auto_merge" | "github_native_queue";
+export type ForgeCapabilityState = "available" | "unavailable" | "unknown";
+
+/** Read-only detection of forge-native merge machinery. Never authorization to merge. */
+export interface ForgeMergeCapabilities {
+  mergeMode: ForgeMergeMode;
+  nativeAutoMerge: ForgeCapabilityState;
+  githubNativeQueue: ForgeCapabilityState;
+  requiredStatusContexts: string[];
+  requiredApprovals?: number;
+  /** true/false only when the forge answer is authoritative enough for this adapter; omit when unknown. */
+  protectedBranch?: boolean;
+  mergeMethods: string[];
+  baseRef?: string;
+  draft?: boolean;
+  pullState?: string;
+  mergeable?: string;
+  forgeVersion?: string;
+  reasons: string[];
+  source: string;
+}
+
 /** A repository plus the change request under review on one forge instance. */
 export interface ForgeRepoTarget extends ForgeScope {
   repoOwner: string;

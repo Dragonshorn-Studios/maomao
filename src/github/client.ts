@@ -9,6 +9,7 @@ import type {
   ForgeCheckState,
   ForgePublishResult,
   ForgeVerdict,
+  ForgeMergeCapabilities,
 } from "../forge/types.js";
 import { createReviewWithFallback } from "../forge/review-text.js";
 import { limitedGithubFetch, unwrapDiffTooLarge } from "./diff-limit.js";
@@ -123,6 +124,14 @@ export interface GithubPort {
     repo: string,
   ): Promise<{ defaultBranch: string; headSha: string }>;
   getCommitDiff?(installationId: number, owner: string, repo: string, sha: string): Promise<string>;
+  /** Read-only probe of base-branch merge queue/protection capabilities. */
+  getMergeCapabilities?(
+    installationId: number,
+    owner: string,
+    repo: string,
+    baseRef: string,
+    pullNumber: number,
+  ): Promise<ForgeMergeCapabilities>;
   /** Resolve any git ref (SHA, short SHA, branch, tag) to its commit. */
   getCommit?(
     installationId: number,
@@ -287,6 +296,7 @@ function toResolvedPull(
     draft: Boolean(pr.draft),
   };
 }
+
 
 export class GithubClient implements GithubPort, ManualTriggerPort {
   /**
@@ -507,6 +517,82 @@ export class GithubClient implements GithubPort, ManualTriggerPort {
       external_id: input.externalId,
     });
     return { id: String(created.data.id), url: created.data.html_url ?? undefined };
+  }
+
+  async getMergeCapabilities(
+    installationId: number,
+    owner: string,
+    repo: string,
+    baseRef: string,
+    pullNumber: number,
+  ): Promise<ForgeMergeCapabilities> {
+    const octokit = this.installationOctokit(installationId);
+    const response = await octokit.graphql<{
+      repository?: {
+        autoMergeAllowed?: boolean;
+        mergeCommitAllowed?: boolean;
+        squashMergeAllowed?: boolean;
+        rebaseMergeAllowed?: boolean;
+        mergeQueue?: { url?: string } | null;
+        pullRequest?: { state?: string; isDraft?: boolean; mergeable?: string; mergeStateStatus?: string } | null;
+      } | null;
+    }>(
+      `query MergeCapabilities($owner: String!, $repo: String!, $branch: String!, $pullNumber: Int!) {
+        repository(owner: $owner, name: $repo) {
+          autoMergeAllowed
+          mergeCommitAllowed
+          squashMergeAllowed
+          rebaseMergeAllowed
+          mergeQueue(branch: $branch) { url }
+          pullRequest(number: $pullNumber) { state isDraft mergeable mergeStateStatus }
+        }
+      }`,
+      { owner, repo, branch: baseRef, pullNumber },
+    );
+    const repository = response.repository;
+    if (!repository) throw new Error(`repository ${owner}/${repo} not found`);
+
+    let contexts: string[] = [];
+    let requiredApprovals: number | undefined;
+    let protectedBranch: boolean | undefined;
+    const reasons: string[] = [];
+    try {
+      const protection = await octokit.rest.repos.getBranchProtection({ owner, repo, branch: baseRef });
+      protectedBranch = true;
+      const statusChecks = protection.data.required_status_checks as
+        | { contexts?: string[]; checks?: Array<{ context?: string }> }
+        | undefined;
+      contexts = [
+        ...(statusChecks?.contexts ?? []),
+        ...(statusChecks?.checks ?? []).map((check) => check.context ?? ""),
+      ].filter(Boolean).sort();
+      const reviews = protection.data.required_pull_request_reviews as { required_approving_review_count?: number } | undefined;
+      requiredApprovals = reviews?.required_approving_review_count;
+    } catch (error) {
+      const status = error && typeof error === "object" && "status" in error ? Number(error.status) : 0;
+      if (status === 404) protectedBranch = false;
+      reasons.push(
+        status === 404
+          ? `No exact branch protection rule was visible for ${baseRef}`
+          : `GitHub branch protection could not be read for ${baseRef}; the GitHub App needs Administration: read for exact protection details: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+
+    if (!repository.mergeQueue) reasons.push(`GitHub merge queue is not configured for ${baseRef}`);
+    reasons.push("GitHub ruleset-based status and approval requirements are not expanded by this probe; native protection remains authoritative");
+    return {
+      mergeMode: "manual",
+      nativeAutoMerge: repository.autoMergeAllowed ? "available" : "unavailable",
+      githubNativeQueue: repository.mergeQueue ? "available" : "unavailable",
+      requiredStatusContexts: contexts,
+      mergeMethods: [repository.mergeCommitAllowed ? "merge" : "", repository.squashMergeAllowed ? "squash" : "", repository.rebaseMergeAllowed ? "rebase" : ""].filter(Boolean) as string[],
+      ...(repository.pullRequest?.state ? { pullState: repository.pullRequest.state } : {}),
+      ...(repository.pullRequest?.mergeable ? { mergeable: repository.pullRequest.mergeStateStatus ?? repository.pullRequest.mergeable } : {}),
+      ...(requiredApprovals ? { requiredApprovals } : {}),
+      ...(protectedBranch != null ? { protectedBranch } : {}),
+      reasons,
+      source: "github-graphql+rest",
+    };
   }
 
   async getRepositoryHead(installationId: number, owner: string, repo: string) {

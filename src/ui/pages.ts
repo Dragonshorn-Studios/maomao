@@ -12,6 +12,7 @@ import type { EffectiveConfigEntry } from "../config-effective.js";
 import type { Severity } from "../schema.js";
 import { parseBriefPayload, type BriefPayload } from "../jobs/brief.js";
 import type { MergeLifecycle } from "../merge/lifecycle.js";
+import type { ForgeMergeCapabilities } from "../forge/types.js";
 import { elapsedMs, escapeHtml, formatDuration, shortSha } from "../util.js";
 import { KNOWN_REVIEWER_ROLES, composeReviewerPrompt, promptBodyFromRolePrompt } from "../prompts.js";
 import { composedPipelineStages } from "../prompt-previews.js";
@@ -293,6 +294,7 @@ function renderJobsPagination(
 export type JobPageOptions = PageOptions & {
   chatEnabled?: boolean;
   mergeLifecycle?: MergeLifecycle;
+  mergeCapabilities?: ForgeMergeCapabilities;
   scanIssueCreation?: ScanIssueCreationData;
   /** Provenance rows for a health-scan job (fingerprints → GitHub issues). */
   scanIssues?: Array<{ fingerprint: string; issue_number: number; issue_url: string; title: string }>;
@@ -310,7 +312,7 @@ export type JobPageOptions = PageOptions & {
 };
 
 
-function renderMergeLifecycle(lifecycle: MergeLifecycle, job: JobRow): string {
+function renderMergeLifecycle(lifecycle: MergeLifecycle, job: JobRow, capabilities?: ForgeMergeCapabilities): string {
   const labels: Record<MergeLifecycle["state"], string> = {
     reviewing: "reviewing",
     waiting_checks: "waiting checks",
@@ -333,7 +335,18 @@ function renderMergeLifecycle(lifecycle: MergeLifecycle, job: JobRow): string {
         <dt>Readiness check</dt><dd>${readiness ? `<code>${escapeHtml(readiness.status)}</code>${readiness.conclusion ? ` / <code>${escapeHtml(readiness.conclusion)}</code>` : ""}` : "not published"}</dd>
         <dt>Native merge</dt><dd>${job.pr_html_url ? `<a href="${escapeHtml(job.pr_html_url)}">open the forge pull request</a>` : "—"}</dd>
         ${nativeUrl ? `<dt>Native check</dt><dd><a href="${escapeHtml(nativeUrl)}" target="_blank" rel="noopener noreferrer">open forge check/status</a></dd>` : ""}
+        ${capabilities ? `<dt>Merge mode</dt><dd><code>${escapeHtml(capabilities.mergeMode)}</code> <span class="muted">read-only detection; no merge control</span></dd>
+        <dt>Native auto-merge</dt><dd><code>${escapeHtml(capabilities.nativeAutoMerge)}</code></dd>
+        <dt>GitHub native queue</dt><dd><code>${escapeHtml(capabilities.githubNativeQueue)}</code></dd>
+        <dt>Merge methods</dt><dd>${capabilities.mergeMethods.length ? escapeHtml(capabilities.mergeMethods.join(", ")) : "none detected"}</dd>
+        ${capabilities.baseRef ? `<dt>Base branch</dt><dd><code>${escapeHtml(capabilities.baseRef)}</code>${capabilities.draft ? " · draft PR" : ""}</dd>` : ""}
+        ${capabilities.pullState || capabilities.mergeable ? `<dt>Pull state</dt><dd>${escapeHtml([capabilities.pullState, capabilities.mergeable].filter(Boolean).join(" · "))}</dd>` : ""}
+        ${capabilities.forgeVersion ? `<dt>Forge version</dt><dd><code>${escapeHtml(capabilities.forgeVersion)}</code></dd>` : ""}
+        <dt>Forge</dt><dd><code>${escapeHtml(job.provider ?? "github")}</code>${job.provider_instance ? ` · <code>${escapeHtml(job.provider_instance)}</code>` : ""}</dd>
+        <dt>Protected branch</dt><dd>${capabilities.protectedBranch == null ? "unknown" : capabilities.protectedBranch ? "yes" : "no"}</dd>
+        <dt>Branch protection</dt><dd>${capabilities.requiredStatusContexts.length ? escapeHtml(capabilities.requiredStatusContexts.join(", ")) : "none detected"}${capabilities.requiredApprovals ? `; ${capabilities.requiredApprovals} approval(s)` : ""}</dd>` : ""}
       </dl>
+      ${capabilities?.reasons.length ? `<details><summary>Merge capability diagnostics</summary><ul>${capabilities.reasons.map((reason) => `<li>${escapeHtml(reason)}</li>`).join("")}</ul></details>` : ""}
       <p class="muted">${escapeHtml(lifecycle.detail)} Maomao reports native merge state only; it does not merge or bypass branch protection.</p>
       ${readiness?.summary ? `<details><summary>Readiness policy details</summary><pre>${escapeHtml(readiness.summary)}</pre></details>` : ""}
       ${readiness?.publish_error ? `<p class="error" role="alert">Publication error: ${escapeHtml(readiness.publish_error)}</p>` : ""}
@@ -498,7 +511,7 @@ export function renderJob(
         </dd>
       </div>`}
     </dl>
-    ${job.job_type === "pr_review" && options.mergeLifecycle ? renderMergeLifecycle(options.mergeLifecycle, job) : ""}
+    ${job.job_type === "pr_review" && options.mergeLifecycle ? renderMergeLifecycle(options.mergeLifecycle, job, options.mergeCapabilities) : ""}
     ${isBrief ? "" : renderRouting(job)}
     ${isBrief ? "" : renderEscalation(job)}
     ${options.stackMembers?.length ? renderStackMembers(options.stackMembers) : ""}

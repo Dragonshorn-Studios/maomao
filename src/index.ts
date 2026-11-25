@@ -128,6 +128,7 @@ const app = createApp({
   store,
   queue,
   github,
+  forge,
   opencode,
   forgeConnections,
   chat,

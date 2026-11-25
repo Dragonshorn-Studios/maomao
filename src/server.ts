@@ -101,6 +101,8 @@ import { opencodeEnvSecrets } from "./opencode/spawn.js";
 import { ModelDiscovery } from "./opencode/models.js";
 import { parseBriefPayload } from "./jobs/brief.js";
 import { MERGE_READINESS_NAME, mergeLifecycleFor } from "./merge/lifecycle.js";
+import { MergeCapabilityService } from "./merge/capability.js";
+import type { ForgeRegistry } from "./forge/registry.js";
 import type { JobRow } from "./jobs/store.js";
 import type { FindingRow } from "./findings/types.js";
 import type { ConfigPageData } from "./ui/index.js";
@@ -149,6 +151,8 @@ export interface ServerContext {
   opencode?: OpenCodePort;
   /** Persisted forge connections (GitLab). Undefined until MAOMAO_FORGE_KEY is set. */
   forgeConnections?: ForgeConnectionStore;
+  /** Connection-bound forge registry used for read-only merge capability probes. */
+  forge?: ForgeRegistry;
   /** OpenCode provider credential store (auth.json). Defaults to the path the spawned child resolves. */
   providerCredentials?: ProviderCredentialStore;
   /** Live model discovery via `opencode models`; the editor falls back to MODEL_CATALOG when unset. */
@@ -300,6 +304,7 @@ function setSessionCookie(c: Context<AppEnv>, value: string): void {
 }
 
 export function createApp(ctx: ServerContext): Hono<AppEnv> {
+  const mergeCapabilities = ctx.forge ? new MergeCapabilityService(ctx.forge) : undefined;
   const app = new Hono<AppEnv>();
   // Every page renders the top banner while the global pause switch is on;
   // the provider reads the store live so toggles take effect on next load.
@@ -1100,7 +1105,7 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
     );
   });
 
-  app.get("/jobs/:id", (c) => {
+  app.get("/jobs/:id", async (c) => {
     const id = Number(c.req.param("id"));
     const job = ctx.store.getJob(id);
     if (!job) return c.text("Not found", 404);
@@ -1124,6 +1129,7 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
         scanIssueCreation: scanIssueCreationData(job),
         scanIssues: job.job_type === "health_scan" ? ctx.store.listScanIssues(job.id) : undefined,
         stackMembers: job.job_type === "stack_review" ? ctx.store.listStackMembers(job.id) : undefined,
+        mergeCapabilities: job.job_type === "pr_review" && mergeCapabilities ? await mergeCapabilities.forJob(job) : undefined,
         mergeLifecycle: job.job_type === "pr_review" ? mergeLifecycleFor(
           job,
           ctx.store.getCheckPublication({

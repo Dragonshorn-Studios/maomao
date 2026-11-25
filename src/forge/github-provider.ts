@@ -22,6 +22,7 @@ import type {
   ForgePublishResult,
   ForgeRepoTarget,
   ForgeSummary,
+  ForgeMergeCapabilities,
 } from "./types.js";
 
 /** getPull arrives via ManualTriggerPort; partial so port fakes without it still construct. */
@@ -139,6 +140,13 @@ export class GitHubProvider implements ForgePort {
       summary: input.summary,
       ...(input.detailsUrl ? { detailsUrl: input.detailsUrl } : {}),
     });
+  }
+
+  async probeMergeCapabilities(target: ForgeRepoTarget): Promise<ForgeMergeCapabilities> {
+    if (!this.client.getMergeCapabilities) throw new Error("GitHub client does not support merge capability detection");
+    const change = await this.getChange(target);
+    const capabilities = await this.client.getMergeCapabilities(this.installationId, target.repoOwner, target.repoName, change.baseRef || "main", target.changeNumber);
+    return { ...capabilities, baseRef: change.baseRef || "main", draft: change.draft };
   }
 
   async listDiscussions(target: ForgeRepoTarget): Promise<ForgeDiscussion[]> {

@@ -10,7 +10,7 @@ import { ForgeRegistry } from "./registry.js";
 import { ForgeConnectionStore } from "./connections.js";
 import { generateForgeKeyHex } from "./secretbox.js";
 import { GitLabProvider } from "../gitlab/provider.js";
-import { GitHubProvider } from "./github-provider.js";
+import { GitHubProvider, type GithubPortWithPulls } from "./github-provider.js";
 import type { ForgeRepoTarget } from "./types.js";
 import type { GithubPort } from "../github/client.js";
 
@@ -23,7 +23,7 @@ const TARGET: ForgeRepoTarget = {
   changeNumber: 7,
 };
 
-function fakeGithub(overrides: Partial<GithubPort> = {}): GithubPort {
+function fakeGithub(overrides: Partial<GithubPortWithPulls> = {}): GithubPortWithPulls {
   return {
     getInstallationToken: async () => "tok-abc123",
     getPullDiff: async () => "diff",
@@ -53,6 +53,44 @@ describe("GitHubProvider", () => {
     expect(spec.remoteRef).toBe("refs/pull/7/head");
     expect(spec.gitAuthArgs.join(" ")).toContain("AUTHORIZATION: basic");
     expect(spec.secrets.some((secret) => secret.includes("tok-abc123"))).toBe(true);
+  });
+
+  it("composes read-only merge capabilities from the pull base ref", async () => {
+    const client = fakeGithub({
+      getPull: async () => ({
+        installationId: 42,
+        repositoryId: 100,
+        accountId: 200,
+        repoOwner: "acme",
+        repoName: "widgets",
+        repoFullName: "acme/widgets",
+        prNumber: 7,
+        prTitle: "t",
+        prBody: "",
+        prHtmlUrl: "https://example.test/pull/7",
+        prAuthor: "dev",
+        baseSha: "b",
+        headSha: "h",
+        baseRef: "release/1",
+        headRef: "feature",
+        draft: true,
+      }),
+      getMergeCapabilities: async (_installationId, _owner, _repo, baseRef, pullNumber) => ({
+        mergeMode: "manual",
+        nativeAutoMerge: "available",
+        githubNativeQueue: "unavailable",
+        requiredStatusContexts: [baseRef, String(pullNumber)],
+        mergeMethods: ["squash"],
+        reasons: [],
+        source: "test",
+      }),
+    });
+    const provider = new GitHubProvider(client, 42, "maomao");
+    await expect(provider.probeMergeCapabilities(scopedTarget())).resolves.toMatchObject({
+      baseRef: "release/1",
+      draft: true,
+      requiredStatusContexts: ["release/1", "7"],
+    });
   });
 
   it("refuses anonymous clone material for a review job with installation 0", async () => {

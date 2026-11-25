@@ -164,9 +164,27 @@ describe("monitoring pages", () => {
 
     const safe = renderJob(job, store.listReviewerRuns(job.id), store.listLogs(job.id), {
       mergeLifecycle: { state: "ready", detail: "ready", nativeUrl: "https://forge.example/check/1" },
+      mergeCapabilities: {
+        mergeMode: "manual",
+        nativeAutoMerge: "available",
+        githubNativeQueue: "unavailable",
+        requiredStatusContexts: ["maomao/merge-readiness"],
+        requiredApprovals: 2,
+        mergeMethods: ["squash"],
+        baseRef: "main",
+        draft: true,
+        forgeVersion: "17.0.1",
+        reasons: ["queue unavailable <script>"],
+        source: "test",
+      },
     });
     expect(safe).toContain('href="https://forge.example/check/1"');
     expect(safe).toContain('rel="noopener noreferrer"');
+    expect(safe).toContain("Merge capability diagnostics");
+    expect(safe).toContain("squash");
+    expect(safe).toContain("draft PR");
+    expect(safe).toContain("17.0.1");
+    expect(safe).toContain("queue unavailable &lt;script&gt;");
   });
 
   it("renders routing-in-progress and observation profiles on job detail", () => {

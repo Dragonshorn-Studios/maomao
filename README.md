@@ -355,6 +355,8 @@ Maomao publishes `maomao/merge-readiness` for each PR head SHA. It starts queued
 
 Pull-request job pages derive a read-only merge lifecycle from that exact-SHA publication and the exact-head forge-confirmed merged marker: `reviewing`, `waiting_checks`, `ready`, `blocked`, `stale`, `merged`, or `failed`. `merged` is never inferred from a passing check alone; it requires the forge to confirm the merge. Publication failures are shown as failed diagnostics rather than false readiness. Native scheduling states (`scheduled_auto_merge`, `github_queued`, and `merge_group_testing`) are reserved for forge-native integration signals; Maomao does not implement a merge control, scheduler, or custom queue.
 
+The same page performs a short-lived, cached, read-only merge-capability probe. GitHub reports auto-merge eligibility, native merge-queue availability for the base branch, permitted merge methods, current pull mergeability when GitHub exposes it, and classic branch-protection presence/contexts/approvals. Forgejo reports server version, permitted merge methods, protected-branch presence/status contexts/approvals, and pull mergeability where available. Missing permissions, unavailable endpoints, unsupported adapters, and timeouts are shown as diagnostics. Probe failures never become merge readiness, and capability detection never enables auto-merge, enqueues a PR, changes branch protection, or grants Maomao merge privileges. Exact GitHub protection details require the App's Administration repository read permission; without it the page explains that gap instead of guessing. GitHub ruleset-based requirements are not expanded yet; the forge remains authoritative.
+
 ## Configure OpenCode models
 
 Maomao does not embed a model vendor. It runs:
