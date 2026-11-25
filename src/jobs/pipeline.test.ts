@@ -323,7 +323,7 @@ describe("pipeline", () => {
       MAOMAO_PUBLIC_URL: "https://maomao.example",
     });
     const store = new JobStore(openDb(":memory:"));
-    const checks: Array<{ status?: string; conclusion?: string; externalId: string; detailsUrl?: string }> = [];
+    const checks: Array<{ status?: string; conclusion?: string; externalId: string; detailsUrl?: string; name?: string }> = [];
     const github = {
       ...githubPort(),
       getPull: async () => ({
