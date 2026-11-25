@@ -274,6 +274,7 @@ describe("pipeline over a Forgejo job (end-to-end)", () => {
     expect(state.statuses.filter((status) => status.context === "maomao/review").at(-1)).toMatchObject({ state: "warning", target_url: expect.any(String) });
     expect(state.statuses.filter((status) => status.context === "maomao/secrets").at(-1)).toMatchObject({ state: "failure" });
     expect(state.statuses.filter((status) => status.context === "maomao/security").at(-1)).toMatchObject({ state: "success" });
+    expect(state.statuses.filter((status) => status.context === "maomao/merge-readiness").at(-1)).toMatchObject({ state: "failure" });
     const storedChecks = jobs.listTrustedCheckResults(created.job.id);
     expect(storedChecks.map((row) => row.name).sort()).toEqual(["maomao/secrets", "maomao/security"]);
     expect(storedChecks.find((row) => row.name === "maomao/secrets")?.findings_json).toContain("credential detected");

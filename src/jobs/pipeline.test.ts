@@ -323,7 +323,7 @@ describe("pipeline", () => {
       MAOMAO_PUBLIC_URL: "https://maomao.example",
     });
     const store = new JobStore(openDb(":memory:"));
-    const checks: Array<{ status?: string; conclusion?: string; externalId: string; detailsUrl?: string }> = [];
+    const checks: Array<{ status?: string; conclusion?: string; externalId: string; detailsUrl?: string; name?: string }> = [];
     const github = {
       ...githubPort(),
       getPull: async () => ({
@@ -344,7 +344,7 @@ describe("pipeline", () => {
         headRef: "feat",
         draft: false,
       }),
-      upsertCheckRun: async (input: { status?: string; conclusion?: string; externalId: string; detailsUrl?: string }) => {
+      upsertCheckRun: async (input: { status?: string; conclusion?: string; externalId: string; detailsUrl?: string; name?: string }) => {
         checks.push(input);
         return { id: "check-1", url: "https://example.test/checks/1" };
       },
@@ -380,9 +380,11 @@ describe("pipeline", () => {
     await pipeline.run(created.job.id);
 
     expect(store.getJob(created.job.id)?.state).toBe("completed");
-    expect(checks[0]).toMatchObject({ status: "queued", detailsUrl: `https://maomao.example/jobs/${created.job.id}` });
-    expect(checks.at(-1)).toMatchObject({ status: "completed", conclusion: "success" });
-    expect(new Set(checks.map((check) => check.externalId)).size).toBe(1);
+    const reviewChecks = checks.filter((check) => check.name === "maomao/review");
+    expect(reviewChecks[0]).toMatchObject({ status: "queued", detailsUrl: `https://maomao.example/jobs/${created.job.id}` });
+    expect(reviewChecks.at(-1)).toMatchObject({ status: "completed", conclusion: "success" });
+    expect(new Set(reviewChecks.map((check) => check.externalId)).size).toBe(1);
+    expect(checks.filter((check) => check.name === "maomao/merge-readiness").at(-1)).toMatchObject({ status: "completed", conclusion: "success" });
     const stored = store.getCheckPublication({
       provider: "github",
       providerInstance: "github.com",

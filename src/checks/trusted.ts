@@ -10,6 +10,7 @@ import { createHash } from "node:crypto";
 import { access, lstat, mkdir, readFile, realpath, rm } from "node:fs/promises";
 import { join, resolve, sep } from "node:path";
 import { z } from "zod";
+import { applyTrustedPolicy, defaultTrustedPolicy, readTrustedPolicy, type ResolvedTrustedPolicy } from "./policy.js";
 import type { Config, TrustedChecksConfig } from "../config.js";
 import type { Severity } from "../schema.js";
 
@@ -238,11 +239,21 @@ export class TrustedCheckRunner {
     return this.enabled() && this.settings().enabledChecks.includes(name);
   }
 
+  async policyForRepo(repoFullName: string): Promise<ResolvedTrustedPolicy> {
+    const settings = this.settings();
+    if (!settings.revision || (!settings.repoUrl && !settings.localPath)) {
+      return defaultTrustedPolicy([], settings.revision || "unconfigured");
+    }
+    return readTrustedPolicy(await this.checkout(settings), repoFullName, settings.enabledChecks, settings.revision);
+  }
+
   async run(input: {
     name: TrustedCheckName;
     repoDir: string;
     workspaceDir: string;
     diffPath: string;
+    repoFullName?: string;
+    policy?: import("./policy.js").ResolvedTrustedPolicy;
     signal?: AbortSignal;
   }): Promise<TrustedCheckResult> {
     const startedAt = Date.now();
@@ -256,6 +267,7 @@ export class TrustedCheckRunner {
       if (trustedDir === repoRealPath || trustedDir.startsWith(repoRealPath + sep) || repoRealPath.startsWith(trustedDir + sep)) {
         throw new Error("trusted checks checkout must not overlap the pull-request checkout");
       }
+      const policy = input.policy ?? await readTrustedPolicy(trustedDir, input.repoFullName ?? "*", settings.enabledChecks, revision);
       const manifestRaw = JSON.parse(await readFile(join(trustedDir, "maomao-trusted-checks.json"), "utf8")) as { version?: number; checks?: Record<string, unknown> };
       if (manifestRaw.version !== 1) throw new Error("trusted checks manifest version must be 1");
       const definition = parseDefinition(input.name, manifestRaw.checks?.[input.name]);
@@ -387,13 +399,20 @@ export class TrustedCheckRunner {
         : "";
       const allDiagnostics = [diagnostics, processDiagnostic].filter(Boolean).join("\n");
       const status = processFailed ? "error" : parsed.data.status;
+      const adjusted = applyTrustedPolicy({
+        name: input.name,
+        status,
+        conclusion: status === "error" ? "action_required" as const : status,
+        findings: parsed.data.findings as TrustedCheckFinding[],
+      }, policy);
+      const suppressionNote = adjusted.suppressedFindings ? `policy suppressed/filtered ${adjusted.suppressedFindings} finding(s)` : "";
       return {
         name: input.name,
         nativeName: trustedCheckNativeName(input.name),
-        status,
-        conclusion: status === "error" ? "action_required" : status,
-        findings: parsed.data.findings as TrustedCheckFinding[],
-        diagnostics: allDiagnostics.slice(0, 8_000),
+        status: adjusted.status,
+        conclusion: adjusted.conclusion,
+        findings: adjusted.findings,
+        diagnostics: [allDiagnostics, suppressionNote].filter(Boolean).join("\n").slice(0, 8_000),
         scannerName: parsed.data.scanner.name,
         ...(parsed.data.scanner.version ? { scannerVersion: parsed.data.scanner.version } : {}),
         revision,

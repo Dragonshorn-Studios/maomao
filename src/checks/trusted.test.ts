@@ -15,7 +15,7 @@ async function git(cwd: string, args: string[]): Promise<void> {
   await execFileAsync("git", ["-c", "user.name=test", "-c", "user.email=test@example.com", ...args], { cwd });
 }
 
-async function trustedFixture(scriptBody: string, opts: { timeoutMs?: number } = {}) {
+async function trustedFixture(scriptBody: string, opts: { timeoutMs?: number; policy?: string } = {}) {
   const root = await mkdtemp(join(tmpdir(), "maomao-trusted-fixture-"));
   const trusted = join(root, "trusted");
   const scriptDir = join(trusted, "checks", "secrets");
@@ -31,6 +31,7 @@ async function trustedFixture(scriptBody: string, opts: { timeoutMs?: number } =
     }),
   );
   await writeFile(join(scriptDir, "run.sh"), scriptBody, { mode: 0o755 });
+  if (opts.policy) await writeFile(join(trusted, "maomao-policy.json"), opts.policy);
   await git(trusted, ["init"]);
   await git(trusted, ["add", "."]);
   await git(trusted, ["commit", "-m", "trusted"]);
@@ -67,6 +68,25 @@ JSON
     expect(JSON.stringify(result.findings)).not.toContain(secret);
     await expect(access(join(fixture.workspace, "trusted-checks", "secrets", "result.json"))).rejects.toThrow();
     expect(result.revision).toBe(fixture.revision);
+  });
+
+  it("applies pinned repository policy before scanner conclusions", async () => {
+    const fixture = await trustedFixture(`cat > "$MAOMAO_RESULT_PATH" <<'JSON'
+{"status":"failure","scanner":{"name":"fixture"},"findings":[{"severity":"medium","category":"semgrep","file":"a.ts","line":2,"summary":"medium pattern"}]}
+JSON
+`, {
+      policy: JSON.stringify({ version: 1, defaults: { severityThreshold: "high", requiredChecks: ["secrets"] } }),
+    });
+    const result = await new TrustedCheckRunner(configFor(fixture.revision, fixture.trusted, fixture.workspace)).run({
+      name: "secrets",
+      repoDir: fixture.repoDir,
+      workspaceDir: fixture.workspace,
+      diffPath: fixture.diffPath,
+      repoFullName: "org/repo",
+    });
+    expect(result.status).toBe("success");
+    expect(result.findings).toEqual([]);
+    expect(result.diagnostics).toContain("policy suppressed/filtered 1");
   });
 
   it("fails closed when the scanner writes malformed JSON", async () => {
