@@ -3,7 +3,7 @@ import { mergeLifecycleFor } from "./lifecycle.js";
 import type { CheckPublicationRow, JobRow } from "../jobs/store.js";
 
 const job = { state: "completed", failure_reason: null } as JobRow;
-const pub = { status: "completed", conclusion: "success", title: "", native_url: "https://example.test/check" } as CheckPublicationRow;
+const pub = { status: "completed", conclusion: "success", title: "", native_url: "https://example.test/check", published_at: "2026-01-01T00:00:00Z" } as CheckPublicationRow;
 
 describe("mergeLifecycleFor", () => {
   it("marks exact-SHA success ready", () => {
@@ -19,10 +19,13 @@ describe("mergeLifecycleFor", () => {
     expect(mergeLifecycleFor(job, { ...pub, conclusion: "action_required" }, false).state).toBe("failed");
     expect(mergeLifecycleFor({ ...job, state: "stale" }, pub, false).state).toBe("stale");
   });
-  it("fails closed when readiness was computed but native publication failed", () => {
+  it("fails closed when readiness was computed but native publication failed or never finished", () => {
     const failedPublish = { ...pub, publish_error: "network timeout" } as CheckPublicationRow;
     const lifecycle = mergeLifecycleFor(job, failedPublish, false);
     expect(lifecycle.state).toBe("failed");
     expect(lifecycle.detail).toContain("network timeout");
+
+    const unfinished = { ...pub, published_at: null } as CheckPublicationRow;
+    expect(mergeLifecycleFor(job, unfinished, false).state).toBe("failed");
   });
 });

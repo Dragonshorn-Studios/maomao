@@ -41,6 +41,9 @@ export function mergeLifecycleFor(job: JobRow, readiness: CheckPublicationRow | 
   if (readiness.publish_error) {
     return { state: "failed", detail: `Merge readiness was computed but could not be published natively: ${readiness.publish_error}`, readiness };
   }
+  if (!readiness.published_at) {
+    return { state: "failed", detail: "Merge readiness was computed but native publication never completed; treat this exact head as unevaluated until publication is retried.", readiness };
+  }
   if (readiness.conclusion === "success") {
     return { state: "ready", detail: "Policy-required review and deterministic checks passed for this exact head SHA.", readiness, nativeUrl: readiness.native_url ?? undefined };
   }

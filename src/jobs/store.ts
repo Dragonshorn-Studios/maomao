@@ -1997,8 +1997,9 @@ export class JobStore {
   }
 
   /**
-   * Records that a pull request merged, keyed by repo + PR number. Written on
-   * every verified merged close delivery — independent of whether any job was
+   * Records that a pull request merged, keyed by repo + PR number and carrying
+   * the exact merged head SHA when the forge supplied it. Written on every
+   * verified merged close delivery — independent of whether any job was
    * cancelled — so the enqueue gate holds even when nothing was running.
    * Merged pulls cannot be reopened, so the record is permanent.
    */
@@ -2007,14 +2008,26 @@ export class JobStore {
     prNumber: number,
     deliveryId: string | null,
     scope?: Partial<ForgeScope>,
+    headSha?: string,
   ): void {
     const resolved = normalizeScope(scope);
     this.db
       .prepare(
-        `INSERT OR IGNORE INTO merged_pulls (repo_full_name, pr_number, provider, provider_instance, merged_at, delivery_id)
-         VALUES (?, ?, ?, ?, ?, ?)`,
+        `INSERT OR IGNORE INTO merged_pulls (repo_full_name, pr_number, provider, provider_instance, merged_at, delivery_id, head_sha)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`,
       )
-      .run(repoFullName, prNumber, resolved.provider, resolved.instance, nowIso(), deliveryId);
+      .run(repoFullName, prNumber, resolved.provider, resolved.instance, nowIso(), deliveryId, headSha ?? null);
+  }
+
+  /** True only when a verified merge webhook recorded this exact immutable head. */
+  hasMergedPullAtHead(repoFullName: string, prNumber: number, headSha: string, scope?: Partial<ForgeScope>): boolean {
+    const resolved = normalizeScope(scope);
+    const row = this.db
+      .prepare(
+        `SELECT head_sha FROM merged_pulls WHERE provider = ? AND provider_instance = ? AND repo_full_name = ? AND pr_number = ?`,
+      )
+      .get(resolved.provider, resolved.instance, repoFullName, prNumber) as { head_sha: string | null } | undefined;
+    return row?.head_sha === headSha;
   }
 
   /** True once a verified webhook recorded this pull as merged. */

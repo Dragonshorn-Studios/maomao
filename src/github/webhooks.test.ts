@@ -1293,7 +1293,7 @@ describe("merge-cancellation hardening", () => {
       action: "closed",
       installation: { id: 42, account: { id: 1001 } },
       repository: { id: 2002, full_name: "acme/widgets", name: "widgets", owner: { login: "acme", id: 1001 } },
-      pull_request: { number: 7, merged: true },
+      pull_request: { number: 7, merged: true, head: { sha: "merged-head" } },
     });
     const closed = await handleGithubWebhook({
       config,
@@ -1302,6 +1302,8 @@ describe("merge-cancellation hardening", () => {
     });
     expect(closed.body.cancelled).toBe(1);
     expect(store.hasMergedPull("acme/widgets", 7)).toBe(true);
+    expect(store.hasMergedPullAtHead("acme/widgets", 7, "merged-head")).toBe(true);
+    expect(store.hasMergedPullAtHead("acme/widgets", 7, "superseded-head")).toBe(false);
 
     // A delayed synchronize (push raced the merge button) arrives after the close.
     const latePushBody = JSON.stringify({

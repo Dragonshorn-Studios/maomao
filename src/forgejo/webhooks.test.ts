@@ -136,5 +136,7 @@ describe("Forgejo pull_request handling", () => {
     expect(closed.status).toBe(200);
     expect(closed.body.cancelled).toBe(1);
     expect(openedDeps.store.getJob(opened.enqueue!.job.id)?.state).toBe("cancelled");
+    expect(openedDeps.store.hasMergedPullAtHead("acme/widgets", 7, "head222", { provider: "forgejo", instance: "forgejo.example" })).toBe(true);
+    expect(openedDeps.store.hasMergedPullAtHead("acme/widgets", 7, "older-head", { provider: "forgejo", instance: "forgejo.example" })).toBe(false);
   });
 });

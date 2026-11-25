@@ -324,6 +324,7 @@ function renderMergeLifecycle(lifecycle: MergeLifecycle, job: JobRow): string {
     failed: "failed",
   };
   const readiness = lifecycle.readiness;
+  const nativeUrl = lifecycle.nativeUrl && /^https?:\/\//i.test(lifecycle.nativeUrl) ? lifecycle.nativeUrl : undefined;
   return `<h2>Merge lifecycle</h2>
     <section class="card merge-lifecycle">
       <dl class="config-grid">
@@ -331,7 +332,7 @@ function renderMergeLifecycle(lifecycle: MergeLifecycle, job: JobRow): string {
         <dt>Exact head</dt><dd><code class="sha">${escapeHtml(shortSha(job.head_sha, 12))}</code></dd>
         <dt>Readiness check</dt><dd>${readiness ? `<code>${escapeHtml(readiness.status)}</code>${readiness.conclusion ? ` / <code>${escapeHtml(readiness.conclusion)}</code>` : ""}` : "not published"}</dd>
         <dt>Native merge</dt><dd>${job.pr_html_url ? `<a href="${escapeHtml(job.pr_html_url)}">open the forge pull request</a>` : "—"}</dd>
-        ${lifecycle.nativeUrl ? `<dt>Native check</dt><dd><a href="${escapeHtml(lifecycle.nativeUrl)}">open forge check/status</a></dd>` : ""}
+        ${nativeUrl ? `<dt>Native check</dt><dd><a href="${escapeHtml(nativeUrl)}" target="_blank" rel="noopener noreferrer">open forge check/status</a></dd>` : ""}
       </dl>
       <p class="muted">${escapeHtml(lifecycle.detail)} Maomao reports native merge state only; it does not merge or bypass branch protection.</p>
       ${readiness?.summary ? `<details><summary>Readiness policy details</summary><pre>${escapeHtml(readiness.summary)}</pre></details>` : ""}

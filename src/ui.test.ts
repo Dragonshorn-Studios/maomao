@@ -152,6 +152,23 @@ describe("monitoring pages", () => {
     expect(detail).toContain('href="https://github.com/acme/ledger/pull/412"');
   });
 
+  it("renders merge lifecycle links only for http(s) forge URLs", () => {
+    const store = seededStore();
+    const job = store.listJobs(20).find((row) => row.pr_number === 412)!;
+    const unsafe = renderJob(job, store.listReviewerRuns(job.id), store.listLogs(job.id), {
+      mergeLifecycle: { state: "ready", detail: "ready", nativeUrl: "javascript:alert(1)" },
+    });
+    expect(unsafe).toContain("Merge lifecycle");
+    expect(unsafe).not.toContain("javascript:alert");
+    expect(unsafe).not.toContain("open forge check/status");
+
+    const safe = renderJob(job, store.listReviewerRuns(job.id), store.listLogs(job.id), {
+      mergeLifecycle: { state: "ready", detail: "ready", nativeUrl: "https://forge.example/check/1" },
+    });
+    expect(safe).toContain('href="https://forge.example/check/1"');
+    expect(safe).toContain('rel="noopener noreferrer"');
+  });
+
   it("renders routing-in-progress and observation profiles on job detail", () => {
     const store = seededStore();
     const routing = store.listJobs(20).find((row) => row.pr_number === 422);

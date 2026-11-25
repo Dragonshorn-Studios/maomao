@@ -1134,7 +1134,7 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
             headSha: job.head_sha,
             name: MERGE_READINESS_NAME,
           }),
-          ctx.store.hasMergedPull(job.repo_full_name, job.pr_number, { provider: job.provider, instance: job.provider_instance }),
+          ctx.store.hasMergedPullAtHead(job.repo_full_name, job.pr_number, job.head_sha, { provider: job.provider, instance: job.provider_instance }),
         ) : undefined,
       }),
     );

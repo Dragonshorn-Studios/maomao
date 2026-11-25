@@ -648,7 +648,7 @@ function seedCancelled(store: JobStore): void {
   const deliveryId = "demo-fixture";
   // The merge marker must exist before the cancel so the enqueue gate is set
   // for this pull (same order as handlePullClosed).
-  store.markPullMerged(merged.repo_full_name, merged.pr_number, deliveryId);
+  store.markPullMerged(merged.repo_full_name, merged.pr_number, deliveryId, undefined, merged.head_sha);
   const { cancelledJobIds } = cancelJobsForPull(store, {
     repoFullName: merged.repo_full_name,
     prNumber: merged.pr_number,

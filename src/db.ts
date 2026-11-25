@@ -298,6 +298,7 @@ function migrate(db: SqliteDb): void {
       ${PROVIDER_COLUMNS},
       merged_at TEXT NOT NULL,
       delivery_id TEXT,
+      head_sha TEXT,
       PRIMARY KEY (provider, provider_instance, repo_full_name, pr_number)
     );
 
@@ -687,6 +688,7 @@ function migrate(db: SqliteDb): void {
     // on dead jobs forever — settle them to their job's outcome (idempotent).
     // Stamps finished_at to match the runtime retireReviewerRuns path; the
     // column is ensured first because pre-usage schemas may not have it.
+    ensureColumn(db, "merged_pulls", "head_sha", "TEXT");
     ensureColumn(db, "reviewer_runs", "finished_at", "TEXT");
     const backfillRunState = db.prepare(
       `UPDATE reviewer_runs SET state = ?, finished_at = COALESCE(finished_at, ?)
