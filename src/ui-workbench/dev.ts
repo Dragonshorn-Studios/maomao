@@ -12,9 +12,10 @@ import { Hono } from "hono";
 import { readFileSync } from "node:fs";
 import { CHAT_BUNDLE_HREF, PIERRE_DIFFS_HREF } from "../ui/paths.js";
 import { THEME_CSS } from "../ui/theme.js";
+import { INFERNAL_CSS, INFERNAL_HREF } from "../ui/infernal.js";
 import { TYPEAHEAD_JS } from "../ui/typeahead.js";
 import { MODEL_PICKER_JS } from "../ui/model-picker.js";
-import { FAVICON_PNG_BASE64, FAVICON_SVG, LARGE_ICON_PNG_BASE64, LARGE_ICON_SVG } from "../ui/icons.js";
+import { FAVICON_PNG_BASE64, LARGE_ICON_PNG_BASE64, MERGEHENNA_FAVICON_SVG } from "../ui/icons.js";
 import { isProduction } from "./gate.js";
 import { mountWorkbench } from "./mount.js";
 import { chatBundlePath, pierreBundlePath } from "./assets.js";
@@ -33,6 +34,12 @@ const app = new Hono();
 // a frame looks exactly like the page it came from.
 app.get("/assets/maomao.css", (c) =>
   c.newResponse(THEME_CSS, 200, {
+    "content-type": "text/css; charset=utf-8",
+    "cache-control": "public, max-age=3600",
+  }),
+);
+app.get(INFERNAL_HREF, (c) =>
+  c.newResponse(INFERNAL_CSS, 200, {
     "content-type": "text/css; charset=utf-8",
     "cache-control": "public, max-age=3600",
   }),
@@ -61,8 +68,8 @@ app.get(PIERRE_DIFFS_HREF, (c) => {
     return c.text("Not found", 404);
   }
 });
-app.get("/assets/favicon.svg", (c) => c.newResponse(FAVICON_SVG, 200, { "content-type": "image/svg+xml" }));
-app.get("/assets/icon.svg", (c) => c.newResponse(LARGE_ICON_SVG, 200, { "content-type": "image/svg+xml" }));
+app.get("/assets/favicon.svg", (c) => c.newResponse(MERGEHENNA_FAVICON_SVG, 200, { "content-type": "image/svg+xml" }));
+app.get("/assets/icon.svg", (c) => c.newResponse(MERGEHENNA_FAVICON_SVG, 200, { "content-type": "image/svg+xml" }));
 // The brand PNGs are stored as base64; the production asset route decodes
 // them, and so must this one — base64 text with an image content type is
 // not an image.

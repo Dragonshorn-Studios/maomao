@@ -1,6 +1,5 @@
 import { escapeHtml } from "../util.js";
 import { csrfInput, layout, type PageOptions } from "./layout.js";
-import { configSubNav } from "./pages.js";
 import {
   TELEMETRY_CHANNELS,
   type TelemetryChannelStatus,
@@ -391,7 +390,6 @@ function probeResultsBlock(results: TelemetryProbeRow[]): string {
 export function renderTelemetryPage(data: TelemetryPageData): string {
   const cards = data.channels.map((channel) => channelCard(channel, data.csrfToken, data.canWrite)).join("");
   const body = `
-    ${configSubNav("telemetry")}
     ${data.options.notice ? `<p class="notice" role="status">${escapeHtml(data.options.notice)}</p>` : ""}
     ${data.options.error ? `<p class="error" role="alert">${escapeHtml(data.options.error)}</p>` : ""}
     <h1>Telemetry</h1>
@@ -405,5 +403,5 @@ export function renderTelemetryPage(data: TelemetryPageData): string {
     ${adHocForm(data.csrfToken, data.canWrite)}
     <script src="${TELEMETRY_PAGE_HREF}" defer></script>
   `;
-  return layout("Telemetry", body, { ...data.options, surface: "operator" });
+  return layout("Telemetry", body, { ...data.options, surface: "operator", nav: "settings", settingsSection: "telemetry" });
 }

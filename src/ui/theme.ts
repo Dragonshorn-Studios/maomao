@@ -3,38 +3,50 @@
 export const THEME_HREF = "/assets/maomao.css";
 
 export const THEME_CSS = `
+/*
+ * Mergehenna is themed by the vendored Infernal SaaS stylesheet
+ * (assets/infernal.css, loaded before this one): data-if-theme and
+ * data-if-brand="mergehenna" on the root element resolve every --if-* token,
+ * so these aliases track the active theme with no per-mode duplication. The
+ * app's historical token names map onto the library so existing components
+ * pick up the Infernal palette without rewrites. Interactive chrome uses
+ * --action*; semantic state colors keep their own names so a completed state
+ * never reads as a clickable accent.
+ */
 :root {
-  color-scheme: light;
-  --paper: #f3efe3;
-  --surface: #faf7ee;
-  --surface-2: #ece6d6;
-  --ink: #1a221c;
-  --ink-muted: #5a6258;
-  --jade: #1f6a4e;
-  --jade-soft: #d5eadc;
-  --herb: #4a6b58;
-  --plum: #6b3a58;
-  --plum-soft: #eadbe3;
-  --cinnabar: #9c2432;
-  --cinnabar-soft: #f3d6d6;
-  --amber: #8a5a10;
-  --amber-soft: #f1e4c4;
-  --working: var(--plum);
-  --working-soft: var(--plum-soft);
-  --ash: #7a776b;
-  --line: #cfc8b6;
-  --line-strong: #b7b09c;
-  --focus: #1f6a4e;
-  --shadow: 0 1px 0 rgba(26, 34, 28, 0.04);
-  --code-bg: #eae4d4;
-  --code-fg: #1a221c;
+  --paper: var(--if-bg);
+  --surface: var(--if-surface);
+  --surface-2: var(--if-surface-2);
+  --ink: var(--if-text);
+  --ink-muted: var(--if-text-soft);
+  --jade: var(--if-success);
+  --jade-soft: var(--if-success-soft);
+  --herb: var(--if-success);
+  --plum: var(--if-accent);
+  --plum-soft: var(--if-accent-soft);
+  --cinnabar: var(--if-danger);
+  --cinnabar-soft: var(--if-danger-soft);
+  --amber: var(--if-warning);
+  --amber-soft: var(--if-warning-soft);
+  --working: var(--if-accent);
+  --working-soft: var(--if-accent-soft);
+  --action: var(--if-accent);
+  --action-ink: var(--if-accent-ink);
+  --action-soft: var(--if-accent-soft);
+  --ash: var(--if-muted);
+  --line: var(--if-line);
+  --line-strong: var(--if-line-strong);
+  --focus: var(--if-accent);
+  --shadow: var(--if-shadow);
+  --code-bg: var(--if-bg);
+  --code-fg: var(--if-text);
   --live: var(--working);
-  --btn-fg: #f3efe3;
+  --btn-fg: var(--if-accent-ink);
   --chat-thought: var(--plum);
-  --radius: 3px;
-  --font-display: "Iowan Old Style", Palatino, "Palatino Linotype", "Book Antiqua", Georgia, "Times New Roman", serif;
-  --font-ui: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-  --font-mono: ui-monospace, "SFMono-Regular", "Cascadia Mono", "Cascadia Code", "Liberation Mono", Menlo, Monaco, Consolas, monospace;
+  --radius: var(--if-radius-sm);
+  --font-display: var(--if-display);
+  --font-ui: var(--if-font);
+  --font-mono: var(--if-mono);
   --space-1: 0.25rem;
   --space-2: 0.5rem;
   --space-3: 0.75rem;
@@ -42,66 +54,6 @@ export const THEME_CSS = `
   --space-5: 1.5rem;
   --space-6: 2.25rem;
   --measure: 72rem;
-}
-
-html[data-theme="dark"] {
-  color-scheme: dark;
-  --paper: #121612;
-  --surface: #1a1f1a;
-  --surface-2: #232a23;
-  --ink: #e8e4d6;
-  --ink-muted: #a8a494;
-  --jade: #7dcea0;
-  --jade-soft: #1c3328;
-  --herb: #9bb8a6;
-  --plum: #d4a8c2;
-  --plum-soft: #33232c;
-  --cinnabar: #e88989;
-  --cinnabar-soft: #3a2224;
-  --amber: #e0b45c;
-  --amber-soft: #3a3220;
-  --working: var(--plum);
-  --working-soft: var(--plum-soft);
-  --ash: #8c8a7e;
-  --line: #2e352e;
-  --line-strong: #4a524a;
-  --focus: #7dcea0;
-  --shadow: 0 1px 0 rgba(0, 0, 0, 0.25);
-  --code-bg: #0e120e;
-  --code-fg: #d9d4c4;
-  --live: var(--working);
-  --btn-fg: #121612;
-}
-
-@media (prefers-color-scheme: dark) {
-  html:not([data-theme="light"]):not([data-theme="dark"]) {
-    color-scheme: dark;
-    --paper: #121612;
-    --surface: #1a1f1a;
-    --surface-2: #232a23;
-    --ink: #e8e4d6;
-    --ink-muted: #a8a494;
-    --jade: #7dcea0;
-    --jade-soft: #1c3328;
-    --herb: #9bb8a6;
-    --plum: #d4a8c2;
-    --plum-soft: #33232c;
-    --cinnabar: #e88989;
-    --cinnabar-soft: #3a2224;
-    --amber: #e0b45c;
-    --amber-soft: #3a3220;
-    --working: var(--plum);
-    --working-soft: var(--plum-soft);
-    --ash: #8c8a7e;
-    --line: #2e352e;
-    --line-strong: #4a524a;
-    --focus: #7dcea0;
-    --shadow: 0 1px 0 rgba(0, 0, 0, 0.25);
-    --code-bg: #0e120e;
-    --code-fg: #d9d4c4;
-    --live: var(--working);
-    --btn-fg: #121612;
-  }
 }
 
 *, *::before, *::after { box-sizing: border-box; }
@@ -114,21 +66,12 @@ body {
   font-family: var(--font-ui);
   font-size: 0.95rem;
   line-height: 1.5;
-  background:
-    repeating-linear-gradient(
-      to bottom,
-      transparent 0,
-      transparent calc(1.4rem - 1px),
-      color-mix(in srgb, var(--line) 32%, transparent) calc(1.4rem - 1px),
-      color-mix(in srgb, var(--line) 32%, transparent) 1.4rem
-    ),
-    var(--paper);
-  background-attachment: local;
+  background: var(--paper);
   color: var(--ink);
 }
 
-a { color: var(--jade); text-underline-offset: 0.15em; }
-a:hover { color: var(--herb); }
+a { color: var(--action); text-decoration: underline; text-underline-offset: 0.15em; }
+a:hover { color: var(--action); filter: brightness(1.12); }
 
 :focus-visible {
   outline: 2px solid var(--focus);
@@ -178,7 +121,7 @@ a:hover { color: var(--herb); }
   flex: none;
   object-fit: contain;
 }
-.brand svg { width: 1.15rem; height: 1.15rem; color: var(--jade); flex: none; }
+.brand svg { width: 1.15rem; height: 1.15rem; color: var(--action); flex: none; }
 .tag { color: var(--ink-muted); font-size: 0.82rem; }
 .grow { flex: 1 1 6rem; }
 
@@ -202,8 +145,111 @@ a:hover { color: var(--herb); }
   cursor: pointer;
 }
 .appearance button[aria-pressed="true"] {
-  background: var(--jade-soft);
+  background: var(--action-soft);
   color: var(--ink);
+}
+
+
+/* ---- App shell: global icon rail + optional contextual side nav ----
+   Composition over the library's .if-rail / .if-context-nav piece classes:
+   these rules only position them as a full-height application shell and add
+   the link-active state (the library expresses it with aria-pressed on its
+   JS-driven buttons; the shell uses plain navigation links). */
+.shell {
+  display: grid;
+  grid-template-columns: 3.75rem minmax(0, 1fr);
+  min-height: 100vh;
+}
+.shell.has-context { grid-template-columns: 3.75rem 14.5rem minmax(0, 1fr); }
+.shell-rail {
+  position: sticky;
+  top: 0;
+  height: 100vh;
+  z-index: 6;
+}
+.shell-context {
+  position: sticky;
+  top: 0;
+  height: 100vh;
+  z-index: 6;
+}
+.shell-content { min-width: 0; }
+a.if-rail__button { display: grid; place-items: center; text-decoration: none; }
+.shell-rail .if-rail__button.is-active {
+  background: var(--if-accent-soft);
+  color: var(--if-accent);
+}
+.shell-rail .if-rail__button.is-active::before {
+  content: "";
+  position: absolute;
+  left: -7px;
+  top: 10px;
+  height: 20px;
+  width: 3px;
+  border-radius: 4px;
+  background: var(--if-accent);
+}
+.shell-rail__logo svg { width: 22px; height: 22px; display: block; }
+.shell-context .if-context-nav__item { text-decoration: none; }
+.shell-context .if-context-nav__item[aria-current] { font-weight: 600; }
+
+/* Queue family switcher: links wearing the library's tab visuals. */
+.queue-views {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+  margin: 0.9rem 0 0.4rem;
+}
+.queue-views .if-tabs { padding: 2px; }
+.queue-views .if-tab { text-decoration: none; display: inline-block; }
+.queue-views .if-tab.is-active {
+  background: var(--if-surface-hover);
+  color: var(--if-text);
+  box-shadow: inset 0 0 0 1px var(--if-line);
+}
+.queue-views-note { font-size: 0.78rem; color: var(--ink-muted); }
+
+.brand-text { display: inline-flex; flex-direction: column; line-height: 1.05; }
+.brand-name { font-family: var(--font-display); font-size: 1.15rem; font-weight: 600; letter-spacing: 0.01em; }
+.brand-caption {
+  font-family: var(--font-mono);
+  font-size: 0.58rem;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--ash);
+  margin-top: 0.18rem;
+}
+
+@media (max-width: 720px) {
+  .shell, .shell.has-context { display: block; }
+  .shell-rail {
+    position: static;
+    height: auto;
+    flex-direction: row;
+    overflow-x: auto;
+    border-right: 0;
+    border-bottom: 1px solid var(--if-line, var(--line));
+    padding: 0.4rem 0.5rem;
+    gap: 4px;
+  }
+  .shell-rail .if-rail__spacer { display: none; }
+  .shell-rail .if-rail__logo { width: 34px; height: 34px; margin-bottom: 0; }
+  .shell-rail .if-rail__button.is-active::before {
+    left: 10px;
+    top: auto;
+    bottom: -4px;
+    height: 3px;
+    width: 20px;
+  }
+  .shell-context {
+    position: static;
+    height: auto;
+    border-right: 0;
+    border-bottom: 1px solid var(--if-line, var(--line));
+    padding: 0.6rem 0.7rem;
+  }
+  .shell-context .if-context-nav__head { padding-bottom: 8px; }
 }
 
 .logout { margin: 0; }
@@ -302,9 +348,9 @@ button, summary {
 }
 
 .btn, .login button, .trigger button, .logout button.primary, .chat-send {
-  background: var(--jade);
+  background: var(--action);
   color: var(--btn-fg);
-  border: 1px solid color-mix(in srgb, var(--jade) 70%, var(--ink));
+  border: 1px solid color-mix(in srgb, var(--action) 70%, var(--ink));
   padding: 0.45rem 0.85rem;
   font-weight: 600;
   cursor: pointer;
@@ -470,7 +516,7 @@ button, summary {
   font-weight: 600;
 }
 .specimen-title a { color: var(--ink); text-decoration: none; }
-.specimen-title a:hover { color: var(--jade); text-decoration: underline; }
+.specimen-title a:hover { color: var(--action); text-decoration: underline; }
 .forge-mark {
   display: inline-flex;
   vertical-align: -0.2em;
@@ -490,7 +536,7 @@ a.pr-external {
   text-decoration: none;
   vertical-align: middle;
 }
-a.pr-external:hover { color: var(--jade); text-decoration: none; }
+a.pr-external:hover { color: var(--action); text-decoration: none; }
 a.pr-external svg { width: 1em; height: 1em; display: block; }
 h1 a.pr-external { font-size: 0.72em; }
 
@@ -710,7 +756,7 @@ h1 a.pr-external { font-size: 0.72em; }
   margin: 0 0.35rem;
 }
 .stack-mini-member a { color: inherit; text-decoration: none; }
-.stack-mini-member a:hover { color: var(--jade); text-decoration: underline; }
+.stack-mini-member a:hover { color: var(--action); text-decoration: underline; }
 .stack-mini-node {
   width: 1.15rem;
   height: 1.15rem;
@@ -896,8 +942,8 @@ form.retry, form.retry-job, form.dequeue {
   white-space: nowrap;
 }
 .retry button:hover, .retry-job button:hover, .dequeue button:hover, a.cancel-review:hover {
-  color: var(--jade);
-  border-color: var(--jade);
+  color: var(--action);
+  border-color: var(--action);
 }
 /* The cancel entry point is an anchor styled as a button: match the form controls. */
 a.cancel-review { text-decoration: none; display: inline-block; }
@@ -908,7 +954,7 @@ a.cancel-review { text-decoration: none; display: inline-block; }
   gap: 0.45rem;
   font-weight: 600;
 }
-.role svg { width: 1rem; height: 1rem; color: var(--herb); flex: none; }
+.role svg { width: 1rem; height: 1rem; color: var(--action); flex: none; }
 .role-agg svg { color: var(--plum); }
 
 .finding {
@@ -1113,7 +1159,7 @@ details.finding-diff > summary {
   border-radius: 6px;
 }
 .typeahead-option.is-active,
-.typeahead-option[aria-selected="true"] { background: color-mix(in srgb, var(--herb) 26%, transparent); }
+.typeahead-option[aria-selected="true"] { background: color-mix(in srgb, var(--action) 26%, transparent); }
 .typeahead-empty,
 .typeahead-empty.is-active {
   cursor: default;
@@ -1144,8 +1190,8 @@ details.finding-diff > summary {
   text-align: left;
   cursor: pointer;
 }
-.model-picker-btn:hover { border-color: var(--jade); }
-.model-picker-btn[aria-expanded="true"] { border-color: var(--jade); }
+.model-picker-btn:hover { border-color: var(--action); }
+.model-picker-btn[aria-expanded="true"] { border-color: var(--action); }
 .model-picker-btn[aria-invalid="true"] { border-color: var(--cinnabar); }
 .model-picker-label {
   overflow: hidden;
@@ -1211,8 +1257,8 @@ details.finding-diff > summary {
   border-radius: 6px;
   cursor: pointer;
 }
-.model-picker-option.is-active { background: color-mix(in srgb, var(--herb) 26%, transparent); }
-.model-picker-check { flex: none; width: 1em; color: var(--jade); visibility: hidden; }
+.model-picker-option.is-active { background: color-mix(in srgb, var(--action) 26%, transparent); }
+.model-picker-check { flex: none; width: 1em; color: var(--action); visibility: hidden; }
 .model-picker-option[aria-selected="true"] .model-picker-check { visibility: visible; }
 .model-picker-text { display: flex; flex-direction: column; min-width: 0; }
 .model-picker-name {
@@ -1422,8 +1468,8 @@ details summary { cursor: pointer; color: var(--ink-muted); }
   max-width: 60rem;
 }
 .chat-bubble p { margin: var(--space-1) 0 0; overflow-wrap: anywhere; }
-.chat-bubble-user { border-left: 3px solid var(--herb); }
-.chat-bubble-assistant { border-left: 3px solid var(--jade); }
+.chat-bubble-user { border-left: 3px solid var(--if-info, var(--herb)); }
+.chat-bubble-assistant { border-left: 3px solid var(--action); }
 .chat-thread { display: grid; gap: var(--space-3); margin-top: var(--space-4); }
 .chat-viewport {
   display: grid;
@@ -1468,7 +1514,7 @@ details summary { cursor: pointer; color: var(--ink-muted); }
   font-weight: 600;
   letter-spacing: 0.02em;
 }
-.chat-cancel:hover { color: var(--jade); border-color: var(--jade); }
+.chat-cancel:hover { color: var(--action); border-color: var(--action); }
 .chat-send:disabled, .chat-cancel:disabled { opacity: 0.5; cursor: default; }
 .chat-error { border: 1px solid var(--cinnabar); background: var(--cinnabar-soft); color: var(--ink); border-radius: var(--radius); padding: var(--space-2); }
 .chat-suggestions { display: flex; flex-wrap: wrap; gap: var(--space-2); }
@@ -1483,7 +1529,7 @@ details summary { cursor: pointer; color: var(--ink-muted); }
   font-size: 0.85rem;
   font-weight: 600;
 }
-.chat-suggestion:hover { color: var(--jade); border-color: var(--jade); }
+.chat-suggestion:hover { color: var(--action); border-color: var(--action); }
 
 /* ---- Operator chrome (header menu + secondary pages) ---- */
 .account-menu { position: relative; }
@@ -1546,7 +1592,7 @@ details summary { cursor: pointer; color: var(--ink-muted); }
 }
 .account-menu-panel a:hover,
 .account-logout button:hover {
-  background: var(--jade-soft);
+  background: var(--action-soft);
   color: var(--ink);
 }
 .account-logout { margin: 0.15rem 0 0; padding: 0.15rem 0 0; border-top: 1px solid var(--line); }
@@ -1558,8 +1604,8 @@ body.operator main form:not(.chat-composer) button {
   letter-spacing: 0.02em;
   cursor: pointer;
   padding: 0.45rem 0.85rem;
-  border: 1px solid color-mix(in srgb, var(--jade) 70%, var(--ink));
-  background: var(--jade);
+  border: 1px solid color-mix(in srgb, var(--action) 70%, var(--ink));
+  background: var(--action);
   color: var(--btn-fg);
 }
 .btn-secondary,
@@ -1576,8 +1622,8 @@ body.operator main form:not(.chat-composer) button.btn-danger {
 }
 .btn:hover, body.operator main form:not(.chat-composer) button:hover { filter: brightness(1.05); }
 .btn-secondary:hover, body.operator main form:not(.chat-composer) button.btn-secondary:hover {
-  color: var(--jade);
-  border-color: var(--jade);
+  color: var(--action);
+  border-color: var(--action);
   filter: none;
 }
 
@@ -1660,10 +1706,10 @@ body.operator main th {
   border-radius: 50%;
   border: 1px solid var(--line-strong);
 }
-.role-check:hover { border-color: var(--jade); color: var(--ink); }
+.role-check:hover { border-color: var(--action); color: var(--ink); }
 .role-check input { position: absolute; opacity: 0; width: 1px; height: 1px; margin: 0; }
-.role-check:has(input:checked) { background: var(--jade-soft); border-color: var(--jade); color: var(--ink); font-weight: 600; }
-.role-check:has(input:checked)::before { background: var(--jade); border-color: var(--jade); }
+.role-check:has(input:checked) { background: var(--action-soft); border-color: var(--action); color: var(--ink); font-weight: 600; }
+.role-check:has(input:checked)::before { background: var(--action); border-color: var(--action); }
 .role-check:has(input:focus-visible) { outline: 2px solid var(--focus); outline-offset: 2px; }
 .alert-level[aria-invalid="true"] .role-check { border-color: var(--cinnabar); }
 .connection-flags { display: flex; flex-wrap: wrap; gap: 0.35rem; margin-top: 0.6rem; }
@@ -1819,8 +1865,8 @@ body.operator main th {
   padding: 0.22rem 0.65rem;
   cursor: pointer;
 }
-.chat-action:hover { color: var(--jade); border-color: var(--jade); }
-.chat-action[data-copied] { color: var(--jade); }
+.chat-action:hover { color: var(--action); border-color: var(--action); }
+.chat-action[data-copied] { color: var(--action); }
 .chat-footer { display: grid; gap: var(--space-3); }
 .chat-scroll-bottom {
   justify-self: center;
@@ -1834,7 +1880,7 @@ body.operator main th {
   padding: 0.22rem 0.65rem;
   cursor: pointer;
 }
-.chat-scroll-bottom:hover { color: var(--jade); border-color: var(--jade); }
+.chat-scroll-bottom:hover { color: var(--action); border-color: var(--action); }
 .chat-indicator { margin: 0; }
 .chat-toolbar {
   display: flex;
@@ -1881,9 +1927,9 @@ body.operator main th {
   display: inline-block;
   margin: 0.35rem 0;
   font-weight: 600;
-  background: var(--jade);
+  background: var(--action);
   color: var(--btn-fg);
-  border: 1px solid color-mix(in srgb, var(--jade) 70%, var(--ink));
+  border: 1px solid color-mix(in srgb, var(--action) 70%, var(--ink));
   padding: 0.45rem 0.85rem;
   text-decoration: none;
 }

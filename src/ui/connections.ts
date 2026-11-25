@@ -159,5 +159,5 @@ export function renderConnectionsPage(data: ConnectionsPageData): string {
       <p><button type="submit" class="btn">Create connection</button></p>
     </form>
   </section>`;
-  return layout("Forge connections", body, { ...data.options, surface: "operator" });
+  return layout("Forge connections", body, { ...data.options, surface: "operator", nav: "settings", settingsSection: "connections" });
 }

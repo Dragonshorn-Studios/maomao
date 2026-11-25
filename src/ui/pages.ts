@@ -17,6 +17,8 @@ import { elapsedMs, escapeHtml, formatDuration, shortSha } from "../util.js";
 import { KNOWN_REVIEWER_ROLES, composeReviewerPrompt, promptBodyFromRolePrompt } from "../prompts.js";
 import { composedPipelineStages } from "../prompt-previews.js";
 import {
+  OPERATOR_NAME,
+  PRODUCT_NAME,
   cancelledBannerCopy,
   diffUnavailableCopy,
   emptyQueueCopy,
@@ -43,7 +45,7 @@ import {
 } from "./copy.js";
 import { externalLinkGlyph, pancakeMark, roleGlyph, stackMark } from "./glyphs.js";
 import { TYPEAHEAD_HREF } from "./typeahead.js";
-import { csrfInput, layout, type PageOptions, type UiIdentity } from "./layout.js";
+import { csrfInput, layout, type PageOptions, type QueueView, type UiIdentity } from "./layout.js";
 import {
   findingLocation,
   formatCost,
@@ -100,12 +102,12 @@ export function renderLogin(options: LoginOptions = {}): string {
     : "";
   const body = `
     <h1>Sign in</h1>
-    <p class="lede">Sign in to view jobs, logs, and APIs.</p>
+    <p class="lede">Sign in to ${escapeHtml(PRODUCT_NAME)} — the merge gate operated by ${escapeHtml(OPERATOR_NAME)} — to view jobs, logs, and APIs.</p>
     ${errorCopy ? `<p class="error" role="alert">${escapeHtml(errorCopy)}</p>` : ""}
     ${githubButton}
     ${githubButton && passwordForm ? `<p class="muted">or</p>` : ""}
     ${passwordForm}`;
-  return layout("Maomao sign in", body, { live: false, accountMenu: false });
+  return layout(`${PRODUCT_NAME} sign in`, body, { live: false, accountMenu: false, rail: false });
 }
 
 const JOB_TYPE_FILTERS: { value: JobRow["job_type"]; label: string }[] = [
@@ -116,8 +118,63 @@ const JOB_TYPE_FILTERS: { value: JobRow["job_type"]; label: string }[] = [
   { value: "merge_group_check", label: "Merge groups" },
 ];
 
+/**
+ * The home queue's family split. The merge queue — reviews and merge-group
+ * checks that gate merging — is the product's default surface; operations
+ * collects the operator-triggered maintenance jobs; `all` is the undivided
+ * history. `types` undefined means no family restriction.
+ */
+export const QUEUE_VIEWS: Array<{
+  id: QueueView,
+  label: string,
+  h1: string,
+  lede: string,
+  types?: Array<JobRow["job_type"]>,
+}> = [
+  {
+    id: "merge",
+    label: "Merge queue",
+    h1: "Merge queue",
+    lede: "Reviews and merge-group checks gating the merge. Each job is anchored to an exact head SHA.",
+    types: ["pr_review", "stack_review", "merge_group_check"],
+  },
+  {
+    id: "ops",
+    label: "Operations",
+    h1: "Operations",
+    lede: "Health scans and repo briefs — operator-triggered maintenance work, newest first.",
+    types: ["health_scan", "repo_brief"],
+  },
+  {
+    id: "all",
+    label: "All jobs",
+    h1: "All jobs",
+    lede: "The undivided job history, newest first. Each job is anchored to an exact head SHA.",
+  },
+];
+
+/** Query string carrying the queue-view state that is *not* the job-type
+ * refinement: the family view, forge scope, superseded history and repo
+ * filter. Type is deliberately dropped across views — it may not exist in
+ * the target family. The default merge view keeps clean URLs. */
+function queueParams(input: { view?: QueueView; forge?: string; superseded?: boolean; repo?: string }): string {
+  const params = new URLSearchParams();
+  if (input.view && input.view !== "merge") params.set("view", input.view);
+  if (input.forge) params.set("forge", input.forge);
+  if (input.superseded) params.set("superseded", "1");
+  if (input.repo) params.set("repo", input.repo);
+  const text = params.toString();
+  return text ? `?${text}` : "";
+}
+
 export function renderHome(jobs: JobRow[], store: JobStore, options: PageOptions = {}): string {
   const empty = emptyQueueCopy();
+  const view = options.queueView?.active ?? "merge";
+  const viewDef = QUEUE_VIEWS.find((entry) => entry.id === view) ?? QUEUE_VIEWS[0];
+  const viewTypes = viewDef.types as readonly string[] | undefined;
+  // The job-type select refines inside the active family: a type the view
+  // cannot contain would only render an empty list.
+  const typeFilters = JOB_TYPE_FILTERS.filter((entry) => !viewTypes || viewTypes.includes(entry.value));
   const stackSummaries = store.stackMemberSummaries(
     jobs.filter((job) => job.job_type === "stack_review").map((job) => job.id),
   );
@@ -153,29 +210,31 @@ export function renderHome(jobs: JobRow[], store: JobStore, options: PageOptions
     superseded: options.superseded?.active === true,
     repo: options.jobFilters?.repo,
     jobType: options.jobFilters?.type,
+    view,
   });
   const pancakeChip = pancakeChipFor(store, options.uiFlavor);
   // data-forge is scaffolding for future client-side filtering; nothing
   // consumes it yet. An explicit All chip clears the active filter.
+  const chipBase = { view, repo: options.jobFilters?.repo };
   const allChip = options.activeForge
-    ? `<a class="top-link" href="/">All forges</a>`
+    ? `<a class="top-link" href="/${queueParams({ ...chipBase, superseded: options.superseded?.active === true })}">All forges</a>`
     : "";
   const forgeChips = (options.forgeScopes ?? [])
     .map((scope) => {
       const key = `${scope.provider}:${scope.instance}`;
       const active = options.activeForge === key;
-      return `<a class="top-link" data-forge="${escapeHtml(key)}" href="/?forge=${encodeURIComponent(key)}" ${active ? 'aria-current="true"' : ""}>${escapeHtml(forgeChipLabel({ provider: scope.provider, provider_instance: scope.instance }))}</a>`;
+      const href = `/${queueParams({ ...chipBase, forge: key, superseded: options.superseded?.active === true })}`;
+      return `<a class="top-link" data-forge="${escapeHtml(key)}" href="${href}" ${active ? 'aria-current="true"' : ""}>${escapeHtml(forgeChipLabel({ provider: scope.provider, provider_instance: scope.instance }))}</a>`;
     })
     .join("\n      ");
   const forgeNav = options.forgeScopes && options.forgeScopes.length > 1 ? `${allChip}${forgeChips}` : "";
   // Superseded rows are filtered server-side; the chip toggles the full
   // history back on and reports how many cards the default view hides.
   const superseded = options.superseded;
-  const forgeQuery = options.activeForge ? `&forge=${encodeURIComponent(options.activeForge)}` : "";
   const supersededChip = superseded?.active
-    ? `<a class="top-link" href="/?${forgeQuery ? forgeQuery.slice(1) : ""}" aria-current="true">Hide superseded</a>`
+    ? `<a class="top-link" href="/${queueParams({ ...chipBase, forge: options.activeForge })}" aria-current="true">Hide superseded</a>`
     : superseded && superseded.hidden > 0
-      ? `<a class="top-link" href="/?superseded=1${forgeQuery}">Show superseded (${superseded.hidden})</a>`
+      ? `<a class="top-link" href="/${queueParams({ ...chipBase, forge: options.activeForge, superseded: true })}">Show superseded (${superseded.hidden})</a>`
       : "";
   const filterNav = [forgeNav, supersededChip].filter(Boolean).join("\n      ");
 
@@ -184,6 +243,7 @@ export function renderHome(jobs: JobRow[], store: JobStore, options: PageOptions
   const jobFilters = options.jobFilters;
   const filterForm = jobFilters
     ? `<form class="trigger job-filters" method="get" action="/">
+      ${view !== "merge" ? `<input type="hidden" name="view" value="${view}"/>` : ""}
       ${options.activeForge ? `<input type="hidden" name="forge" value="${escapeHtml(options.activeForge)}"/>` : ""}
       ${superseded?.active ? `<input type="hidden" name="superseded" value="1"/>` : ""}
       <label>
@@ -202,20 +262,33 @@ export function renderHome(jobs: JobRow[], store: JobStore, options: PageOptions
         Job type
         <select name="type">
           <option value="">All types</option>
-          ${JOB_TYPE_FILTERS.map(
+          ${typeFilters.map(
             (entry) =>
               `<option value="${entry.value}"${jobFilters.type === entry.value ? " selected" : ""}>${escapeHtml(entry.label)}</option>`,
           ).join("")}
         </select>
       </label>
       <button type="submit">Filter</button>
-      ${jobFilters.repo || jobFilters.type ? `<a class="top-link" href="/${options.activeForge ? `?forge=${encodeURIComponent(options.activeForge)}` : ""}">Clear filters</a>` : ""}
+      ${jobFilters.repo || jobFilters.type ? `<a class="top-link" href="/${queueParams({ view, forge: options.activeForge, superseded: superseded?.active === true })}">Clear filters</a>` : ""}
     </form>`
     : "";
 
+  const viewTabs = `<nav class="queue-views" aria-label="Queue views">
+    <span class="if-tabs">${QUEUE_VIEWS.map((entry) => {
+      const active = entry.id === view;
+      const href = `/${queueParams({
+        view: entry.id,
+        forge: options.activeForge,
+        superseded: superseded?.active === true,
+        repo: options.jobFilters?.repo,
+      })}`;
+      return `<a class="if-tab${active ? " is-active" : ""}" href="${href}"${active ? ' aria-current="page"' : ""}>${escapeHtml(entry.label)}</a>`;
+    }).join("")}</span>
+  </nav>`;
   const body = `
-    <h1>Review jobs</h1>
-    <p class="lede">Recent pull request reviews. Each job is anchored to an exact head SHA.${pancakeChip ? ` ${pancakeChip}` : ""}</p>
+    <h1>${escapeHtml(viewDef.h1)}</h1>
+    <p class="lede">${escapeHtml(viewDef.lede)}${pancakeChip ? ` ${pancakeChip}` : ""}</p>
+    ${viewTabs}
     ${filterNav ? `<div class="meta-row" role="navigation" aria-label="Filter jobs">${filterNav}</div>` : ""}
     ${filterForm}
     ${options.notice ? `<p class="notice" role="status">${escapeHtml(options.notice)}</p>` : ""}
@@ -232,12 +305,12 @@ export function renderHome(jobs: JobRow[], store: JobStore, options: PageOptions
       cards
         ? `<ol class="queue">${cards}</ol>`
         : `<div class="empty" role="status">
-            <p><strong>${escapeHtml(empty.title)}</strong></p>
-            <p class="muted">${escapeHtml(empty.body)}</p>
+            <p><strong>${escapeHtml(view === "ops" ? "No operations have run yet." : empty.title)}</strong></p>
+            <p class="muted">${escapeHtml(view === "ops" ? "Health scans and repo briefs land here once the operator runs them." : empty.body)}</p>
           </div>`
     }
     ${paginationNav}`;
-  return layout("Maomao", body, options);
+  return layout(PRODUCT_NAME, body, { nav: "queue", ...options });
 }
 
 /**
@@ -263,9 +336,10 @@ function pancakeChipFor(store: JobStore, flavor?: UiFlavor): string {
 function renderJobsPagination(
   jobs: JobRow[],
   pagination?: { hasOlder: boolean; hasNewer: boolean },
-  filters?: { forge?: string; superseded?: boolean; repo?: string; jobType?: string },
+  filters?: { forge?: string; superseded?: boolean; repo?: string; jobType?: string; view?: QueueView },
 ): string {
-  const forgeParam = filters?.forge ? `&forge=${encodeURIComponent(filters.forge)}` : "";
+  const viewParam = filters?.view && filters.view !== "merge" ? `&view=${filters.view}` : "";
+  const forgeParam = `${viewParam}${filters?.forge ? `&forge=${encodeURIComponent(filters.forge)}` : ""}`;
   const supersededParam = filters?.superseded ? `&superseded=1` : "";
   const repoParam = filters?.repo ? `&repo=${encodeURIComponent(filters.repo)}` : "";
   const typeParam = filters?.jobType ? `&type=${encodeURIComponent(filters.jobType)}` : "";
@@ -559,7 +633,10 @@ export function renderJob(
           ? `Merge group · ${job.repo_full_name}`
           : forgeBadgeTitle(job, job.repo_full_name, job.pr_number),
     body,
-    options,
+    {
+      nav: job.job_type === "health_scan" ? "scan" : job.job_type === "repo_brief" ? "brief" : "queue",
+      ...options,
+    },
   );
 }
 
@@ -819,7 +896,7 @@ export function renderReviewerBoard(
           ? `<div class="empty" role="status"><p><strong>Page ${pagination.page} is beyond the last page (${totalPages}).</strong></p><p class="muted">${pagination.total} runs${stateFilter ? ` with status ${escapeHtml(stateFilter)}` : ""} — <a href="/reviewers?page=${totalPages}${stateParam}">back to page ${totalPages}</a>.</p></div>`
           : `<div class="empty" role="status"><p><strong>No reviewer runs${stateFilter ? ` with status ${escapeHtml(stateFilter)}` : ""}.</strong></p><p class="muted">Runs appear here as soon as a review job picks specialists.</p></div>`
     }`;
-  return layout("Maomao reviewers", body, options);
+  return layout(`${PRODUCT_NAME} reviewers`, body, { nav: "reviewers", ...options });
 }
 
 function renderRouting(job: JobRow): string {
@@ -1463,28 +1540,6 @@ function renderEffectiveConfigSection(entries: EffectiveConfigEntry[]): string {
     ${sections}`;
 }
 
-/** Shared sub-nav across the /config pages so each section is one click away. */
-export type ConfigSection = "effective" | "profiles" | "providers" | "telemetry" | "trusted-checks" | "merge-modes" | "prompts" | "audit" | "deliveries";
-
-export function configSubNav(active: ConfigSection): string {
-  const links: Array<[ConfigSection, string, string]> = [
-    ["effective", "/config", "Effective configuration"],
-    ["profiles", "/config/profiles", "Profiles"],
-    ["providers", "/config/providers", "Provider keys"],
-    ["telemetry", "/config/telemetry", "Telemetry"],
-    ["trusted-checks", "/config/trusted-checks", "Trusted checks"],
-    ["merge-modes", "/config/merge-modes", "Merge modes"],
-    ["prompts", "/config/prompts", "Specialist prompts"],
-    ["audit", "/config/audit", "Audit"],
-    ["deliveries", "/config/deliveries", "Deliveries"],
-  ];
-  return `<p class="config-nav">${links
-    .map(([id, href, label]) =>
-      id === active ? `<strong>${escapeHtml(label)}</strong>` : `<a href="${href}">${escapeHtml(label)}</a>`,
-    )
-    .join(" · ")}</p>`;
-}
-
 /** One-line summary of what a profile definition configures. */
 function profileSummary(definition: ProfileDefinition): string {
   const reviewers = definition.reviewers
@@ -1830,14 +1885,13 @@ export function renderProfileForm(
 /**
  * /config landing: the effective configuration with per-row provenance and a
  * "how to change this" pointer. Profiles, provider keys, prompts, and the audit
- * trail each live on their own page (see configSubNav) so no single render can
+ * trail each live on their own page (see the settings side nav) so no single render can
  * derail an unrelated flow.
  */
 export function renderConfigPage(data: ConfigPageData): string {
   const body = `
     <h1>Review configuration</h1>
     <p class="lede">What this process is actually running, with the source of every value and where to change it.</p>
-    ${configSubNav("effective")}
     ${data.notice ? `<p class="notice" role="status">${escapeHtml(data.notice)}</p>` : ""}
     ${data.error ? `<p class="error" role="alert">${escapeHtml(data.error)}</p>` : ""}
     ${data.effectiveConfig ? renderEffectiveConfigSection(data.effectiveConfig) : ""}
@@ -1847,6 +1901,8 @@ export function renderConfigPage(data: ConfigPageData): string {
     csrfToken: data.csrfToken,
     identity: data.identity,
     surface: "operator",
+    nav: "settings",
+    settingsSection: "effective",
   });
 }
 
@@ -2011,7 +2067,6 @@ export function renderProfilesPage(data: ConfigPageData): string {
   const body = `
     <h1>Review profiles</h1>
     <p class="lede">A profile bundles reviewer roles, models, publish floor, and budgets. New jobs run with the active revision of the profile their repo routes to below; unmatched repos use the active <code>default</code>, and with nothing active the env configuration applies. Credentials are never part of a profile.</p>
-    ${configSubNav("profiles")}
     ${data.notice ? `<p class="notice" role="status">${escapeHtml(data.notice)}</p>` : ""}
     ${data.error ? `<p class="error" role="alert">${escapeHtml(data.error)}</p>` : ""}
     ${createLink}
@@ -2029,6 +2084,8 @@ export function renderProfilesPage(data: ConfigPageData): string {
     csrfToken: data.csrfToken,
     identity: data.identity,
     surface: "operator",
+    nav: "settings",
+    settingsSection: "profiles",
   });
 }
 
@@ -2067,7 +2124,6 @@ export function renderDraftEditPage(data: DraftEditPageData): string {
       )
     : `<p class="muted">Writing configuration requires an operator OAuth identity.</p>`;
   const body = `
-    ${configSubNav("profiles")}
     <p class="crumb"><a href="/config/profiles">Profiles</a> / Draft #${data.revision.id}</p>
     ${data.notice ? `<p class="notice" role="status">${escapeHtml(data.notice)}</p>` : ""}
     ${data.error ? `<p class="error" role="alert">${escapeHtml(data.error)}</p>` : ""}
@@ -2077,6 +2133,8 @@ export function renderDraftEditPage(data: DraftEditPageData): string {
     csrfToken: data.csrfToken,
     identity: data.identity,
     surface: "operator",
+    nav: "settings",
+    settingsSection: "profiles",
   });
 }
 
@@ -2112,7 +2170,6 @@ export function renderNewProfilePage(data: ConfigPageData): string {
       )
     : `<p class="muted">Writing configuration requires an operator OAuth identity.</p>`;
   const body = `
-    ${configSubNav("profiles")}
     <p class="crumb"><a href="/config/profiles">Profiles</a> / New draft</p>
     ${data.notice ? `<p class="notice" role="status">${escapeHtml(data.notice)}</p>` : ""}
     ${data.error ? `<p class="error" role="alert">${escapeHtml(data.error)}</p>` : ""}
@@ -2122,6 +2179,8 @@ export function renderNewProfilePage(data: ConfigPageData): string {
     csrfToken: data.csrfToken,
     identity: data.identity,
     surface: "operator",
+    nav: "settings",
+    settingsSection: "profiles",
   });
 }
 
@@ -2163,7 +2222,6 @@ export function renderConfigDeliveriesPage(data: ConfigPageData): string {
   const body = `
     <h1>Webhook deliveries</h1>
     <p class="lede">Every verified webhook delivery maomao answered — most recent first. <span class="muted">Dimmed rows were ignored</span>; the result column carries the reason (stack chatter, unsupported events, non-command comments) alongside handled outcomes.</p>
-    ${configSubNav("deliveries")}
     ${data.notice ? `<p class="notice" role="status">${escapeHtml(data.notice)}</p>` : ""}
     ${data.error ? `<p class="error" role="alert">${escapeHtml(data.error)}</p>` : ""}
     ${deliveriesTable(deliveries)}
@@ -2173,6 +2231,8 @@ export function renderConfigDeliveriesPage(data: ConfigPageData): string {
     csrfToken: data.csrfToken,
     identity: data.identity,
     surface: "operator",
+    nav: "settings",
+    settingsSection: "deliveries",
   });
 }
 
@@ -2181,7 +2241,6 @@ export function renderConfigAuditPage(data: ConfigPageData): string {
   const body = `
     <h1>Configuration audit</h1>
     <p class="lede">The most recent configuration changes — who did what, and when.</p>
-    ${configSubNav("audit")}
     ${data.notice ? `<p class="notice" role="status">${escapeHtml(data.notice)}</p>` : ""}
     ${data.error ? `<p class="error" role="alert">${escapeHtml(data.error)}</p>` : ""}
     ${configAuditTable(data.audit)}`;
@@ -2190,6 +2249,8 @@ export function renderConfigAuditPage(data: ConfigPageData): string {
     csrfToken: data.csrfToken,
     identity: data.identity,
     surface: "operator",
+    nav: "settings",
+    settingsSection: "audit",
   });
 }
 
@@ -2453,7 +2514,6 @@ export function renderPromptConfigPage(data: PromptConfigPageData): string {
     )
     .join("");
   const body = `
-    ${configSubNav("prompts")}
     <h1>Specialist prompts</h1>
     <p class="lede">Each specialist ships with built-in instructions. Override a role when you need different focus; the live override is the active revision, drafts stay private until you activate them. Security guardrails are composed at runtime and are not editable — expand <strong>Composed built-in</strong> to read guardrails plus the current body. Evaluation never publishes to GitHub.</p>
     ${data.notice ? `<p class="notice" role="status">${escapeHtml(data.notice)}</p>` : ""}
@@ -2477,6 +2537,8 @@ export function renderPromptConfigPage(data: PromptConfigPageData): string {
     csrfToken: data.csrfToken,
     identity: data.identity,
     surface: "operator",
+    nav: "settings",
+    settingsSection: "prompts",
   });
 }
 
@@ -2585,6 +2647,7 @@ export function renderScanConfirmPage(data: ScanConfirmData): string {
     csrfToken: data.csrfToken,
     identity: data.identity,
     surface: "operator",
+    nav: "scan",
   });
 }
 
@@ -2630,6 +2693,7 @@ export function renderScanPage(data: ScanPageData): string {
     csrfToken: data.csrfToken,
     identity: data.identity,
     surface: "operator",
+    nav: "scan",
   });
 }
 
@@ -2763,6 +2827,7 @@ export function renderScanIssuePreviewPage(data: ScanIssuePreviewData): string {
     csrfToken: data.csrfToken,
     identity: data.identity,
     surface: "operator",
+    nav: "scan",
   });
 }
 
@@ -2856,6 +2921,7 @@ export function renderBriefConfirmPage(data: BriefConfirmData): string {
     csrfToken: data.csrfToken,
     identity: data.identity,
     surface: "operator",
+    nav: "brief",
   });
 }
 
@@ -2904,6 +2970,7 @@ export function renderBriefPage(data: BriefPageData): string {
     csrfToken: data.csrfToken,
     identity: data.identity,
     surface: "operator",
+    nav: "brief",
   });
 }
 
@@ -2993,6 +3060,7 @@ export function renderPausePage(data: PausePageData): string {
     csrfToken: data.csrfToken,
     identity: data.identity,
     surface: "operator",
+    nav: "queue",
   });
 }
 
@@ -3044,6 +3112,7 @@ export function renderBriefTabPage(data: BriefTabData): string {
     csrfToken: data.csrfToken,
     identity: data.identity,
     surface: "operator",
+    nav: "brief",
   });
 }
 

@@ -1,6 +1,5 @@
 import { escapeHtml } from "../util.js";
 import { csrfInput, layout, type PageOptions } from "./layout.js";
-import { configSubNav } from "./pages.js";
 import type { TrustedCheckSettingsStatus } from "../checks/settings.js";
 
 export interface TrustedChecksPageData {
@@ -72,7 +71,6 @@ export function renderTrustedChecksPage(data: TrustedChecksPageData): string {
     ${envManaged && data.canWrite && status.hasStored ? `<form method="post" action="/config/trusted-checks/delete">${csrfInput(data.csrfToken)}<button type="submit" class="btn-danger">Clear shadowed stored settings</button></form>` : ""}
   </section>`;
   const body = `
-    ${configSubNav("trusted-checks")}
     ${data.options.notice ? `<p class="notice" role="status">${escapeHtml(data.options.notice)}</p>` : ""}
     ${data.options.error ? `<p class="error" role="alert">${escapeHtml(data.options.error)}</p>` : ""}
     <h1>Trusted checks</h1>
@@ -80,5 +78,5 @@ export function renderTrustedChecksPage(data: TrustedChecksPageData): string {
     ${current}
     ${form}
   `;
-  return layout("Trusted checks", body, { ...data.options, surface: "operator" });
+  return layout("Trusted checks", body, { ...data.options, surface: "operator", nav: "settings", settingsSection: "trusted-checks" });
 }

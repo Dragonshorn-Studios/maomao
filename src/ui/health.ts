@@ -34,5 +34,5 @@ export function renderHealthPage(data: HealthPageData): string {
       </div>
     </dl>
     <p class="muted">Machine-readable: <a href="/health?json=1"><code>GET /health?json=1</code></a></p>`;
-  return layout("Health", body, { live: false, surface: "operator", ...data.options });
+  return layout("Health", body, { live: false, surface: "operator", nav: "health", settingsSection: "health", ...data.options });
 }

@@ -2114,8 +2114,8 @@ describe("config page IA", () => {
     expect(html).toContain("&lt;img src=x onerror=alert(1)&gt;");
     expect(html).toContain("&lt;script&gt;");
     expect(html).not.toContain("<img src=x onerror");
-    // Active sub-nav section renders as <strong>, siblings stay links.
-    expect(html).toContain("<strong>Deliveries</strong>");
+    // The active settings side-nav entry is aria-current; siblings stay links.
+    expect(html).toContain('href="/config/deliveries" aria-current="page"');
     expect(html).toContain('href="/config/audit"');
 
     // Keyset link appears once a page fills up.

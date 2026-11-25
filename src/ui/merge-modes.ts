@@ -2,7 +2,6 @@ import type { MergeModeRule } from "../merge/settings.js";
 import type { ForgeMergeMode } from "../forge/types.js";
 import { escapeHtml } from "../util.js";
 import { csrfInput, layout, type PageOptions } from "./layout.js";
-import { configSubNav } from "./pages.js";
 
 export interface MergeModesPageData {
   rules: MergeModeRule[];
@@ -47,7 +46,6 @@ export function renderMergeModesPage(data: MergeModesPageData): string {
     <div class="telemetry-actions"><button type="submit" class="btn">Save merge mode</button></div>
   </form>` : "";
   const body = `
-    ${configSubNav("merge-modes")}
     ${data.options.notice ? `<p class="notice" role="status">${escapeHtml(data.options.notice)}</p>` : ""}
     ${data.options.error ? `<p class="error" role="alert">${escapeHtml(data.options.error)}</p>` : ""}
     <h1>Merge modes</h1>
@@ -58,5 +56,5 @@ export function renderMergeModesPage(data: MergeModesPageData): string {
     </section>
     ${form}
   `;
-  return layout("Merge modes", body, { ...data.options, surface: "operator" });
+  return layout("Merge modes", body, { ...data.options, surface: "operator", nav: "settings", settingsSection: "merge-modes" });
 }

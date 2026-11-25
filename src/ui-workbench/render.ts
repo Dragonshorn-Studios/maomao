@@ -156,12 +156,13 @@ function workbenchShell(
 ): string {
   const theme = options.theme ?? "light";
   return `<!doctype html>
-<html lang="en" data-theme="${theme}">
+<html lang="en" data-theme="${theme}" data-if-theme="${theme}" data-if-brand="mergehenna">
 <head>
   <meta charset="utf-8"/>
   <meta name="viewport" content="width=device-width, initial-scale=1"/>
   <meta name="robots" content="noindex"/>
   <title>${escapeHtml(title)} · Maomao UI workbench</title>
+  <link rel="stylesheet" href="/assets/infernal.css"/>
   <link rel="stylesheet" href="/assets/maomao.css"/>
   <style>${WORKBENCH_CSS}</style>
   ${options.extraHead ?? ""}
@@ -440,12 +441,13 @@ export function renderFrame(
     : "";
 
   return `<!doctype html>
-<html lang="en" data-theme="${options.theme}"${options.frozen ? ' data-workbench-frozen="1"' : ""}>
+<html lang="en" data-theme="${options.theme}" data-if-theme="${options.theme}" data-if-brand="mergehenna"${options.frozen ? ' data-workbench-frozen="1"' : ""}>
 <head>
   <meta charset="utf-8"/>
   <meta name="viewport" content="width=device-width, initial-scale=1"/>
   <meta name="robots" content="noindex"/>
   <title>${escapeHtml(story.title)} · ${escapeHtml(variant.title)}</title>
+  <link rel="stylesheet" href="/assets/infernal.css"/>
   <link rel="stylesheet" href="/assets/maomao.css"/>
   ${frozenStyle}
   ${scripts}

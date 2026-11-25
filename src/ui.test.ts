@@ -3,6 +3,7 @@ import { openDb } from "./db.js";
 import { seedDemoJobs } from "./demo/fixtures.js";
 import { JobStore } from "./jobs/store.js";
 import { THEME_CSS } from "./ui/theme.js";
+import { INFERNAL_CSS } from "./ui/infernal.js";
 import { TYPEAHEAD_JS } from "./ui/typeahead.js";
 import { renderConfigAuditPage, renderConfigPage, renderDraftEditPage, renderHome, renderJob, renderLogin, renderProfilesPage, renderPromptConfigPage, renderReviewerBoard, renderScanConfirmPage, renderScanIssuePreviewPage, renderScanPage } from "./ui/pages.js";
 import { layout } from "./ui/layout.js";
@@ -29,7 +30,7 @@ describe("theme tokens", () => {
     expect(THEME_CSS).toContain("--cinnabar:");
     expect(THEME_CSS).toContain("--amber:");
     expect(THEME_CSS).toContain("--working:");
-    expect(THEME_CSS).toContain("--working: var(--plum)");
+    expect(THEME_CSS).toContain("--working: var(--if-accent)");
     expect(THEME_CSS).not.toContain("#6ecad6");
     expect(THEME_CSS).toContain(".finding.is-unconfirmed");
     expect(THEME_CSS).toContain("details.finding");
@@ -62,7 +63,12 @@ describe("theme tokens", () => {
     expect(THEME_CSS).toMatch(/\.state-reviewing[\s\S]*var\(--working-soft\)/);
     expect(THEME_CSS).not.toMatch(/\.tick\.running \{ background: var\(--amber\)/);
     expect(THEME_CSS).toContain("--ash:");
-    expect(THEME_CSS).toContain('html[data-theme="dark"]');
+    // Light/dark theming is owned by the vendored Infernal stylesheet,
+    // keyed on data-if-theme; the app theme only aliases its tokens.
+    expect(INFERNAL_CSS).toContain('[data-if-theme="dark"]');
+    expect(INFERNAL_CSS).toContain('[data-if-theme="light"]');
+    expect(INFERNAL_CSS).toContain('[data-if-brand="mergehenna"]');
+    expect(THEME_CSS).toContain("--paper: var(--if-bg)");
     expect(THEME_CSS).toContain("prefers-reduced-motion");
     expect(THEME_CSS).toContain("--font-mono:");
     expect(THEME_CSS).toContain(".account-menu");
@@ -113,7 +119,7 @@ describe("monitoring pages", () => {
     const html = renderHome([], store);
     expect(html).toContain("Nothing is under examination.");
     expect(html).toContain("Queue a GitHub pull request");
-    expect(html).toContain("Review jobs");
+    expect(html).toContain("Merge queue");
   });
 
   it("renders scannable specimen cards with SHA, progress, and severity text", () => {

@@ -1563,7 +1563,7 @@ export class JobStore {
    * malformed values and re-renders the first page when a cursor yields
    * nothing).
    */
-  listJobsPage(input: { before?: number; after?: number; limit?: number; forge?: { provider: string; instance: string }; includeStale?: boolean; repo?: string; jobType?: JobRow["job_type"] }): {
+  listJobsPage(input: { before?: number; after?: number; limit?: number; forge?: { provider: string; instance: string }; includeStale?: boolean; repo?: string; jobType?: JobRow["job_type"]; jobTypes?: Array<JobRow["job_type"]> }): {
     jobs: JobRow[];
     hasOlder: boolean;
     hasNewer: boolean;
@@ -1583,6 +1583,11 @@ export class JobStore {
     if (input.jobType) {
       whereParts.push("job_type = ?");
       whereParams.push(input.jobType);
+    } else if (input.jobTypes?.length) {
+      // The home queue's family views (merge queue vs operations) filter to a
+      // fixed set of types; a single jobType always wins when both are given.
+      whereParts.push(`job_type IN (${input.jobTypes.map(() => "?").join(", ")})`);
+      whereParams.push(...input.jobTypes);
     }
     // Superseded rows outnumber live ones on tip-thrashed stacks; the list
     // hides them unless the caller asks for the full history.

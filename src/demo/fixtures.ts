@@ -84,6 +84,7 @@ export function seedDemoJobs(store: JobStore): void {
   seedRouting(store);
   seedFailed(store);
   seedClean(store);
+  seedOpsJobs(store);
   seedPoisonInternalOnly(store);
   seedPoisonSniffing(store);
   seedCancelled(store);
@@ -915,4 +916,43 @@ function seedPoisonSniffing(store: JobStore): void {
     internal_escalation_provider: PROVIDER,
   });
   store.log(job.id, `Internal poison-alert pass model=${AGG_MODEL}`);
+}
+
+/** Operator-triggered maintenance jobs — health scans and repo briefs —
+ * so the Operations view of the queue has cards to show. */
+function seedOpsJobs(store: JobStore): void {
+  const brief = store.enqueue(
+    baseJob({
+      prNumber: 0,
+      prTitle: "Repository brief — acme/ledger",
+      headSha: "br1ef000br1ef000br1ef000br1ef000br1ef000",
+      headRef: "main",
+      jobType: "repo_brief",
+      prHtmlUrl: "https://github.com/acme/ledger",
+    }),
+  );
+  store.setJobState(brief.job.id, "completed", {
+    started_at: ago(30),
+    finished_at: ago(28),
+    aggregator_state: "done",
+    aggregator_model: AGG_MODEL,
+    aggregator_provider: PROVIDER,
+    aggregator_prompt_tokens: 4200,
+    aggregator_completion_tokens: 1500,
+  });
+
+  const scan = store.enqueue(
+    baseJob({
+      prNumber: 0,
+      prTitle: "Health scan — novacorp/api",
+      repoFullName: "novacorp/api",
+      repoOwner: "novacorp",
+      repoName: "api",
+      headSha: "5ca15ca15ca15ca15ca15ca15ca15ca15ca15ca1",
+      headRef: "main",
+      jobType: "health_scan",
+      prHtmlUrl: "https://github.com/novacorp/api",
+    }),
+  );
+  store.setJobState(scan.job.id, "reviewing", { started_at: ago(4) });
 }

@@ -1,16 +1,17 @@
 /**
- * The app's design tokens, parsed from the theme CSS.
+ * The app's design tokens, parsed from the two-layer theme CSS.
  *
- * Sumomo parses `resources/css/app.css`; Maomao keeps its theme in a
- * TypeScript string (`src/ui/theme.ts`), so the parser reads that string
- * instead of a file. The shape of the result is the same idea: every token
- * with its light and dark value, grouped for display.
- *
- * The theme defines two token sets:
- *   - `:root` — the light palette.
- *   - `html[data-theme="dark"]` — the dark overrides. A token the dark set
- *     does not redeclare keeps its light value in both themes.
+ * Mergehenna's palette lives in the vendored Infernal SaaS stylesheet
+ * (`src/ui/infernal.ts`): `:root` holds the dark values, blocks keyed on
+ * `[data-if-theme="light"]` carry the light overrides and `[data-if-brand]`
+ * blocks the brand accents. The app theme (`src/ui/theme.ts`) then aliases
+ * its historical token names onto the `--if-*` values in a single
+ * theme-independent `:root` block — an alias like `--paper: var(--if-bg)`
+ * resolves to a different hex per theme because the `--if-*` token it points
+ * at does. The parser therefore reads both stylesheets as one document and
+ * resolves `var()` chains inside each theme's merged map.
  */
+import { INFERNAL_CSS } from "../ui/infernal.js";
 import { THEME_CSS } from "../ui/theme.js";
 
 export type TokenKind = "color" | "font" | "space" | "other";
@@ -100,24 +101,55 @@ function cssVars(body: string): Map<string, string> {
   return vars;
 }
 
-/** The token sets of the theme, keyed by token name (without dashes). */
-function tokenSets(css: string): { light: Map<string, string>; dark: Map<string, string> } {
+/**
+ * The token sets of the theme, keyed by token name (without dashes).
+ *
+ * Layering follows the cascade: `:root` blocks (the dark Infernal palette
+ * plus the app's theme-independent aliases) first, brand blocks apply to
+ * both themes, then the `[data-if-theme]` overrides split the sets. Values
+ * stay as declared — `var()` resolution happens per theme afterwards.
+ */
+function tokenSets(rawCss: string): { light: Map<string, string>; dark: Map<string, string> } {
+  // Comments only obscure selector matching (`/* … */:root` never equals
+  // `:root`); nothing in a declaration body here needs them preserved.
+  const css = rawCss.replace(/\/\*[\s\S]*?\*\//g, "");
   const blocks = cssBlocks(css);
-
   const light = new Map<string, string>();
+  const dark = new Map<string, string>();
+
+  const apply = (block: CssBlock, target: Map<string, string>) => {
+    for (const [name, value] of cssVars(block.body)) target.set(name, value);
+  };
+  // Infernal declares its dark palette on `:root, [data-if-theme="dark"]` —
+  // a comma selector that is also the theme-independent default — so the
+  // base layer is any block mentioning a bare `:root` part, not a selector
+  // that merely ends in one. Themed overrides re-apply on top of it.
+  const isRoot = (selector: string) => selector.split(",").some((part) => part.trim() === ":root");
+  const themed = (selector: string) => /data-if-theme="(light|dark)"/.exec(selector)?.[1];
+
+  const rooted = new Set<CssBlock>();
   for (const block of blocks) {
-    // The plain `:root` block. A selector such as `:not([data-theme="dark"])`
-    // never ends in `:root`, so it cannot be mistaken for one.
-    if (block.selector.endsWith(":root")) {
-      for (const [name, value] of cssVars(block.body)) light.set(name, value);
+    if (isRoot(block.selector)) {
+      apply(block, light);
+      apply(block, dark);
+      rooted.add(block);
     }
   }
-
-  const dark = new Map<string, string>();
-  const canonical = blocks.filter((block) => /^html\[data-theme="dark"\]/.test(block.selector));
-  const fallback = canonical.length > 0 ? canonical : blocks.filter((block) => block.selector.includes('data-theme="dark"'));
-  for (const block of fallback) {
-    for (const [name, value] of cssVars(block.body)) dark.set(name, value);
+  // The app roots every page at data-if-brand="mergehenna": competing brand
+  // blocks are unreachable in the real cascade, not alternatives.
+  const brandReachable = (selector: string) => !selector.includes("data-if-brand") || selector.includes('data-if-brand="mergehenna"');
+  for (const block of blocks) {
+    // Brand blocks without a theme selector apply in both themes.
+    if (brandReachable(block.selector) && block.selector.includes("data-if-brand") && !themed(block.selector)) {
+      apply(block, light);
+      apply(block, dark);
+    }
+  }
+  for (const block of blocks) {
+    if (rooted.has(block) || !brandReachable(block.selector)) continue;
+    const theme = themed(block.selector);
+    if (theme === "light") apply(block, light);
+    if (theme === "dark") apply(block, dark);
   }
 
   return { light, dark };
@@ -157,7 +189,7 @@ function declarations(vars: Map<string, string>): string {
  * The result is deterministic: the same CSS always yields the same tokens in
  * the same order.
  */
-export function designTokens(css: string = THEME_CSS): DesignTokens {
+export function designTokens(css: string = `${INFERNAL_CSS}\n${THEME_CSS}`): DesignTokens {
   const { light, dark } = tokenSets(css);
 
   // A token the dark set does not redeclare keeps its light value.

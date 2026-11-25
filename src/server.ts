@@ -55,6 +55,7 @@ import {
   renderConfigAuditPage,
   renderConfigDeliveriesPage,
   renderProfileForm,
+  QUEUE_VIEWS,
   renderHome,
   renderJob,
   renderReviewerBoard,
@@ -63,17 +64,19 @@ import {
   renderPromptConfigPage,
   renderHealthPage,
   THEME_CSS,
+  INFERNAL_CSS,
+  INFERNAL_HREF,
   PIERRE_DIFFS_HREF,
   CHAT_BUNDLE_HREF,
   TYPEAHEAD_HREF,
   TYPEAHEAD_JS,
   MODEL_PICKER_HREF,
   MODEL_PICKER_JS,
-  FAVICON_SVG,
+  MERGEHENNA_FAVICON_SVG,
   FAVICON_PNG_BASE64,
-  LARGE_ICON_SVG,
   LARGE_ICON_PNG_BASE64,
   type PageOptions,
+  type QueueView,
   type ScanConfirmNotice,
   type ScanIssueCreationData,
   type ScanIssuePreviewItem,
@@ -587,6 +590,13 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
     }),
   );
 
+  app.get(INFERNAL_HREF, (c) =>
+    c.newResponse(INFERNAL_CSS, 200, {
+      "content-type": "text/css; charset=utf-8",
+      "cache-control": "public, max-age=3600",
+    }),
+  );
+
   // The @pierre/diffs browser bundle (built by `npm run build:vendor`). Read
   // once from disk and cached; 404 before the first build so pages fall back
   // to the server-rendered diff markup.
@@ -649,8 +659,8 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
   // Brand icons: fixed constants from src/ui/icons.ts (no filesystem, no traversal).
   const iconAssets: Array<[string, string, string]> = [
     // [path, content-type, source]
-    ["/assets/favicon.svg", "image/svg+xml", FAVICON_SVG],
-    ["/assets/icon.svg", "image/svg+xml", LARGE_ICON_SVG],
+    ["/assets/favicon.svg", "image/svg+xml", MERGEHENNA_FAVICON_SVG],
+    ["/assets/icon.svg", "image/svg+xml", MERGEHENNA_FAVICON_SVG],
   ];
   for (const [path, contentType, body] of iconAssets) {
     app.get(path, (c) =>
@@ -928,16 +938,27 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
     // `?superseded=1` includes stale (superseded) rows; the default view hides
     // them so tip-thrashed stacks show one card, not a wall of history.
     const showSuperseded = c.req.query("superseded") === "1";
+    // `?view=` splits the queue by job family: the merge queue (the reviews
+    // and merge-group checks that gate merging) is the default surface;
+    // operations collects scans and briefs; `all` is the undivided history.
+    const requestedView = c.req.query("view");
+    const view: QueueView = requestedView === "ops" || requestedView === "all" ? requestedView : "merge";
+    const viewDef = QUEUE_VIEWS.find((entry) => entry.id === view) ?? QUEUE_VIEWS[0];
     // `?repo=` / `?type=` — validated against what the jobs table actually
-    // holds so stale links degrade to the unfiltered view.
+    // holds so stale links degrade to the unfiltered view. A type outside
+    // the active view's family is dropped: it could only render empty.
     const repoNames = ctx.store.listRepoNames();
     const requestedRepo = c.req.query("repo");
     const repo = requestedRepo && repoNames.includes(requestedRepo) ? requestedRepo : undefined;
     const requestedType = c.req.query("type");
-    const jobType = (JOB_TYPE_VALUES as readonly string[]).includes(requestedType ?? "")
-      ? (requestedType as (typeof JOB_TYPE_VALUES)[number])
-      : undefined;
-    let page = ctx.store.listJobsPage({ ...cursor, forge, includeStale: showSuperseded, repo, jobType });
+    const jobType =
+      (JOB_TYPE_VALUES as readonly string[]).includes(requestedType ?? "") &&
+      (!viewDef.types || (viewDef.types as readonly string[]).includes(requestedType ?? ""))
+        ? (requestedType as (typeof JOB_TYPE_VALUES)[number])
+        : undefined;
+    const jobTypes = jobType ? undefined : viewDef.types ? [...viewDef.types] : undefined;
+    const pageInput = { forge, includeStale: showSuperseded, repo, jobType, jobTypes };
+    let page = ctx.store.listJobsPage({ ...cursor, ...pageInput });
     // Only out-of-range cursors empty the page: after at/past the newest id,
     // or before at/below the oldest id. (A before cursor past the newest id
     // never gets here empty — the store's id< query already returns the
@@ -945,7 +966,7 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
     // first page and say why instead of a dead end.
     let staleCursorNotice: string | undefined;
     if (page.jobs.length === 0) {
-      page = ctx.store.listJobsPage({ forge, includeStale: showSuperseded, repo, jobType });
+      page = ctx.store.listJobsPage(pageInput);
       if (page.jobs.length > 0 && (cursor.before != null || cursor.after != null)) {
         staleCursorNotice = forge
           ? "That page no longer exists — showing the newest matching jobs instead."
@@ -966,6 +987,7 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
           ? { active: true, hidden: 0 }
           : { active: false, hidden: ctx.store.supersededJobCount(forge) },
         jobFilters: { repos: repoNames, repo, type: jobType },
+        queueView: { active: view },
       }),
     );
   });
