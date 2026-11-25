@@ -415,7 +415,7 @@ describe("rendering", () => {
   it("mounts the chat island", async () => {
     const html = await (await app.request("/dev/ui/chat/empty/frame")).text();
     expect(html).toContain('id="maomao-chat-root"');
-    expect(html).toContain('src="/assets/chat.js"');
+    expect(html).toMatch(/src="\/assets\/chat\.js(\?v=[0-9a-f]{10})?"/);
   });
 
   it("freezes animations when asked", async () => {

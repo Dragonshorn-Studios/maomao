@@ -3,9 +3,10 @@ import { CSRF_FIELD } from "../auth.js";
 import type { FindingRow } from "../findings/types.js";
 import { OPERATOR_NAME, PRODUCT_DESCRIPTION, PRODUCT_NAME, PRODUCT_TAGLINE, type UiFlavor } from "./copy.js";
 import { mergehennaMark, operatorMark } from "./glyphs.js";
-import { THEME_HREF } from "./theme.js";
-import { INFERNAL_HREF } from "./infernal.js";
-import { PIERRE_DIFFS_HREF } from "./paths.js";
+import { THEME_URL } from "./theme.js";
+import { INFERNAL_URL } from "./infernal.js";
+import { diskAssetUrl, PIERRE_DIFFS_HREF } from "./paths.js";
+import { FAVICON_SVG_URL, FAVICON_PNG_URL, ICON_PNG_URL } from "./icons.js";
 
 export interface UiIdentity {
   login: string;
@@ -410,12 +411,12 @@ export function layout(title: string, body: string, options: PageOptions = {}): 
   <meta name="color-scheme" content="light dark"/>
   <meta name="description" content="${escapeHtml(PRODUCT_DESCRIPTION)}"/>
   <title>${escapeHtml(title)}</title>
-  <link rel="icon" href="/assets/favicon.svg" type="image/svg+xml"/>
-  <link rel="alternate icon" href="/assets/favicon.png"/>
-  <link rel="apple-touch-icon" href="/assets/icon.png"/>
-  <link rel="stylesheet" href="${INFERNAL_HREF}"/>
-  <link rel="stylesheet" href="${THEME_HREF}"/>
-  <script src="${PIERRE_DIFFS_HREF}" defer></script>
+  <link rel="icon" href="${FAVICON_SVG_URL}" type="image/svg+xml"/>
+  <link rel="alternate icon" href="${FAVICON_PNG_URL}"/>
+  <link rel="apple-touch-icon" href="${ICON_PNG_URL}"/>
+  <link rel="stylesheet" href="${INFERNAL_URL}"/>
+  <link rel="stylesheet" href="${THEME_URL}"/>
+  <script src="${diskAssetUrl(PIERRE_DIFFS_HREF)}" defer></script>
   <script>${APPEARANCE_BOOT}</script>
   <script>${PANCAKE_BOOT}</script>
   <script>${ACCOUNT_BOOT}</script>
@@ -427,7 +428,7 @@ export function layout(title: string, body: string, options: PageOptions = {}): 
     ${contextNav}
     <div class="shell-content">
       <header class="top">
-        <a class="brand" href="/"><img class="brand-mark" src="/assets/favicon.svg" width="28" height="28" alt=""/><span class="brand-text"><span class="brand-name">${escapeHtml(PRODUCT_NAME)}</span><span class="brand-caption">operated by ${escapeHtml(OPERATOR_NAME)}</span></span></a>
+        <a class="brand" href="/"><img class="brand-mark" src="${FAVICON_SVG_URL}" width="28" height="28" alt=""/><span class="brand-text"><span class="brand-name">${escapeHtml(PRODUCT_NAME)}</span><span class="brand-caption">operated by ${escapeHtml(OPERATOR_NAME)}</span></span></a>
         <span class="tag">${escapeHtml(PRODUCT_TAGLINE)}</span>
         <span class="grow"></span>
         <div class="appearance" role="group" aria-label="Appearance">

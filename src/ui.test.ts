@@ -103,10 +103,12 @@ describe("monitoring pages", () => {
     expect(html).toContain('data-appearance="dark"');
     expect(html).toContain('data-appearance="system"');
     expect(html).toContain("/assets/maomao.css");
-    expect(html).toContain('rel="icon" href="/assets/favicon.svg"');
-    expect(html).toContain('rel="alternate icon" href="/assets/favicon.png"');
-    expect(html).toContain('rel="apple-touch-icon" href="/assets/icon.png"');
-    expect(html).toContain('class="brand-mark" src="/assets/favicon.svg"');
+    // Asset URLs are content-fingerprinted (?v=<10 hex chars of sha256>) so a
+    // deploy invalidates every cache layer at once; see staticAsset in server.ts.
+    expect(html).toMatch(/rel="icon" href="\/assets\/favicon\.svg\?v=[0-9a-f]{10}"/);
+    expect(html).toMatch(/rel="alternate icon" href="\/assets\/favicon\.png\?v=[0-9a-f]{10}"/);
+    expect(html).toMatch(/rel="apple-touch-icon" href="\/assets\/icon\.png\?v=[0-9a-f]{10}"/);
+    expect(html).toMatch(/class="brand-mark" src="\/assets\/favicon\.svg\?v=[0-9a-f]{10}"/);
     expect(html).not.toContain("EventSource");
     expect(html).toContain("Skip to content");
     expect(html).toContain('<script src="/assets/vendor/pierre-diffs.js" defer></script>');
@@ -1131,7 +1133,7 @@ describe("scan repository typeahead", () => {
     expect(html).toContain('aria-controls="repo-listbox"');
     expect(html).toContain('aria-autocomplete="list"');
     expect(html).toContain('role="listbox"');
-    expect(html).toContain('<script src="/assets/typeahead.js" defer></script>');
+    expect(html).toMatch(/<script src="\/assets\/typeahead\.js\?v=[0-9a-f]{10}" defer><\/script>/);
     expect(html).toContain('aria-label="Run repository health scan"');
     // The wrap lives inside the label so `.trigger label { flex: 1 }` gives the
     // combobox (and its absolutely positioned listbox) the full field width.
@@ -1819,7 +1821,7 @@ describe("model picker markup", () => {
     });
     expect(html).toContain("data-model-picker");
     expect(html).toContain('class="model-picker-input" name="model"');
-    expect(html).toContain('<script src="/assets/model-picker.js" defer></script>');
+    expect(html).toMatch(/<script src="\/assets\/model-picker\.js\?v=[0-9a-f]{10}" defer><\/script>/);
   });
 });
 

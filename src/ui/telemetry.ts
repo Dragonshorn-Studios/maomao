@@ -36,6 +36,8 @@ export interface TelemetryPageData {
   options: PageOptions;
 }
 
+import { versionedUrl } from "./paths.js";
+
 export const TELEMETRY_PAGE_HREF = "/assets/telemetry.js";
 
 /**
@@ -401,7 +403,9 @@ export function renderTelemetryPage(data: TelemetryPageData): string {
     <p class="muted">Normally you do not need anything below. Leave these fields blank to inherit the shared OpenObserve connection.</p>
     <ul class="telemetry-list">${cards}</ul>
     ${adHocForm(data.csrfToken, data.canWrite)}
-    <script src="${TELEMETRY_PAGE_HREF}" defer></script>
+    <script src="${TELEMETRY_PAGE_URL}" defer></script>
   `;
   return layout("Telemetry", body, { ...data.options, surface: "operator", nav: "settings", settingsSection: "telemetry" });
 }
+
+export const TELEMETRY_PAGE_URL = versionedUrl(TELEMETRY_PAGE_HREF, TELEMETRY_PAGE_JS);

@@ -1,5 +1,7 @@
 /** Visual tokens and CSS for the monitoring UI. Orchestration does not import this. */
 
+import { versionedUrl } from "./paths.js";
+
 export const THEME_HREF = "/assets/maomao.css";
 
 export const THEME_CSS = `
@@ -2269,3 +2271,6 @@ body.operator main th {
   text-decoration: none;
 }
 `.trim();
+
+/** Embedding URL with the content fingerprint — see paths.ts. */
+export const THEME_URL = versionedUrl(THEME_HREF, THEME_CSS);

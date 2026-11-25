@@ -7,6 +7,8 @@
  * with data-if-brand on the document root.
  */
 
+import { versionedUrl } from "./paths.js";
+
 export const INFERNAL_HREF = "/assets/infernal.css";
 
 export const INFERNAL_CSS = `/* Infernal UI v0.1 — framework-agnostic, namespaced component library */
@@ -211,3 +213,6 @@ button:disabled,input:disabled,select:disabled,textarea:disabled{opacity:.46;cur
 @media (max-width:680px){.if-app{display:block}.if-sidebar{position:static;display:flex;flex-direction:row;padding:8px 12px;gap:7px;overflow:auto}.if-sidebar nav{display:flex}.if-sidebar .if-nav-title,.if-sidebar__footer{display:none}.if-nav-link{min-width:37px;padding:9px}.if-brand{margin-right:8px}.if-topbar{padding:10px 15px;flex-wrap:wrap}.if-content{padding:17px}.if-grid,.if-grid--two{grid-template-columns:1fr}.if-section-heading{align-items:flex-start;flex-direction:column}}
 @media (prefers-reduced-motion:reduce){*,*::before,*::after{animation:none!important;transition:none!important;scroll-behavior:auto!important}}
 `;
+
+/** Embedding URL with the content fingerprint — see paths.ts. */
+export const INFERNAL_URL = versionedUrl(INFERNAL_HREF, INFERNAL_CSS);

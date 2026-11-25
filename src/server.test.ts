@@ -14,7 +14,7 @@ import type { JobQueue } from "./jobs/queue.js";
 import type { OpenCodePort } from "./opencode/parse.js";
 import { ChatService } from "./chat/service.js";
 import { ChatStore } from "./chat/store.js";
-import { CHAT_BUNDLE_HREF } from "./ui/paths.js";
+import { assetVersion, CHAT_BUNDLE_HREF } from "./ui/paths.js";
 
 type OpenCodeLike = OpenCodePort;
 import { createApp } from "./server.js";
@@ -4917,27 +4917,44 @@ describe("home queue family views", () => {
 });
 
 describe("static asset caching", () => {
-  it("revalidates every load with a content etag and answers 304s", async () => {
+  it("serves assets immutable for a year — the fingerprinted embedding URL is the cache key", async () => {
     const { app } = testApp();
     for (const path of ["/assets/maomao.css", "/assets/infernal.css", "/assets/favicon.svg", "/assets/typeahead.js", "/assets/model-picker.js"]) {
-      const first = await app.request(path);
-      expect(first.status).toBe(200);
-      // Unversioned URLs must never be cached across deploys: the browser
-      // revalidates every time and the etag keeps that answer a cheap 304.
-      expect(first.headers.get("cache-control")).toBe("no-cache");
-      const etag = first.headers.get("etag");
-      expect(etag).toBeTruthy();
-      const revalidated = await app.request(path, { headers: { "if-none-match": etag! } });
-      expect(revalidated.status).toBe(304);
-      expect(await revalidated.text()).toBe("");
+      const res = await app.request(path);
+      expect(res.status).toBe(200);
+      // Pages reference assets at content-fingerprinted URLs (?v=<hash>), so a
+      // deploy that changes any byte produces new URLs and no cache layer —
+      // browser, Cloudflare edge, proxy — can ever serve a stale copy. That
+      // makes immutable year-long caching safe and eliminates revalidation
+      // round-trips. (The hour-long unversioned caching this replaces once
+      // stranded a pre-rebrand stylesheet under mergehenna HTML at the edge.)
+      expect(res.headers.get("cache-control")).toBe("public, max-age=31536000, immutable");
     }
   });
 
-  it("varies the etag with the content, so a deploy invalidates caches", async () => {
+  it("embeds asset URLs whose fingerprint is the hash of the served content", async () => {
     const { app } = testApp();
-    const css = await app.request("/assets/maomao.css");
-    const svg = await app.request("/assets/favicon.svg");
-    expect(css.headers.get("etag")).not.toBe(svg.headers.get("etag"));
+    const page = await app.request("/");
+    expect(page.status).toBe(200);
+    const html = await page.text();
+    const references = html.match(/\/assets\/[a-z0-9./-]+\?v=[0-9a-f]{10}/g) ?? [];
+    // infernal.css, maomao.css, favicon.svg/png, icon.png at minimum.
+    expect(references.length).toBeGreaterThanOrEqual(4);
+    for (const reference of new Set(references)) {
+      const res = await app.request(reference);
+      expect(res.status).toBe(200);
+      const fingerprint = reference.match(/\?v=([0-9a-f]{10})/)![1];
+      expect(assetVersion(new Uint8Array(await res.arrayBuffer()))).toBe(fingerprint);
+    }
+  });
+
+  it("varies the fingerprint with the content, so a deploy invalidates every cache layer", async () => {
+    const { app } = testApp();
+    const page = await app.request("/");
+    const html = await page.text();
+    const css = html.match(/\/assets\/maomao\.css\?v=([0-9a-f]{10})/)![1];
+    const infernal = html.match(/\/assets\/infernal\.css\?v=([0-9a-f]{10})/)![1];
+    expect(css).not.toBe(infernal);
   });
 });
 
