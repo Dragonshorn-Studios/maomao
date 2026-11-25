@@ -1,7 +1,6 @@
 import { Hono, type Context } from "hono";
 import { isIP } from "node:net";
 import { streamSSE } from "hono/streaming";
-import { createHash } from "node:crypto";
 import { deleteCookie, getCookie, setCookie } from "hono/cookie";
 import type { Config } from "./config.js";
 import { JOB_TYPES, type JobStore, type JobType } from "./jobs/store.js";
@@ -65,10 +64,13 @@ import {
   renderPromptConfigPage,
   renderHealthPage,
   THEME_CSS,
+  THEME_URL,
   INFERNAL_CSS,
   INFERNAL_HREF,
+  INFERNAL_URL,
   PIERRE_DIFFS_HREF,
   CHAT_BUNDLE_HREF,
+  primeDiskAssetVersion,
   TYPEAHEAD_HREF,
   TYPEAHEAD_JS,
   MODEL_PICKER_HREF,
@@ -322,19 +324,18 @@ function setSessionCookie(c: Context<AppEnv>, value: string): void {
   });
 }
 
-/** Static assets are served at stable, unversioned paths, so their cache
- * entries must revalidate on every load: a deploy that changes the theme,
- * the vendored library, or the brand icons has to reach operators on the
- * very next page render — caching them for hours once shipped a green
- * pre-rebrand stylesheet under the mergehenna HTML. The content etag keeps
- * the revalidation answer a cheap 304 in the common case. */
+/** Static assets are content-fingerprinted at the embedding site (see
+ * versionedUrl in src/ui/paths.ts): a deploy that changes any byte of an
+ * asset changes the URL pages reference, so responses can cache immutably
+ * for a year — no revalidation round-trips, and no cache anywhere (browser,
+ * Cloudflare edge, corporate proxy) can ever serve a stale copy. This
+ * replaces the hour-long unversioned caching that once stranded a
+ * pre-rebrand stylesheet under mergehenna HTML at the Cloudflare edge. */
 function staticAsset(c: Context<AppEnv>, body: string | Uint8Array, contentType: string) {
-  const etag = `"${createHash("sha256").update(body).digest("hex").slice(0, 32)}"`;
-  const headers = { "content-type": contentType, "cache-control": "no-cache", etag };
-  if (c.req.header("if-none-match") === etag) {
-    return c.newResponse(null, 304, { "cache-control": "no-cache", etag });
-  }
-  return c.newResponse(typeof body === "string" ? body : body.slice().buffer, 200, headers);
+  return c.newResponse(typeof body === "string" ? body : body.slice().buffer, 200, {
+    "content-type": contentType,
+    "cache-control": "public, max-age=31536000, immutable",
+  });
 }
 
 /** Recently-viewed jobs, most-recent first, as a dot-separated id list. The
@@ -648,6 +649,7 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
     if (chatBundle === undefined) {
       try {
         chatBundle = readFileSync(resolve(assetsDir, "chat.js"), "utf8");
+        primeDiskAssetVersion(CHAT_BUNDLE_HREF, chatBundle);
       } catch {
         console.warn("assets: chat bundle not built; run npm run build:vendor");
         return c.text("Not found", 404);
@@ -662,6 +664,7 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
     if (pierreBundle === undefined) {
       try {
         pierreBundle = readFileSync(resolve(vendorDir, "pierre-diffs.js"), "utf8");
+        primeDiskAssetVersion(PIERRE_DIFFS_HREF, pierreBundle);
       } catch {
         console.warn("assets: pierre-diffs bundle not built; run npm run build:vendor");
         return c.text("Not found", 404);
@@ -669,6 +672,24 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
     }
     return staticAsset(c, pierreBundle, "text/javascript; charset=utf-8");
   });
+
+  // Prime the vendor-bundle fingerprints eagerly: pages rendered before the
+  // first asset request would otherwise embed the unversioned fallback. A
+  // missing bundle stays unprimed — dev servers started before build:vendor
+  // fall back to the bare path, which 404s either way until the build runs.
+  for (const [href, file] of [
+    [CHAT_BUNDLE_HREF, resolve(assetsDir, "chat.js")],
+    [PIERRE_DIFFS_HREF, resolve(vendorDir, "pierre-diffs.js")],
+  ] as const) {
+    try {
+      const body = readFileSync(file, "utf8");
+      primeDiskAssetVersion(href, body);
+      if (href === CHAT_BUNDLE_HREF) chatBundle = body;
+      else pierreBundle = body;
+    } catch {
+      // Not built yet — the lazy path in the asset routes keeps retrying.
+    }
+  }
 
   app.get(TYPEAHEAD_HREF, (c) => staticAsset(c, TYPEAHEAD_JS, "text/javascript; charset=utf-8"));
 
@@ -4041,8 +4062,8 @@ const CSRF_FAILURE_HTML = `<!doctype html>
   <meta charset="utf-8"/>
   <meta name="viewport" content="width=device-width, initial-scale=1"/>
   <title>Maomao — form expired</title>
-  <link rel="stylesheet" href="${INFERNAL_HREF}"/>
-  <link rel="stylesheet" href="/assets/maomao.css"/>
+  <link rel="stylesheet" href="${INFERNAL_URL}"/>
+  <link rel="stylesheet" href="${THEME_URL}"/>
 </head>
 <body>
   <main id="main">

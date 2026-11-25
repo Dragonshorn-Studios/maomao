@@ -7,7 +7,7 @@
 import { escapeHtml } from "../util.js";
 import type { ChatConversationRow, ChatMessageRow } from "../chat/store.js";
 import { layout, csrfInput, type PageOptions } from "./layout.js";
-import { CHAT_BUNDLE_HREF } from "./paths.js";
+import { CHAT_BUNDLE_HREF, diskAssetUrl } from "./paths.js";
 
 const SEVERITY_ORDER: readonly string[] = ["blocker", "high", "medium", "low", "info"];
 
@@ -87,7 +87,7 @@ export function renderChatPage(data: ChatPageData): string {
     </div>
     ${exhausted ? "" : '<div id="maomao-chat-root"></div>'}
     <script id="maomao-chat-config" type="application/json">${islandConfig}</script>
-    <script src="${CHAT_BUNDLE_HREF}" defer></script>
+    <script src="${diskAssetUrl(CHAT_BUNDLE_HREF)}" defer></script>
     <form id="maomao-chat-form" class="trigger" method="post" action="/jobs/${data.job.id}/chat/messages">
       ${csrf}
       <label>

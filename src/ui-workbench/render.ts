@@ -6,6 +6,8 @@
  * real theme, so a preview looks like the app it came from.
  */
 import { escapeHtml } from "../util.js";
+import { INFERNAL_URL } from "../ui/infernal.js";
+import { THEME_URL } from "../ui/theme.js";
 import { VIEWPORTS, type ViewportName, type WorkbenchStory, type WorkbenchVariant } from "./contract.js";
 import type { DesignTokens } from "./tokens.js";
 
@@ -162,8 +164,8 @@ function workbenchShell(
   <meta name="viewport" content="width=device-width, initial-scale=1"/>
   <meta name="robots" content="noindex"/>
   <title>${escapeHtml(title)} · Maomao UI workbench</title>
-  <link rel="stylesheet" href="/assets/infernal.css"/>
-  <link rel="stylesheet" href="/assets/maomao.css"/>
+  <link rel="stylesheet" href="${INFERNAL_URL}"/>
+  <link rel="stylesheet" href="${THEME_URL}"/>
   <style>${WORKBENCH_CSS}</style>
   ${options.extraHead ?? ""}
 </head>
@@ -447,8 +449,8 @@ export function renderFrame(
   <meta name="viewport" content="width=device-width, initial-scale=1"/>
   <meta name="robots" content="noindex"/>
   <title>${escapeHtml(story.title)} · ${escapeHtml(variant.title)}</title>
-  <link rel="stylesheet" href="/assets/infernal.css"/>
-  <link rel="stylesheet" href="/assets/maomao.css"/>
+  <link rel="stylesheet" href="${INFERNAL_URL}"/>
+  <link rel="stylesheet" href="${THEME_URL}"/>
   ${frozenStyle}
   ${scripts}
 </head>

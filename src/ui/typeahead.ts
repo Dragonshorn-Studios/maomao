@@ -10,6 +10,8 @@
  * the source of truth either way. All text inserted via textContent.
  */
 
+import { versionedUrl } from "./paths.js";
+
 export const TYPEAHEAD_HREF = "/assets/typeahead.js";
 
 export const TYPEAHEAD_JS = String.raw`(function () {
@@ -143,3 +145,5 @@ export const TYPEAHEAD_JS = String.raw`(function () {
   else init();
 })();
 `;
+
+export const TYPEAHEAD_URL = versionedUrl(TYPEAHEAD_HREF, TYPEAHEAD_JS);

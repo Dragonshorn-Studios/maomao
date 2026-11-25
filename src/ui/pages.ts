@@ -1,6 +1,6 @@
 import type { JobRow, JobStore, ReviewerRunRow, WebhookDeliveryRow } from "../jobs/store.js";
 import { forgeBadgeTitle, forgeBadgeTitleHtml, forgeChipLabel, providerLabel } from "./forge-badge.js";
-import { MODEL_PICKER_HREF, modelPicker, type ModelPickerEntry } from "./model-picker.js";
+import { MODEL_PICKER_URL, modelPicker, type ModelPickerEntry } from "./model-picker.js";
 import type { FindingRow } from "../findings/types.js";
 import { fingerprintFinding, stripHtmlComments } from "../findings/identity.js";
 import { POLICIES_WITH_EXTERNAL, POLICIES_WITH_INTERNAL } from "../routing/types.js";
@@ -44,7 +44,7 @@ import {
   usageReportedCopy,
 } from "./copy.js";
 import { externalLinkGlyph, pancakeMark, roleGlyph, stackMark } from "./glyphs.js";
-import { TYPEAHEAD_HREF } from "./typeahead.js";
+import { TYPEAHEAD_URL } from "./typeahead.js";
 import { csrfInput, layout, type PageOptions, type QueueView, type UiIdentity } from "./layout.js";
 import {
   findingLocation,
@@ -1954,7 +1954,7 @@ ${modelPicker({
       <a href="/config/profiles">Cancel</a>
     </form>
     ${discoveryStatus}
-    <script src="${MODEL_PICKER_HREF}" defer></script>
+    <script src="${MODEL_PICKER_URL}" defer></script>
   </section>`;
 }
 
@@ -2607,7 +2607,7 @@ export function renderPromptConfigPage(data: PromptConfigPageData): string {
     <h2>Evaluations</h2>
     ${evalForm}
     ${data.evaluations.length > 0 ? `<table class="config-audit"><thead><tr><th>ID</th><th>Prompt</th><th>Fixture</th><th>Model</th><th>Status</th><th>Result</th></tr></thead><tbody>${evaluationRows}</tbody></table>` : `<p class="muted">No evaluations recorded.</p>`}
-    <script src="${MODEL_PICKER_HREF}" defer></script>`;
+    <script src="${MODEL_PICKER_URL}" defer></script>`;
   return layout("Specialist prompts", body, {
     showLogout: data.canWrite || Boolean(data.csrfToken),
     csrfToken: data.csrfToken,
@@ -2762,7 +2762,7 @@ export function renderScanPage(data: ScanPageData): string {
         ? `<p class="muted">Open a completed scan to select findings, preview the proposed issues, and publish them. Findings are deduplicated per repository + fingerprint; already-linked GitHub issues are skipped, and partial failures can be retried safely.</p>`
         : `<p class="muted">Issue creation is disabled (GITHUB_ISSUE_CREATION_ENABLED=false).</p>`
     }
-    <script src="${TYPEAHEAD_HREF}" defer></script>`
+    <script src="${TYPEAHEAD_URL}" defer></script>`
     : `<p class="muted">Scanning requires an operator GitHub OAuth identity.</p>`}`;
   return layout("Repository health scan", body, {
     showLogout: data.canScan || Boolean(data.csrfToken),
@@ -3038,8 +3038,8 @@ export function renderBriefPage(data: BriefPageData): string {
     <p class="muted">Default model: ${escapeHtml(data.model || "(server default)")} · timeout ${escapeHtml(formatDuration(data.timeoutMs))}. An override brief is never read from or written to the shared brief cache.</p>
     <h2>Recent repo briefs</h2>
     ${recentBriefs}
-    <script src="${TYPEAHEAD_HREF}" defer></script>
-    <script src="${MODEL_PICKER_HREF}" defer></script>`
+    <script src="${TYPEAHEAD_URL}" defer></script>
+    <script src="${MODEL_PICKER_URL}" defer></script>`
     : `<p class="muted">Repo briefs require an operator GitHub OAuth identity.</p>`}`;
   return layout("Repo brief", body, {
     showLogout: data.canBrief || Boolean(data.csrfToken),
@@ -3129,7 +3129,7 @@ export function renderPausePage(data: PausePageData): string {
     <p class="muted">Pausing now cancels queued and in-flight automatic reviews for the repository; starting a new pause for a paused repository extends it. Stack declarations and the stack trigger are posted as PR comments, not here.</p>
     <h2>Active pauses</h2>
     ${pauseRows}
-    <script src="${TYPEAHEAD_HREF}" defer></script>`
+    <script src="${TYPEAHEAD_URL}" defer></script>`
     : `<p class="muted">Managing review pauses requires an operator GitHub OAuth identity.</p>`}`;
   return layout("Review pause", body, {
     showLogout: data.canOperate || Boolean(data.csrfToken),

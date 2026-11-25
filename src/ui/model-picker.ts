@@ -94,6 +94,8 @@ export function modelPicker(options: {
 }
 
 /** Deferred script src on pages that render a model picker. */
+import { versionedUrl } from "./paths.js";
+
 export const MODEL_PICKER_HREF = "/assets/model-picker.js";
 
 /**
@@ -300,3 +302,5 @@ export const MODEL_PICKER_JS = String.raw`(function () {
   });
 })();
 `;
+
+export const MODEL_PICKER_URL = versionedUrl(MODEL_PICKER_HREF, MODEL_PICKER_JS);
