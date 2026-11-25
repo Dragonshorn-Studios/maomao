@@ -192,6 +192,10 @@ export function createPipeline(deps: PipelineDeps) {
     };
   }
 
+  function forgetTrustedPublicationMemory(job: JobRow): void {
+    for (const name of TRUSTED_CHECK_NAMES) trustedPublicationMemory.delete(trustedMemoryKey(job, name));
+  }
+
   function trustedNamesWithPublications(job: JobRow): typeof TRUSTED_CHECK_NAMES {
     const active = new Set(activeTrustedCheckNames());
     for (const name of TRUSTED_CHECK_NAMES) {
@@ -214,6 +218,7 @@ export function createPipeline(deps: PipelineDeps) {
         validateHead: conclusion !== "cancelled",
       });
     }
+    forgetTrustedPublicationMemory(job);
   }
 
   async function runTrustedChecks(job: JobRow, workspace: { repoDir: string; dir: string; diffPath: string }, signal: AbortSignal): Promise<void> {
@@ -270,6 +275,7 @@ export function createPipeline(deps: PipelineDeps) {
       );
       await publisher.publish(deps.store.getJob(job.id) ?? job, trustedCheckPublicationInput(result));
     }
+    forgetTrustedPublicationMemory(job);
   }
   return {
     abortJob,
