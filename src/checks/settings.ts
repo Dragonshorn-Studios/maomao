@@ -111,7 +111,6 @@ export class TrustedCheckSettingsStore {
   }
 
   clear(): { removed: boolean } {
-    if (complete(this.envConfig)) return { removed: false };
     const result = this.db.prepare("DELETE FROM trusted_check_settings WHERE id = 1").run();
     return { removed: result.changes > 0 };
   }

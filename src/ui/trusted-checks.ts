@@ -68,7 +68,8 @@ export function renderTrustedChecksPage(data: TrustedChecksPageData): string {
       <dt>Pinned revision</dt><dd>${status.revision ? `<code>${escapeHtml(status.revision)}</code>` : "—"}</dd>
       <dt>Enabled checks</dt><dd>${status.enabledChecks.length ? status.enabledChecks.map((name) => `<code>maomao/${name}</code>`).join(" ") : "none"}</dd>
     </dl>
-    ${envManaged ? `<p class="muted">This deployment is pinned by <code>MAOMAO_TRUSTED_CHECKS_*</code> environment variables, so the UI cannot change it.</p>` : ""}
+    ${envManaged ? `<p class="muted">This deployment is pinned by <code>MAOMAO_TRUSTED_CHECKS_*</code> environment variables, so the UI cannot change the effective source.</p>` : ""}
+    ${envManaged && data.canWrite && status.hasStored ? `<form method="post" action="/config/trusted-checks/delete">${csrfInput(data.csrfToken)}<button type="submit" class="btn-danger">Clear shadowed stored settings</button></form>` : ""}
   </section>`;
   const body = `
     ${configSubNav("trusted-checks")}
