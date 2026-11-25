@@ -321,6 +321,41 @@ function setSessionCookie(c: Context<AppEnv>, value: string): void {
   });
 }
 
+/** Recently-viewed jobs, most-recent first, as a dot-separated id list. The
+ * cookie is self-referential convenience state — worst-case tampering shows
+ * the operator their own jobs in a funny order — so it is not signed. */
+const RECENT_COOKIE = "mh_recent";
+const RECENT_LIMIT = 8;
+
+function parseRecentCookie(value: string | undefined): number[] {
+  if (!value) return [];
+  return value
+    .split(".")
+    .map((part) => (/^[0-9]{1,10}$/.test(part) ? Number(part) : 0))
+    .filter((id) => id > 0)
+    .slice(0, RECENT_LIMIT);
+}
+
+function recordRecentJob(c: Context<AppEnv>, id: number): void {
+  const existing = parseRecentCookie(getCookie(c, RECENT_COOKIE));
+  const next = [id, ...existing.filter((entry) => entry !== id)].slice(0, RECENT_LIMIT);
+  setCookie(c, RECENT_COOKIE, next.join("."), {
+    httpOnly: true,
+    sameSite: "Lax",
+    secure: cookieSecure(c.req.url, c.req.header("x-forwarded-proto")),
+    path: "/",
+  });
+}
+
+function recentJobsFor(c: Context<AppEnv>, ctx: ServerContext): Array<{ id: number; title: string; state: string }> {
+  const jobs: Array<{ id: number; title: string; state: string }> = [];
+  for (const id of parseRecentCookie(getCookie(c, RECENT_COOKIE))) {
+    const job = ctx.store.getJob(id);
+    if (job) jobs.push({ id: job.id, title: job.pr_title, state: job.state });
+  }
+  return jobs;
+}
+
 export function createApp(ctx: ServerContext): Hono<AppEnv> {
   const mergeCapabilities = ctx.forge ? new MergeCapabilityService(ctx.forge, undefined, ctx.mergeModeSettings) : undefined;
   const app = new Hono<AppEnv>();
@@ -992,6 +1027,7 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
             { active: false, hidden: ctx.store.supersededJobCount(forge, jobType ? [jobType] : viewDef.types, repo) },
         jobFilters: { repos: repoNames, repo, type: jobType },
         queueView: { active: view },
+        recentJobs: recentJobsFor(c, ctx),
       }),
     );
   });
@@ -1015,6 +1051,7 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
         csrfToken: gateOn ? ensureCsrfToken(c, ctx.config.uiSessionSecret) : undefined,
         runFilters: { state },
         runPagination: { page, pageSize, total: board.total },
+        recentJobs: recentJobsFor(c, ctx),
       }),
     );
   });
@@ -1164,6 +1201,7 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
     const id = Number(c.req.param("id"));
     const job = ctx.store.getJob(id);
     if (!job) return c.text("Not found", 404);
+    recordRecentJob(c, id);
     const latest = ctx.store.findLatestJobForPull(job.repo_full_name, job.pr_number, undefined, {
       provider: job.provider,
       instance: job.provider_instance,

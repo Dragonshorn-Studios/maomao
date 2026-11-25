@@ -53,12 +53,17 @@ export interface PageOptions {
   /** Active entry of the settings context navigation; setting it also opens
    * the shell's second column (the settings side nav). */
   settingsSection?: SettingsSection;
+  /** Recently viewed jobs for the shell's second column on monitoring
+   * surfaces — the triangular queue → job → runs workflow benefits from a
+   * persistent jump-back list. Settings pages win the column when both are
+   * set; an empty list renders no panel. */
+  recentJobs?: Array<{ id: number; title: string; state: string }>;
   /** Login renders without the rail: there is nowhere useful to navigate to. */
   rail?: boolean;
 }
 
 /** Top-level product areas shown in the shell's icon rail. */
-export type NavArea = "queue" | "reviewers" | "scan" | "brief" | "settings" | "health";
+export type NavArea = "queue" | "operations" | "reviewers" | "settings" | "health";
 
 /** The home queue's family split: the merge queue is the default surface,
  * operations collects scans and briefs, `all` is the undivided history. */
@@ -108,13 +113,15 @@ const SETTINGS_NAV: Array<{ group: string; items: Array<[SettingsSection, string
   },
 ];
 
-/** Primary destinations, top to bottom in the rail. */
+/** Primary destinations, top to bottom in the rail. The rail is purely
+ * monitoring surfaces — the merge queue, the operations jobs, the reviewer
+ * runs board. The scan/brief trigger pages are actions and live on the
+ * operations surface instead of competing with watching surfaces here. */
 const RAIL_ITEMS: Array<[NavArea, string, string, string]> = [
   // [area, href, label, glyph]
   ["queue", "/", "Merge queue", "▤"],
+  ["operations", "/?view=ops", "Operations", "⌗"],
   ["reviewers", "/reviewers", "Reviewer runs", "◈"],
-  ["scan", "/scan", "Health scan", "⌕"],
-  ["brief", "/brief", "Repo brief", "✎"],
 ];
 
 /** Utility destinations pinned to the rail's bottom. */
@@ -275,6 +282,23 @@ function settingsContextNav(active: SettingsSection): string {
   </nav>`;
 }
 
+/** The shell's second column on monitoring surfaces: recently viewed jobs,
+ * most-recent first, with a state glance so a stale entry is obvious. */
+function recentContextNav(jobs: Array<{ id: number; title: string; state: string }>): string {
+  const links = jobs
+    .map(
+      (job) =>
+        `<a class="if-context-nav__item recent-job" href="/jobs/${job.id}"><span class="recent-job__title">${escapeHtml(job.title)}</span><span class="recent-job__state" data-state="${escapeHtml(job.state)}">${escapeHtml(job.state)}</span></a>`,
+    )
+    .join("\n      ");
+  return `<nav class="shell-context if-context-nav" aria-label="Recently viewed jobs">
+    <div class="if-context-nav__head"><span class="if-context-nav__title">Recently viewed</span></div>
+    <div class="if-context-nav__scroll">
+      ${links}
+    </div>
+  </nav>`;
+}
+
 function accountMenu(options: PageOptions): string {
   if (options.accountMenu === false) return "";
   const identity = options.identity;
@@ -373,7 +397,11 @@ export function layout(title: string, body: string, options: PageOptions = {}): 
   </script>`
     : "";
   const rail = options.rail !== false;
-  const contextNav = options.settingsSection ? settingsContextNav(options.settingsSection) : "";
+  const contextNav = options.settingsSection
+    ? settingsContextNav(options.settingsSection)
+    : options.recentJobs?.length
+      ? recentContextNav(options.recentJobs)
+      : "";
   return `<!doctype html>
 <html lang="en" data-if-brand="mergehenna">
 <head>

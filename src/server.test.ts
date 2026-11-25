@@ -4916,6 +4916,72 @@ describe("home queue family views", () => {
   });
 });
 
+describe("navigation reorganization", () => {
+  function seededOne() {
+    const { app, store } = testApp();
+    store.enqueue({
+      repoFullName: "acme/widgets",
+      repoOwner: "acme",
+      repoName: "widgets",
+      installationId: 1,
+      prNumber: 1,
+      prTitle: "job one",
+      prBody: "",
+      prHtmlUrl: "",
+      prAuthor: "dev",
+      baseSha: "b",
+      headSha: "sha-1",
+      baseRef: "main",
+      headRef: "f",
+      reviewers: [],
+    });
+    return { app, store };
+  }
+
+  it("exposes monitoring areas in the rail and per-surface primary actions", async () => {
+    const { app } = seededOne();
+    const merge = await (await app.request("/")).text();
+    // The rail is the family switcher: merge queue, operations, runs.
+    expect(merge).toContain('title="Merge queue"');
+    expect(merge).toContain('href="/?view=ops"');
+    expect(merge).toContain('title="Operations"');
+    expect(merge).toContain('title="Reviewer runs"');
+    // Trigger forms are actions, not areas: no scan/brief rail items.
+    expect(merge).not.toContain('title="Health scan"');
+    expect(merge).not.toContain('title="Repo brief"');
+    // The merge queue leads with its review trigger; operations leads with
+    // scan/brief launch actions instead.
+    expect(merge).toContain('action="/reviews"');
+    const ops = await (await app.request("/?view=ops")).text();
+    expect(ops).toContain('href="/scan"');
+    expect(ops).toContain('href="/brief"');
+    expect(ops).not.toContain('action="/reviews"');
+    expect(ops).toContain("New health scan");
+  });
+
+  it("tracks recently viewed jobs into the monitoring context panel", async () => {
+    const { app } = seededOne();
+    const anon = await app.request("/");
+    expect(await anon.text()).not.toContain("Recently viewed");
+    const detail = await app.request("/jobs/1");
+    expect(detail.status).toBe(200);
+    const cookie = detail.headers.get("set-cookie") ?? "";
+    expect(cookie).toContain("mh_recent=1");
+    const home = await app.request("/", { headers: { cookie: cookie.split(";")[0]! } });
+    const html = await home.text();
+    expect(html).toContain("Recently viewed");
+    expect(html).toContain("job one");
+    expect(html).toContain("shell has-context");
+    // Reviewers board carries the same jump-back panel.
+    const board = await app.request("/reviewers", { headers: { cookie: cookie.split(";")[0]! } });
+    expect(await board.text()).toContain("Recently viewed");
+    // Garbage cookie content degrades to no panel, never an error.
+    const junk = await app.request("/", { headers: { cookie: "mh_recent=abc..x9" } });
+    expect(junk.status).toBe(200);
+    expect(await junk.text()).not.toContain("Recently viewed");
+  });
+});
+
 describe("home queue pagination", () => {
   function seededApp(count: number) {
     const { app, store } = testApp();

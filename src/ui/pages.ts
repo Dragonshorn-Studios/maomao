@@ -273,34 +273,41 @@ export function renderHome(jobs: JobRow[], store: JobStore, options: PageOptions
     </form>`
     : "";
 
-  const viewTabs = `<nav class="queue-views" aria-label="Queue views">
-    <span class="if-tabs">${QUEUE_VIEWS.map((entry) => {
-      const active = entry.id === view;
-      const href = `/${queueParams({
-        view: entry.id,
-        forge: options.activeForge,
-        superseded: superseded?.active === true,
-        repo: options.jobFilters?.repo,
-      })}`;
-      return `<a class="if-tab${active ? " is-active" : ""}" href="${href}"${active ? ' aria-current="page"' : ""}>${escapeHtml(entry.label)}</a>`;
-    }).join("")}</span>
-  </nav>`;
-  const body = `
-    <h1>${escapeHtml(viewDef.h1)}</h1>
-    <p class="lede">${escapeHtml(viewDef.lede)}${pancakeChip ? ` ${pancakeChip}` : ""}</p>
-    ${viewTabs}
-    ${filterNav ? `<div class="meta-row" role="navigation" aria-label="Filter jobs">${filterNav}</div>` : ""}
-    ${filterForm}
-    ${options.notice ? `<p class="notice if-banner if-banner--success" role="status">${escapeHtml(options.notice)}</p>` : ""}
-    ${options.error ? `<p class="error if-banner if-banner--danger" role="alert">${escapeHtml(options.error)}</p>` : ""}
-    <form class="trigger" method="post" action="/reviews">
+  // The rail is the family switcher now — merge and operations are its
+  // areas. "All jobs" survives as a quiet escape hatch for undivided
+  // history, tucked next to the filters rather than competing as a tab.
+  const allJobsLink =
+    view === "all"
+      ? ""
+      : `<a class="top-link" href="/${queueParams({ view: "all" })}">All jobs</a>`;
+  // Each surface leads with its own primary action: the merge queue queues
+  // reviews; the operations surface launches scans and briefs. The "all"
+  // view is a debugging surface and gets neither.
+  const primaryAction =
+    view === "ops"
+      ? `<div class="ops-actions">
+          <a class="if-button if-button--primary" href="/scan">New health scan</a>
+          <a class="if-button" href="/brief">New repo brief</a>
+        </div>`
+      : view === "merge"
+        ? `<form class="trigger" method="post" action="/reviews">
       ${csrfInput(options.csrfToken)}
       <label>
         Queue a GitHub pull request
         <input type="url" name="url" placeholder="https://github.com/owner/repo/pull/123" value="${escapeHtml(options.reviewUrl ?? "")}" required/>
       </label>
       <button class="if-button if-button--primary" type="submit">Queue review</button>
-    </form>
+    </form>`
+        : "";
+  const body = `
+    <h1>${escapeHtml(viewDef.h1)}</h1>
+    <p class="lede">${escapeHtml(viewDef.lede)}${pancakeChip ? ` ${pancakeChip}` : ""}</p>
+    ${allJobsLink}
+    ${filterNav ? `<div class="meta-row" role="navigation" aria-label="Filter jobs">${filterNav}</div>` : ""}
+    ${filterForm}
+    ${options.notice ? `<p class="notice if-banner if-banner--success" role="status">${escapeHtml(options.notice)}</p>` : ""}
+    ${options.error ? `<p class="error if-banner if-banner--danger" role="alert">${escapeHtml(options.error)}</p>` : ""}
+    ${primaryAction}
     ${
       cards
         ? `<ol class="queue">${cards}</ol>`
@@ -310,7 +317,7 @@ export function renderHome(jobs: JobRow[], store: JobStore, options: PageOptions
           </div>`
     }
     ${paginationNav}`;
-  return layout(PRODUCT_NAME, body, { nav: "queue", ...options });
+  return layout(PRODUCT_NAME, body, { nav: view === "ops" ? "operations" : "queue", ...options });
 }
 
 /**
@@ -698,7 +705,7 @@ export function renderJob(
           : forgeBadgeTitle(job, job.repo_full_name, job.pr_number),
     body,
     {
-      nav: job.job_type === "health_scan" ? "scan" : job.job_type === "repo_brief" ? "brief" : "queue",
+      nav: job.job_type === "health_scan" || job.job_type === "repo_brief" ? "operations" : "queue",
       ...options,
     },
   );
@@ -2716,7 +2723,7 @@ export function renderScanConfirmPage(data: ScanConfirmData): string {
     csrfToken: data.csrfToken,
     identity: data.identity,
     surface: "operator",
-    nav: "scan",
+    nav: "operations",
   });
 }
 
@@ -2762,7 +2769,7 @@ export function renderScanPage(data: ScanPageData): string {
     csrfToken: data.csrfToken,
     identity: data.identity,
     surface: "operator",
-    nav: "scan",
+    nav: "operations",
   });
 }
 
@@ -2896,7 +2903,7 @@ export function renderScanIssuePreviewPage(data: ScanIssuePreviewData): string {
     csrfToken: data.csrfToken,
     identity: data.identity,
     surface: "operator",
-    nav: "scan",
+    nav: "operations",
   });
 }
 
@@ -2990,7 +2997,7 @@ export function renderBriefConfirmPage(data: BriefConfirmData): string {
     csrfToken: data.csrfToken,
     identity: data.identity,
     surface: "operator",
-    nav: "brief",
+    nav: "operations",
   });
 }
 
@@ -3039,7 +3046,7 @@ export function renderBriefPage(data: BriefPageData): string {
     csrfToken: data.csrfToken,
     identity: data.identity,
     surface: "operator",
-    nav: "brief",
+    nav: "operations",
   });
 }
 
@@ -3181,7 +3188,7 @@ export function renderBriefTabPage(data: BriefTabData): string {
     csrfToken: data.csrfToken,
     identity: data.identity,
     surface: "operator",
-    nav: "brief",
+    nav: "operations",
   });
 }
 

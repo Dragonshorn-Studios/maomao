@@ -245,21 +245,32 @@ a.if-rail__button { display: grid; place-items: center; text-decoration: none; }
 .shell-context .if-context-nav__item[aria-current] { font-weight: 600; }
 
 /* Queue family switcher: links wearing the library's tab visuals. */
-.queue-views {
+.ops-actions {
   display: flex;
+  gap: 0.5rem;
   align-items: center;
-  gap: 0.75rem;
-  flex-wrap: wrap;
-  margin: 0.9rem 0 0.4rem;
+  margin: 0.7rem 0 1rem;
 }
-.queue-views .if-tabs { padding: 2px; }
-.queue-views .if-tab { text-decoration: none; display: inline-block; }
-.queue-views .if-tab.is-active {
-  background: var(--if-surface-hover);
-  color: var(--if-text);
-  box-shadow: inset 0 0 0 1px var(--if-line);
+.ops-actions .if-button { text-decoration: none; }
+.recent-job { justify-content: space-between; gap: 0.5rem; }
+.recent-job__title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
 }
-.queue-views-note { font-size: 0.78rem; color: var(--ink-muted); }
+.recent-job__state {
+  flex: none;
+  font-family: var(--font-mono);
+  font-size: 0.58rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--ink-muted);
+}
+.recent-job__state[data-state="completed"] { color: var(--ok-text); }
+.recent-job__state[data-state="failed"], .recent-job__state[data-state="cancelled"] { color: var(--bad); }
+.recent-job__state[data-state="reviewing"], .recent-job__state[data-state="running"] { color: var(--accent); }
+
 
 .brand-text { display: inline-flex; flex-direction: column; line-height: 1.05; }
 .brand-name { font-family: var(--font-display); font-size: 1.15rem; font-weight: 600; letter-spacing: 0.01em; }
