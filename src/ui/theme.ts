@@ -472,13 +472,16 @@ button, summary {
 }
 .jobs-pagination .jobs-pagination-note { margin: 0 0 0.35rem; }
 
+.if-banner { margin: 0.8rem 0; border-radius: var(--radius); }
 .notice, .error, .warn {
   border: 1px solid var(--line);
   padding: 0.65rem 0.8rem;
   margin: 0.8rem 0;
   background: var(--surface);
 }
-.notice { border-color: var(--jade); background: var(--jade-soft); }
+.notice:not(.if-banner) { border-color: var(--jade); background: var(--jade-soft); }
+/* Flash banners are infernal if-banner instances; the legacy frame rules
+   above only cover inline notices that have not adopted the component. */
 .pause-banner {
   background: var(--amber-soft);
   border-bottom: 1px solid var(--amber);
@@ -500,7 +503,7 @@ button, summary {
   border-color: var(--amber);
   background: var(--amber-soft);
 }
-.error { border-color: var(--cinnabar); background: var(--cinnabar-soft); color: var(--ink); }
+.error:not(.if-banner) { border-color: var(--cinnabar); background: var(--cinnabar-soft); color: var(--ink); }
 .warn { border-color: var(--amber); background: var(--amber-soft); }
 .usage-incomplete { color: var(--amber); font-size: 0.9em; margin: 0.35rem 0 0; }
 .usage-breakdown, .usage-note { font-size: 0.9em; margin: 0.25rem 0 0; }
@@ -1544,9 +1547,14 @@ pre, .log-panel {
 .logs .lvl { text-transform: uppercase; letter-spacing: 0.04em; }
 
 .empty {
-  padding: 1.4rem 1.1rem;
-  text-align: left;
+  padding: 1.6rem 1.2rem;
+  text-align: center;
+  border-style: dashed;
+  border-color: var(--line-strong, var(--line));
+  color: var(--muted);
 }
+
+.empty strong { color: var(--ink); }
 .empty p { margin: 0.3rem 0; }
 
 details { margin: 0.45rem 0; }

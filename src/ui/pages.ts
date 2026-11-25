@@ -291,8 +291,8 @@ export function renderHome(jobs: JobRow[], store: JobStore, options: PageOptions
     ${viewTabs}
     ${filterNav ? `<div class="meta-row" role="navigation" aria-label="Filter jobs">${filterNav}</div>` : ""}
     ${filterForm}
-    ${options.notice ? `<p class="notice" role="status">${escapeHtml(options.notice)}</p>` : ""}
-    ${options.error ? `<p class="error" role="alert">${escapeHtml(options.error)}</p>` : ""}
+    ${options.notice ? `<p class="notice if-banner if-banner--success" role="status">${escapeHtml(options.notice)}</p>` : ""}
+    ${options.error ? `<p class="error if-banner if-banner--danger" role="alert">${escapeHtml(options.error)}</p>` : ""}
     <form class="trigger" method="post" action="/reviews">
       ${csrfInput(options.csrfToken)}
       <label>
@@ -483,7 +483,7 @@ function renderMergeLifecycle(lifecycle: MergeLifecycle, job: JobRow, capabiliti
         ${capabilities?.reasons.length ? `<details class="merge-diagnostics"><summary>Merge capability diagnostics</summary><ul>${capabilities.reasons.map((reason) => `<li>${escapeHtml(reason)}</li>`).join("")}</ul></details>` : ""}
         <p class="if-caption merge-lifecycle-note">${escapeHtml(lifecycle.detail)} Maomao reports native merge state only; it does not merge or bypass branch protection.</p>
         ${readiness?.summary ? `<details class="merge-diagnostics"><summary>Readiness policy details</summary><pre>${escapeHtml(readiness.summary)}</pre></details>` : ""}
-        ${readiness?.publish_error ? `<p class="error" role="alert">Publication error: ${escapeHtml(readiness.publish_error)}</p>` : ""}
+        ${readiness?.publish_error ? `<p class="error if-banner if-banner--danger" role="alert">Publication error: ${escapeHtml(readiness.publish_error)}</p>` : ""}
       </div>
     </section>`;
 }
@@ -576,8 +576,8 @@ export function renderJob(
   const jobActions = renderJobActions(job, options.csrfToken);
   const body = `
     <p class="crumb"><a href="/">Jobs</a> / job ${job.id}</p>
-    ${options.notice ? `<p class="notice" role="status">${escapeHtml(options.notice)}</p>` : ""}
-    ${options.error ? `<p class="error" role="alert">${escapeHtml(options.error)}</p>` : ""}
+    ${options.notice ? `<p class="notice if-banner if-banner--success" role="status">${escapeHtml(options.notice)}</p>` : ""}
+    ${options.error ? `<p class="error if-banner if-banner--danger" role="alert">${escapeHtml(options.error)}</p>` : ""}
     ${cancelledBanner}
     ${stale ? `<p class="warn" role="status">${escapeHtml(staleBanner())}</p>` : ""}
     <h1>${heading}${prExternalLinkHtml(job)}</h1>
@@ -1679,9 +1679,9 @@ function revisionCard(revision: ConfigRevisionView, data: ConfigPageData): strin
   const effectNote =
     revision.status === "active"
       ? revision.name === "default"
-        ? `<p class="notice" role="status">In effect — drives every new job whose repo matches no route rule.</p>`
+        ? `<p class="notice if-banner if-banner--success" role="status">In effect — drives every new job whose repo matches no route rule.</p>`
         : routedPatterns.length > 0
-          ? `<p class="notice" role="status">In effect — drives new jobs for repos matching ${routedPatterns
+          ? `<p class="notice if-banner if-banner--success" role="status">In effect — drives new jobs for repos matching ${routedPatterns
               .map((route) => `<code>${escapeHtml(route.pattern)}</code>`)
               .join(", ")}.</p>`
           : `<p class="error" role="alert">Active, but no repo route targets it — nothing uses this profile until a rule below points at <code>${escapeHtml(revision.name)}</code>.</p>`
@@ -1956,7 +1956,7 @@ export function renderConfigPage(data: ConfigPageData): string {
   const body = `
     <h1>Review configuration</h1>
     <p class="lede">What this process is actually running, with the source of every value and where to change it.</p>
-    ${data.notice ? `<p class="notice" role="status">${escapeHtml(data.notice)}</p>` : ""}
+    ${data.notice ? `<p class="notice if-banner if-banner--success" role="status">${escapeHtml(data.notice)}</p>` : ""}
     ${data.error ? `<p class="error" role="alert">${escapeHtml(data.error)}</p>` : ""}
     ${data.effectiveConfig ? renderEffectiveConfigSection(data.effectiveConfig) : ""}
     <p class="muted">Service status and uptime live on the <a href="/health">health page</a>.</p>`;
@@ -2131,7 +2131,7 @@ export function renderProfilesPage(data: ConfigPageData): string {
   const body = `
     <h1>Review profiles</h1>
     <p class="lede">A profile bundles reviewer roles, models, publish floor, and budgets. New jobs run with the active revision of the profile their repo routes to below; unmatched repos use the active <code>default</code>, and with nothing active the env configuration applies. Credentials are never part of a profile.</p>
-    ${data.notice ? `<p class="notice" role="status">${escapeHtml(data.notice)}</p>` : ""}
+    ${data.notice ? `<p class="notice if-banner if-banner--success" role="status">${escapeHtml(data.notice)}</p>` : ""}
     ${data.error ? `<p class="error" role="alert">${escapeHtml(data.error)}</p>` : ""}
     ${createLink}
     <h2>Active</h2>
@@ -2189,7 +2189,7 @@ export function renderDraftEditPage(data: DraftEditPageData): string {
     : `<p class="muted">Writing configuration requires an operator OAuth identity.</p>`;
   const body = `
     <p class="crumb"><a href="/config/profiles">Profiles</a> / Draft #${data.revision.id}</p>
-    ${data.notice ? `<p class="notice" role="status">${escapeHtml(data.notice)}</p>` : ""}
+    ${data.notice ? `<p class="notice if-banner if-banner--success" role="status">${escapeHtml(data.notice)}</p>` : ""}
     ${data.error ? `<p class="error" role="alert">${escapeHtml(data.error)}</p>` : ""}
     ${editor}`;
   return layout(`Edit draft #${data.revision.id}`, body, {
@@ -2235,7 +2235,7 @@ export function renderNewProfilePage(data: ConfigPageData): string {
     : `<p class="muted">Writing configuration requires an operator OAuth identity.</p>`;
   const body = `
     <p class="crumb"><a href="/config/profiles">Profiles</a> / New draft</p>
-    ${data.notice ? `<p class="notice" role="status">${escapeHtml(data.notice)}</p>` : ""}
+    ${data.notice ? `<p class="notice if-banner if-banner--success" role="status">${escapeHtml(data.notice)}</p>` : ""}
     ${data.error ? `<p class="error" role="alert">${escapeHtml(data.error)}</p>` : ""}
     ${editor}`;
   return layout("New draft", body, {
@@ -2286,7 +2286,7 @@ export function renderConfigDeliveriesPage(data: ConfigPageData): string {
   const body = `
     <h1>Webhook deliveries</h1>
     <p class="lede">Every verified webhook delivery maomao answered — most recent first. <span class="muted">Dimmed rows were ignored</span>; the result column carries the reason (stack chatter, unsupported events, non-command comments) alongside handled outcomes.</p>
-    ${data.notice ? `<p class="notice" role="status">${escapeHtml(data.notice)}</p>` : ""}
+    ${data.notice ? `<p class="notice if-banner if-banner--success" role="status">${escapeHtml(data.notice)}</p>` : ""}
     ${data.error ? `<p class="error" role="alert">${escapeHtml(data.error)}</p>` : ""}
     ${deliveriesTable(deliveries)}
     ${older}`;
@@ -2305,7 +2305,7 @@ export function renderConfigAuditPage(data: ConfigPageData): string {
   const body = `
     <h1>Configuration audit</h1>
     <p class="lede">The most recent configuration changes — who did what, and when.</p>
-    ${data.notice ? `<p class="notice" role="status">${escapeHtml(data.notice)}</p>` : ""}
+    ${data.notice ? `<p class="notice if-banner if-banner--success" role="status">${escapeHtml(data.notice)}</p>` : ""}
     ${data.error ? `<p class="error" role="alert">${escapeHtml(data.error)}</p>` : ""}
     ${configAuditTable(data.audit)}`;
   return layout("Configuration audit", body, {
@@ -2580,7 +2580,7 @@ export function renderPromptConfigPage(data: PromptConfigPageData): string {
   const body = `
     <h1>Specialist prompts</h1>
     <p class="lede">Each specialist ships with built-in instructions. Override a role when you need different focus; the live override is the active revision, drafts stay private until you activate them. Security guardrails are composed at runtime and are not editable — expand <strong>Composed built-in</strong> to read guardrails plus the current body. Evaluation never publishes to GitHub.</p>
-    ${data.notice ? `<p class="notice" role="status">${escapeHtml(data.notice)}</p>` : ""}
+    ${data.notice ? `<p class="notice if-banner if-banner--success" role="status">${escapeHtml(data.notice)}</p>` : ""}
     ${data.error ? `<p class="error" role="alert">${escapeHtml(data.error)}</p>` : ""}
     ${writeGate}
     <h2>Roles</h2>
@@ -3095,7 +3095,7 @@ export function renderPausePage(data: PausePageData): string {
     <p class="lede">Pause automatic pull-request reviews for one repository while a stack is being built. Expiring a pause resumes normal handling of future webhooks — it does not backfill intermediate states. A repository pause still allows manual reviews, scans, briefs, and explicit stack triggers; the global switch above stops every kind of review.</p>
     ${globalCard}
     ${data.error ? `<p class="error" role="alert">${escapeHtml(data.error)}</p>` : ""}
-    ${data.notice ? `<p class="notice" role="status">${escapeHtml(data.notice)}</p>` : ""}
+    ${data.notice ? `<p class="notice if-banner if-banner--success" role="status">${escapeHtml(data.notice)}</p>` : ""}
     ${data.canOperate ? `
     <form class="trigger" method="post" action="/pause">
       ${csrf}
