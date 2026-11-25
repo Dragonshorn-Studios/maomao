@@ -251,7 +251,7 @@ export class TrustedCheckRunner {
     if (!this.enabled()) return errorResult(input.name, revision, "trusted checks are not configured", startedAt);
     if (!this.enabledFor(input.name)) return errorResult(input.name, revision, `trusted ${input.name} check is disabled`, startedAt);
     try {
-      const trustedDir = await this.checkout();
+      const trustedDir = await this.checkout(settings);
       const repoRealPath = await realpath(input.repoDir);
       if (trustedDir === repoRealPath || trustedDir.startsWith(repoRealPath + sep) || repoRealPath.startsWith(trustedDir + sep)) {
         throw new Error("trusted checks checkout must not overlap the pull-request checkout");
@@ -404,15 +404,14 @@ export class TrustedCheckRunner {
     }
   }
 
-  private checkout(): Promise<string> {
-    const settings = this.settings();
+  private checkout(settings = this.settings()): Promise<string> {
     const key = `${settings.repoUrl} ${settings.localPath} ${settings.revision}`;
     if (this.checkoutKey !== key) {
       this.checkoutPromise = undefined;
       this.checkoutKey = key;
     }
     if (!this.checkoutPromise) {
-      const pending = this.prepareCheckout();
+      const pending = this.prepareCheckout(settings);
       this.checkoutPromise = pending;
       void pending.catch(() => {
         if (this.checkoutPromise === pending) this.checkoutPromise = undefined;
@@ -421,8 +420,7 @@ export class TrustedCheckRunner {
     return this.checkoutPromise;
   }
 
-  private async prepareCheckout(): Promise<string> {
-    const settings = this.settings();
+  private async prepareCheckout(settings: TrustedCheckRuntimeConfig): Promise<string> {
     const revision = settings.revision;
     if (settings.localPath) {
       const path = await realpath(settings.localPath);
