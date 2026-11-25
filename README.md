@@ -266,7 +266,7 @@ Forgejo does not expose GitHub Check Runs or portable line annotations. Maomao i
 | `failure` | `failure` |
 | `neutral` | `warning` |
 | `skipped` | `skipped` |
-| `cancelled` / `timed_out` / `action_required` | `error` |
+| `error` / `cancelled` / `timed_out` / `action_required` | `error` |
 
 The complete human-facing review is posted as a pull-request comment; inline findings are retained in that comment body rather than pretending Forgejo supports GitHub-style line anchors. Review-thread resolution and approval/request-changes verdicts are not currently available through this adapter; those degrade to comments while the native status still records Maomao's deterministic lifecycle outcome.
 

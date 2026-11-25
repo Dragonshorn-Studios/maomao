@@ -15,24 +15,24 @@ describe("forge boot validation", () => {
     expect(() => assertRuntimeConfig(loadConfig({}))).toThrow(/GITHUB_APP_ID/);
     expect(() => assertRuntimeConfig(loadConfig({ ...forgeKeyEnv }))).toThrow(/GITHUB_APP_ID/);
     expect(() =>
-      assertRuntimeConfig(loadConfig(githubEnv), { gitlabConnections: 0, gitlabBootstrap: false }),
+      assertRuntimeConfig(loadConfig(githubEnv), { forgeConnections: 0, gitlabBootstrap: false }),
     ).not.toThrow();
   });
 
   it("lets a GitLab-only deployment boot without GitHub App credentials", () => {
     expect(() =>
-      assertRuntimeConfig(loadConfig(forgeKeyEnv), { gitlabConnections: 1, gitlabBootstrap: false }),
+      assertRuntimeConfig(loadConfig(forgeKeyEnv), { forgeConnections: 1, gitlabBootstrap: false }),
     ).not.toThrow();
     expect(() =>
-      assertRuntimeConfig(loadConfig(forgeKeyEnv), { gitlabConnections: 0, gitlabBootstrap: true }),
+      assertRuntimeConfig(loadConfig(forgeKeyEnv), { forgeConnections: 0, gitlabBootstrap: true }),
     ).not.toThrow();
   });
 
   it("requires MAOMAO_FORGE_KEY whenever a GitLab forge path exists", () => {
     expect(() =>
-      assertRuntimeConfig(loadConfig({}), { gitlabConnections: 2, gitlabBootstrap: false }),
+      assertRuntimeConfig(loadConfig({}), { forgeConnections: 2, gitlabBootstrap: false }),
     ).toThrow(/MAOMAO_FORGE_KEY/);
-    expect(() => assertRuntimeConfig(loadConfig({}), { gitlabConnections: 0, gitlabBootstrap: true })).toThrow(
+    expect(() => assertRuntimeConfig(loadConfig({}), { forgeConnections: 0, gitlabBootstrap: true })).toThrow(
       /MAOMAO_FORGE_KEY/,
     );
   });

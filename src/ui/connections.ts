@@ -154,7 +154,7 @@ export function renderConnectionsPage(data: ConnectionsPageData): string {
         <legend>Policy</legend>
         <p><label><input type="checkbox" name="allowPrivateNetwork" value="1"/> allow private-network addresses (self-managed hosts)</label></p>
         <p><label><input type="checkbox" name="allowInsecureHttp" value="1"/> allow plain HTTP (discouraged)</label></p>
-        <p><label><input type="checkbox" name="allowApprove" value="1"/> allow approval verdicts on clean reviews</label></p>
+        <p><label><input type="checkbox" name="allowApprove" value="1"/> allow approval verdicts on clean GitLab reviews</label></p>
       </fieldset>
       <p><button type="submit" class="btn">Create connection</button></p>
     </form>

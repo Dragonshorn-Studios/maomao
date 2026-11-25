@@ -1233,7 +1233,7 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
   ) => c.html(renderProfilesPage(profilesPageData(c, { error: message })), status);
 
 
-  // ---- Forge connections (GitLab) ----
+  // ---- Forge connections ----
 
   app.get("/connections", (c) => {
     if (!gateOn) return c.redirect("/", 302);
@@ -1289,7 +1289,7 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
         caPem: typeof body.caPem === "string" && body.caPem.trim() ? body.caPem : undefined,
         allowPrivateNetwork: checked("allowPrivateNetwork"),
         allowInsecureHttp: checked("allowInsecureHttp"),
-        allowApprove: checked("allowApprove"),
+        allowApprove: provider === "forgejo" ? false : checked("allowApprove"),
       });
       const probe = await probeConnection(ctx.forgeConnections, row.id, { timeoutMs: 10_000 });
       if (probe.ok) {
