@@ -353,6 +353,8 @@ The pinned trusted checkout may also contain `maomao-policy.json`; because it is
 
 Maomao publishes `maomao/merge-readiness` for each PR head SHA. It starts queued/in-progress with the review job and completes only after the review and required deterministic inputs for that exact SHA are present. Review `failure`/`timed_out`, required scanner failures, missing results, scanner errors, skipped scans, malformed policy, and stale-head validation failures are non-success. `success` means the policy-required inputs all passed for that immutable head; a later push receives a fresh evaluation and can never inherit the old SHA's passing decision. This signal is publication only in this phase — Maomao does not merge or bypass branch protection.
 
+Pull-request job pages derive a read-only merge lifecycle from that exact-SHA publication and the forge-confirmed merged marker: `reviewing`, `waiting_checks`, `ready`, `blocked`, `stale`, `merged`, or `failed`. `merged` is never inferred from a passing check alone; it requires the forge to confirm the merge. Publication failures are shown as failed diagnostics rather than false readiness. Native scheduling states (`scheduled_auto_merge`, `github_queued`, and `merge_group_testing`) are reserved for forge-native integration signals; Maomao does not implement a merge control, scheduler, or custom queue.
+
 ## Configure OpenCode models
 
 Maomao does not embed a model vendor. It runs:

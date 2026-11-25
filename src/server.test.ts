@@ -181,7 +181,10 @@ describe("HTTP app", () => {
 
     const detail = await app.request(`/jobs/${enqueued[0]}`);
     expect(detail.status).toBe(200);
-    expect(await detail.text()).toContain("acme/widgets #8");
+    const detailHtml = await detail.text();
+    expect(detailHtml).toContain("acme/widgets #8");
+    expect(detailHtml).toContain("Merge lifecycle");
+    expect(detailHtml).toContain("reviewing");
   });
 
   it("protects UI/API/events with a session cookie and leaves webhook/health public", async () => {

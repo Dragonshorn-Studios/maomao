@@ -11,6 +11,7 @@ import { initialProfileFormValues, profileFormValuesFromDefinition } from "../co
 import type { EffectiveConfigEntry } from "../config-effective.js";
 import type { Severity } from "../schema.js";
 import { parseBriefPayload, type BriefPayload } from "../jobs/brief.js";
+import type { MergeLifecycle } from "../merge/lifecycle.js";
 import { elapsedMs, escapeHtml, formatDuration, shortSha } from "../util.js";
 import { KNOWN_REVIEWER_ROLES, composeReviewerPrompt, promptBodyFromRolePrompt } from "../prompts.js";
 import { composedPipelineStages } from "../prompt-previews.js";
@@ -291,6 +292,7 @@ function renderJobsPagination(
 
 export type JobPageOptions = PageOptions & {
   chatEnabled?: boolean;
+  mergeLifecycle?: MergeLifecycle;
   scanIssueCreation?: ScanIssueCreationData;
   /** Provenance rows for a health-scan job (fingerprints → GitHub issues). */
   scanIssues?: Array<{ fingerprint: string; issue_number: number; issue_url: string; title: string }>;
@@ -306,6 +308,36 @@ export type JobPageOptions = PageOptions & {
     state: string;
   }>;
 };
+
+
+function renderMergeLifecycle(lifecycle: MergeLifecycle, job: JobRow): string {
+  const labels: Record<MergeLifecycle["state"], string> = {
+    reviewing: "reviewing",
+    waiting_checks: "waiting checks",
+    ready: "ready",
+    scheduled_auto_merge: "scheduled auto-merge",
+    github_queued: "GitHub queued",
+    merge_group_testing: "merge-group testing",
+    blocked: "blocked",
+    stale: "stale",
+    merged: "merged",
+    failed: "failed",
+  };
+  const readiness = lifecycle.readiness;
+  return `<h2>Merge lifecycle</h2>
+    <section class="card merge-lifecycle">
+      <dl class="config-grid">
+        <dt>State</dt><dd><strong>${escapeHtml(labels[lifecycle.state])}</strong></dd>
+        <dt>Exact head</dt><dd><code class="sha">${escapeHtml(shortSha(job.head_sha, 12))}</code></dd>
+        <dt>Readiness check</dt><dd>${readiness ? `<code>${escapeHtml(readiness.status)}</code>${readiness.conclusion ? ` / <code>${escapeHtml(readiness.conclusion)}</code>` : ""}` : "not published"}</dd>
+        <dt>Native merge</dt><dd>${job.pr_html_url ? `<a href="${escapeHtml(job.pr_html_url)}">open the forge pull request</a>` : "—"}</dd>
+        ${lifecycle.nativeUrl ? `<dt>Native check</dt><dd><a href="${escapeHtml(lifecycle.nativeUrl)}">open forge check/status</a></dd>` : ""}
+      </dl>
+      <p class="muted">${escapeHtml(lifecycle.detail)} Maomao reports native merge state only; it does not merge or bypass branch protection.</p>
+      ${readiness?.summary ? `<details><summary>Readiness policy details</summary><pre>${escapeHtml(readiness.summary)}</pre></details>` : ""}
+      ${readiness?.publish_error ? `<p class="error" role="alert">Publication error: ${escapeHtml(readiness.publish_error)}</p>` : ""}
+    </section>`;
+}
 
 /** Ordered member rail with pinned SHAs, per-member state badges, and links
  * to each member's review job. The numbered node column reads bottom-up,
@@ -465,6 +497,7 @@ export function renderJob(
         </dd>
       </div>`}
     </dl>
+    ${job.job_type === "pr_review" && options.mergeLifecycle ? renderMergeLifecycle(options.mergeLifecycle, job) : ""}
     ${isBrief ? "" : renderRouting(job)}
     ${isBrief ? "" : renderEscalation(job)}
     ${options.stackMembers?.length ? renderStackMembers(options.stackMembers) : ""}
