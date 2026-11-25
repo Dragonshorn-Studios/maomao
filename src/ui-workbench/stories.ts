@@ -689,6 +689,7 @@ export const STORIES: WorkbenchStory[] = [
     title: "Ask Maomao chat island",
     category: "React islands",
     family: "react",
+    surface: "operator",
     sourceFiles: ["src/ui/chat-entry.tsx", "src/ui/chat-page.ts", "src/ui/chat-stream.ts"],
     defaultViewport: "desktop",
     notes: "The assistant-ui island. Its stream endpoint is a fake in-process handler — no model is ever called.",

@@ -361,4 +361,25 @@ describe("listJobsPage repo and job-type filters", () => {
     const combined = store.listJobsPage({ repo: "acme/other", jobType: "stack_review" });
     expect(combined.jobs).toHaveLength(0);
   });
+
+  it("filters by job-type families and scopes the superseded count", () => {
+    const store = filteredFixture();
+    // Family membership: the merge family keeps reviews, the operations
+    // family would keep scans/briefs — never a cross-family leak.
+    const mergeFamily = store.listJobsPage({ jobTypes: ["pr_review", "stack_review", "merge_group_check"] });
+    expect(mergeFamily.jobs.map((job) => job.pr_number).sort()).toEqual([1, 2, 3]);
+    const opsOnly = store.listJobsPage({ jobTypes: ["health_scan", "repo_brief"] });
+    expect(opsOnly.jobs).toHaveLength(0);
+    const singular = store.listJobsPage({ jobTypes: ["pr_review"] });
+    expect(singular.jobs.map((job) => job.pr_number).sort()).toEqual([1, 3]);
+    // The superseded count mirrors the same scoping: types and repo.
+    for (const job of store.listJobsPage({}).jobs) {
+      store.setJobState(job.id, "stale");
+    }
+    expect(store.supersededJobCount()).toBe(3);
+    expect(store.supersededJobCount(undefined, ["stack_review"])).toBe(1);
+    expect(store.supersededJobCount(undefined, ["pr_review", "stack_review"], "acme/widgets")).toBe(2);
+    expect(store.supersededJobCount(undefined, undefined, "acme/other")).toBe(1);
+    expect(store.supersededJobCount(undefined, ["health_scan"])).toBe(0);
+  });
 });

@@ -112,6 +112,9 @@ describe("monitoring pages", () => {
     expect(html).toContain('<script src="/assets/vendor/pierre-diffs.js" defer></script>');
     expect(html).not.toContain('<details class="account-menu">');
     expect(html).not.toContain('href="/connections"');
+    // Rail-less pages must opt out of the rail grid column entirely —
+    // regressing this squeezed the login into the 3.75rem icon column.
+    expect(html).toContain("shell--railless");
   });
 
   it("renders the empty queue with restrained flavor", () => {

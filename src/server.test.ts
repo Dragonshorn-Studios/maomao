@@ -4847,6 +4847,75 @@ describe("manual cancel and dequeue hardening", () => {
   }
 });
 
+describe("home queue family views", () => {
+  function seededFamilies() {
+    const { app, store } = testApp();
+    const seed = (prNumber: number, jobType?: "pr_review" | "stack_review" | "repo_brief" | "health_scan" | "merge_group_check") => {
+      store.enqueue({
+        repoFullName: "acme/widgets",
+        repoOwner: "acme",
+        repoName: "widgets",
+        installationId: 1,
+        prNumber,
+        prTitle: `${jobType ?? "pr_review"} ${prNumber}`,
+        prBody: "",
+        prHtmlUrl: "",
+        prAuthor: "dev",
+        baseSha: "b",
+        headSha: `sha-${jobType ?? "pr_review"}-${prNumber}`,
+        baseRef: "main",
+        headRef: "f",
+        reviewers: [],
+        jobType,
+        dedupKey: jobType === "stack_review" ? `stack:${prNumber}` : jobType ? `${jobType}:${prNumber}` : undefined,
+      });
+    };
+    seed(1, "pr_review");
+    seed(2, "health_scan");
+    seed(3, "repo_brief");
+    seed(4, "merge_group_check");
+    return { app, store };
+  }
+
+  it("splits merge, operations, and all jobs across the family views", async () => {
+    const { app } = seededFamilies();
+    const merge = await (await app.request("/")).text();
+    expect(merge).toContain("pr_review 1");
+    expect(merge).toContain("merge_group_check 4");
+    expect(merge).not.toContain("health_scan 2");
+    expect(merge).not.toContain("repo_brief 3");
+
+    const ops = await (await app.request("/?view=ops")).text();
+    expect(ops).toContain("health_scan 2");
+    expect(ops).toContain("repo_brief 3");
+    expect(ops).not.toContain("pr_review 1");
+    expect(ops).not.toContain("merge_group_check 4");
+
+    const all = await (await app.request("/?view=all")).text();
+    for (const title of ["pr_review 1", "health_scan 2", "repo_brief 3", "merge_group_check 4"]) {
+      expect(all).toContain(title);
+    }
+
+    // An unknown view degrades to the merge queue rather than rendering empty.
+    const unknown = await (await app.request("/?view=bogus")).text();
+    expect(unknown).toContain("pr_review 1");
+    expect(unknown).not.toContain("health_scan 2");
+  });
+
+  it("drops type refinements outside the active view family", async () => {
+    const { app } = seededFamilies();
+    const valid = await (await app.request("/?view=ops&type=health_scan")).text();
+    expect(valid).toContain("health_scan 2");
+    expect(valid).not.toContain("repo_brief 3");
+    // pr_review cannot exist in the operations family: the refinement is
+    // dropped and the family list renders instead of a dead empty page.
+    const impossible = await (await app.request("/?view=ops&type=pr_review")).text();
+    expect(impossible).toContain("health_scan 2");
+    expect(impossible).toContain("repo_brief 3");
+    expect(impossible).not.toContain('type" value="pr_review" selected');
+  });
+});
+
 describe("home queue pagination", () => {
   function seededApp(count: number) {
     const { app, store } = testApp();

@@ -353,6 +353,21 @@ describe("rendering", () => {
     }
   });
 
+  it("emulates the operator surface on the frame body for operator stories", async () => {
+    const operatorStory = STORIES.find((story) => story.surface === "operator");
+    expect(operatorStory).toBeTruthy();
+    const operatorFrame = await (
+      await app.request(frameUrl(operatorStory!.id, operatorStory!.variants[0]!.id))
+    ).text();
+    expect(operatorFrame).toContain('<body class="operator"');
+    const plainStory = STORIES.find((story) => story.surface !== "operator");
+    expect(plainStory).toBeTruthy();
+    const plainFrame = await (
+      await app.request(frameUrl(plainStory!.id, plainStory!.variants[0]!.id))
+    ).text();
+    expect(plainFrame).not.toContain('<body class="operator"');
+  });
+
   it("shows the real job card with its state", async () => {
     const html = await (await app.request("/dev/ui/job-card/completed/frame")).text();
     expect(html).toContain("Harden session cookie flags on /api");
@@ -488,6 +503,7 @@ describe("design tokens", () => {
     ]);
     const fonts = tokens.groups.find((group) => group.title === "Typography");
     expect(fonts?.tokens.map((token) => token.name).sort()).toEqual([
+      "font-body",
       "font-display",
       "font-mono",
       "font-ui",

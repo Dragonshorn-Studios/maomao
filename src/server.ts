@@ -3,7 +3,7 @@ import { isIP } from "node:net";
 import { streamSSE } from "hono/streaming";
 import { deleteCookie, getCookie, setCookie } from "hono/cookie";
 import type { Config } from "./config.js";
-import type { JobStore } from "./jobs/store.js";
+import { JOB_TYPES, type JobStore, type JobType } from "./jobs/store.js";
 import { handleGithubWebhook } from "./github/webhooks.js";
 import { handleGitLabWebhook } from "./gitlab/webhooks.js";
 import { handleForgejoWebhook } from "./forgejo/webhooks.js";
@@ -778,7 +778,9 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
     const rawUrl = typeof body.url === "string" ? body.url : "";
     const csrfToken = gateOn ? ensureCsrfToken(c, ctx.config.uiSessionSecret) : undefined;
     const identity = c.get("identity");
-    const homePage = ctx.store.listJobsPage({});
+    // The error re-render is the default merge-queue view: scope the page
+    // to that family so operations jobs don't leak onto it.
+    const homePage = ctx.store.listJobsPage({ jobTypes: [...(QUEUE_VIEWS[0].types ?? [])] });
     const home = (extra: { error?: string; notice?: string; reviewUrl?: string } = {}) =>
       c.html(
         renderHome(homePage.jobs, ctx.store, {
@@ -924,7 +926,6 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
     }
   });
 
-  const JOB_TYPE_VALUES = ["pr_review", "stack_review", "repo_brief", "health_scan", "merge_group_check"] as const;
   app.get("/", (c) => {
     const cursor = jobsPageCursor(c.req.query("before"), c.req.query("after"));
     // Forge filter: `?forge=provider:instance`, validated against the scopes
@@ -952,9 +953,9 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
     const repo = requestedRepo && repoNames.includes(requestedRepo) ? requestedRepo : undefined;
     const requestedType = c.req.query("type");
     const jobType =
-      (JOB_TYPE_VALUES as readonly string[]).includes(requestedType ?? "") &&
+      (JOB_TYPES as readonly string[]).includes(requestedType ?? "") &&
       (!viewDef.types || (viewDef.types as readonly string[]).includes(requestedType ?? ""))
-        ? (requestedType as (typeof JOB_TYPE_VALUES)[number])
+        ? (requestedType as JobType)
         : undefined;
     const jobTypes = jobType ? undefined : viewDef.types ? [...viewDef.types] : undefined;
     const pageInput = { forge, includeStale: showSuperseded, repo, jobType, jobTypes };
@@ -988,7 +989,7 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
           : // The count mirrors what the toggle can actually reveal: the
             // active job-type refinement when one is set, else the view's
             // job family — never stale rows of other families.
-            { active: false, hidden: ctx.store.supersededJobCount(forge, jobType ? [jobType] : viewDef.types) },
+            { active: false, hidden: ctx.store.supersededJobCount(forge, jobType ? [jobType] : viewDef.types, repo) },
         jobFilters: { repos: repoNames, repo, type: jobType },
         queueView: { active: view },
       }),
@@ -4027,6 +4028,7 @@ const CSRF_FAILURE_HTML = `<!doctype html>
   <meta charset="utf-8"/>
   <meta name="viewport" content="width=device-width, initial-scale=1"/>
   <title>Maomao — form expired</title>
+  <link rel="stylesheet" href="${INFERNAL_HREF}"/>
   <link rel="stylesheet" href="/assets/maomao.css"/>
 </head>
 <body>
