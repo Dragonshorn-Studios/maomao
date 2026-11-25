@@ -357,6 +357,8 @@ Pull-request job pages derive a read-only merge lifecycle from that exact-SHA pu
 
 The same page performs a short-lived, cached, read-only merge-capability probe. GitHub reports auto-merge eligibility, native merge-queue availability for the base branch, permitted merge methods, current pull mergeability when GitHub exposes it, and applicable branch-rule presence/contexts/approvals. Forgejo reports server version, permitted merge methods, protected-branch presence/status contexts/approvals, and pull mergeability where available. Missing permissions, unavailable endpoints, unsupported adapters, and timeouts are shown as diagnostics. Probe failures never become merge readiness, and capability detection never enables auto-merge, enqueues a PR, changes branch protection, or grants Maomao merge privileges. GitHub branch rules include applicable rulesets as exposed to the installation; if that endpoint is unavailable, the page explains the visibility gap instead of guessing.
 
+Operators can record merge-mode intent at `/config/merge-modes`: `disabled` (no merge-capability probing or native action), `manual` (the default; read-only reporting), `native_auto_merge`, or `github_native_queue`. Rules are scoped to a forge provider, instance, and `owner/repo`, with one blank-scope global default; changes are written to the configuration audit. The setting is explicit opt-in intent only. It does not enqueue a pull request, enable auto-merge, change branch protection, or grant merge/push privileges, and native actions must revalidate live capabilities and exact PR state when implemented.
+
 ## Configure OpenCode models
 
 Maomao does not embed a model vendor. It runs:

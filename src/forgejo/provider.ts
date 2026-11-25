@@ -166,7 +166,6 @@ export class ForgejoProvider implements ForgePort {
     }
     reasons.push("Forgejo merge-when-checks-succeed support depends on the deployed server version and user action; Maomao does not infer or trigger it");
     return {
-      mergeMode: "manual",
       nativeAutoMerge: "unknown",
       githubNativeQueue: "unavailable",
       requiredStatusContexts: contexts,

@@ -21,6 +21,7 @@ import { ForgeConnectionStore } from "./forge/connections.js";
 import { ProviderCredentialStore } from "./opencode/credentials.js";
 import { TelemetrySettingsStore } from "./telemetry/settings.js";
 import { TrustedCheckSettingsStore } from "./checks/settings.js";
+import { MergeModeSettingsStore } from "./merge/settings.js";
 import { ModelDiscovery } from "./opencode/models.js";
 import { generateForgeKeyHex } from "./forge/secretbox.js";
 import { computeSignature } from "./gitlab/signature.js";
@@ -220,8 +221,7 @@ describe("HTTP app", () => {
       forJob: () => ({
         provider: "github",
         probeMergeCapabilities: async () => ({
-          mergeMode: "manual",
-          nativeAutoMerge: "available",
+            nativeAutoMerge: "available",
           githubNativeQueue: "unavailable",
           requiredStatusContexts: ["maomao/merge-readiness"],
           requiredApprovals: 1,
@@ -235,7 +235,9 @@ describe("HTTP app", () => {
         }),
       }),
     };
-    const { app, store } = testApp({}, undefined, undefined, { forge: forge as never });
+    const mergeModeSettings = new MergeModeSettingsStore(openDb(":memory:"));
+    mergeModeSettings.save({ provider: "github", providerInstance: "github.com", repoFullName: "acme/widgets", mergeMode: "native_auto_merge", actor: "octocat" });
+    const { app, store } = testApp({}, undefined, undefined, { forge: forge as never, mergeModeSettings });
     const created = store.enqueue({
       repoFullName: "acme/widgets",
       repoOwner: "acme",
@@ -255,6 +257,7 @@ describe("HTTP app", () => {
 
     const html = await (await app.request(`/jobs/${created.job.id}`)).text();
     expect(html).toContain("Merge capability diagnostics");
+    expect(html).toContain("native_auto_merge");
     expect(html).toContain("GitHub merge queue is not configured for main");
     expect(html).toContain("squash");
     expect(html).toContain("OPEN · MERGEABLE");
@@ -6535,6 +6538,51 @@ describe("global review pause", () => {
     expect(denied.status).toBe(403);
     expect(store.getGlobalPause()).toBeUndefined();
     log.mockRestore();
+  });
+});
+
+describe("merge mode config routes", () => {
+  it("renders, saves, validates, and clears operator merge-mode rules", async () => {
+    const mergeModeSettings = new MergeModeSettingsStore(openDb(":memory:"));
+    const { app } = testApp(
+      { UI_PASSWORD: "hunter2", UI_SESSION_SECRET: "session-secret-for-tests" },
+      undefined,
+      undefined,
+      { mergeModeSettings },
+    );
+    const { session } = await loginSession(app);
+    const page = await app.request("/config/merge-modes", { headers: { cookie: session } });
+    const { csrfCookie, csrfToken, html } = await csrfArtifacts(page);
+    expect(html).toContain("Merge modes");
+    expect(html).toContain("The default mode is");
+    expect(html).toContain('name="providerInstance"');
+
+    const invalid = await app.request("/config/merge-modes", {
+      method: "POST",
+      headers: { cookie: `${session}; ${csrfCookie}`, "content-type": "application/x-www-form-urlencoded" },
+      body: `provider=github&mergeMode=manual&csrf_token=${encodeURIComponent(csrfToken)}`,
+    });
+    expect(invalid.status).toBe(400);
+    expect(mergeModeSettings.list()).toEqual([]);
+
+    const artifacts = await csrfArtifacts(await app.request("/config/merge-modes", { headers: { cookie: session } }));
+    const saved = await app.request("/config/merge-modes", {
+      method: "POST",
+      headers: { cookie: `${session}; ${artifacts.csrfCookie}`, "content-type": "application/x-www-form-urlencoded" },
+      body: `provider=github&providerInstance=github.com&repoFullName=${encodeURIComponent("acme/widgets")}&mergeMode=github_native_queue&csrf_token=${encodeURIComponent(artifacts.csrfToken)}`,
+    });
+    expect(saved.status).toBe(303);
+    expect(mergeModeSettings.effective({ provider: "github", instance: "github.com", repoFullName: "acme/widgets" })).toBe("github_native_queue");
+
+    const rule = mergeModeSettings.list()[0]!;
+    const deleteArtifacts = await csrfArtifacts(await app.request("/config/merge-modes", { headers: { cookie: session } }));
+    const cleared = await app.request("/config/merge-modes/delete", {
+      method: "POST",
+      headers: { cookie: `${session}; ${deleteArtifacts.csrfCookie}`, "content-type": "application/x-www-form-urlencoded" },
+      body: `id=${rule.id}&csrf_token=${encodeURIComponent(deleteArtifacts.csrfToken)}`,
+    });
+    expect(cleared.status).toBe(303);
+    expect(mergeModeSettings.list()).toEqual([]);
   });
 });
 

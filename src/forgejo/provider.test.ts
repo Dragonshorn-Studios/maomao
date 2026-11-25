@@ -131,7 +131,6 @@ describe("ForgejoProvider", () => {
     server = fixtureServer(state);
     const { provider } = await providerOn(server);
     await expect(provider.probeMergeCapabilities(TARGET)).resolves.toMatchObject({
-      mergeMode: "manual",
       nativeAutoMerge: "unknown",
       githubNativeQueue: "unavailable",
       requiredStatusContexts: ["maomao/merge-readiness", "test"],

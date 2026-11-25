@@ -12,7 +12,7 @@ import type { EffectiveConfigEntry } from "../config-effective.js";
 import type { Severity } from "../schema.js";
 import { parseBriefPayload, type BriefPayload } from "../jobs/brief.js";
 import type { MergeLifecycle } from "../merge/lifecycle.js";
-import type { ForgeMergeCapabilities } from "../forge/types.js";
+import type { MergeCapabilityReport } from "../forge/types.js";
 import { elapsedMs, escapeHtml, formatDuration, shortSha } from "../util.js";
 import { KNOWN_REVIEWER_ROLES, composeReviewerPrompt, promptBodyFromRolePrompt } from "../prompts.js";
 import { composedPipelineStages } from "../prompt-previews.js";
@@ -294,7 +294,7 @@ function renderJobsPagination(
 export type JobPageOptions = PageOptions & {
   chatEnabled?: boolean;
   mergeLifecycle?: MergeLifecycle;
-  mergeCapabilities?: ForgeMergeCapabilities;
+  mergeCapabilities?: MergeCapabilityReport;
   scanIssueCreation?: ScanIssueCreationData;
   /** Provenance rows for a health-scan job (fingerprints → GitHub issues). */
   scanIssues?: Array<{ fingerprint: string; issue_number: number; issue_url: string; title: string }>;
@@ -312,7 +312,7 @@ export type JobPageOptions = PageOptions & {
 };
 
 
-function renderMergeLifecycle(lifecycle: MergeLifecycle, job: JobRow, capabilities?: ForgeMergeCapabilities): string {
+function renderMergeLifecycle(lifecycle: MergeLifecycle, job: JobRow, capabilities?: MergeCapabilityReport): string {
   const labels: Record<MergeLifecycle["state"], string> = {
     reviewing: "reviewing",
     waiting_checks: "waiting checks",
@@ -1454,7 +1454,7 @@ function renderEffectiveConfigSection(entries: EffectiveConfigEntry[]): string {
 }
 
 /** Shared sub-nav across the /config pages so each section is one click away. */
-export type ConfigSection = "effective" | "profiles" | "providers" | "telemetry" | "trusted-checks" | "prompts" | "audit" | "deliveries";
+export type ConfigSection = "effective" | "profiles" | "providers" | "telemetry" | "trusted-checks" | "merge-modes" | "prompts" | "audit" | "deliveries";
 
 export function configSubNav(active: ConfigSection): string {
   const links: Array<[ConfigSection, string, string]> = [
@@ -1463,6 +1463,7 @@ export function configSubNav(active: ConfigSection): string {
     ["providers", "/config/providers", "Provider keys"],
     ["telemetry", "/config/telemetry", "Telemetry"],
     ["trusted-checks", "/config/trusted-checks", "Trusted checks"],
+    ["merge-modes", "/config/merge-modes", "Merge modes"],
     ["prompts", "/config/prompts", "Specialist prompts"],
     ["audit", "/config/audit", "Audit"],
     ["deliveries", "/config/deliveries", "Deliveries"],

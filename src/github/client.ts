@@ -593,7 +593,6 @@ export class GithubClient implements GithubPort, ManualTriggerPort {
 
     if (!repository.mergeQueue) reasons.push(`GitHub merge queue is not configured for ${baseRef}`);
     return {
-      mergeMode: "manual",
       nativeAutoMerge: repository.autoMergeAllowed ? "available" : "unavailable",
       githubNativeQueue: repository.mergeQueue ? "available" : "unavailable",
       requiredStatusContexts: contexts,

@@ -166,7 +166,7 @@ describe("monitoring pages", () => {
       mergeLifecycle: { state: "ready", detail: "ready", nativeUrl: "https://forge.example/check/1" },
       mergeCapabilities: {
         mergeMode: "manual",
-        nativeAutoMerge: "available",
+      nativeAutoMerge: "available",
         githubNativeQueue: "unavailable",
         requiredStatusContexts: ["maomao/merge-readiness"],
         requiredApprovals: 2,
