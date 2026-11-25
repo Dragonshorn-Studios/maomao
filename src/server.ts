@@ -1,6 +1,7 @@
 import { Hono, type Context } from "hono";
 import { isIP } from "node:net";
 import { streamSSE } from "hono/streaming";
+import { createHash } from "node:crypto";
 import { deleteCookie, getCookie, setCookie } from "hono/cookie";
 import type { Config } from "./config.js";
 import { JOB_TYPES, type JobStore, type JobType } from "./jobs/store.js";
@@ -321,6 +322,21 @@ function setSessionCookie(c: Context<AppEnv>, value: string): void {
   });
 }
 
+/** Static assets are served at stable, unversioned paths, so their cache
+ * entries must revalidate on every load: a deploy that changes the theme,
+ * the vendored library, or the brand icons has to reach operators on the
+ * very next page render — caching them for hours once shipped a green
+ * pre-rebrand stylesheet under the mergehenna HTML. The content etag keeps
+ * the revalidation answer a cheap 304 in the common case. */
+function staticAsset(c: Context<AppEnv>, body: string | Uint8Array, contentType: string) {
+  const etag = `"${createHash("sha256").update(body).digest("hex").slice(0, 32)}"`;
+  const headers = { "content-type": contentType, "cache-control": "no-cache", etag };
+  if (c.req.header("if-none-match") === etag) {
+    return c.newResponse(null, 304, { "cache-control": "no-cache", etag });
+  }
+  return c.newResponse(typeof body === "string" ? body : body.slice().buffer, 200, headers);
+}
+
 /** Recently-viewed jobs, most-recent first, as a dot-separated id list. The
  * cookie is self-referential convenience state — worst-case tampering shows
  * the operator their own jobs in a funny order — so it is not signed. */
@@ -618,26 +634,16 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
     return c.json(payload);
   });
 
-  app.get("/assets/maomao.css", (c) =>
-    c.newResponse(THEME_CSS, 200, {
-      "content-type": "text/css; charset=utf-8",
-      "cache-control": "public, max-age=3600",
-    }),
-  );
+  app.get("/assets/maomao.css", (c) => staticAsset(c, THEME_CSS, "text/css; charset=utf-8"));
 
-  app.get(INFERNAL_HREF, (c) =>
-    c.newResponse(INFERNAL_CSS, 200, {
-      "content-type": "text/css; charset=utf-8",
-      "cache-control": "public, max-age=3600",
-    }),
-  );
+  app.get(INFERNAL_HREF, (c) => staticAsset(c, INFERNAL_CSS, "text/css; charset=utf-8"));
 
   // The @pierre/diffs browser bundle (built by `npm run build:vendor`). Read
   // once from disk and cached; 404 before the first build so pages fall back
   // to the server-rendered diff markup.
   const vendorDir = ctx.vendorAssetsDir ?? resolve(process.cwd(), "dist/assets/vendor");
   const assetsDir = ctx.vendorAssetsDir ? resolve(ctx.vendorAssetsDir, "..") : resolve(process.cwd(), "dist/assets");
-  let chatBundle: string | null | undefined;
+  let chatBundle: string | undefined;
   app.get(CHAT_BUNDLE_HREF, (c) => {
     if (chatBundle === undefined) {
       try {
@@ -647,12 +653,9 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
         return c.text("Not found", 404);
       }
     }
-    return c.newResponse(chatBundle, 200, {
-      "content-type": "text/javascript; charset=utf-8",
-      "cache-control": "public, max-age=3600",
-    });
+    return staticAsset(c, chatBundle, "text/javascript; charset=utf-8");
   });
-  let pierreBundle: string | null | undefined;
+  let pierreBundle: string | undefined;
   app.get(PIERRE_DIFFS_HREF, (c) => {
     // Only successful reads are cached: a server started before the vendor
     // build keeps retrying, so the asset appears without a restart.
@@ -664,32 +667,14 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
         return c.text("Not found", 404);
       }
     }
-    return c.newResponse(pierreBundle, 200, {
-      "content-type": "text/javascript; charset=utf-8",
-      "cache-control": "public, max-age=3600",
-    });
+    return staticAsset(c, pierreBundle, "text/javascript; charset=utf-8");
   });
 
-  app.get(TYPEAHEAD_HREF, (c) =>
-    c.newResponse(TYPEAHEAD_JS, 200, {
-      "content-type": "text/javascript; charset=utf-8",
-      "cache-control": "public, max-age=3600",
-    }),
-  );
+  app.get(TYPEAHEAD_HREF, (c) => staticAsset(c, TYPEAHEAD_JS, "text/javascript; charset=utf-8"));
 
-  app.get(MODEL_PICKER_HREF, (c) =>
-    c.newResponse(MODEL_PICKER_JS, 200, {
-      "content-type": "text/javascript; charset=utf-8",
-      "cache-control": "public, max-age=3600",
-    }),
-  );
+  app.get(MODEL_PICKER_HREF, (c) => staticAsset(c, MODEL_PICKER_JS, "text/javascript; charset=utf-8"));
 
-  app.get(TELEMETRY_PAGE_HREF, (c) =>
-    c.newResponse(TELEMETRY_PAGE_JS, 200, {
-      "content-type": "text/javascript; charset=utf-8",
-      "cache-control": "public, max-age=3600",
-    }),
-  );
+  app.get(TELEMETRY_PAGE_HREF, (c) => staticAsset(c, TELEMETRY_PAGE_JS, "text/javascript; charset=utf-8"));
 
   // Brand icons: fixed constants from src/ui/icons.ts (no filesystem, no traversal).
   const iconAssets: Array<[string, string, string]> = [
@@ -698,24 +683,14 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
     ["/assets/icon.svg", "image/svg+xml", MERGEHENNA_FAVICON_SVG],
   ];
   for (const [path, contentType, body] of iconAssets) {
-    app.get(path, (c) =>
-      c.newResponse(body, 200, {
-        "content-type": `${contentType}; charset=utf-8`,
-        "cache-control": "public, max-age=86400",
-      }),
-    );
+    app.get(path, (c) => staticAsset(c, body, `${contentType}; charset=utf-8`));
   }
   const pngAssets: Array<[string, string]> = [
     ["/assets/favicon.png", FAVICON_PNG_BASE64],
     ["/assets/icon.png", LARGE_ICON_PNG_BASE64],
   ];
   for (const [path, base64] of pngAssets) {
-    app.get(path, (c) =>
-      c.newResponse(new Uint8Array(Buffer.from(base64, "base64")), 200, {
-        "content-type": "image/png",
-        "cache-control": "public, max-age=86400",
-      }),
-    );
+    app.get(path, (c) => staticAsset(c, new Uint8Array(Buffer.from(base64, "base64")), "image/png"));
   }
 
   app.post("/webhooks/github", async (c) => {
