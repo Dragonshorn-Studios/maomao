@@ -127,7 +127,7 @@ export class ForgejoProvider implements ForgePort {
       baseRef: pull.base.ref ?? "",
       headRef: pull.head.ref ?? "",
       draft: Boolean(pull.draft),
-      ...(pull.state ? { state: pull.state } : {}),
+      ...(pull.state === "open" || pull.state === "closed" ? { closed: pull.state === "closed" } : {}),
       ...(pull.merged != null ? { merged: Boolean(pull.merged) } : {}),
     };
   }

@@ -74,14 +74,14 @@ function pull(overrides: Partial<ForgeChange> = {}): ForgeChange {
     baseRef: "main",
     headRef: "feature",
     draft: false,
-    state: "open",
+    closed: false,
     ...overrides,
   };
 }
 
 describe("ForgejoMergeReconciler", () => {
   it("records an authoritative merged head and cancels active work through the shared path", async () => {
-    const { store, aborted, reconciler } = harness(pull({ state: "closed", merged: true }));
+    const { store, aborted, reconciler } = harness(pull({ closed: true, merged: true }));
     const job = seedJob(store);
 
     const report = await reconciler.reconcileNow();

@@ -7,6 +7,8 @@ import type { JobQueue } from "../jobs/queue.js";
 import type { JobRow, JobStore } from "../jobs/store.js";
 import { repoRateLimitActive, type RepoRateLimiter } from "../github/rate-limit.js";
 
+export type MergeReconcileOutcome = "merged" | "requeued" | "unchanged";
+
 export interface MergeReconciliationReport {
   scanned: number;
   merged: number;
@@ -87,7 +89,7 @@ export class ForgejoMergeReconciler {
     }
   }
 
-  private async reconcileJob(job: JobRow): Promise<"merged" | "requeued" | "unchanged"> {
+  private async reconcileJob(job: JobRow): Promise<MergeReconcileOutcome> {
     if (job.job_type !== "pr_review" || job.provider !== "forgejo") return "unchanged";
     const scope = { provider: job.provider, instance: job.provider_instance };
     if (this.deps.store.hasMergedPull(job.repo_full_name, job.pr_number, scope)) return "unchanged";
@@ -104,7 +106,7 @@ export class ForgejoMergeReconciler {
       });
       return "merged";
     }
-    if ((change.state && change.state !== "open") || !change.headSha || change.headSha === job.head_sha) return "unchanged";
+    if (change.closed === true || !change.headSha || change.headSha === job.head_sha) return "unchanged";
     if (this.deps.store.getGlobalPause() || this.deps.store.getActivePause(job.repo_full_name, job.provider, job.provider_instance)) return "unchanged";
     if (change.draft && !this.deps.config.reviewDrafts) return "unchanged";
     const rateOn = repoRateLimitActive(this.deps.config.repoRateLimitPerWindow, this.deps.config.repoRateWindowMs);
