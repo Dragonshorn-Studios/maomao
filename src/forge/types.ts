@@ -109,6 +109,8 @@ export interface ForgeMergeCapabilities {
   pullState?: string;
   mergeable?: string;
   forgeVersion?: string;
+  /** Forge-native merge is scheduled after the latest observed head push; omitted when the forge cannot prove ordering. */
+  nativeMergeScheduled?: boolean;
   reasons: string[];
   source: string;
 }

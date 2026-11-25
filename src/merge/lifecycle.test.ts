@@ -9,6 +9,10 @@ describe("mergeLifecycleFor", () => {
   it("marks exact-SHA success ready", () => {
     expect(mergeLifecycleFor(job, pub, false)).toMatchObject({ state: "ready", nativeUrl: pub.native_url });
   });
+  it("distinguishes forge-native scheduled auto-merge after readiness success", () => {
+    expect(mergeLifecycleFor(job, pub, false, true)).toMatchObject({ state: "scheduled_auto_merge" });
+    expect(mergeLifecycleFor(job, pub, false, false).state).toBe("ready");
+  });
   it("never reports merged before forge confirmation", () => {
     expect(mergeLifecycleFor(job, pub, false).state).not.toBe("merged");
     expect(mergeLifecycleFor(job, pub, true).state).toBe("merged");

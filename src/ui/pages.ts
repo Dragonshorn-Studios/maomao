@@ -337,7 +337,7 @@ function renderMergeLifecycle(lifecycle: MergeLifecycle, job: JobRow, capabiliti
         <dt>Native merge</dt><dd>${job.pr_html_url ? `<a href="${escapeHtml(job.pr_html_url)}">open the forge pull request</a>` : "—"}</dd>
         ${nativeUrl ? `<dt>Native check</dt><dd><a href="${escapeHtml(nativeUrl)}" target="_blank" rel="noopener noreferrer">open forge check/status</a></dd>` : ""}
         ${capabilities ? `<dt>Merge mode</dt><dd><code>${escapeHtml(capabilities.mergeMode)}</code> <span class="muted">read-only detection; no merge control</span></dd>
-        <dt>Native auto-merge</dt><dd><code>${escapeHtml(capabilities.nativeAutoMerge)}</code></dd>
+        <dt>Native auto-merge</dt><dd><code>${escapeHtml(capabilities.nativeAutoMerge)}</code>${capabilities.nativeMergeScheduled != null ? ` · ${capabilities.nativeMergeScheduled ? "scheduled after latest head push" : "not scheduled for current head"}` : ""}</dd>
         <dt>GitHub native queue</dt><dd><code>${escapeHtml(capabilities.githubNativeQueue)}</code></dd>
         <dt>Merge methods</dt><dd>${capabilities.mergeMethods.length ? escapeHtml(capabilities.mergeMethods.join(", ")) : "none detected"}</dd>
         ${capabilities.baseRef ? `<dt>Base branch</dt><dd><code>${escapeHtml(capabilities.baseRef)}</code>${capabilities.draft ? " · draft PR" : ""}</dd>` : ""}
