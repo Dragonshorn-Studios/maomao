@@ -42,11 +42,21 @@ export async function createReviewWithFallback(input: {
 export function findExistingReview(
   summaries: ForgeSummary[],
   headSha: string,
-): ForgePublishResult | undefined {
+): (ForgePublishResult & { verdict?: ForgeSummary["verdict"] }) | undefined {
   const marker = reviewMarker(headSha);
-  const match = summaries.find((summary) => summary.body.includes(marker));
-  if (!match) return undefined;
-  return { id: match.id, url: match.htmlUrl ?? "" };
+  const matches = summaries.filter((summary) => summary.body.includes(marker));
+  if (matches.length === 0) return undefined;
+  // Review/note ids are monotonic for both GitHub reviews and GitLab notes.
+  // When an escalation legitimately posts a newer review for the same SHA,
+  // later reruns must compare against that newest review rather than the
+  // original comment-only one.
+  const match = matches.reduce((latest, summary) => {
+    const id = Number(summary.id);
+    const latestId = Number(latest.id);
+    if (Number.isFinite(id) && Number.isFinite(latestId)) return id > latestId ? summary : latest;
+    return summary;
+  });
+  return { id: match.id, url: match.htmlUrl ?? "", ...(match.verdict ? { verdict: match.verdict } : {}) };
 }
 
 export interface InlineCommentFinding {

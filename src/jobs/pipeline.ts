@@ -2666,13 +2666,18 @@ async function publishReview(
     stale: deps.store.isStale(job.id),
   });
 
-  if (already) {
+  const escalatesExisting =
+    already && decision.event === "REQUEST_CHANGES" && already.verdict != null && already.verdict !== "REQUEST_CHANGES";
+  if (already && !escalatesExisting) {
     deps.store.log(job.id, `Review already exists for ${job.head_sha}; skipping publish`);
     deps.store.patchJob(job.id, {
       review_event: "COMMENT",
       review_event_reason: "existing maomao review found by marker",
     });
     return { clean, event: decision.event, posted: { ...already, postedFingerprints: [] } };
+  }
+  if (already && escalatesExisting) {
+    deps.store.log(job.id, `Posting a new REQUEST_CHANGES review for ${job.head_sha}; the existing review was ${already.verdict}`);
   }
 
   for (const { finding, violations } of outside) {

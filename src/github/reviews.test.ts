@@ -53,6 +53,15 @@ describe("GitHub review payload", () => {
       "deadbeef",
     );
     expect(existing?.id).toBe("9");
+    expect(
+      findExistingReview(
+        [
+          { id: "9", body: `${reviewMarker("deadbeef")}\ncomment`, verdict: "COMMENT" },
+          { id: "10", body: `${reviewMarker("deadbeef")}\nrequest`, verdict: "REQUEST_CHANGES" },
+        ],
+        "deadbeef",
+      ),
+    ).toMatchObject({ id: "10", verdict: "REQUEST_CHANGES" });
     expect(findExistingReview([{ id: "1", body: "unrelated" }], "deadbeef")).toBeUndefined();
   });
 });

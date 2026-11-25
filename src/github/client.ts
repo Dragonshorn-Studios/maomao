@@ -104,7 +104,7 @@ export interface GithubPort {
     owner: string,
     repo: string,
     pullNumber: number,
-  ): Promise<{ id: number; body: string; commitId?: string; htmlUrl?: string; userLogin?: string }[]>;
+  ): Promise<{ id: number; body: string; commitId?: string; htmlUrl?: string; userLogin?: string; verdict?: ForgeVerdict }[]>;
   createCommentReview(input: {
     installationId: number;
     owner: string;
@@ -436,7 +436,7 @@ export class GithubClient implements GithubPort, ManualTriggerPort {
     owner: string,
     repo: string,
     pullNumber: number,
-  ): Promise<{ id: number; body: string; commitId?: string; htmlUrl?: string; userLogin?: string }[]> {
+  ): Promise<{ id: number; body: string; commitId?: string; htmlUrl?: string; userLogin?: string; verdict?: ForgeVerdict }[]> {
     const octokit = this.installationOctokit(installationId);
     const reviews = await octokit.paginate(octokit.rest.pulls.listReviews, {
       owner,
@@ -450,6 +450,8 @@ export class GithubClient implements GithubPort, ManualTriggerPort {
       commitId: review.commit_id ?? undefined,
       htmlUrl: review.html_url,
       userLogin: review.user?.login ?? undefined,
+      verdict:
+        review.state === "CHANGES_REQUESTED" ? "REQUEST_CHANGES" : review.state === "APPROVED" ? "APPROVE" : "COMMENT",
     }));
   }
 

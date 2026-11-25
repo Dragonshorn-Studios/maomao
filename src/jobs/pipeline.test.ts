@@ -910,7 +910,7 @@ describe("pipeline", () => {
     const github: GithubPort = githubPort({
       getInstallationToken: async () => "token",
       getPullDiff: async () => "diff",
-      listReviews: async () => [{ id: 5, body: "<!-- maomao-review sha=abc -->", htmlUrl: "https://r" }],
+      listReviews: async () => [{ id: 5, body: "<!-- maomao-review sha=abc -->", htmlUrl: "https://r", verdict: "REQUEST_CHANGES" }],
       createCommentReview: async () => {
         creates += 1;
         return { id: "x", url: "u" };
@@ -964,6 +964,80 @@ describe("pipeline", () => {
     }).run(created.job.id);
     expect(creates).toBe(0);
     expect(store.getJob(created.job.id)?.github_review_id).toBe("5");
+    expect(publishedChecks.at(-1)).toMatchObject({ status: "completed", conclusion: "failure" });
+  });
+
+  it("posts a new review when a retry escalates an existing comment to request changes", async () => {
+    const config = loadConfig({
+      REVIEWER_ROLES: "correctness",
+      POST_EMPTY_REVIEW: "true",
+      GITHUB_REVIEW_ALLOW_REQUEST_CHANGES: "true",
+      GITHUB_REVIEW_REQUEST_CHANGES_MIN_SEVERITY: "high",
+    });
+    const store = new JobStore(openDb(":memory:"));
+    const publishedChecks: ReviewCheckInput[] = [];
+    const checkPublisher = {
+      publish: async (_job: object, input: ReviewCheckInput) => {
+        publishedChecks.push(input);
+      },
+      publishQueuedJobId: async () => {},
+      publishCancelledJobId: async () => {},
+    } as unknown as ReviewCheckPublisher;
+    const postedEvents: Array<string | undefined> = [];
+    const github: GithubPort = githubPort({
+      getInstallationToken: async () => "token",
+      getPullDiff: async () => "diff",
+      listReviews: async () => [{ id: 5, body: "<!-- maomao-review sha=abc -->", htmlUrl: "https://r", verdict: "COMMENT" }],
+      createCommentReview: async (input) => {
+        postedEvents.push(input.event);
+        return { id: "6", url: "https://example.test/reviews/6" };
+      },
+    });
+    const opencode: OpenCodePort = {
+      async run(input) {
+        const text = input.prompt.includes("aggregator")
+          ? JSON.stringify({
+              verdict: "comment",
+              summary: "high finding",
+              findings: [
+                {
+                  severity: "high",
+                  confidence: 0.9,
+                  category: "correctness",
+                  file: "example.ts",
+                  line: 1,
+                  summary: "high bug",
+                  body: "details",
+                },
+              ],
+            })
+          : JSON.stringify({ reviewer: "correctness", verdict: "clean", findings: [] });
+        return { stdout: text, stderr: "", exitCode: 0, text, usage: {} };
+      },
+    };
+    const created = store.enqueue({
+      repoFullName: "acme/widgets",
+      repoOwner: "acme",
+      repoName: "widgets",
+      installationId: 9,
+      prNumber: 4,
+      prTitle: "t",
+      prBody: "",
+      prHtmlUrl: "",
+      prAuthor: "dev",
+      baseSha: "base",
+      headSha: "abc",
+      baseRef: "main",
+      headRef: "feat",
+      reviewers: [{ role: "correctness", title: "Correctness" }],
+    });
+
+    await createPipeline({ config, store, github, checkPublisher, checkout: await fixtureCheckout(), opencode }).run(
+      created.job.id,
+    );
+
+    expect(postedEvents).toEqual(["REQUEST_CHANGES"]);
+    expect(store.getJob(created.job.id)?.github_review_id).toBe("6");
     expect(publishedChecks.at(-1)).toMatchObject({ status: "completed", conclusion: "failure" });
   });
 

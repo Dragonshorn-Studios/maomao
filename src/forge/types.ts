@@ -189,6 +189,8 @@ export interface ForgeSummary {
   commitId?: string;
   htmlUrl?: string;
   userLogin?: string;
+  /** Native review verdict when the forge exposes one (GitHub reviews do; note-only forges do not). */
+  verdict?: ForgeVerdict;
 }
 
 
