@@ -80,10 +80,6 @@ export function mergeGroupPrimaryPrNumber(headRef: string, participants: MergeGr
 
 export function mergeGroupMetadata(event: MergeGroupEvent): string {
   return JSON.stringify({
-    baseSha: event.baseSha,
-    headSha: event.headSha,
-    baseRef: event.baseRef,
-    headRef: event.headRef,
     pullRequests: event.participants,
   });
 }

@@ -158,7 +158,7 @@ Create a GitHub App for your user or org. Maomao needs **least privilege**:
 
 Do **not** grant Actions write, Administration, Secrets, merge, or branch push. After you change App permissions, open each installation and **accept the new permissions** — tokens keep the old scopes until you do, and resolve still fails with `Resource not accessible by integration`.
 
-Subscribe the app to **Pull request**, **Pull request review comment**, **Issue comment**, and **Merge group** (for `@maomao escalate` in `manual` poison-alert policy). Set the webhook URL to:
+Subscribe the app to **Pull request**, **Pull request review comment**, **Merge group**, and **Issue comment** (the last is for `@maomao escalate` in `manual` poison-alert policy). Set the webhook URL to:
 
 ```text
 https://<your-host>/webhooks/github
@@ -193,7 +193,7 @@ The check is a visibility layer over the existing review job. It does not replac
 
 ### GitHub merge-group checks
 
-When the App is subscribed to **Merge group** events, a `checks_requested` delivery enqueues a dedicated `merge_group_check` job for the event's exact synthetic `head_sha`. Maomao fetches that merge-queue ref/commit directly, computes the diff of the synthetic commit, runs the pinned trusted deterministic checks against the combined tree, and publishes `maomao/secrets`, `maomao/security`, and `maomao/merge-readiness` to the synthetic SHA. Results from the participant PR head are never copied onto the merge-group commit. The merge-group readiness check evaluates deterministic scan evidence for the synthetic tree; PR-level review enforcement belongs to the checks required before GitHub admits the pull request to the queue. A changed or rebuilt merge group has a new synthetic SHA and therefore requires a fresh scan.
+When the App has **Merge queues: read** and is subscribed to **Merge group** events, a `checks_requested` delivery enqueues a dedicated `merge_group_check` job for the event's exact synthetic `head_sha`. Maomao fetches that merge-queue ref/commit directly, computes the diff of the synthetic commit, runs the enabled pinned trusted deterministic checks against the combined tree, and publishes the corresponding `maomao/secrets` / `maomao/security` results plus `maomao/merge-readiness` to the synthetic SHA. Results from the participant PR head are never copied onto the merge-group commit. The merge-group readiness check evaluates deterministic scan evidence for the synthetic tree. If trusted policy requires a passing review and the webhook does not enumerate exact participant heads with passing `maomao/review` publications, readiness fails closed instead of treating queue admission as review evidence. A changed or rebuilt merge group has a new synthetic SHA and therefore requires a fresh scan.
 
 
 ## Configure GitLab (GitLab.com and self-managed)

@@ -496,7 +496,6 @@ const JOB_PATCH_KEYS = new Set<string>([
   "risk_profile",
   "risk_reason",
   "brief_json",
-  "merge_group_json",
 ]);
 
 export class JobStore {

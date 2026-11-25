@@ -98,6 +98,7 @@ describe("webhook handling", () => {
       head_ref: "refs/heads/gh-readonly-queue/main/pr-7-abc",
     });
     expect(job?.merge_group_json).toContain("head222");
+    expect(job?.dedup_key).toBe("merge-group:refs/heads/gh-readonly-queue/main/pr-7-abc");
     expect(store.listReviewerRuns(job!.id)).toHaveLength(0);
 
     const duplicate = await handleGithubWebhook({
@@ -108,6 +109,34 @@ describe("webhook handling", () => {
     expect(duplicate.status).toBe(200);
     expect(duplicate.body.created).toBe(false);
     expect(duplicate.body.jobId).toBe(result.body.jobId);
+  });
+
+
+  it("handles a realistic merge_group payload without enumerated participants", async () => {
+    const secret = "s3cret";
+    const config = loadConfig({ GITHUB_WEBHOOK_SECRET: secret, REVIEWER_ROLES: "correctness" });
+    const store = new JobStore(openDb(":memory:"));
+    const payload = {
+      action: "checks_requested",
+      installation: { id: 42, account: { id: 1001 } },
+      repository: { id: 2002, full_name: "acme/widgets", name: "widgets", owner: { login: "acme", id: 1001 } },
+      merge_group: {
+        base_sha: "base999",
+        head_sha: "synthetic888",
+        base_ref: "refs/heads/main",
+        head_ref: "refs/heads/gh-readonly-queue/main/pr-7",
+      },
+    };
+    const rawBody = JSON.stringify(payload);
+    const result = await handleGithubWebhook({
+      config,
+      store,
+      request: { event: "merge_group", deliveryId: "mg-real", signature: sign(secret, rawBody), rawBody },
+    });
+    expect(result.status).toBe(202);
+    const job = store.getJob(Number(result.body.jobId));
+    expect(job).toMatchObject({ job_type: "merge_group_check", pr_number: 7, head_sha: "synthetic888" });
+    expect(job?.merge_group_json).not.toContain("head222");
   });
 
   it("ignores merge_group actions other than checks_requested", async () => {

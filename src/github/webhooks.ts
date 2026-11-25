@@ -404,7 +404,7 @@ async function handleGithubWebhookRequest(input: GithubWebhookInput): Promise<We
         repositoryId: parsed.githubRepositoryId,
       });
       if (!auth.ok) return ignored(auth.reason);
-      const first = parsed.participants[0]!;
+      const first = parsed.participants[0];
       const enqueue = input.store.enqueue({
         repoFullName: parsed.repoFullName,
         repoOwner: parsed.repoOwner,
@@ -414,7 +414,9 @@ async function handleGithubWebhookRequest(input: GithubWebhookInput): Promise<We
         ...(parsed.githubRepositoryId ? { githubRepositoryId: parsed.githubRepositoryId } : {}),
         prNumber: mergeGroupPrimaryPrNumber(parsed.headRef, parsed.participants),
         prTitle: `GitHub merge group for ${parsed.baseRef}`,
-        prBody: `Native merge-group validation for ${parsed.participants.map((pr) => `#${pr.number}@${pr.headSha.slice(0, 12)}`).join(", ")}`,
+        prBody: parsed.participants.length
+          ? `Native merge-group validation for ${parsed.participants.map((pr) => `#${pr.number}@${pr.headSha.slice(0, 12)}`).join(", ")}`
+          : "Native merge-group validation; participant heads were not enumerated by the forge",
         prHtmlUrl: first?.htmlUrl ?? "",
         prAuthor: "github-merge-queue",
         baseSha: parsed.baseSha,
@@ -425,6 +427,7 @@ async function handleGithubWebhookRequest(input: GithubWebhookInput): Promise<We
         webhookEvent: `${input.request.event}.${payload.action}`,
         reviewers: [],
         jobType: "merge_group_check",
+        dedupKey: `merge-group:${parsed.headRef}`,
         mergeGroupJson: mergeGroupMetadata(parsed),
       });
       input.store.claimWebhookDelivery(input.request.deliveryId, input.request.event, enqueueClaimResult(enqueue));

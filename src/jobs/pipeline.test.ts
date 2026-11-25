@@ -7968,14 +7968,32 @@ describe("merge-group checks", () => {
       mergeGroupJson: JSON.stringify({ pullRequests: [{ number: 7, headSha: "prhead222" }] }),
     }).job;
 
+    store.beginCheckPublication({
+      provider: "github",
+      providerInstance: "github.com",
+      repoFullName: "acme/widgets",
+      prNumber: 7,
+      headSha: "prhead222",
+      name: "maomao/review",
+      externalId: "review-evidence",
+      jobId: job.id,
+      status: "completed",
+      conclusion: "success",
+      title: "review passed",
+      summary: "review passed",
+    });
+    store.finishCheckPublication(
+      { provider: "github", providerInstance: "github.com", repoFullName: "acme/widgets", prNumber: 7, headSha: "prhead222", name: "maomao/review" },
+      { published: true, nativeId: "review-check" },
+    );
     const commitDiffs: string[] = [];
-    const checkRuns: Array<{ headSha?: string; name?: string; status?: string }> = [];
+    const checkRuns: Array<{ headSha?: string; name?: string; status?: string; conclusion?: string }> = [];
     const github = githubPort({
       getCommitDiff: async (_installationId: number, _owner: string, _repo: string, sha: string) => {
         commitDiffs.push(sha);
         return "diff --git a/example.ts b/example.ts\n";
       },
-      upsertCheckRun: async (input: { headSha?: string; name?: string; status?: string }) => {
+      upsertCheckRun: async (input: { headSha?: string; name?: string; status?: string; conclusion?: string }) => {
         checkRuns.push(input);
         return { id: `check-${checkRuns.length}`, url: "" };
       },
@@ -7983,7 +8001,7 @@ describe("merge-group checks", () => {
     const trustedRuns: Array<{ name: string; repoDir: string; diffPath: string }> = [];
     const trustedCheckRunner = {
       enabledFor: () => true,
-      policyForRepo: async () => ({ requireReview: false, requiredChecks: [], revision: "trustedrev", source: "test" as const }),
+      policyForRepo: async () => ({ requireReview: true, requiredChecks: [], revision: "trustedrev", source: "test" as const }),
       run: async (input: { name: "secrets" | "security"; repoDir: string; diffPath: string }) => {
         trustedRuns.push(input);
         return {
@@ -8016,7 +8034,159 @@ describe("merge-group checks", () => {
     expect(diffText).toContain("diff --git");
     expect(checkRuns.some((run) => run.headSha === "synthetic888" && run.name === "maomao/secrets")).toBe(true);
     expect(checkRuns.some((run) => run.headSha === "synthetic888" && run.name === "maomao/security")).toBe(true);
-    expect(checkRuns.some((run) => run.headSha === "synthetic888" && run.name === "maomao/merge-readiness")).toBe(true);
+    expect(checkRuns.some((run) => run.headSha === "synthetic888" && run.name === "maomao/merge-readiness" && run.conclusion === "success")).toBe(true);
+    expect(checkRuns.some((run) => run.name === "maomao/review")).toBe(false);
     expect(store.getJob(job.id)?.state).toBe("completed");
+  });
+});
+
+describe("merge-group queued publication", () => {
+  it("does not open a maomao/review check for a scanner-only merge-group job", async () => {
+    const store = new JobStore(openDb(":memory:"));
+    const job = store.enqueue({
+      repoFullName: "acme/widgets",
+      repoOwner: "acme",
+      repoName: "widgets",
+      installationId: 42,
+      prNumber: 7,
+      prTitle: "GitHub merge group for main",
+      prBody: "",
+      prHtmlUrl: "",
+      prAuthor: "github-merge-queue",
+      baseSha: "base999",
+      headSha: "synthetic888",
+      baseRef: "main",
+      headRef: "refs/heads/gh-readonly-queue/main/pr-7",
+      reviewers: [],
+      jobType: "merge_group_check",
+    }).job;
+    const publishQueuedJobId = vi.fn(async () => {});
+    const pipeline = createPipeline({
+      config: loadConfig({}),
+      store,
+      github: githubPort(),
+      checkout: await fixtureCheckout(),
+      opencode: {} as OpenCodePort,
+      checkPublisher: { publishQueuedJobId } as unknown as ReviewCheckPublisher,
+    });
+
+    await pipeline.publishQueuedCheck(job.id);
+
+    expect(publishQueuedJobId).not.toHaveBeenCalled();
+  });
+});
+
+describe("merge-group review policy", () => {
+  it("fails merge readiness closed when required participant review evidence is unavailable", async () => {
+    const store = new JobStore(openDb(":memory:"));
+    const job = store.enqueue({
+      repoFullName: "acme/widgets",
+      repoOwner: "acme",
+      repoName: "widgets",
+      installationId: 42,
+      prNumber: 7,
+      prTitle: "GitHub merge group for main",
+      prBody: "",
+      prHtmlUrl: "",
+      prAuthor: "github-merge-queue",
+      baseSha: "base999",
+      headSha: "synthetic888",
+      baseRef: "main",
+      headRef: "refs/heads/gh-readonly-queue/main/pr-7",
+      reviewers: [],
+      jobType: "merge_group_check",
+      mergeGroupJson: JSON.stringify({ pullRequests: [] }),
+    }).job;
+    const checkRuns: Array<{ headSha?: string; name?: string; status?: string; conclusion?: string }> = [];
+    const github = githubPort({
+      getCommitDiff: async () => "diff --git a/example.ts b/example.ts\n",
+      upsertCheckRun: async (input: { headSha?: string; name?: string; status?: string; conclusion?: string }) => {
+        checkRuns.push(input);
+        return { id: `check-${checkRuns.length}`, url: "" };
+      },
+    } as unknown as Partial<GithubPort>);
+    const pipeline = createPipeline({
+      config: loadConfig({}),
+      store,
+      github,
+      checkout: await fixtureCheckout(),
+      opencode: {} as OpenCodePort,
+      trustedCheckRunner: {
+        enabledFor: () => false,
+        policyForRepo: async () => ({ requireReview: true, requiredChecks: [], revision: "trustedrev", source: "test" as const }),
+        run: async () => { throw new Error("should not run disabled scanners"); },
+      } as never,
+    });
+
+    await pipeline.run(job.id);
+
+    expect(checkRuns.some((run) => run.name === "maomao/merge-readiness" && run.status === "completed" && run.conclusion === "failure")).toBe(true);
+    expect(store.getJob(job.id)?.state).toBe("completed");
+  });
+});
+
+describe("merge-group participant review evidence", () => {
+  it("does not let missing evidence hide a known participant review failure", async () => {
+    const store = new JobStore(openDb(":memory:"));
+    const job = store.enqueue({
+      repoFullName: "acme/widgets",
+      repoOwner: "acme",
+      repoName: "widgets",
+      installationId: 42,
+      prNumber: 8,
+      prTitle: "GitHub merge group for main",
+      prBody: "",
+      prHtmlUrl: "",
+      prAuthor: "github-merge-queue",
+      baseSha: "base999",
+      headSha: "synthetic888",
+      baseRef: "main",
+      headRef: "refs/heads/gh-readonly-queue/main/pr-8",
+      reviewers: [],
+      jobType: "merge_group_check",
+      mergeGroupJson: JSON.stringify({ pullRequests: [{ number: 7, headSha: "missing777" }, { number: 8, headSha: "failed888" }] }),
+    }).job;
+    store.beginCheckPublication({
+      provider: "github",
+      providerInstance: "github.com",
+      repoFullName: "acme/widgets",
+      prNumber: 8,
+      headSha: "failed888",
+      name: "maomao/review",
+      externalId: "failed-review",
+      jobId: job.id,
+      status: "completed",
+      conclusion: "failure",
+      title: "review failed",
+      summary: "review failed",
+    });
+    store.finishCheckPublication(
+      { provider: "github", providerInstance: "github.com", repoFullName: "acme/widgets", prNumber: 8, headSha: "failed888", name: "maomao/review" },
+      { published: true, nativeId: "review-check" },
+    );
+    const checkRuns: Array<{ name?: string; status?: string; conclusion?: string }> = [];
+    const github = githubPort({
+      getCommitDiff: async () => "diff --git a/example.ts b/example.ts\n",
+      upsertCheckRun: async (input: { name?: string; status?: string; conclusion?: string }) => {
+        checkRuns.push(input);
+        return { id: `check-${checkRuns.length}`, url: "" };
+      },
+    } as unknown as Partial<GithubPort>);
+    const pipeline = createPipeline({
+      config: loadConfig({}),
+      store,
+      github,
+      checkout: await fixtureCheckout(),
+      opencode: {} as OpenCodePort,
+      trustedCheckRunner: {
+        enabledFor: () => false,
+        policyForRepo: async () => ({ requireReview: false, requiredChecks: [], revision: "trustedrev", source: "test" as const }),
+        run: async () => { throw new Error("should not run disabled scanners"); },
+      } as never,
+    });
+
+    await pipeline.run(job.id);
+
+    expect(checkRuns.some((run) => run.name === "maomao/merge-readiness" && run.status === "completed" && run.conclusion === "failure")).toBe(true);
   });
 });
