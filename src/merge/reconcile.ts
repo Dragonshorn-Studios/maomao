@@ -1,13 +1,13 @@
 import type { Config } from "../config.js";
 import type { ForgeRegistry } from "../forge/registry.js";
-import { forgeTargetOf } from "../forge/types.js";
+import { forgeTargetOf, type ForgeScope } from "../forge/types.js";
 import { cancelJobsForPull } from "../jobs/cancel.js";
 import { dispatchEnqueue, enqueuePullJob } from "../jobs/enqueue.js";
 import type { JobQueue } from "../jobs/queue.js";
 import type { JobRow, JobStore } from "../jobs/store.js";
 import { repoRateLimitActive, type RepoRateLimiter } from "../github/rate-limit.js";
 
-export type MergeReconcileOutcome = "merged" | "requeued" | "unchanged";
+type MergeReconcileOutcome = "merged" | "requeued" | "unchanged";
 
 export interface MergeReconciliationReport {
   scanned: number;
@@ -89,21 +89,32 @@ export class ForgejoMergeReconciler {
     }
   }
 
+  private cancelMergedJobs(job: JobRow, scope: ForgeScope): void {
+    cancelJobsForPull(this.deps.store, {
+      repoFullName: job.repo_full_name,
+      prNumber: job.pr_number,
+      scope,
+      reason: "pr_merged",
+      note: "periodic Forgejo reconciliation",
+      onCancelled: (jobIds) => this.deps.queue.abortMany(jobIds),
+    });
+  }
+
   private async reconcileJob(job: JobRow): Promise<MergeReconcileOutcome> {
     if (job.job_type !== "pr_review" || job.provider !== "forgejo") return "unchanged";
     const scope = { provider: job.provider, instance: job.provider_instance };
-    if (this.deps.store.hasMergedPull(job.repo_full_name, job.pr_number, scope)) return "unchanged";
+    if (this.deps.store.hasMergedPull(job.repo_full_name, job.pr_number, scope)) {
+      // Keep retrying cancellation without another forge read: the merge marker
+      // is intentionally written before cancellation so the enqueue gate is
+      // fail-closed, and this branch is the recovery path if cancellation or the
+      // process failed after that write.
+      this.cancelMergedJobs(job, scope);
+      return "unchanged";
+    }
     const change = await this.deps.forge.forJob(job).getChange(forgeTargetOf(job));
     if (change.merged === true) {
       this.deps.store.markPullMerged(job.repo_full_name, job.pr_number, null, scope, change.headSha);
-      cancelJobsForPull(this.deps.store, {
-        repoFullName: job.repo_full_name,
-        prNumber: job.pr_number,
-        scope,
-        reason: "pr_merged",
-        note: "periodic Forgejo reconciliation",
-        onCancelled: (jobIds) => this.deps.queue.abortMany(jobIds),
-      });
+      this.cancelMergedJobs(job, scope);
       return "merged";
     }
     if (change.closed === true || !change.headSha || change.headSha === job.head_sha) return "unchanged";

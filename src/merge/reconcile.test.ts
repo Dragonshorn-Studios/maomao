@@ -46,9 +46,11 @@ function harness(change: ForgeChange | Error) {
     enqueue(id: number) { enqueued.push(id); },
     abortMany(ids: number[]) { aborted.push(ids); },
   } as unknown as JobQueue;
+  let forgeReads = 0;
   const forge = {
     forJob: () => ({
       getChange: async () => {
+        forgeReads += 1;
         if (change instanceof Error) throw change;
         return change;
       },
@@ -56,7 +58,7 @@ function harness(change: ForgeChange | Error) {
   };
   const rateLimiter = new RepoRateLimiter();
   const reconciler = new ForgejoMergeReconciler({ config: config(), store, queue, forge: forge as never, rateLimiter }, { batchSize: 10 });
-  return { store, queue, enqueued, aborted, rateLimiter, reconciler };
+  return { store, queue, enqueued, aborted, rateLimiter, reconciler, reads: () => forgeReads };
 }
 
 function pull(overrides: Partial<ForgeChange> = {}): ForgeChange {
@@ -81,14 +83,29 @@ function pull(overrides: Partial<ForgeChange> = {}): ForgeChange {
 
 describe("ForgejoMergeReconciler", () => {
   it("records an authoritative merged head and cancels active work through the shared path", async () => {
-    const { store, aborted, reconciler } = harness(pull({ closed: true, merged: true }));
+    const { store, aborted, reconciler } = harness(pull({ closed: true, merged: true, headSha: "merged-head" }));
     const job = seedJob(store);
 
     const report = await reconciler.reconcileNow();
 
     expect(report).toMatchObject({ scanned: 1, merged: 1, errors: 0 });
-    expect(store.hasMergedPullAtHead("acme/widgets", 7, "old-head", { provider: "forgejo", instance: "forgejo.example" })).toBe(true);
+    expect(store.hasMergedPullAtHead("acme/widgets", 7, "merged-head", { provider: "forgejo", instance: "forgejo.example" })).toBe(true);
     expect(store.getJob(job.id)).toMatchObject({ state: "cancelled", cancelled_reason: "pr_merged" });
+    expect(aborted).toEqual([[job.id]]);
+  });
+
+
+
+  it("retries cancellation for an already recorded merge without rereading the forge", async () => {
+    const { store, aborted, reconciler, reads } = harness(pull({ closed: true, merged: true }));
+    const job = seedJob(store);
+    store.markPullMerged("acme/widgets", 7, null, { provider: "forgejo", instance: "forgejo.example" }, "merged-head");
+
+    const report = await reconciler.reconcileNow();
+
+    expect(report).toMatchObject({ scanned: 1, merged: 0, errors: 0 });
+    expect(reads()).toBe(0);
+    expect(store.getJob(job.id)?.state).toBe("cancelled");
     expect(aborted).toEqual([[job.id]]);
   });
 
@@ -118,6 +135,31 @@ describe("ForgejoMergeReconciler", () => {
     expect(store.listJobs(10)).toHaveLength(1);
     expect(enqueued).toEqual([]);
     expect(aborted).toEqual([]);
+  });
+
+
+
+  it("does not requeue a closed unmerged pull even when its head moved", async () => {
+    const { store, enqueued, reconciler } = harness(pull({ closed: true, merged: false, headSha: "new-head" }));
+    seedJob(store);
+
+    const report = await reconciler.reconcileNow();
+
+    expect(report).toMatchObject({ scanned: 1, requeued: 0, merged: 0, errors: 0 });
+    expect(enqueued).toEqual([]);
+    expect(store.listJobs(10)).toHaveLength(1);
+  });
+
+  it("does not requeue while the global review pause is active", async () => {
+    const { store, enqueued, reconciler } = harness(pull({ headSha: "new-head" }));
+    seedJob(store);
+    store.setGlobalPause("operator");
+
+    const report = await reconciler.reconcileNow();
+
+    expect(report.requeued).toBe(0);
+    expect(enqueued).toEqual([]);
+    expect(store.listJobs(10)).toHaveLength(1);
   });
 
   it("shares the Forgejo repository rate-limit budget with webhook ingestion", async () => {
