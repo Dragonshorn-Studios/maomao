@@ -58,6 +58,16 @@ describe("forge boot validation", () => {
 });
 
 describe("loadConfig", () => {
+  it("trusts no proxy hops by default and accepts explicit nonnegative counts", () => {
+    expect(loadConfig({}).trustProxyHops).toBe(0);
+    expect(loadConfig({ TRUST_PROXY_HOPS: "0" }).trustProxyHops).toBe(0);
+    expect(loadConfig({ TRUST_PROXY_HOPS: "2" }).trustProxyHops).toBe(2);
+  });
+
+  it.each(["-1", "1.5", "1oops", "true", "9007199254740992"])("rejects invalid TRUST_PROXY_HOPS=%s", (value) => {
+    expect(() => loadConfig({ TRUST_PROXY_HOPS: value })).toThrow(/TRUST_PROXY_HOPS/);
+  });
+
   it("loads defaults and reviewer roles from env", () => {
     const config = loadConfig({
       GITHUB_APP_ID: "1",
