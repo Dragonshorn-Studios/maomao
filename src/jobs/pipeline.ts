@@ -86,6 +86,7 @@ import {
   targetKey,
 } from "../routing/escalation.js";
 import { ReviewCheckPublisher, reviewCheckInputForState } from "../checks/review-check.js";
+import { TRUSTED_CHECK_NAMES, TrustedCheckRunner, trustedCheckNativeName, type TrustedCheckResult } from "../checks/trusted.js";
 import {
   assignFindingIds,
   findingsMeetThreshold,
@@ -107,6 +108,8 @@ export interface PipelineDeps {
   connections?: ForgeConnectionStore;
   /** Optional check publisher override for focused tests; production uses the default review publisher. */
   checkPublisher?: ReviewCheckPublisher;
+  /** Optional trusted-check runner override for focused tests. */
+  trustedCheckRunner?: TrustedCheckRunner;
   checkout: CheckoutPort;
   opencode: OpenCodePort;
   getInstallationToken?: (installationId: number) => Promise<string>;
@@ -120,24 +123,139 @@ export function abortJob(jobId: number): void {
   aborts.get(jobId)?.abort();
 }
 
+type TrustedPipelineHooks = {
+  run: (job: JobRow, workspace: { repoDir: string; dir: string; diffPath: string }, signal: AbortSignal) => Promise<void>;
+  finish: (job: JobRow, conclusion: "cancelled" | "action_required", reason: string) => Promise<void>;
+};
+
+function trustedCheckPublicationInput(result: TrustedCheckResult): Parameters<ReviewCheckPublisher["publish"]>[1] {
+  const counts = new Map<string, number>();
+  for (const finding of result.findings) counts.set(finding.severity, (counts.get(finding.severity) ?? 0) + 1);
+  const countText = [...counts.entries()].map(([severity, count]) => `${count} ${severity}`).join(", ") || "no findings";
+  const firstFinding = result.findings[0];
+  return {
+    status: "completed",
+    conclusion: result.conclusion,
+    title: `Maomao ${result.name} check ${result.status}`,
+    summary: [
+      `${result.scannerName}${result.scannerVersion ? ` ${result.scannerVersion}` : ""} completed with status ${result.status}: ${countText}.`,
+      `Pinned trusted-check revision: ${result.revision}.`,
+      firstFinding ? `Top finding: ${firstFinding.severity} ${firstFinding.category}${firstFinding.file ? ` in ${firstFinding.file}${firstFinding.line ? `:${firstFinding.line}` : ""}` : ""} — ${firstFinding.summary}` : "",
+      result.diagnostics ? `Diagnostics: ${result.diagnostics.slice(0, 1200)}` : "",
+    ].filter(Boolean).join("\n\n"),
+  };
+}
+
 export function createPipeline(deps: PipelineDeps) {
   const forge =
     deps.forge ?? new ForgeRegistry(deps.github, deps.config.github.appSlug, deps.getInstallationToken, deps.connections);
-  const checks =
-    deps.checkPublisher ??
-    new ReviewCheckPublisher({
-      store: deps.store,
-      forge,
-      config: deps.config,
-      publicUrl: deps.config.publicUrl,
+  const publisherDeps = {
+    store: deps.store,
+    forge,
+    config: deps.config,
+    publicUrl: deps.config.publicUrl,
+  };
+  const checks = deps.checkPublisher ?? new ReviewCheckPublisher(publisherDeps);
+  const trustedChecks = deps.trustedCheckRunner ?? new TrustedCheckRunner(deps.config);
+
+  function trustedPublisher(name: (typeof TRUSTED_CHECK_NAMES)[number]): ReviewCheckPublisher {
+    return new ReviewCheckPublisher(publisherDeps, {
+      name: trustedCheckNativeName(name),
+      label: `Maomao ${name} check`,
+      externalPrefix: `maomao-${name}`,
     });
+  }
+
+  function trustedKey(job: JobRow, name: (typeof TRUSTED_CHECK_NAMES)[number]) {
+    return {
+      provider: job.provider,
+      providerInstance: job.provider_instance,
+      repoFullName: job.repo_full_name,
+      prNumber: job.pr_number,
+      headSha: job.head_sha,
+      name: trustedCheckNativeName(name),
+    };
+  }
+
+  async function publishTrustedTerminal(job: JobRow, conclusion: "cancelled" | "action_required", reason: string): Promise<void> {
+    if (!trustedChecks.enabled() || job.job_type !== "pr_review") return;
+    for (const name of TRUSTED_CHECK_NAMES) {
+      const key = trustedKey(job, name);
+      const existing = deps.store.getCheckPublication(key);
+      if (existing?.status === "completed" && existing.conclusion && !(conclusion === "cancelled" && existing.conclusion === "action_required")) continue;
+      await trustedPublisher(name).publish(job, {
+        status: "completed",
+        conclusion,
+        title: `Maomao ${name} check ${conclusion === "cancelled" ? "cancelled" : "did not run"}`,
+        summary: `The deterministic ${name} check did not complete for PR #${job.pr_number} at ${job.head_sha.slice(0, 12)}: ${reason}`,
+        validateHead: conclusion !== "cancelled",
+      });
+    }
+  }
+
+  async function runTrustedChecks(job: JobRow, workspace: { repoDir: string; dir: string; diffPath: string }, signal: AbortSignal): Promise<void> {
+    if (!trustedChecks.enabled()) return;
+    for (const name of TRUSTED_CHECK_NAMES) {
+      const publisher = trustedPublisher(name);
+      await publisher.publish(job, {
+        status: "in_progress",
+        stage: "scanning",
+        title: `Maomao ${name} check running`,
+        summary: `Maomao is running the pinned deterministic ${name} check for PR #${job.pr_number} at ${job.head_sha.slice(0, 12)}.`,
+      });
+      throwIfStale(deps.store, job.id, signal);
+      const result = await trustedChecks.run({
+        name,
+        repoDir: workspace.repoDir,
+        workspaceDir: workspace.dir,
+        diffPath: workspace.diffPath,
+        signal,
+      });
+      deps.store.recordTrustedCheckResult({
+        provider: job.provider,
+        providerInstance: job.provider_instance,
+        repoFullName: job.repo_full_name,
+        prNumber: job.pr_number,
+        headSha: job.head_sha,
+        jobId: job.id,
+        status: result.status,
+        conclusion: result.conclusion,
+        scannerName: result.scannerName,
+        ...(result.scannerVersion ? { scannerVersion: result.scannerVersion } : {}),
+        name: result.nativeName,
+        revision: result.revision,
+        findingsJson: JSON.stringify(result.findings),
+        diagnostics: result.diagnostics,
+        durationMs: result.durationMs,
+      });
+      deps.store.log(
+        job.id,
+        `Trusted ${name} check ${result.status}: ${result.findings.length} finding(s), scanner=${result.scannerName}${result.scannerVersion ? `@${result.scannerVersion}` : ""}, revision=${result.revision.slice(0, 12)}${result.diagnostics ? ` — ${result.diagnostics.split("\n")[0]?.slice(0, 240)}` : ""}`,
+        result.status === "success" ? "info" : "warn",
+      );
+      await publisher.publish(deps.store.getJob(job.id) ?? job, trustedCheckPublicationInput(result));
+    }
+  }
   return {
     abortJob,
-    publishQueuedCheck(jobId: number): Promise<void> {
-      return checks.publishQueuedJobId(jobId);
+    async publishQueuedCheck(jobId: number): Promise<void> {
+      await checks.publishQueuedJobId(jobId);
+      const job = deps.store.getJob(jobId);
+      if (!job || job.state !== "queued" || !trustedChecks.enabled()) return;
+      await Promise.all(
+        TRUSTED_CHECK_NAMES.map((name) =>
+          trustedPublisher(name).publish(job, {
+            status: "queued",
+            title: `Maomao ${name} check queued`,
+            summary: `Maomao queued the pinned deterministic ${name} check for PR #${job.pr_number} at ${job.head_sha.slice(0, 12)}.`,
+          }),
+        ),
+      );
     },
-    publishCancelledCheck(jobId: number): Promise<void> {
-      return checks.publishCancelledJobId(jobId);
+    async publishCancelledCheck(jobId: number): Promise<void> {
+      await checks.publishCancelledJobId(jobId);
+      const job = deps.store.getJob(jobId);
+      if (job) await publishTrustedTerminal(job, "cancelled", "the review job was cancelled or superseded before the scanner completed");
     },
     async run(jobId: number): Promise<void> {
       const existing = aborts.get(jobId);
@@ -174,9 +292,9 @@ export function createPipeline(deps: PipelineDeps) {
         } else if (job?.job_type === "repo_brief") {
           await runBriefJob(deps, forge, jobId, controller.signal);
         } else if (job?.job_type === "stack_review") {
-          await runStackJob(deps, forge, jobId, controller.signal, checks);
+          await runStackJob(deps, forge, jobId, controller.signal, checks, { run: runTrustedChecks, finish: publishTrustedTerminal });
         } else {
-          await runJob(deps, forge, jobId, controller.signal, checks);
+          await runJob(deps, forge, jobId, controller.signal, checks, { run: runTrustedChecks, finish: publishTrustedTerminal });
         }
       } finally {
         if (aborts.get(jobId) === controller) aborts.delete(jobId);
@@ -380,6 +498,7 @@ async function runJob(
   jobId: number,
   signal: AbortSignal,
   checks: ReviewCheckPublisher,
+  trustedHooks: TrustedPipelineHooks,
 ): Promise<void> {
   const { store, config } = deps;
   const job = store.getJob(jobId);
@@ -567,6 +686,10 @@ async function runJob(
       store.patchJob(jobId, { aggregator_normalized: JSON.stringify(aggregated, null, 2) });
     }
 
+    throwIfStale(store, jobId, signal);
+    await trustedHooks.run(store.getJob(jobId) ?? job, workspace, signal);
+    throwIfStale(store, jobId, signal);
+
     store.setJobState(jobId, "publishing", { aggregator_state: "done" });
     void checks.publish(store.getJob(jobId) ?? job, { status: "in_progress", stage: "publishing" });
     const publication = await publishReview(deps, provider, job, aggregated, reviewerCount, snapshot, diff, workspace.repoDir, signal);
@@ -677,6 +800,7 @@ async function runJob(
         { ...latest, state: cancelled ? "cancelled" : "stale" },
         reviewCheckInputForState({ ...latest, state: cancelled ? "cancelled" : "stale" }),
       );
+      await trustedHooks.finish(latest, "cancelled", "the review job was cancelled or superseded before the scanner completed");
       if (!store.isStale(jobId)) store.setJobState(jobId, "stale", { finished_at: nowIso() });
       return;
     }
@@ -695,6 +819,7 @@ async function runJob(
       { ...latest, state: "failed", failure_reason: message },
       reviewCheckInputForState({ ...latest, state: "failed", failure_reason: message }),
     );
+    await trustedHooks.finish(latest, "action_required", `the review job failed before the scanner completed: ${message.slice(0, 500)}`);
     store.setJobState(jobId, "failed", {
       failure_reason: message,
       finished_at: nowIso(),
@@ -1208,6 +1333,7 @@ async function runStackJob(
   jobId: number,
   signal: AbortSignal,
   checks: ReviewCheckPublisher,
+  trustedHooks: TrustedPipelineHooks,
 ): Promise<void> {
   const { store, config } = deps;
   const job = store.getJob(jobId);
@@ -1381,7 +1507,7 @@ async function runStackJob(
         store.patchStackMember(member.id, { memberJobId, state: "reviewing" });
         if (enqueued.created) {
           store.log(jobId, `Reviewing stack member #${member.pr_number} as job ${memberJobId}`);
-          await runJob(deps, forge, memberJobId, signal, checks);
+          await runJob(deps, forge, memberJobId, signal, checks, trustedHooks);
           outcome = await waitForJob(deps.store, memberJobId, jobId, signal);
           // Run envelope (issue #136): only spend this run itself enqueued
           // counts — a reused job's recorded tokens belong to the run that

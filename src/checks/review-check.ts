@@ -16,18 +16,18 @@ export type ReviewCheckInput = ForgeCheckState & {
   validateHead?: boolean;
 };
 
-function keyFor(job: JobRow): CheckPublicationKey {
+function keyFor(job: JobRow, name = REVIEW_CHECK_NAME): CheckPublicationKey {
   return {
     provider: job.provider,
     providerInstance: job.provider_instance,
     repoFullName: job.repo_full_name,
     prNumber: job.pr_number,
     headSha: job.head_sha,
-    name: REVIEW_CHECK_NAME,
+    name,
   };
 }
 
-function externalIdFor(job: JobRow): string {
+function externalIdFor(job: JobRow, name = REVIEW_CHECK_NAME, externalPrefix = "maomao-review"): string {
   const digest = createHash("sha256")
     .update(
       [
@@ -36,29 +36,30 @@ function externalIdFor(job: JobRow): string {
         job.repo_full_name,
         String(job.pr_number),
         job.head_sha,
-        REVIEW_CHECK_NAME,
+        name,
       ].join("\0"),
     )
     .digest("hex")
     .slice(0, 32);
-  return `maomao-review-${digest}`;
+  return `${externalPrefix}-${digest}`;
 }
 
-function defaultTitle(input: ReviewCheckInput): string {
-  if (input.status === "queued") return "Maomao review queued";
-  if (input.status === "in_progress") return `Maomao review ${input.stage ?? "in progress"}`;
-  if (input.conclusion === "success") return "Maomao review passed";
-  if (input.conclusion === "failure") return "Maomao review failed";
-  if (input.conclusion === "cancelled") return "Maomao review cancelled";
-  if (input.conclusion === "timed_out") return "Maomao review timed out";
-  return "Maomao review completed";
+function defaultTitle(input: ReviewCheckInput, label = "Maomao review"): string {
+  if (input.status === "queued") return `${label} queued`;
+  if (input.status === "in_progress") return `${label} ${input.stage ?? "in progress"}`;
+  if (input.conclusion === "success") return `${label} passed`;
+  if (input.conclusion === "failure") return `${label} failed`;
+  if (input.conclusion === "cancelled") return `${label} cancelled`;
+  if (input.conclusion === "timed_out") return `${label} timed out`;
+  return `${label} completed`;
 }
 
-function defaultSummary(job: JobRow, input: ReviewCheckInput): string {
+function defaultSummary(job: JobRow, input: ReviewCheckInput, label = "Maomao review"): string {
   const sha = job.head_sha.slice(0, 12);
-  if (input.status === "queued") return `Maomao queued a review for PR #${job.pr_number} at ${sha}.`;
-  if (input.status === "in_progress") return `Maomao is reviewing PR #${job.pr_number} at ${sha}.`;
-  return `Maomao finished processing PR #${job.pr_number} at ${sha}.`;
+  const noun = label.replace(/^Maomao /, "");
+  if (input.status === "queued") return `Maomao queued the ${noun} for PR #${job.pr_number} at ${sha}.`;
+  if (input.status === "in_progress") return `Maomao is running the ${noun} for PR #${job.pr_number} at ${sha}.`;
+  return `Maomao finished the ${noun} for PR #${job.pr_number} at ${sha}.`;
 }
 
 /** Terminal job state → native-check conclusion for the existing human review result. */
@@ -90,11 +91,16 @@ export class ReviewCheckPublisher {
       config: Config;
       publicUrl?: string;
     },
+    private readonly identity: { name: string; label: string; externalPrefix: string } = {
+      name: REVIEW_CHECK_NAME,
+      label: "Maomao review",
+      externalPrefix: "maomao-review",
+    },
   ) {}
 
   publish(job: JobRow, input: ReviewCheckInput): Promise<void> {
     if (job.job_type !== "pr_review" || job.pr_number <= 0) return Promise.resolve();
-    const key = keyFor(job);
+    const key = keyFor(job, this.identity.name);
     const chainKey = [
       key.provider,
       key.providerInstance,
@@ -135,7 +141,7 @@ export class ReviewCheckPublisher {
   }
 
   private async publishNow(job: JobRow, input: ReviewCheckInput): Promise<void> {
-    const key = keyFor(job);
+    const key = keyFor(job, this.identity.name);
     const detailsUrl = this.detailsUrl(job);
     let effective = input;
     if (job.provider === "github") {
@@ -145,7 +151,7 @@ export class ReviewCheckPublisher {
         repositoryId: job.github_repository_id ?? undefined,
       });
       if (!auth.ok) {
-        this.deps.store.log(job.id, `Not publishing ${REVIEW_CHECK_NAME}: unauthorized: ${auth.reason}`, "warn");
+        this.deps.store.log(job.id, `Not publishing ${this.identity.name}: unauthorized: ${auth.reason}`, "warn");
         return;
       }
     }
@@ -155,7 +161,7 @@ export class ReviewCheckPublisher {
     } catch (error) {
       this.deps.store.log(
         job.id,
-        `Could not publish ${REVIEW_CHECK_NAME}: forge unavailable: ${error instanceof Error ? error.message : String(error)}`,
+        `Could not publish ${this.identity.name}: forge unavailable: ${error instanceof Error ? error.message : String(error)}`,
         "warn",
       );
       return;
@@ -179,26 +185,26 @@ export class ReviewCheckPublisher {
         // happen; a later retry/rerun can reconcile it.
         this.deps.store.beginCheckPublication({
           ...key,
-          externalId: externalIdFor(job),
+          externalId: externalIdFor(job, this.identity.name, this.identity.externalPrefix),
           jobId: job.id,
           status: input.status,
           ...(input.conclusion ? { conclusion: input.conclusion } : {}),
-          title: input.title ?? defaultTitle(input),
-          summary: input.summary ?? defaultSummary(job, input),
+          title: input.title ?? defaultTitle(input, this.identity.label),
+          summary: input.summary ?? defaultSummary(job, input, this.identity.label),
           ...(detailsUrl ? { detailsUrl } : {}),
         });
         const message = `head validation failed: ${error instanceof Error ? error.message : String(error)}`;
         this.deps.store.finishCheckPublication(key, { error: message.slice(0, 1000) });
-        this.deps.store.log(job.id, `Could not publish ${REVIEW_CHECK_NAME}: ${message}`, "warn");
+        this.deps.store.log(job.id, `Could not publish ${this.identity.name}: ${message}`, "warn");
         return;
       }
     }
 
-    const title = effective.title ?? defaultTitle(effective);
-    const summary = effective.summary ?? defaultSummary(job, effective);
+    const title = effective.title ?? defaultTitle(effective, this.identity.label);
+    const summary = effective.summary ?? defaultSummary(job, effective, this.identity.label);
     this.deps.store.beginCheckPublication({
       ...key,
-      externalId: externalIdFor(job),
+      externalId: externalIdFor(job, this.identity.name, this.identity.externalPrefix),
       jobId: job.id,
       status: effective.status,
       ...(effective.conclusion ? { conclusion: effective.conclusion } : {}),
@@ -214,8 +220,8 @@ export class ReviewCheckPublisher {
       const result = await provider.publishCheck({
         target: forgeTargetOf(job),
         commitSha: job.head_sha,
-        name: REVIEW_CHECK_NAME,
-        externalId: externalIdFor(job),
+        name: this.identity.name,
+        externalId: externalIdFor(job, this.identity.name, this.identity.externalPrefix),
         ...state,
         title,
         summary,
@@ -229,7 +235,7 @@ export class ReviewCheckPublisher {
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       this.deps.store.finishCheckPublication(key, { error: message.slice(0, 1000) });
-      this.deps.store.log(job.id, `Could not publish ${REVIEW_CHECK_NAME}: ${message}`, "warn");
+      this.deps.store.log(job.id, `Could not publish ${this.identity.name}: ${message}`, "warn");
     }
   }
 
