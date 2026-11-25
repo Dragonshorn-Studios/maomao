@@ -35,7 +35,9 @@ function severityAtLeast(severity: TrustedSeverity, threshold: TrustedSeverity):
 }
 
 function boolOr(value: unknown, fallback: boolean): boolean {
-  return typeof value === "boolean" ? value : fallback;
+  if (value == null) return fallback;
+  if (typeof value !== "boolean") throw new Error("trusted policy requireReview must be boolean");
+  return value;
 }
 
 function thresholdOr(value: unknown, fallback: TrustedSeverity): TrustedSeverity {
@@ -61,6 +63,7 @@ function suppressionsOr(value: unknown): TrustedPolicySuppression[] {
     if (typeof row.fingerprint !== "string" || !/^[0-9a-f]{64}$/.test(row.fingerprint) || typeof row.reason !== "string" || !row.reason.trim()) {
       throw new Error("trusted policy suppressions require a 64-character lowercase fingerprint and reason");
     }
+    if (row.check != null && row.check !== "secrets" && row.check !== "security") throw new Error("trusted policy suppression check is invalid");
     return [{
       ...(row.check === "secrets" || row.check === "security" ? { check: row.check } : {}),
       fingerprint: row.fingerprint,
@@ -70,7 +73,8 @@ function suppressionsOr(value: unknown): TrustedPolicySuppression[] {
 }
 
 function mergePolicy(raw: unknown, fallback: TrustedRepoPolicy): TrustedRepoPolicy {
-  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return fallback;
+  if (raw == null) return fallback;
+  if (typeof raw !== "object" || Array.isArray(raw)) throw new Error("trusted policy entries must be objects");
   const value = raw as Record<string, unknown>;
   return {
     requireReview: boolOr(value.requireReview, fallback.requireReview),
@@ -114,9 +118,10 @@ export async function readTrustedPolicy(trustedDir: string, repoFullName: string
     severityThreshold: "high",
     suppressions: [],
   });
-  const repositories = parsed.repositories && typeof parsed.repositories === "object" && !Array.isArray(parsed.repositories)
-    ? parsed.repositories as Record<string, unknown>
-    : {};
+  if (parsed.repositories != null && (typeof parsed.repositories !== "object" || Array.isArray(parsed.repositories))) {
+    throw new Error("trusted policy repositories must be an object");
+  }
+  const repositories = (parsed.repositories ?? {}) as Record<string, unknown>;
   const merged = mergePolicy(repositories[repoFullName], base);
   return { ...merged, revision, source: "trusted-repo" };
 }

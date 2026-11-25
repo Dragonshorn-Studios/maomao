@@ -43,6 +43,8 @@ describe("trusted repository policy", () => {
 
   it("rejects malformed trusted policy instead of guessing", async () => {
     await expect(readTrustedPolicy(await policyDir("{"), "org/repo", [], "c".repeat(40))).rejects.toThrow();
+    await expect(readTrustedPolicy(await policyDir(JSON.stringify({ version: 1, defaults: { requireReview: "yes" } })), "org/repo", [], "c".repeat(40))).rejects.toThrow("requireReview");
+    await expect(readTrustedPolicy(await policyDir(JSON.stringify({ version: 1, defaults: { requiredChecks: ["tests"] } })), "org/repo", [], "c".repeat(40))).rejects.toThrow("requiredChecks");
   });
 
   it("filters findings by threshold and explicit fingerprint suppressions", () => {
