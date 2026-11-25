@@ -5,6 +5,8 @@ import { join } from "node:path";
 import { promisify } from "node:util";
 import { describe, expect, it } from "vitest";
 import { loadConfig } from "../config.js";
+import { openDb } from "../db.js";
+import { TrustedCheckSettingsStore } from "./settings.js";
 import { TrustedCheckRunner } from "./trusted.js";
 
 const execFileAsync = promisify(execFile);
@@ -169,6 +171,20 @@ JSON
     });
     expect(result.status).toBe("error");
     expect(result.diagnostics).toContain("must not overlap");
+  });
+
+  it("reloads operator-managed pinning when the stored source or revision changes", async () => {
+    const first = await trustedFixture(`printf '%s' '{"status":"success","scanner":{"name":"first"},"findings":[]}' > "$MAOMAO_RESULT_PATH"
+`);
+    const second = await trustedFixture(`printf '%s' '{"status":"success","scanner":{"name":"second"},"findings":[]}' > "$MAOMAO_RESULT_PATH"
+`);
+    const settings = new TrustedCheckSettingsStore(openDb(":memory:"), loadConfig({}).trustedChecks);
+    expect(settings.save({ localPath: first.trusted, revision: first.revision, enabledChecks: ["secrets"] })).toEqual({ ok: true });
+    const runner = new TrustedCheckRunner(loadConfig({}), () => settings.effective());
+    const input = { name: "secrets" as const, repoDir: first.repoDir, workspaceDir: first.workspace, diffPath: first.diffPath };
+    expect((await runner.run(input)).scannerName).toBe("first");
+    expect(settings.save({ localPath: second.trusted, revision: second.revision, enabledChecks: ["secrets"] })).toEqual({ ok: true });
+    expect((await runner.run({ ...input, workspaceDir: second.workspace })).scannerName).toBe("second");
   });
 
   it("refuses a dirty or wrong-revision local trusted checkout before executing anything", async () => {

@@ -261,6 +261,16 @@ function migrate(db: SqliteDb): void {
       UNIQUE (provider, provider_instance, repo_full_name, pr_number, head_sha, name)
     );
 
+    CREATE TABLE IF NOT EXISTS trusted_check_settings (
+      id INTEGER PRIMARY KEY CHECK (id = 1),
+      repo_url TEXT NOT NULL DEFAULT '',
+      local_path TEXT NOT NULL DEFAULT '',
+      revision TEXT NOT NULL DEFAULT '',
+      secrets_enabled INTEGER NOT NULL DEFAULT 1,
+      security_enabled INTEGER NOT NULL DEFAULT 1,
+      updated_at TEXT NOT NULL
+    );
+
     CREATE TABLE IF NOT EXISTS trusted_check_results (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       ${PROVIDER_COLUMNS},

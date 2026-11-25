@@ -1730,6 +1730,9 @@ body.operator main th {
   grid-template-columns: repeat(auto-fit, minmax(14rem, 1fr));
   gap: 0.6rem 0.9rem;
 }
+.config-grid { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 0.35rem 1rem; }
+.config-grid dt { color: var(--ink-muted); font-size: 0.82rem; }
+.config-grid dd { margin: 0; overflow-wrap: anywhere; }
 .telemetry-field-wide { grid-column: 1 / -1; }
 .telemetry-field span { display: block; color: var(--ink-muted); font-size: 0.8rem; margin-bottom: 0.2rem; }
 .telemetry-field input, .telemetry-field select { width: 100%; }

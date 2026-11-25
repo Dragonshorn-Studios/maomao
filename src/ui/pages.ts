@@ -1407,7 +1407,7 @@ function renderEffectiveConfigSection(entries: EffectiveConfigEntry[]): string {
 }
 
 /** Shared sub-nav across the /config pages so each section is one click away. */
-export type ConfigSection = "effective" | "profiles" | "providers" | "telemetry" | "prompts" | "audit" | "deliveries";
+export type ConfigSection = "effective" | "profiles" | "providers" | "telemetry" | "trusted-checks" | "prompts" | "audit" | "deliveries";
 
 export function configSubNav(active: ConfigSection): string {
   const links: Array<[ConfigSection, string, string]> = [
@@ -1415,6 +1415,7 @@ export function configSubNav(active: ConfigSection): string {
     ["profiles", "/config/profiles", "Profiles"],
     ["providers", "/config/providers", "Provider keys"],
     ["telemetry", "/config/telemetry", "Telemetry"],
+    ["trusted-checks", "/config/trusted-checks", "Trusted checks"],
     ["prompts", "/config/prompts", "Specialist prompts"],
     ["audit", "/config/audit", "Audit"],
     ["deliveries", "/config/deliveries", "Deliveries"],

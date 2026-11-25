@@ -7,6 +7,8 @@ import { handleGithubWebhook } from "./github/webhooks.js";
 import { handleGitLabWebhook } from "./gitlab/webhooks.js";
 import { handleForgejoWebhook } from "./forgejo/webhooks.js";
 import { ForgeConnectionStore, countConnections, toView } from "./forge/connections.js";
+import type { TrustedCheckSettingsStore } from "./checks/settings.js";
+import { renderTrustedChecksPage } from "./ui/trusted-checks.js";
 import { probeConnection } from "./forge/probe.js";
 import { InstanceUrlError } from "./forge/safe-http.js";
 import { ChatService } from "./chat/service.js";
@@ -154,6 +156,8 @@ export interface ServerContext {
   chat?: { service: ChatService; store: ChatStore };
   /** Operator-managed OpenObserve settings for /config/telemetry; defaults to the XDG path. */
   telemetrySettings?: TelemetrySettingsStore;
+  /** Operator-managed trusted-check pinning for /config/trusted-checks. */
+  trustedCheckSettings?: TrustedCheckSettingsStore;
   /** Injectable transport for the telemetry connection probe (tests). */
   telemetryFetch?: typeof fetch;
   /** The environment loadConfig consumed; defaults to process.env. Injectable for tests. */
@@ -1572,6 +1576,54 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
     if (result.ok) return { channel, ok: true, detail: `Connected — HTTP ${result.status}`, url: masked };
     return { channel, ok: false, detail: result.detail, url: masked };
   };
+
+  const renderTrustedChecks = (
+    c: Context<AppEnv>,
+    extra: { notice?: string; error?: string; status?: number } = {},
+  ) => {
+    if (!ctx.trustedCheckSettings) return c.text("Trusted-check settings are unavailable on this process", 503);
+    return c.html(
+      renderTrustedChecksPage({
+        status: ctx.trustedCheckSettings.status(),
+        csrfToken: gateOn ? ensureCsrfToken(c, ctx.config.uiSessionSecret) : undefined,
+        canWrite: gateOn,
+        options: { ...pageOpts, identity: c.get("identity"), notice: extra.notice, error: extra.error },
+      }),
+      (extra.status ?? 200) as 200 | 400 | 503,
+    );
+  };
+
+  app.get("/config/trusted-checks", (c) => {
+    if (!gateOn) return c.redirect("/", 302);
+    return renderTrustedChecks(c, { notice: c.req.query("notice") ?? undefined, error: c.req.query("error") ?? undefined });
+  });
+
+  app.post("/config/trusted-checks", async (c) => {
+    if (!gateOn) return c.redirect("/", 302);
+    if (!ctx.trustedCheckSettings) return c.text("Trusted-check settings are unavailable on this process", 503);
+    const body = await c.req.parseBody();
+    const text = (name: string) => (typeof body[name] === "string" ? (body[name] as string).trim() : "");
+    const enabledChecks = [
+      ...(body.secrets === "1" ? ["secrets" as const] : []),
+      ...(body.security === "1" ? ["security" as const] : []),
+    ];
+    const result = ctx.trustedCheckSettings.save({
+      repoUrl: text("repoUrl"),
+      localPath: text("localPath"),
+      revision: text("revision"),
+      enabledChecks,
+    });
+    if (!result.ok) return renderTrustedChecks(c, { error: result.error, status: 400 });
+    return c.redirect(`/config/trusted-checks?notice=${encodeURIComponent("Trusted-check settings saved. They apply to subsequent scans.")}`, 303);
+  });
+
+  app.post("/config/trusted-checks/delete", (c) => {
+    if (!gateOn) return c.redirect("/", 302);
+    if (!ctx.trustedCheckSettings) return c.text("Trusted-check settings are unavailable on this process", 503);
+    const result = ctx.trustedCheckSettings.clear();
+    const note = result.removed ? "Stored trusted-check settings cleared." : "No stored trusted-check settings.";
+    return c.redirect(`/config/trusted-checks?notice=${encodeURIComponent(note)}`, 303);
+  });
 
   app.get("/config/telemetry", (c) => {
     if (!gateOn) return c.redirect("/", 302);

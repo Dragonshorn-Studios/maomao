@@ -87,6 +87,7 @@ import {
 } from "../routing/escalation.js";
 import { ReviewCheckPublisher, reviewCheckInputForState } from "../checks/review-check.js";
 import { TRUSTED_CHECK_NAMES, TrustedCheckRunner, trustedCheckNativeName, type TrustedCheckResult } from "../checks/trusted.js";
+import type { TrustedCheckSettingsStore } from "../checks/settings.js";
 import {
   assignFindingIds,
   findingsMeetThreshold,
@@ -110,6 +111,8 @@ export interface PipelineDeps {
   checkPublisher?: ReviewCheckPublisher;
   /** Optional trusted-check runner override for focused tests. */
   trustedCheckRunner?: TrustedCheckRunner;
+  /** Operator-managed trusted-check pinning; absent tests use static env config. */
+  trustedCheckSettings?: TrustedCheckSettingsStore;
   checkout: CheckoutPort;
   opencode: OpenCodePort;
   getInstallationToken?: (installationId: number) => Promise<string>;
@@ -156,7 +159,11 @@ export function createPipeline(deps: PipelineDeps) {
     publicUrl: deps.config.publicUrl,
   };
   const checks = deps.checkPublisher ?? new ReviewCheckPublisher(publisherDeps);
-  const trustedChecks = deps.trustedCheckRunner ?? new TrustedCheckRunner(deps.config);
+  const trustedChecks = deps.trustedCheckRunner ?? new TrustedCheckRunner(
+    deps.config,
+    () => deps.trustedCheckSettings?.effective() ?? { ...deps.config.trustedChecks, enabledChecks: [...TRUSTED_CHECK_NAMES] },
+  );
+  const activeTrustedCheckNames = () => TRUSTED_CHECK_NAMES.filter((name) => trustedChecks.enabledFor(name));
 
   const trustedPublishers = new Map<string, ReviewCheckPublisher>();
   function trustedPublisher(name: (typeof TRUSTED_CHECK_NAMES)[number]): ReviewCheckPublisher {
@@ -182,9 +189,17 @@ export function createPipeline(deps: PipelineDeps) {
     };
   }
 
-  async function publishTrustedTerminal(job: JobRow, conclusion: "cancelled" | "action_required", reason: string): Promise<void> {
-    if (!trustedChecks.enabled() || job.job_type !== "pr_review") return;
+  function trustedNamesWithPublications(job: JobRow): typeof TRUSTED_CHECK_NAMES {
+    const active = new Set(activeTrustedCheckNames());
     for (const name of TRUSTED_CHECK_NAMES) {
+      if (deps.store.getCheckPublication(trustedKey(job, name))) active.add(name);
+    }
+    return TRUSTED_CHECK_NAMES.filter((name) => active.has(name));
+  }
+
+  async function publishTrustedTerminal(job: JobRow, conclusion: "cancelled" | "action_required", reason: string): Promise<void> {
+    if (job.job_type !== "pr_review") return;
+    for (const name of trustedNamesWithPublications(job)) {
       const key = trustedKey(job, name);
       const existing = deps.store.getCheckPublication(key);
       if (existing?.status === "completed" && existing.conclusion && !(conclusion === "cancelled" && existing.conclusion === "action_required")) continue;
@@ -199,8 +214,20 @@ export function createPipeline(deps: PipelineDeps) {
   }
 
   async function runTrustedChecks(job: JobRow, workspace: { repoDir: string; dir: string; diffPath: string }, signal: AbortSignal): Promise<void> {
-    if (!trustedChecks.enabled()) return;
-    for (const name of TRUSTED_CHECK_NAMES) {
+    const active = new Set(activeTrustedCheckNames());
+    for (const name of trustedNamesWithPublications(job)) {
+      if (active.has(name)) continue;
+      const existing = deps.store.getCheckPublication(trustedKey(job, name));
+      if (existing?.status === "completed") continue;
+      await trustedPublisher(name).publish(job, {
+        status: "completed",
+        conclusion: "cancelled",
+        title: `Maomao ${name} check cancelled`,
+        summary: `The deterministic ${name} check was disabled before it ran for PR #${job.pr_number} at ${job.head_sha.slice(0, 12)}.`,
+        validateHead: false,
+      });
+    }
+    for (const name of active) {
       const publisher = trustedPublisher(name);
       await publisher.publish(job, {
         status: "in_progress",
@@ -248,7 +275,7 @@ export function createPipeline(deps: PipelineDeps) {
       const job = deps.store.getJob(jobId);
       if (!job || job.state !== "queued" || !trustedChecks.enabled()) return;
       await Promise.all(
-        TRUSTED_CHECK_NAMES.map((name) =>
+        activeTrustedCheckNames().map((name) =>
           trustedPublisher(name).publish(job, {
             status: "queued",
             title: `Maomao ${name} check queued`,

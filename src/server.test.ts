@@ -20,6 +20,7 @@ import { createApp } from "./server.js";
 import { ForgeConnectionStore } from "./forge/connections.js";
 import { ProviderCredentialStore } from "./opencode/credentials.js";
 import { TelemetrySettingsStore } from "./telemetry/settings.js";
+import { TrustedCheckSettingsStore } from "./checks/settings.js";
 import { ModelDiscovery } from "./opencode/models.js";
 import { generateForgeKeyHex } from "./forge/secretbox.js";
 import { computeSignature } from "./gitlab/signature.js";
@@ -6458,6 +6459,80 @@ describe("global review pause", () => {
     expect(denied.status).toBe(403);
     expect(store.getGlobalPause()).toBeUndefined();
     log.mockRestore();
+  });
+});
+
+describe("trusted checks config routes", () => {
+  it("renders, saves, and clears operator-managed pinning", async () => {
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    const trustedCheckSettings = new TrustedCheckSettingsStore(openDb(":memory:"), loadConfig({}).trustedChecks);
+    const { app } = testApp(
+      { UI_PASSWORD: "hunter2", UI_SESSION_SECRET: "session-secret-for-tests" },
+      undefined,
+      undefined,
+      { trustedCheckSettings },
+    );
+    const { session } = await loginSession(app);
+    const revision = "0123456789abcdef0123456789abcdef01234567";
+
+    const page = await app.request("/config/trusted-checks", { headers: { cookie: session } });
+    const { csrfCookie, csrfToken, html } = await csrfArtifacts(page);
+    expect(html).toContain("Trusted checks");
+    expect(html).toContain("not configured");
+    expect(html).toContain('name="repoUrl"');
+    expect(html).toContain('name="secrets"');
+
+    const saved = await app.request("/config/trusted-checks", {
+      method: "POST",
+      headers: { cookie: `${session}; ${csrfCookie}`, "content-type": "application/x-www-form-urlencoded" },
+      body:
+        `repoUrl=${encodeURIComponent("https://git.example.com/security/checks.git")}` +
+        `&revision=${revision}` +
+        `&secrets=1` +
+        `&csrf_token=${encodeURIComponent(csrfToken)}`,
+    });
+    expect(saved.status).toBe(303);
+    expect(trustedCheckSettings.effective()).toMatchObject({
+      repoUrl: "https://git.example.com/security/checks.git",
+      revision,
+      enabledChecks: ["secrets"],
+    });
+
+    const after = await app.request("/config/trusted-checks", { headers: { cookie: session } });
+    const afterHtml = await after.text();
+    expect(afterHtml).toContain("stored operator settings");
+    expect(afterHtml).toContain("https://git.example.com/security/checks.git");
+    expect(afterHtml).toContain("maomao/secrets");
+
+    const artifacts = await csrfArtifacts(await app.request("/config/trusted-checks", { headers: { cookie: session } }));
+    const cleared = await app.request("/config/trusted-checks/delete", {
+      method: "POST",
+      headers: { cookie: `${session}; ${artifacts.csrfCookie}`, "content-type": "application/x-www-form-urlencoded" },
+      body: `csrf_token=${encodeURIComponent(artifacts.csrfToken)}`,
+    });
+    expect(cleared.status).toBe(303);
+    expect(trustedCheckSettings.status().source).toBe("none");
+    log.mockRestore();
+  });
+  it("is read-only when environment variables pin trusted checks", async () => {
+    const revision = "0123456789abcdef0123456789abcdef01234567";
+    const env = loadConfig({
+      MAOMAO_TRUSTED_CHECKS_PATH: "/opt/env-checks",
+      MAOMAO_TRUSTED_CHECKS_REVISION: revision,
+    }).trustedChecks;
+    const trustedCheckSettings = new TrustedCheckSettingsStore(openDb(":memory:"), env);
+    const { app } = testApp(
+      { UI_PASSWORD: "hunter2", UI_SESSION_SECRET: "session-secret-for-tests" },
+      undefined,
+      undefined,
+      { trustedCheckSettings },
+    );
+    const { session } = await loginSession(app);
+    const page = await app.request("/config/trusted-checks", { headers: { cookie: session } });
+    const html = await page.text();
+    expect(html).toContain("environment variables (read-only here)");
+    expect(html).toContain("/opt/env-checks");
+    expect(html).not.toContain('action="/config/trusted-checks"');
   });
 });
 
