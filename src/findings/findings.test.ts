@@ -144,6 +144,38 @@ describe("prior finding collection and publish filtering", () => {
     ]);
   });
 
+  it("does not treat a resolved historical thread as settled when the finding was republished in an approval body", () => {
+    const marker = findingMarker("approvalbodyfid01", "oldsha");
+    const store = new JobStore(openDb(":memory:"));
+    store.upsertFinding({
+      repoFullName: "acme/widgets",
+      prNumber: 7,
+      fingerprint: "approvalbodyfid01",
+      status: "open",
+      reviewedSha: "newsha",
+      summary: "still-present advisory",
+      publicationSurface: "approval_body",
+    });
+    const priors = collectPriorFindings({
+      threads: [
+        {
+          id: "PRRT_closed",
+          isResolved: true,
+          comments: [{ id: "c1", databaseId: 11, body: `${marker}
+**low**: advisory` }],
+        },
+      ],
+      stored: store.listFindings("acme/widgets", 7),
+    });
+    expect(priors[0]).toEqual(
+      expect.objectContaining({
+        fingerprint: "approvalbodyfid01",
+        settledResolved: false,
+        githubAlreadyResolved: false,
+      }),
+    );
+  });
+
   it("reads the finding marker from a later comment when comments[0] is a reply", () => {
     const marker = findingMarker("deadbeefdeadbeef", "oldsha");
     const priors = collectPriorFindings({

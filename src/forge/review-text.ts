@@ -66,6 +66,7 @@ export interface InlineCommentFinding {
   body?: string;
   severity: string;
   category?: string;
+  confidence?: number;
   fingerprint?: string;
 }
 

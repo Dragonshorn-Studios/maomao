@@ -981,6 +981,7 @@ async function runJob(
         job,
         threads,
         postedFingerprints: posted?.postedFingerprints ?? [],
+        bodyPublishedFingerprints: posted?.bodyPublishedFingerprints ?? [],
         diff,
       });
     } catch (error) {
@@ -2999,7 +3000,7 @@ interface ReviewPublication {
   clean: boolean;
   /** The event this run would publish, even when an existing review makes reposting unnecessary. */
   event: ForgeVerdict;
-  posted?: { id: string; url: string; postedFingerprints: string[] };
+  posted?: { id: string; url: string; postedFingerprints: string[]; bodyPublishedFingerprints?: string[] };
 }
 
 async function publishReview(
@@ -3220,18 +3221,46 @@ async function publishReview(
   // Fingerprints of what the forge actually accepted, not what we intended:
   // publishReview degrades to a body-only review when inline locations are rejected.
   const postedFingerprints = inlineCommentFingerprints(posted.postedComments ?? comments);
+  const bodyPublishedFingerprints: string[] = [];
   if (approvalBodyOnly) {
     // Body-listed approval findings are the intended replacement publication,
     // so a moved prior thread may close even though there is no new inline thread.
+    // Persist only the entries actually rendered within the body cap; without
+    // an inline thread, SQLite is the next run's evidence that they remain open.
     for (const entry of demoted.slice(0, DEMOTED_BODY_LIMIT)) {
       const fingerprint = entry.finding.fingerprint ?? fingerprintFinding(entry.finding);
+      bodyPublishedFingerprints.push(fingerprint);
       if (!postedFingerprints.includes(fingerprint)) postedFingerprints.push(fingerprint);
+      const context = findingDiffContext(diff, entry.finding.file, entry.finding.line);
+      deps.store.upsertFinding({
+        repoFullName: job.repo_full_name,
+        prNumber: job.pr_number,
+        scope: scopeOf(job),
+        fingerprint,
+        status: "open",
+        reviewedSha: job.head_sha,
+        currentSha: job.head_sha,
+        originalPath: entry.finding.file ?? null,
+        originalLine: entry.finding.line ?? null,
+        currentPath: entry.finding.file ?? null,
+        currentLine: entry.finding.line ?? null,
+        category: entry.finding.category ?? null,
+        summary: entry.finding.summary,
+        body: entry.finding.body ?? null,
+        severity: entry.finding.severity ?? null,
+        confidence: entry.finding.confidence ?? null,
+        reconciliationReason: "published in approval body",
+        publicationSurface: "approval_body",
+        diffHunk: context.diffHunk,
+        diffNote: context.diffNote,
+        lastJobId: job.id,
+      });
     }
   }
   for (const warning of posted.warnings ?? []) {
     deps.store.log(job.id, warning, "warn");
   }
-  return { clean, event: decision.event, posted: { ...posted, postedFingerprints } };
+  return { clean, event: decision.event, posted: { ...posted, postedFingerprints, bodyPublishedFingerprints } };
 }
 
 async function dispatchExternalEscalation(

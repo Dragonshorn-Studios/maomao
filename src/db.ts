@@ -217,6 +217,7 @@ function migrate(db: SqliteDb): void {
       reopen_command TEXT,
       reconciliation_confidence REAL,
       reconciliation_reason TEXT,
+      publication_surface TEXT,
       diff_hunk TEXT,
       diff_note TEXT,
       last_job_id INTEGER,
@@ -699,6 +700,7 @@ function migrate(db: SqliteDb): void {
     const findingColumns: [string, string][] = [
       ["diff_hunk", "TEXT"],
       ["diff_note", "TEXT"],
+      ["publication_surface", "TEXT"],
     ];
     for (const [name, ddl] of findingColumns) ensureColumn(db, "findings", name, ddl);
 

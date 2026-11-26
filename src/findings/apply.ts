@@ -195,14 +195,19 @@ export function persistThreadsAsFindings(input: {
   job: JobRow;
   threads: ForgeDiscussion[];
   postedFingerprints: string[];
+  bodyPublishedFingerprints?: Iterable<string>;
   diff?: string;
 }): void {
   const published = new Set(input.postedFingerprints);
+  const bodyPublished = new Set(input.bodyPublishedFingerprints ?? []);
   for (const thread of input.threads) {
     if (!isMaomaoDiscussion(thread)) continue;
     const comment = findingComment(thread);
     const marker = parseDiscussionFindingMarker(thread);
     if (!marker || !comment) continue;
+    // Approval-body republication intentionally has no replacement thread;
+    // do not let the historical inline thread overwrite that newer surface.
+    if (bodyPublished.has(marker.id)) continue;
     const existing = input.store.getFinding(input.job.repo_full_name, input.job.pr_number, marker.id, scopeOf(input.job));
     if (existing?.status === "dismissed") continue;
     // Republished fingerprint: ignore the already-resolved conversation so the
@@ -246,6 +251,7 @@ export function persistThreadsAsFindings(input: {
       currentLine: threadLine,
       summary: existing?.summary || summarizeComment(comment.body),
       reconciliationReason,
+      publicationSurface: "inline",
       diffHunk: context.diffHunk,
       diffNote: context.diffNote,
       lastJobId: input.job.id,

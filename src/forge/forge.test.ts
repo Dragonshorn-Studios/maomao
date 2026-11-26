@@ -55,6 +55,30 @@ describe("GitHubProvider", () => {
     expect(spec.secrets.some((secret) => secret.includes("tok-abc123"))).toBe(true);
   });
 
+  it("fails review dismissal when the backing client lacks the API", async () => {
+    const provider = new GitHubProvider(fakeGithub(), 42, "maomao");
+    await expect(provider.dismissReview(scopedTarget(), "11", "superseded")).rejects.toThrow(
+      "does not support review dismissal",
+    );
+  });
+
+  it("rejects a non-numeric review id before calling the backing client", async () => {
+    let calls = 0;
+    const provider = new GitHubProvider(
+      fakeGithub({
+        dismissReview: async () => {
+          calls += 1;
+        },
+      }),
+      42,
+      "maomao",
+    );
+    await expect(provider.dismissReview(scopedTarget(), "not-a-number", "superseded")).rejects.toThrow(
+      "review id is not numeric",
+    );
+    expect(calls).toBe(0);
+  });
+
   it("composes read-only merge capabilities from the pull base ref", async () => {
     const client = fakeGithub({
       getPull: async () => ({

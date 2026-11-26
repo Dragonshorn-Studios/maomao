@@ -2449,6 +2449,9 @@ describe("inline comment anchoring", () => {
     expect(review?.body).not.toContain(fingerprints[10] ?? "");
     expect(review?.body).toContain("and 1 more");
     expect(resolved).toEqual(fingerprints.slice(0, 10).map((fingerprint) => `thread-${fingerprint}`));
+    const rows = store.listFindings("acme/widgets", 4);
+    expect(rows.filter((row) => row.publication_surface === "approval_body")).toHaveLength(10);
+    expect(rows.find((row) => row.fingerprint === fingerprints[0])?.status).toBe("moved");
   });
 });
 
@@ -3717,6 +3720,25 @@ describe("review verdict events", () => {
     expect(job?.failure_reason).toContain("cannot dismiss stale Maomao approval");
   });
 
+  it("dismisses stale approvals at job start even when the final verdict stays COMMENT", async () => {
+    const store = new JobStore(openDb(":memory:"));
+    const posted: { event?: string }[] = [];
+    const dismissed: number[] = [];
+    const base = cleanReviewPipeline(store, posted, {
+      listReviews: async () => [
+        { id: 11, body: "old approval", commitId: "oldsha", userLogin: "maomao[bot]", verdict: "APPROVE" },
+      ],
+      dismissReview: async (input) => {
+        dismissed.push(input.reviewId);
+      },
+    });
+    const config = { ...base.config, reviewAllowApprove: false };
+    const created = store.enqueue({ ...jobInput("newsha"), reviewers: [] });
+    await createPipeline({ config, store, github: base.github, checkout: await fixtureCheckout(), opencode: base.opencode }).run(created.job.id);
+    expect(dismissed).toEqual([11]);
+    expect(posted[0]?.event).toBe("COMMENT");
+  });
+
   it("fails closed when the forge cannot dismiss a stale Maomao approval", async () => {
     const store = new JobStore(openDb(":memory:"));
     const port: ForgePort = {
@@ -3770,7 +3792,7 @@ describe("review verdict events", () => {
 
   it("publishes REQUEST_CHANGES for findings at the configured threshold", async () => {
     const store = new JobStore(openDb(":memory:"));
-    const posted: { event?: string }[] = [];
+    const posted: { event?: string; comments?: number }[] = [];
     const config = loadConfig({
       REVIEWER_ROLES: "correctness,security",
       OPENCODE_REVIEWER_MODEL: "test/model",
@@ -3782,10 +3804,10 @@ describe("review verdict events", () => {
       GITHUB_APP_PRIVATE_KEY: "k",
     });
     const github: GithubPort = githubPort({
-      getPullDiff: async () => "diff --git a/example.ts b/example.ts\n",
+      getPullDiff: async () => "",
       listReviews: async () => [],
       createCommentReview: async (input) => {
-        posted.push({ event: input.event });
+        posted.push({ event: input.event, comments: input.comments.length });
         return { id: "97", url: "u" };
       },
     });
