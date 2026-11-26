@@ -33,6 +33,39 @@ function prPayload(overrides: Record<string, unknown> = {}) {
   };
 }
 
+function checkRunPayload(checkRunOverrides: Record<string, unknown> = {}, overrides: Record<string, unknown> = {}) {
+  return {
+    action: "rerequested",
+    installation: { id: 42, account: { id: 1001 } },
+    repository: { id: 2002, full_name: "acme/widgets", name: "widgets", owner: { login: "acme", id: 1001 } },
+    sender: { login: "alice", type: "User" },
+    check_run: {
+      id: 501,
+      name: "maomao/secrets",
+      head_sha: "head42",
+      pull_requests: [{ number: 42, base: { sha: "base42", ref: "main" }, head: { sha: "head42", ref: "feat-42" } }],
+      ...checkRunOverrides,
+    },
+    ...overrides,
+  };
+}
+
+function checkSuitePayload(checkSuiteOverrides: Record<string, unknown> = {}, overrides: Record<string, unknown> = {}) {
+  return {
+    action: "rerequested",
+    installation: { id: 42, account: { id: 1001 } },
+    repository: { id: 2002, full_name: "acme/widgets", name: "widgets", owner: { login: "acme", id: 1001 } },
+    sender: { login: "alice", type: "User" },
+    check_suite: {
+      id: 601,
+      head_sha: "head42",
+      pull_requests: [{ number: 42, base: { sha: "base42", ref: "main" }, head: { sha: "head42", ref: "feat-42" } }],
+      ...checkSuiteOverrides,
+    },
+    ...overrides,
+  };
+}
+
 describe("webhook handling", () => {
   it("rejects invalid signatures", async () => {
     const config = loadConfig({ GITHUB_WEBHOOK_SECRET: "s3cret", REVIEWER_ROLES: "correctness" });
@@ -673,6 +706,242 @@ describe("webhook handling", () => {
     });
     expect(dup.body.duplicate).toBe(true);
     expect(store.listJobs(10)).toHaveLength(2);
+  });
+
+  it("reruns a Maomao check-run as a full exact-head review", async () => {
+    const secret = "s3cret";
+    const config = loadConfig({
+      GITHUB_WEBHOOK_SECRET: secret,
+      GITHUB_APP_ID: "1",
+      GITHUB_APP_PRIVATE_KEY: "k",
+      REVIEWER_ROUTING: "fixed",
+      REVIEWER_ROLES: "correctness",
+    });
+    const store = new JobStore(openDb(":memory:"));
+    const prior = store.enqueue({
+      repoFullName: "acme/widgets",
+      repoOwner: "acme",
+      repoName: "widgets",
+      installationId: 42,
+      prNumber: 42,
+      prTitle: "PR 42",
+      prBody: "",
+      prHtmlUrl: "https://github.com/acme/widgets/pull/42",
+      prAuthor: "alice",
+      baseSha: "base42",
+      headSha: "head42",
+      baseRef: "main",
+      headRef: "feat-42",
+      reviewers: [],
+    }).job;
+    store.setJobState(prior.id, "completed");
+
+    const { github } = stackGithub({ pulls: { 42: resolvedStackPull(42) } });
+    const rawBody = JSON.stringify(checkRunPayload());
+    const result = await handleGithubWebhook({
+      config,
+      store,
+      github,
+      request: { event: "check_run", deliveryId: "cr-1", signature: sign(secret, rawBody), rawBody },
+    });
+    expect(result.status).toBe(200);
+    expect(result.body.created).toBe(true);
+    const fresh = store.listJobs(10).find((job) => job.id !== prior.id);
+    expect(fresh).toMatchObject({
+      pr_number: 42,
+      head_sha: "head42",
+      review_mode: "full",
+      webhook_event: "check_run.rerequested",
+    });
+    expect(store.getJob(prior.id)?.dedup_key).toBe(`rereview:${prior.id}`);
+    expect(store.listWebhookDeliveries({}).find((delivery) => delivery.delivery_id === "cr-1")?.result).toBe("check-run-rerun");
+  });
+
+  it("reruns a Maomao check-suite as a full exact-head review", async () => {
+    const secret = "s3cret";
+    const config = loadConfig({
+      GITHUB_WEBHOOK_SECRET: secret,
+      GITHUB_APP_ID: "1",
+      GITHUB_APP_PRIVATE_KEY: "k",
+      REVIEWER_ROUTING: "fixed",
+      REVIEWER_ROLES: "correctness",
+    });
+    const store = new JobStore(openDb(":memory:"));
+    const prior = store.enqueue({
+      repoFullName: "acme/widgets",
+      repoOwner: "acme",
+      repoName: "widgets",
+      installationId: 42,
+      prNumber: 42,
+      prTitle: "PR 42",
+      prBody: "",
+      prHtmlUrl: "https://github.com/acme/widgets/pull/42",
+      prAuthor: "alice",
+      baseSha: "base42",
+      headSha: "head42",
+      baseRef: "main",
+      headRef: "feat-42",
+      reviewers: [],
+    }).job;
+    store.setJobState(prior.id, "completed");
+
+    const rawBody = JSON.stringify(checkSuitePayload());
+    const result = await handleGithubWebhook({
+      config,
+      store,
+      github: stackGithub({ pulls: { 42: resolvedStackPull(42) } }).github,
+      request: { event: "check_suite", deliveryId: "cs-1", signature: sign(secret, rawBody), rawBody },
+    });
+    expect(result.status).toBe(200);
+    expect(result.body.created).toBe(true);
+    const fresh = store.listJobs(10).find((job) => job.id !== prior.id);
+    expect(fresh).toMatchObject({
+      pr_number: 42,
+      head_sha: "head42",
+      review_mode: "full",
+      webhook_event: "check_suite.rerequested",
+    });
+    expect(store.listWebhookDeliveries({}).find((delivery) => delivery.delivery_id === "cs-1")?.result).toBe("check-suite-rerun");
+  });
+
+  it("ignores automatic check_suite lifecycle actions that are not rerun requests", async () => {
+    const secret = "s3cret";
+    const config = loadConfig({ GITHUB_WEBHOOK_SECRET: secret });
+    const store = new JobStore(openDb(":memory:"));
+    const rawBody = JSON.stringify(checkSuitePayload({}, { action: "requested" }));
+    const result = await handleGithubWebhook({
+      config,
+      store,
+      request: { event: "check_suite", deliveryId: "cs-ignore", signature: sign(secret, rawBody), rawBody },
+    });
+    expect(result.status).toBe(202);
+    expect(result.body.ignored).toBe(true);
+    expect(store.listJobs(10)).toHaveLength(0);
+  });
+
+  it("uses durable check publications to resolve a rerun when GitHub omits pull request links", async () => {
+    const secret = "s3cret";
+    const config = loadConfig({
+      GITHUB_WEBHOOK_SECRET: secret,
+      GITHUB_APP_ID: "1",
+      GITHUB_APP_PRIVATE_KEY: "k",
+      REVIEWER_ROUTING: "fixed",
+      REVIEWER_ROLES: "correctness",
+    });
+    const store = new JobStore(openDb(":memory:"));
+    const prior = store.enqueue({
+      repoFullName: "acme/widgets",
+      repoOwner: "acme",
+      repoName: "widgets",
+      installationId: 42,
+      prNumber: 42,
+      prTitle: "PR 42",
+      prBody: "",
+      prHtmlUrl: "https://github.com/acme/widgets/pull/42",
+      prAuthor: "alice",
+      baseSha: "base42",
+      headSha: "head42",
+      baseRef: "main",
+      headRef: "feat-42",
+      reviewers: [],
+    }).job;
+    store.setJobState(prior.id, "completed");
+    store.beginCheckPublication({
+      provider: "github",
+      providerInstance: "github.com",
+      repoFullName: "acme/widgets",
+      prNumber: 42,
+      headSha: "head42",
+      name: "maomao/secrets",
+      externalId: "external-1",
+      jobId: prior.id,
+      status: "completed",
+      conclusion: "action_required",
+      title: "secrets error",
+      summary: "secrets error",
+    });
+
+    const { github } = stackGithub({ pulls: { 42: resolvedStackPull(42) } });
+    const rawBody = JSON.stringify(checkRunPayload({ pull_requests: [] }));
+    const result = await handleGithubWebhook({
+      config,
+      store,
+      github,
+      request: { event: "check_run", deliveryId: "cr-2", signature: sign(secret, rawBody), rawBody },
+    });
+    expect(result.body.created).toBe(true);
+    expect(store.listJobs(10)).toHaveLength(2);
+  });
+
+  it("refuses stale, unauthorized, and non-Maomao check-run reruns without enqueueing", async () => {
+    const secret = "s3cret";
+    const config = loadConfig({ GITHUB_WEBHOOK_SECRET: secret, GITHUB_APP_ID: "1", GITHUB_APP_PRIVATE_KEY: "k" });
+    const store = new JobStore(openDb(":memory:"));
+    const movedPull = resolvedStackPull(42, { headSha: "newhead42" });
+
+    const staleBody = JSON.stringify(checkRunPayload());
+    const stale = await handleGithubWebhook({
+      config,
+      store,
+      github: stackGithub({ pulls: { 42: movedPull } }).github,
+      request: { event: "check_run", deliveryId: "cr-stale", signature: sign(secret, staleBody), rawBody: staleBody },
+    });
+    expect(stale.body.ignored).toBe(true);
+    expect(String(stale.body.reason)).toContain("current head");
+
+    const unauthorizedBody = JSON.stringify(checkRunPayload({ name: "maomao/review" }));
+    const unauthorized = await handleGithubWebhook({
+      config,
+      store,
+      github: stackGithub({ permission: "read", pulls: { 42: resolvedStackPull(42) } }).github,
+      request: { event: "check_run", deliveryId: "cr-unauth", signature: sign(secret, unauthorizedBody), rawBody: unauthorizedBody },
+    });
+    expect(unauthorized.body.ignored).toBe(true);
+    expect(String(unauthorized.body.reason)).toContain("not authorized");
+
+    const foreignBody = JSON.stringify(checkRunPayload({ name: "ci/tests" }));
+    const foreign = await handleGithubWebhook({
+      config,
+      store,
+      github: stackGithub({ pulls: { 42: resolvedStackPull(42) } }).github,
+      request: { event: "check_run", deliveryId: "cr-foreign", signature: sign(secret, foreignBody), rawBody: foreignBody },
+    });
+    expect(foreign.body.ignored).toBe(true);
+    expect(String(foreign.body.reason)).toContain("not managed");
+    expect(store.listJobs(10)).toHaveLength(0);
+  });
+
+  it("reports an in-flight exact-head job instead of duplicating a check-run rerun", async () => {
+    const secret = "s3cret";
+    const config = loadConfig({ GITHUB_WEBHOOK_SECRET: secret, GITHUB_APP_ID: "1", GITHUB_APP_PRIVATE_KEY: "k" });
+    const store = new JobStore(openDb(":memory:"));
+    const running = store.enqueue({
+      repoFullName: "acme/widgets",
+      repoOwner: "acme",
+      repoName: "widgets",
+      installationId: 42,
+      prNumber: 42,
+      prTitle: "PR 42",
+      prBody: "",
+      prHtmlUrl: "https://github.com/acme/widgets/pull/42",
+      prAuthor: "alice",
+      baseSha: "base42",
+      headSha: "head42",
+      baseRef: "main",
+      headRef: "feat-42",
+      reviewers: [],
+    }).job;
+
+    const rawBody = JSON.stringify(checkRunPayload());
+    const result = await handleGithubWebhook({
+      config,
+      store,
+      github: stackGithub({ pulls: { 42: resolvedStackPull(42) } }).github,
+      request: { event: "check_run", deliveryId: "cr-flight", signature: sign(secret, rawBody), rawBody },
+    });
+    expect(result.body.jobId).toBe(running.id);
+    expect(result.body.created).not.toBe(true);
+    expect(store.listJobs(10)).toHaveLength(1);
   });
 
   it("upgrades a queued verify-first job in place on @maomao review", async () => {
@@ -3269,11 +3538,11 @@ describe("webhook delivery log", () => {
     const result = await handleGithubWebhook({
       config,
       store,
-      request: { event: "check_run", deliveryId: "ev-1", signature: sign(secret, rawBody), rawBody },
+      request: { event: "workflow_run", deliveryId: "ev-1", signature: sign(secret, rawBody), rawBody },
     });
     expect(result.body.ignored).toBe(true);
     const row = loggedDelivery(store, "ev-1");
-    expect(row?.result).toBe("ignored: event check_run");
+    expect(row?.result).toBe("ignored: event workflow_run");
   });
 
   it("records pings and keeps the specific result on already-claimed deliveries", async () => {

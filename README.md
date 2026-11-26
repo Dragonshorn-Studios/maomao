@@ -158,7 +158,7 @@ Create a GitHub App for your user or org. Maomao needs **least privilege**:
 
 Do **not** grant Actions write, Administration, Secrets, merge, or branch push. After you change App permissions, open each installation and **accept the new permissions** — tokens keep the old scopes until you do, and resolve still fails with `Resource not accessible by integration`.
 
-Subscribe the app to **Pull request**, **Pull request review comment**, **Merge group**, and **Issue comment** (the last is for `@maomao escalate` in `manual` poison-alert policy). Set the webhook URL to:
+Subscribe the app to **Pull request**, **Pull request review comment**, **Merge group**, and **Issue comment** (the last is for `@maomao escalate` in `manual` poison-alert policy). GitHub Apps with **Checks: write** are automatically subscribed to `check_run` and `check_suite` events; Maomao uses their `rerequested` actions to support GitHub's individual-check and re-run-all controls. Set the webhook URL to:
 
 ```text
 https://<your-host>/webhooks/github
@@ -190,6 +190,8 @@ Events handled by default: `opened`, `reopened`, `synchronize`, `ready_for_revie
 When the App has **Checks: write**, Maomao publishes one stable `maomao/review` Check Run per pull-request head SHA. It moves from `queued` to `in_progress` while the existing review pipeline runs, then completes with a conclusion derived from the actual review outcome: clean reviews are `success`, request-changes verdicts are `failure`, comment-only reviews are `neutral`, and cancelled or superseded work is `cancelled`. Retries for the same SHA update the same logical check instead of intentionally creating another active one.
 
 The check is a visibility layer over the existing review job. It does not replace the human-facing review comment, does not merge or approve by itself, and never publishes diff text or secret values. If `MAOMAO_PUBLIC_URL` is set, the check links back to the Maomao job page. A missing Checks permission or GitHub API failure is recorded on the job and in Maomao's durable `check_publications` audit row without failing the review itself.
+
+GitHub's individual rerun control for `maomao/review`, `maomao/secrets`, `maomao/security`, or `maomao/merge-readiness` sends `check_run.rerequested`; re-running the whole Maomao suite sends `check_suite.rerequested`. Because those checks are outputs of one exact-head review job, either control requeues that whole job rather than pretending a scanner is independently executable. Maomao authorizes the requesting user, resolves the live pull request, and refuses stale-SHA, merged, draft, ambiguous, or merge-group check reruns instead of overwriting current-head results. Automatic `check_suite.requested` deliveries remain ignored because pull-request webhooks already enqueue the initial review.
 
 ### GitHub merge-group checks
 
