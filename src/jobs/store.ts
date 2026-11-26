@@ -4,7 +4,7 @@ import type { CancelReason, JobState, ReviewerState } from "../config.js";
 import { JOBS_PAGE_SIZE_DEFAULT, JOBS_PAGE_SIZE_MAX, LIVE_JOB_STATES, TERMINAL_JOB_STATES } from "../config.js";
 import type { ForgeCheckConclusion, ForgeCheckStatus, ForgeScope, WebhookDeliveryContext } from "../forge/types.js";
 import { IGNORED_RESULT_PREFIX, normalizeScope } from "../forge/types.js";
-import type { FindingRow, FindingStatus } from "../findings/types.js";
+import type { FindingPublicationSurface, FindingRow, FindingStatus } from "../findings/types.js";
 import { nowIso } from "../util.js";
 import { stackDedupPrefix } from "../stacks/commands.js";
 import { publish } from "../events.js";
@@ -2531,6 +2531,7 @@ export class JobStore {
     reopenCommand?: string | null;
     reconciliationConfidence?: number | null;
     reconciliationReason?: string | null;
+    publicationSurface?: FindingPublicationSurface | null;
     diffHunk?: string | null;
     diffNote?: string | null;
     lastJobId?: number | null;
@@ -2552,8 +2553,8 @@ export class JobStore {
           github_thread_id, github_comment_id, original_path, original_line, current_path, current_line,
           category, summary, body, severity, confidence,
           dismissed_by, dismissed_at, dismiss_command, reopened_by, reopened_at, reopen_command,
-          reconciliation_confidence, reconciliation_reason, diff_hunk, diff_note, last_job_id, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          reconciliation_confidence, reconciliation_reason, publication_surface, diff_hunk, diff_note, last_job_id, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(provider, provider_instance, repo_full_name, pr_number, fingerprint) DO UPDATE SET
           status = excluded.status,
           reviewed_sha = excluded.reviewed_sha,
@@ -2577,6 +2578,7 @@ export class JobStore {
           reopen_command = excluded.reopen_command,
           reconciliation_confidence = COALESCE(excluded.reconciliation_confidence, findings.reconciliation_confidence),
           reconciliation_reason = COALESCE(excluded.reconciliation_reason, findings.reconciliation_reason),
+          publication_surface = COALESCE(excluded.publication_surface, findings.publication_surface),
           diff_hunk = CASE
             WHEN excluded.diff_hunk IS NULL AND excluded.diff_note IS NULL THEN findings.diff_hunk
             ELSE excluded.diff_hunk
@@ -2616,6 +2618,7 @@ export class JobStore {
         input.reopenCommand ?? null,
         input.reconciliationConfidence ?? null,
         input.reconciliationReason ?? null,
+        input.publicationSurface ?? null,
         input.diffHunk ?? null,
         input.diffNote ?? null,
         input.lastJobId ?? null,

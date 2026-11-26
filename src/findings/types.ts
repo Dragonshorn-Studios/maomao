@@ -10,6 +10,8 @@ export type FindingStatus =
 
 export type FindingClassification = Exclude<FindingStatus, "open">;
 
+export type FindingPublicationSurface = "inline" | "approval_body";
+
 export interface FindingRow {
   id: number;
   repo_full_name: string;
@@ -40,6 +42,8 @@ export interface FindingRow {
   reopen_command: string | null;
   reconciliation_confidence: number | null;
   reconciliation_reason: string | null;
+  /** Where the finding was last visibly published: inline thread or approval body. */
+  publication_surface?: FindingPublicationSurface | null;
   /** Unified mini-diff around the finding, taken from the authoritative diff of `reviewed_sha`. */
   diff_hunk: string | null;
   /** Why the mini-diff is missing or clipped: see `FindingDiffNote`. Null when no diff was fetched. */

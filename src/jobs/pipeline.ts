@@ -12,7 +12,7 @@ import { forgeTargetOf, scopeOf } from "../forge/types.js";
 import { logForgeWrite } from "../telemetry/forge-log.js";
 import { stackIdFromDedupKey } from "../stacks/commands.js";
 import { publish } from "../events.js";
-import { buildReviewBody, findExistingReview, selectInlineComments, inlineCommentFingerprints } from "../forge/review-text.js";
+import { buildReviewBody, DEMOTED_BODY_LIMIT, findExistingReview, selectInlineComments, inlineCommentFingerprints } from "../forge/review-text.js";
 import type { CheckoutPort } from "../checkout.js";
 import {
   aggregatorUsagePersistence,
@@ -648,6 +648,39 @@ function degradedAggregation(
   return applyAggregatorFallback(store, jobId, null, reviewers, null, 0);
 }
 
+
+async function dismissSupersededApprovals(deps: PipelineDeps, provider: ForgePort, job: JobRow): Promise<void> {
+  const target = forgeTargetOf(job);
+  const summaries = await provider.listSummaries(target);
+  const staleApprovals = summaries.filter(
+    (summary) =>
+      summary.verdict === "APPROVE" &&
+      summary.commitId &&
+      summary.commitId !== job.head_sha &&
+      provider.isBotLogin(summary.userLogin),
+  );
+  if (staleApprovals.length === 0) return;
+  if (!provider.dismissReview) {
+    throw new Error(
+      `cannot dismiss ${staleApprovals.length} stale Maomao approval(s): forge does not support review dismissal`,
+    );
+  }
+  for (const approval of staleApprovals) {
+    try {
+      await provider.dismissReview(
+        target,
+        approval.id,
+        `Superseded by a new Maomao review for ${job.head_sha}.`,
+      );
+      deps.store.log(job.id, `Dismissed stale Maomao approval ${approval.id} for ${approval.commitId}`);
+    } catch (error) {
+      throw new Error(
+        `cannot dismiss stale Maomao approval ${approval.id} for ${approval.commitId}: ${formatError(error)}`,
+      );
+    }
+  }
+}
+
 /**
  * Shared reviewer stage with profile budget enforcement: each run is
  * rescheduled only while the job-wide budget allows; once a ceiling trips,
@@ -794,6 +827,8 @@ async function runJob(
 
     const target = forgeTargetOf(job);
     const provider = forge.forJob(job);
+    throwIfStale(store, jobId, signal);
+    await dismissSupersededApprovals(deps, provider, job);
     const clone = await provider.cloneSpec(target);
     const diff = await provider.getChangeDiff(target, config.maxDiffBytes);
     const diffBytes = Buffer.byteLength(diff, "utf8");
@@ -946,6 +981,7 @@ async function runJob(
         job,
         threads,
         postedFingerprints: posted?.postedFingerprints ?? [],
+        bodyPublishedFingerprints: posted?.bodyPublishedFingerprints ?? [],
         diff,
       });
     } catch (error) {
@@ -2964,7 +3000,7 @@ interface ReviewPublication {
   clean: boolean;
   /** The event this run would publish, even when an existing review makes reposting unnecessary. */
   event: ForgeVerdict;
-  posted?: { id: string; url: string; postedFingerprints: string[] };
+  posted?: { id: string; url: string; postedFingerprints: string[]; bodyPublishedFingerprints?: string[] };
 }
 
 async function publishReview(
@@ -3088,17 +3124,27 @@ async function publishReview(
 
   deps.store.log(job.id, `Review event: ${decision.event} (${decision.reason})`);
 
-  const { comments, demoted } = selectInlineComments(publishable, {
-    limit: deps.config.maxInlineComments,
-    headSha: job.head_sha,
-    diff,
-  });
-  for (const entry of demoted) {
-    deps.store.log(
-      job.id,
-      `Finding not shown inline: ${entry.finding.file}:${entry.finding.line} is not in the diff (${entry.reason}); listing it in the review body`,
-      "warn",
-    );
+  // Approvals are deliberately body-only: advisory findings belong in the
+  // summary review, not as noisy inline threads that can block merge queues.
+  // Comment/request-changes reviews keep inline placement because those
+  // findings need direct action on the diff.
+  const approvalBodyOnly = decision.event === "APPROVE";
+  const selected = approvalBodyOnly
+    ? { comments: [], demoted: publishable.map((finding) => ({ finding, reason: "approval_body_only" })) }
+    : selectInlineComments(publishable, {
+        limit: deps.config.maxInlineComments,
+        headSha: job.head_sha,
+        diff,
+      });
+  const { comments, demoted } = selected;
+  if (!approvalBodyOnly) {
+    for (const entry of demoted) {
+      deps.store.log(
+        job.id,
+        `Finding not shown inline: ${entry.finding.file}:${entry.finding.line} is not in the diff (${entry.reason}); listing it in the review body`,
+        "warn",
+      );
+    }
   }
   // The summary rides into the review body too — a tainted one is withheld
   // whole rather than partially scrubbed (secrets would not be path-shaped).
@@ -3112,12 +3158,14 @@ async function publishReview(
     );
     summary = "(summary withheld — it referenced files outside the checkout; see the Maomao job log)";
   }
+  const approvalBodyLimit = Math.max(DEMOTED_BODY_LIMIT, deps.config.maxInlineComments);
   const body = buildReviewBody({
     headSha: job.head_sha,
     summary,
     findingsCount,
     reviewerCount,
     demoted,
+    demotedLimit: approvalBodyOnly ? approvalBodyLimit : undefined,
     withheldCount,
     withheldRefs: [...withheldRefs],
   });
@@ -3175,10 +3223,46 @@ async function publishReview(
   // Fingerprints of what the forge actually accepted, not what we intended:
   // publishReview degrades to a body-only review when inline locations are rejected.
   const postedFingerprints = inlineCommentFingerprints(posted.postedComments ?? comments);
+  const bodyPublishedFingerprints: string[] = [];
+  if (approvalBodyOnly) {
+    // Body-listed approval findings are the intended replacement publication,
+    // so a moved prior thread may close even though there is no new inline thread.
+    // Persist only the entries actually rendered within the body cap; without
+    // an inline thread, SQLite is the next run's evidence that they remain open.
+    for (const entry of demoted.slice(0, approvalBodyLimit)) {
+      const fingerprint = entry.finding.fingerprint ?? fingerprintFinding(entry.finding);
+      bodyPublishedFingerprints.push(fingerprint);
+      if (!postedFingerprints.includes(fingerprint)) postedFingerprints.push(fingerprint);
+      const context = findingDiffContext(diff, entry.finding.file, entry.finding.line);
+      deps.store.upsertFinding({
+        repoFullName: job.repo_full_name,
+        prNumber: job.pr_number,
+        scope: scopeOf(job),
+        fingerprint,
+        status: "open",
+        reviewedSha: job.head_sha,
+        currentSha: job.head_sha,
+        originalPath: entry.finding.file ?? null,
+        originalLine: entry.finding.line ?? null,
+        currentPath: entry.finding.file ?? null,
+        currentLine: entry.finding.line ?? null,
+        category: entry.finding.category ?? null,
+        summary: entry.finding.summary,
+        body: entry.finding.body ?? null,
+        severity: entry.finding.severity ?? null,
+        confidence: entry.finding.confidence ?? null,
+        reconciliationReason: "published in approval body",
+        publicationSurface: "approval_body",
+        diffHunk: context.diffHunk,
+        diffNote: context.diffNote,
+        lastJobId: job.id,
+      });
+    }
+  }
   for (const warning of posted.warnings ?? []) {
     deps.store.log(job.id, warning, "warn");
   }
-  return { clean, event: decision.event, posted: { ...posted, postedFingerprints } };
+  return { clean, event: decision.event, posted: { ...posted, postedFingerprints, bodyPublishedFingerprints } };
 }
 
 async function dispatchExternalEscalation(

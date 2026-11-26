@@ -11,6 +11,8 @@ import { OpenCodeTimeoutError } from "../opencode/spawn.js";
 import { profileBudgetExceeded } from "../routing/policy.js";
 import { findingMarker, fingerprintFinding } from "../findings/identity.js";
 import type { ReviewCheckInput, ReviewCheckPublisher } from "../checks/review-check.js";
+import type { ForgePort } from "../forge/port.js";
+import type { ForgeRegistry } from "../forge/registry.js";
 import { createPipeline } from "./pipeline.js";
 import { parseBriefPayload } from "./brief.js";
 import { JobStore } from "./store.js";
@@ -2379,6 +2381,78 @@ describe("inline comment anchoring", () => {
     const logs = store.listLogs(created.job.id).map((row) => row.message).join("\n");
     expect(logs).toContain("no replacement comment was posted");
   });
+  it("resolves only approval-body findings that are actually rendered within the body cap", async () => {
+    const priors = Array.from({ length: 13 }, (_, index) => ({
+      severity: "medium" as const,
+      confidence: 0.9,
+      category: "correctness",
+      file: "example.ts",
+      line: index + 1,
+      summary: `advisory ${index + 1}`,
+    }));
+    const fingerprints = priors.map((finding) => fingerprintFinding(finding));
+    const config = loadConfig({
+      REVIEWER_ROLES: "correctness",
+      OPENCODE_REVIEWER_MODEL: "test/model",
+      POST_EMPTY_REVIEW: "true",
+      GITHUB_REVIEW_ALLOW_APPROVE: "true",
+      GITHUB_REVIEW_APPROVE_MAX_SEVERITY: "medium",
+    });
+    const store = new JobStore(openDb(":memory:"));
+    const created = enqueueJob(store, config, "approvalcapsha");
+    const resolved: string[] = [];
+    let review: { event?: string; body: string; comments: number } | undefined;
+    await createPipeline({
+      config,
+      store,
+      github: githubPort({
+        getPullDiff: async () => "",
+        listReviewThreads: async () => fingerprints.map((fingerprint, index) => threadFor(fingerprint, `advisory ${index + 1}`)),
+        resolveReviewThread: async (_id, threadId) => {
+          resolved.push(threadId);
+        },
+        createCommentReview: async (input) => {
+          review = { event: input.event, body: input.body, comments: input.comments.length };
+          return { id: "11", url: "u" };
+        },
+      }),
+      checkout: await fixtureCheckout(),
+      opencode: {
+        async run(input) {
+          if (input.prompt.includes("finding verifier")) {
+            const text = JSON.stringify({
+              classifications: fingerprints.map((fingerprint, index) => ({
+                fingerprint,
+                status: "moved",
+                confidence: 0.95,
+                reason: "relocated",
+                file: "example.ts",
+                line: index + 20,
+              })),
+            });
+            return { stdout: text, stderr: "", exitCode: 0, text, usage: {} };
+          }
+          if (input.prompt.includes("Role id:")) {
+            const text = JSON.stringify({ schema_version: 1, reviewer: "correctness", verdict: "clean", findings: [] });
+            return { stdout: text, stderr: "", exitCode: 0, text, usage: {} };
+          }
+          const text = JSON.stringify({ schema_version: 1, verdict: "comment", summary: "advisories moved", findings: [] });
+          return { stdout: text, stderr: "", exitCode: 0, text, usage: {} };
+        },
+      },
+    }).run(created.job.id);
+
+    expect(store.getJob(created.job.id)?.state).toBe("completed");
+    expect(review?.event).toBe("APPROVE");
+    expect(review?.comments).toBe(0);
+    expect(review?.body).toContain(fingerprints[0] ?? "");
+    expect(review?.body).not.toContain(fingerprints[12] ?? "");
+    expect(review?.body).toContain("and 1 more");
+    expect(resolved).toEqual(fingerprints.slice(0, 12).map((fingerprint) => `thread-${fingerprint}`));
+    const rows = store.listFindings("acme/widgets", 4);
+    expect(rows.filter((row) => row.publication_surface === "approval_body")).toHaveLength(12);
+    expect(rows.find((row) => row.fingerprint === fingerprints[0])?.status).toBe("moved");
+  });
 });
 
 function enqueueJob(store: JobStore, config: ReturnType<typeof loadConfig>, headSha = "cafebabe") {
@@ -3533,6 +3607,54 @@ describe("review verdict events", () => {
     expect(job?.state).toBe("completed");
   });
 
+  it("publishes advisory findings in the approval body without inline comments", async () => {
+    const store = new JobStore(openDb(":memory:"));
+    const posted: { event?: string; body: string; comments: number }[] = [];
+    const config = loadConfig({
+      REVIEWER_ROLES: "correctness",
+      OPENCODE_REVIEWER_MODEL: "test/model",
+      POST_EMPTY_REVIEW: "true",
+      GITHUB_REVIEW_ALLOW_APPROVE: "true",
+      GITHUB_REVIEW_APPROVE_MAX_SEVERITY: "low",
+      GITHUB_APP_ID: "1",
+      GITHUB_WEBHOOK_SECRET: "s",
+      GITHUB_APP_PRIVATE_KEY: "k",
+    });
+    const github: GithubPort = githubPort({
+      getPullDiff: async () => "",
+      listReviews: async () => [],
+      createCommentReview: async (input) => {
+        posted.push({ event: input.event, body: input.body, comments: input.comments.length });
+        return { id: "96", url: "u" };
+      },
+    });
+    const opencode: OpenCodePort = {
+      async run(input) {
+        const roleMatch = input.prompt.match(/Role id: (\w+)/);
+        const finding = {
+          severity: "low",
+          confidence: 0.8,
+          category: "correctness",
+          file: "example.ts",
+          line: 1,
+          summary: "advisory nit",
+          ...(roleMatch ? { reason: "small issue" } : { body: "small issue" }),
+        };
+        const text = roleMatch
+          ? JSON.stringify({ schema_version: 1, reviewer: roleMatch[1], verdict: "findings", findings: [finding] })
+          : JSON.stringify({ schema_version: 1, verdict: "comment", summary: "one advisory", findings: [finding] });
+        return { stdout: text, stderr: "", exitCode: 0, text, usage: {} };
+      },
+    };
+    const created = store.enqueue({ ...jobInput("approvebodysha"), reviewers: [] });
+    await createPipeline({ config, store, github, checkout: await fixtureCheckout(), opencode }).run(created.job.id);
+    expect(posted).toHaveLength(1);
+    expect(posted[0]?.event).toBe("APPROVE");
+    expect(posted[0]?.comments).toBe(0);
+    expect(posted[0]?.body).toContain("advisory nit");
+    expect(posted[0]?.body).toContain("maomao-finding");
+  });
+
   it("stays COMMENT by default for a clean review", async () => {
     const store = new JobStore(openDb(":memory:"));
     const posted: { event?: string }[] = [];
@@ -3556,6 +3678,92 @@ describe("review verdict events", () => {
     );
     expect(posted[0]?.event).toBe("COMMENT");
     expect(store.getJob(created.job.id)?.review_event).toBe("COMMENT");
+  });
+
+  it("dismisses only stale Maomao approvals for different head SHAs", async () => {
+    const store = new JobStore(openDb(":memory:"));
+    const posted: { event?: string }[] = [];
+    const dismissed: number[] = [];
+    const { config, opencode, github } = cleanReviewPipeline(store, posted, {
+      listReviews: async () => [
+        { id: 11, body: "old approval", commitId: "oldsha", userLogin: "maomao[bot]", verdict: "APPROVE" },
+        { id: 12, body: "current approval", commitId: "newsha", userLogin: "maomao[bot]", verdict: "APPROVE" },
+        { id: 13, body: "human approval", commitId: "oldsha", userLogin: "octocat", verdict: "APPROVE" },
+        { id: 14, body: "old comment", commitId: "oldsha", userLogin: "maomao[bot]", verdict: "COMMENT" },
+      ],
+      dismissReview: async (input) => {
+        dismissed.push(input.reviewId);
+      },
+    });
+    const created = store.enqueue({ ...jobInput("newsha"), reviewers: [] });
+    await createPipeline({ config, store, github, checkout: await fixtureCheckout(), opencode }).run(created.job.id);
+    expect(dismissed).toEqual([11]);
+    expect(posted[0]?.event).toBe("APPROVE");
+  });
+
+  it("fails closed when a stale Maomao approval cannot be dismissed", async () => {
+    const store = new JobStore(openDb(":memory:"));
+    const posted: { event?: string }[] = [];
+    const { config, opencode, github } = cleanReviewPipeline(store, posted, {
+      listReviews: async () => [
+        { id: 11, body: "old approval", commitId: "oldsha", userLogin: "maomao[bot]", verdict: "APPROVE" },
+      ],
+      dismissReview: async () => {
+        throw new Error("dismissal forbidden");
+      },
+    });
+    const created = store.enqueue({ ...jobInput("newsha"), reviewers: [] });
+    await createPipeline({ config, store, github, checkout: await fixtureCheckout(), opencode }).run(created.job.id);
+    expect(posted).toHaveLength(0);
+    const job = store.getJob(created.job.id);
+    expect(job?.state).toBe("failed");
+    expect(job?.failure_reason).toContain("cannot dismiss stale Maomao approval");
+  });
+
+  it("dismisses stale approvals at job start even when the final verdict stays COMMENT", async () => {
+    const store = new JobStore(openDb(":memory:"));
+    const posted: { event?: string }[] = [];
+    const dismissed: number[] = [];
+    const base = cleanReviewPipeline(store, posted, {
+      listReviews: async () => [
+        { id: 11, body: "old approval", commitId: "oldsha", userLogin: "maomao[bot]", verdict: "APPROVE" },
+      ],
+      dismissReview: async (input) => {
+        dismissed.push(input.reviewId);
+      },
+    });
+    const config = { ...base.config, reviewAllowApprove: false };
+    const created = store.enqueue({ ...jobInput("newsha"), reviewers: [] });
+    await createPipeline({ config, store, github: base.github, checkout: await fixtureCheckout(), opencode: base.opencode }).run(created.job.id);
+    expect(dismissed).toEqual([11]);
+    expect(posted[0]?.event).toBe("COMMENT");
+  });
+
+  it("fails closed when the forge cannot dismiss a stale Maomao approval", async () => {
+    const store = new JobStore(openDb(":memory:"));
+    const port: ForgePort = {
+      provider: "github",
+      instance: "github.com",
+      getChange: async () => { throw new Error("unused"); },
+      getChangeDiff: async () => "",
+      listSummaries: async () => [
+        { id: "11", body: "old approval", commitId: "oldsha", userLogin: "maomao[bot]", verdict: "APPROVE" },
+      ],
+      publishReview: async () => { throw new Error("unused"); },
+      listDiscussions: async () => [],
+      resolveDiscussion: async () => {},
+      unresolveDiscussion: async () => {},
+      getActorPermission: async () => "none",
+      cloneSpec: async () => { throw new Error("unused"); },
+      isBotLogin: (login) => login === "maomao[bot]",
+    };
+    const forge = { forJob: () => port } as unknown as ForgeRegistry;
+    const { config, opencode, github } = cleanReviewPipeline(store, []);
+    const created = store.enqueue({ ...jobInput("newsha"), reviewers: [] });
+    await createPipeline({ config, store, github, forge, checkout: await fixtureCheckout(), opencode }).run(created.job.id);
+    const job = store.getJob(created.job.id);
+    expect(job?.state).toBe("failed");
+    expect(job?.failure_reason).toContain("forge does not support review dismissal");
   });
 
   it("records the suppressed decision when a clean review is not posted", async () => {
@@ -3584,7 +3792,7 @@ describe("review verdict events", () => {
 
   it("publishes REQUEST_CHANGES for findings at the configured threshold", async () => {
     const store = new JobStore(openDb(":memory:"));
-    const posted: { event?: string }[] = [];
+    const posted: { event?: string; comments?: number }[] = [];
     const config = loadConfig({
       REVIEWER_ROLES: "correctness,security",
       OPENCODE_REVIEWER_MODEL: "test/model",
@@ -3596,10 +3804,10 @@ describe("review verdict events", () => {
       GITHUB_APP_PRIVATE_KEY: "k",
     });
     const github: GithubPort = githubPort({
-      getPullDiff: async () => "diff --git a/example.ts b/example.ts\n",
+      getPullDiff: async () => "",
       listReviews: async () => [],
       createCommentReview: async (input) => {
-        posted.push({ event: input.event });
+        posted.push({ event: input.event, comments: input.comments.length });
         return { id: "97", url: "u" };
       },
     });
@@ -3630,6 +3838,7 @@ describe("review verdict events", () => {
     const created = store.enqueue({ ...jobInput("rcsha"), reviewers: [] });
     await createPipeline({ config, store, github, checkout: await fixtureCheckout(), opencode }).run(created.job.id);
     expect(posted[0]?.event).toBe("REQUEST_CHANGES");
+    expect(posted[0]?.comments).toBe(1);
     expect(store.getJob(created.job.id)?.review_event).toBe("REQUEST_CHANGES");
     expect(store.getJob(created.job.id)?.review_event_reason).toContain("high");
   });

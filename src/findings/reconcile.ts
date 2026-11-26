@@ -24,6 +24,7 @@ export interface PriorFinding {
   category?: string;
   severity?: string;
   reviewedSha?: string;
+  publicationSurface?: string | null;
   dismissed: boolean;
   settledResolved: boolean;
   githubAlreadyResolved?: boolean;
@@ -47,6 +48,7 @@ export function collectPriorFindings(input: {
       category: row.category ?? undefined,
       severity: row.severity ?? undefined,
       reviewedSha: row.reviewed_sha,
+      publicationSurface: row.publication_surface,
       dismissed: row.status === "dismissed",
       settledResolved: row.status === "resolved",
       githubAlreadyResolved: false,
@@ -75,9 +77,18 @@ export function collectPriorFindings(input: {
       category: existing?.category,
       severity: existing?.severity,
       reviewedSha: marker.sha || existing?.reviewedSha,
+      publicationSurface: existing?.publicationSurface,
       dismissed,
-      settledResolved: dismissed ? false : thread.isResolved,
-      githubAlreadyResolved: dismissed ? false : thread.isResolved,
+      settledResolved: dismissed
+        ? false
+        : existing?.publicationSurface === "approval_body"
+          ? existing.settledResolved
+          : thread.isResolved,
+      githubAlreadyResolved: dismissed
+        ? false
+        : existing?.publicationSurface === "approval_body"
+          ? false
+          : thread.isResolved,
     });
   }
 

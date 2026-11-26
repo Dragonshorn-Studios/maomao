@@ -140,6 +140,18 @@ describe("inline comment selection", () => {
     expect(body).not.toContain("`a.ts:11`");
   });
 
+  it("lists location-less demoted findings without an undefined location", () => {
+    const body = buildReviewBody({
+      headSha: "abc123",
+      summary: "sum",
+      findingsCount: 1,
+      reviewerCount: 1,
+      demoted: [{ finding: { summary: "general advisory", severity: "low" }, reason: "approval_body_only" }],
+    });
+    expect(body).toContain("**low**: general advisory");
+    expect(body).not.toContain("undefined:undefined");
+  });
+
   it("keeps the body unchanged when nothing was demoted", () => {
     const body = buildReviewBody({ headSha: "abc123", summary: "sum", findingsCount: 0, reviewerCount: 1 });
     expect(body).not.toContain("not shown inline");

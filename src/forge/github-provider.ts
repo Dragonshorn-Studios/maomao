@@ -116,6 +116,24 @@ export class GitHubProvider implements ForgePort {
     });
   }
 
+  async dismissReview(target: ForgeRepoTarget, reviewId: string, message: string): Promise<void> {
+    if (!this.client.dismissReview) {
+      throw new Error("GitHub client does not support review dismissal");
+    }
+    const numeric = Number(reviewId);
+    if (!Number.isSafeInteger(numeric) || numeric <= 0) {
+      throw new Error(`GitHub review id is not numeric: ${reviewId}`);
+    }
+    await this.client.dismissReview({
+      installationId: this.installationId,
+      owner: target.repoOwner,
+      repo: target.repoName,
+      pullNumber: target.changeNumber,
+      reviewId: numeric,
+      message,
+    });
+  }
+
   supportsNativeChecks(): boolean {
     return typeof this.client.upsertCheckRun === "function";
   }

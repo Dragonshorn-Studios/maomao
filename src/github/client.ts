@@ -106,6 +106,14 @@ export interface GithubPort {
     repo: string,
     pullNumber: number,
   ): Promise<{ id: number; body: string; commitId?: string; htmlUrl?: string; userLogin?: string; verdict?: ForgeVerdict }[]>;
+  dismissReview?(input: {
+    installationId: number;
+    owner: string;
+    repo: string;
+    pullNumber: number;
+    reviewId: number;
+    message: string;
+  }): Promise<void>;
   createCommentReview(input: {
     installationId: number;
     owner: string;
@@ -463,6 +471,24 @@ export class GithubClient implements GithubPort, ManualTriggerPort {
       verdict:
         review.state === "CHANGES_REQUESTED" ? "REQUEST_CHANGES" : review.state === "APPROVED" ? "APPROVE" : "COMMENT",
     }));
+  }
+
+  async dismissReview(input: {
+    installationId: number;
+    owner: string;
+    repo: string;
+    pullNumber: number;
+    reviewId: number;
+    message: string;
+  }): Promise<void> {
+    const octokit = this.installationOctokit(input.installationId);
+    await octokit.rest.pulls.dismissReview({
+      owner: input.owner,
+      repo: input.repo,
+      pull_number: input.pullNumber,
+      review_id: input.reviewId,
+      message: input.message,
+    });
   }
 
   async upsertCheckRun(input: GithubCheckRunUpsertInput): Promise<{ id: string; url?: string }> {

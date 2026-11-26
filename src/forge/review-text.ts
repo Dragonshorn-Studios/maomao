@@ -66,6 +66,7 @@ export interface InlineCommentFinding {
   body?: string;
   severity: string;
   category?: string;
+  confidence?: number;
   fingerprint?: string;
 }
 
@@ -75,7 +76,7 @@ export interface DemotedFinding {
   reason: string;
 }
 
-const DEMOTED_BODY_LIMIT = 10;
+export const DEMOTED_BODY_LIMIT = 10;
 
 export function buildReviewBody(input: {
   headSha: string;
@@ -83,6 +84,8 @@ export function buildReviewBody(input: {
   findingsCount: number;
   reviewerCount: number;
   demoted?: DemotedFinding[];
+  /** Maximum body-listed findings; defaults to the legacy demoted-inline cap. */
+  demotedLimit?: number;
   /** Count of findings withheld by the out-of-checkout path gate (issue #176). */
   withheldCount?: number;
   /** The offending path refs — published so a legitimately suppressed finding is investigable. Paths name files; they cannot carry file contents. */
@@ -97,13 +100,14 @@ export function buildReviewBody(input: {
   let body = `${header}${input.summary.trim()}\n`;
   const demoted = input.demoted ?? [];
   if (demoted.length > 0) {
-    const shown = demoted.slice(0, DEMOTED_BODY_LIMIT);
-    const lines = shown.map(
-      (entry) =>
-        `- **${entry.finding.severity}**: ${entry.finding.summary} — \`${entry.finding.file}:${entry.finding.line}\``,
-    );
+    const shown = demoted.slice(0, input.demotedLimit ?? DEMOTED_BODY_LIMIT);
+    const lines = shown.map((entry) => {
+      const fingerprint = entry.finding.fingerprint ?? fingerprintFinding(entry.finding);
+      const location = entry.finding.file && entry.finding.line ? ` — \`${entry.finding.file}:${entry.finding.line}\`` : "";
+      return `- **${entry.finding.severity}**: ${entry.finding.summary}${location}\n  ${findingMarker(fingerprint, input.headSha)}`;
+    });
     if (demoted.length > shown.length) lines.push(`- … and ${demoted.length - shown.length} more`);
-    body += `\n#### Findings not shown inline\n\nThese locations are not part of the diff hunks, so they are listed here instead:\n\n${lines.join("\n")}\n`;
+    body += `\n#### Findings not shown inline\n\nThese findings are listed here instead of as inline comments:\n\n${lines.join("\n")}\n`;
   }
   if (input.withheldCount) {
     const refs = input.withheldRefs ?? [];

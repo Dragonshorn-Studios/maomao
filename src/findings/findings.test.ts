@@ -144,6 +144,38 @@ describe("prior finding collection and publish filtering", () => {
     ]);
   });
 
+  it("does not treat a resolved historical thread as settled when the finding was republished in an approval body", () => {
+    const marker = findingMarker("approvalbodyfid01", "oldsha");
+    const store = new JobStore(openDb(":memory:"));
+    store.upsertFinding({
+      repoFullName: "acme/widgets",
+      prNumber: 7,
+      fingerprint: "approvalbodyfid01",
+      status: "open",
+      reviewedSha: "newsha",
+      summary: "still-present advisory",
+      publicationSurface: "approval_body",
+    });
+    const priors = collectPriorFindings({
+      threads: [
+        {
+          id: "PRRT_closed",
+          isResolved: true,
+          comments: [{ id: "c1", databaseId: 11, body: `${marker}
+**low**: advisory` }],
+        },
+      ],
+      stored: store.listFindings("acme/widgets", 7),
+    });
+    expect(priors[0]).toEqual(
+      expect.objectContaining({
+        fingerprint: "approvalbodyfid01",
+        settledResolved: false,
+        githubAlreadyResolved: false,
+      }),
+    );
+  });
+
   it("reads the finding marker from a later comment when comments[0] is a reply", () => {
     const marker = findingMarker("deadbeefdeadbeef", "oldsha");
     const priors = collectPriorFindings({
@@ -663,6 +695,79 @@ describe("thread findings carry anchored hunks", () => {
     expect(row?.diff_hunk).toContain("console.log(secret);");
     expect(row?.diff_hunk?.startsWith("@@")).toBe(true);
     expect(row?.diff_note).toBeNull();
+  });
+  it("does not let a resolved historical thread overwrite a durable approval-body surface", () => {
+    const store = new JobStore(openDb(":memory:"));
+    const job = {
+      id: 9,
+      repo_full_name: "acme/widgets",
+      pr_number: 3,
+      installation_id: 1,
+      head_sha: "sha123",
+      pr_html_url: "https://github.com/acme/widgets/pull/3",
+    } as unknown as JobRow;
+    store.upsertFinding({
+      repoFullName: "acme/widgets",
+      prNumber: 3,
+      fingerprint: "fpapprovalbody01",
+      status: "open",
+      reviewedSha: "sha123",
+      summary: "advisory",
+      publicationSurface: "approval_body",
+    });
+    const marker = findingMarker("fpapprovalbody01", "oldsha");
+    persistThreadsAsFindings({
+      store,
+      job,
+      threads: [
+        {
+          id: "PRRT_closed",
+          isResolved: true,
+          comments: [{ id: "c1", databaseId: 5, body: `${marker}
+**low**: advisory` }],
+        },
+      ],
+      postedFingerprints: [],
+    });
+    const row = store.getFinding("acme/widgets", 3, "fpapprovalbody01");
+    expect(row?.status).toBe("open");
+    expect(row?.publication_surface).toBe("approval_body");
+  });
+
+  it("lets a new inline publication supersede the approval-body surface", () => {
+    const store = new JobStore(openDb(":memory:"));
+    const job = {
+      id: 9,
+      repo_full_name: "acme/widgets",
+      pr_number: 3,
+      installation_id: 1,
+      head_sha: "sha123",
+      pr_html_url: "https://github.com/acme/widgets/pull/3",
+    } as unknown as JobRow;
+    store.upsertFinding({
+      repoFullName: "acme/widgets",
+      prNumber: 3,
+      fingerprint: "fpapprovalbody01",
+      status: "open",
+      reviewedSha: "sha123",
+      summary: "advisory",
+      publicationSurface: "approval_body",
+    });
+    const marker = findingMarker("fpapprovalbody01", "sha123");
+    persistThreadsAsFindings({
+      store,
+      job,
+      threads: [
+        {
+          id: "PRRT_new",
+          isResolved: false,
+          comments: [{ id: "c1", databaseId: 5, body: `${marker}
+**low**: advisory` }],
+        },
+      ],
+      postedFingerprints: ["fpapprovalbody01"],
+    });
+    expect(store.getFinding("acme/widgets", 3, "fpapprovalbody01")?.publication_surface).toBe("inline");
   });
 });
 
