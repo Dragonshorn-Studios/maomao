@@ -75,7 +75,7 @@ export interface DemotedFinding {
   reason: string;
 }
 
-const DEMOTED_BODY_LIMIT = 10;
+export const DEMOTED_BODY_LIMIT = 10;
 
 export function buildReviewBody(input: {
   headSha: string;

@@ -11,6 +11,8 @@ import { OpenCodeTimeoutError } from "../opencode/spawn.js";
 import { profileBudgetExceeded } from "../routing/policy.js";
 import { findingMarker, fingerprintFinding } from "../findings/identity.js";
 import type { ReviewCheckInput, ReviewCheckPublisher } from "../checks/review-check.js";
+import type { ForgePort } from "../forge/port.js";
+import type { ForgeRegistry } from "../forge/registry.js";
 import { createPipeline } from "./pipeline.js";
 import { parseBriefPayload } from "./brief.js";
 import { JobStore } from "./store.js";
@@ -2379,6 +2381,75 @@ describe("inline comment anchoring", () => {
     const logs = store.listLogs(created.job.id).map((row) => row.message).join("\n");
     expect(logs).toContain("no replacement comment was posted");
   });
+  it("resolves only approval-body findings that are actually rendered within the body cap", async () => {
+    const priors = Array.from({ length: 11 }, (_, index) => ({
+      severity: "medium" as const,
+      confidence: 0.9,
+      category: "correctness",
+      file: "example.ts",
+      line: index + 1,
+      summary: `advisory ${index + 1}`,
+    }));
+    const fingerprints = priors.map((finding) => fingerprintFinding(finding));
+    const config = loadConfig({
+      REVIEWER_ROLES: "correctness",
+      OPENCODE_REVIEWER_MODEL: "test/model",
+      POST_EMPTY_REVIEW: "true",
+      GITHUB_REVIEW_ALLOW_APPROVE: "true",
+      GITHUB_REVIEW_APPROVE_MAX_SEVERITY: "medium",
+    });
+    const store = new JobStore(openDb(":memory:"));
+    const created = enqueueJob(store, config, "approvalcapsha");
+    const resolved: string[] = [];
+    let review: { event?: string; body: string; comments: number } | undefined;
+    await createPipeline({
+      config,
+      store,
+      github: githubPort({
+        getPullDiff: async () => "",
+        listReviewThreads: async () => fingerprints.map((fingerprint, index) => threadFor(fingerprint, `advisory ${index + 1}`)),
+        resolveReviewThread: async (_id, threadId) => {
+          resolved.push(threadId);
+        },
+        createCommentReview: async (input) => {
+          review = { event: input.event, body: input.body, comments: input.comments.length };
+          return { id: "11", url: "u" };
+        },
+      }),
+      checkout: await fixtureCheckout(),
+      opencode: {
+        async run(input) {
+          if (input.prompt.includes("finding verifier")) {
+            const text = JSON.stringify({
+              classifications: fingerprints.map((fingerprint, index) => ({
+                fingerprint,
+                status: "moved",
+                confidence: 0.95,
+                reason: "relocated",
+                file: "example.ts",
+                line: index + 20,
+              })),
+            });
+            return { stdout: text, stderr: "", exitCode: 0, text, usage: {} };
+          }
+          if (input.prompt.includes("Role id:")) {
+            const text = JSON.stringify({ schema_version: 1, reviewer: "correctness", verdict: "clean", findings: [] });
+            return { stdout: text, stderr: "", exitCode: 0, text, usage: {} };
+          }
+          const text = JSON.stringify({ schema_version: 1, verdict: "comment", summary: "advisories moved", findings: [] });
+          return { stdout: text, stderr: "", exitCode: 0, text, usage: {} };
+        },
+      },
+    }).run(created.job.id);
+
+    expect(store.getJob(created.job.id)?.state).toBe("completed");
+    expect(review?.event).toBe("APPROVE");
+    expect(review?.comments).toBe(0);
+    expect(review?.body).toContain(fingerprints[0] ?? "");
+    expect(review?.body).not.toContain(fingerprints[10] ?? "");
+    expect(review?.body).toContain("and 1 more");
+    expect(resolved).toEqual(fingerprints.slice(0, 10).map((fingerprint) => `thread-${fingerprint}`));
+  });
 });
 
 function enqueueJob(store: JobStore, config: ReturnType<typeof loadConfig>, headSha = "cafebabe") {
@@ -3644,6 +3715,33 @@ describe("review verdict events", () => {
     const job = store.getJob(created.job.id);
     expect(job?.state).toBe("failed");
     expect(job?.failure_reason).toContain("cannot dismiss stale Maomao approval");
+  });
+
+  it("fails closed when the forge cannot dismiss a stale Maomao approval", async () => {
+    const store = new JobStore(openDb(":memory:"));
+    const port: ForgePort = {
+      provider: "github",
+      instance: "github.com",
+      getChange: async () => { throw new Error("unused"); },
+      getChangeDiff: async () => "",
+      listSummaries: async () => [
+        { id: "11", body: "old approval", commitId: "oldsha", userLogin: "maomao[bot]", verdict: "APPROVE" },
+      ],
+      publishReview: async () => { throw new Error("unused"); },
+      listDiscussions: async () => [],
+      resolveDiscussion: async () => {},
+      unresolveDiscussion: async () => {},
+      getActorPermission: async () => "none",
+      cloneSpec: async () => { throw new Error("unused"); },
+      isBotLogin: (login) => login === "maomao[bot]",
+    };
+    const forge = { forJob: () => port } as unknown as ForgeRegistry;
+    const { config, opencode, github } = cleanReviewPipeline(store, []);
+    const created = store.enqueue({ ...jobInput("newsha"), reviewers: [] });
+    await createPipeline({ config, store, github, forge, checkout: await fixtureCheckout(), opencode }).run(created.job.id);
+    const job = store.getJob(created.job.id);
+    expect(job?.state).toBe("failed");
+    expect(job?.failure_reason).toContain("forge does not support review dismissal");
   });
 
   it("records the suppressed decision when a clean review is not posted", async () => {

@@ -12,7 +12,7 @@ import { forgeTargetOf, scopeOf } from "../forge/types.js";
 import { logForgeWrite } from "../telemetry/forge-log.js";
 import { stackIdFromDedupKey } from "../stacks/commands.js";
 import { publish } from "../events.js";
-import { buildReviewBody, findExistingReview, selectInlineComments, inlineCommentFingerprints } from "../forge/review-text.js";
+import { buildReviewBody, DEMOTED_BODY_LIMIT, findExistingReview, selectInlineComments, inlineCommentFingerprints } from "../forge/review-text.js";
 import type { CheckoutPort } from "../checkout.js";
 import {
   aggregatorUsagePersistence,
@@ -3223,8 +3223,8 @@ async function publishReview(
   if (approvalBodyOnly) {
     // Body-listed approval findings are the intended replacement publication,
     // so a moved prior thread may close even though there is no new inline thread.
-    for (const finding of publishable) {
-      const fingerprint = finding.fingerprint ?? fingerprintFinding(finding);
+    for (const entry of demoted.slice(0, DEMOTED_BODY_LIMIT)) {
+      const fingerprint = entry.finding.fingerprint ?? fingerprintFinding(entry.finding);
       if (!postedFingerprints.includes(fingerprint)) postedFingerprints.push(fingerprint);
     }
   }
