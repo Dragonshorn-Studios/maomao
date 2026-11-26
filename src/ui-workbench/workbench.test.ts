@@ -232,6 +232,14 @@ describe("gating", () => {
     expect((await app.request("/dev/ui/job-card/completed/frame")).status).toBe(200);
   });
 
+  it("renders frames in the apothecary default or the mergehenna pack", async () => {
+    const app = gatedWorkbench({ enabled: true });
+    const base = await (await app.request("/dev/ui/job-card/completed/frame")).text();
+    expect(base).toContain('data-if-brand="apothecary"');
+    const mergehenna = await (await app.request("/dev/ui/job-card/completed/frame?brand=mergehenna")).text();
+    expect(mergehenna).toContain('data-if-brand="mergehenna"');
+  });
+
   it("is fail-closed in the production server", async () => {
     const off = productionApp({});
     expect((await off.request("/dev/ui")).status).toBe(404);
@@ -472,8 +480,8 @@ describe("design tokens", () => {
       ?.tokens.find((token) => token.name === "paper");
     expect(paper).toBeDefined();
     expect(paper?.light).toBe("var(--if-bg)");
-    expect(paper?.resolvedLight).toBe("#f2eff4");
-    expect(paper?.resolvedDark).toBe("#0c0d13");
+    expect(paper?.resolvedLight).toBe("#f3efe3");
+    expect(paper?.resolvedDark).toBe("#121612");
   });
 
   it("resolves var() aliases to the value of the theme they sit in", () => {
@@ -481,8 +489,8 @@ describe("design tokens", () => {
       .find((group) => group.title === "Colors")
       ?.tokens.find((token) => token.name === "chat-thought");
     expect(thought?.light).toBe("var(--plum)");
-    expect(thought?.resolvedLight).toBe("#a95523");
-    expect(thought?.resolvedDark).toBe("#f4a86d");
+    expect(thought?.resolvedLight).toBe("#1f6a4e");
+    expect(thought?.resolvedDark).toBe("#7dcea0");
   });
 
   it("keeps a token that the dark set does not redeclare", () => {
@@ -490,8 +498,8 @@ describe("design tokens", () => {
       .find((group) => group.title === "Spacing & sizing")
       ?.tokens.find((token) => token.name === "radius");
     expect(radius?.light).toBe("var(--if-radius-sm)");
-    expect(radius?.resolvedLight).toBe("7px");
-    expect(radius?.resolvedDark).toBe("7px");
+    expect(radius?.resolvedLight).toBe("3px");
+    expect(radius?.resolvedDark).toBe("3px");
   });
 
   it("groups colors, typography, spacing, and the rest", () => {
@@ -523,8 +531,8 @@ describe("design tokens", () => {
     expect(html).toContain("workbench-token-light");
     expect(html).toContain("workbench-token-dark");
     expect(html).toContain("--paper: var(--if-bg);");
-    expect(html).toContain("#f2eff4");
-    expect(html).toContain("#0c0d13");
+    expect(html).toContain("#f3efe3");
+    expect(html).toContain("#121612");
   });
 
   it("themes the tokens page", async () => {

@@ -18,7 +18,7 @@ export function renderHealthPage(data: HealthPageData): string {
     : `<span class="state state-failed">down</span>`;
   const body = `
     <h1>Health</h1>
-    <p class="lede">Process liveness for this Maomao instance. Probes that do not ask for HTML still receive JSON.</p>
+    <p class="lede">Process liveness for this instance. Probes that do not ask for HTML still receive JSON.</p>
     <dl class="meta-grid">
       <div>
         <dt>Status</dt>

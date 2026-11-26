@@ -13,6 +13,7 @@ import { renderChatPage } from "./ui/chat-page.js";
 import { jobStateLabel, settledFindingsCopy, findingOverrideNote } from "./ui/copy.js";
 import { modelPicker, MODEL_PICKER_JS } from "./ui/model-picker.js";
 import { formatCost, formatTokens, jobMetrics } from "./ui/metrics.js";
+import { loadInstanceBranding } from "./branding.js";
 
 function seededStore() {
   const store = new JobStore(openDb(":memory:"));
@@ -92,6 +93,62 @@ describe("theme tokens", () => {
     expect(THEME_CSS).toContain(".prompt-composed");
     expect(THEME_CSS).not.toContain("fonts.googleapis.com");
     expect(THEME_CSS).not.toContain("cdn.");
+  });
+});
+
+describe("instance branding", () => {
+  it("renders unconfigured pages as Maomao with the apothecary pack", () => {
+    const html = renderLogin({ showPassword: true });
+    expect(html).toContain('data-if-brand="apothecary"');
+    expect(html).toContain("<title>Maomao sign in</title>");
+    expect(html).toContain('<span class="brand-name">Maomao</span>');
+    expect(html).toContain("PR examination console");
+    expect(html).not.toContain("powered by Maomao");
+  });
+
+  it("renders a configured mergehenna instance with operator attribution", () => {
+    const branding = loadInstanceBranding({ UI_THEME_PACK: "mergehenna" });
+    const html = renderLogin({ showPassword: true, branding });
+    expect(html).toContain('data-if-brand="mergehenna"');
+    expect(html).toContain("<title>Mergehenna sign in</title>");
+    expect(html).toContain('<span class="brand-name">Mergehenna</span>');
+    expect(html).toContain('<span class="brand-caption">powered by Maomao</span>');
+    expect(html).toContain("Merge gate review console");
+  });
+
+  it("escapes operator-configured instance text", () => {
+    const branding = loadInstanceBranding({ UI_INSTANCE_NAME: '<img src=x onerror="alert(1)">' });
+    const html = renderLogin({ branding });
+    expect(html).not.toContain('<img src=x onerror="alert(1)">');
+    expect(html).toContain('&lt;img src=x onerror=&quot;alert(1)&quot;&gt;');
+  });
+
+  it("uses custom instance text across home, job chat links, and chat pages", () => {
+    const branding = loadInstanceBranding({
+      UI_INSTANCE_NAME: "Henhouse",
+      UI_INSTANCE_TAGLINE: "Reviews with feathers",
+      UI_THEME_PACK: "mergehenna",
+    });
+    const store = new JobStore(openDb(":memory:"));
+    const home = renderHome([], store, { branding });
+    expect(home).toContain("<title>Henhouse</title>");
+    expect(home).toContain('<span class="brand-name">Henhouse</span>');
+    expect(home).toContain("Reviews with feathers");
+
+    const chat = renderChatPage({
+      job: { id: 1, repo_full_name: "acme/repo", head_sha: "0123456789abcdef", pr_number: 2 },
+      conversation: undefined,
+      messages: [],
+      findings: [],
+      enabled: true,
+      maxMessages: 20,
+      usedCost: 0,
+      maxCostUsd: 1,
+      model: "model",
+      options: { branding },
+    });
+    expect(chat).toContain("Ask Henhouse — code explainer");
+    expect(chat).toContain('"assistantName":"Henhouse"');
   });
 });
 

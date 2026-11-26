@@ -17,8 +17,6 @@ import { elapsedMs, escapeHtml, formatDuration, shortSha } from "../util.js";
 import { KNOWN_REVIEWER_ROLES, composeReviewerPrompt, promptBodyFromRolePrompt } from "../prompts.js";
 import { composedPipelineStages } from "../prompt-previews.js";
 import {
-  OPERATOR_NAME,
-  PRODUCT_NAME,
   cancelledBannerCopy,
   diffUnavailableCopy,
   emptyQueueCopy,
@@ -45,7 +43,7 @@ import {
 } from "./copy.js";
 import { externalLinkGlyph, pancakeMark, roleGlyph, stackMark } from "./glyphs.js";
 import { TYPEAHEAD_URL } from "./typeahead.js";
-import { csrfInput, layout, type PageOptions, type QueueView, type UiIdentity } from "./layout.js";
+import { csrfInput, layout, pageBranding, type PageOptions, type QueueView, type UiIdentity } from "./layout.js";
 import {
   findingLocation,
   formatCost,
@@ -68,7 +66,7 @@ const LOGIN_ERRORS: Record<LoginError, string> = {
   csrf: "This form's security token was missing or expired. Go back and try again.",
   "oauth-state": "Sign-in could not be verified (the state was missing, expired, or replayed). Start again.",
   "oauth-denied":
-    "Your GitHub account is not authorized to operate this Maomao instance. Ask an operator to add your GitHub user id, or sign out of GitHub and retry with a different account.",
+    "Your GitHub account is not authorized to operate this instance. Ask an operator to add your GitHub user id, or sign out of GitHub and retry with a different account.",
   "oauth-failed": "GitHub sign-in failed. Try again shortly.",
   "oauth-cancelled": "GitHub sign-in was cancelled. You can try again.",
 };
@@ -79,6 +77,8 @@ export interface LoginOptions {
   csrfToken?: string;
   showGithub?: boolean;
   showPassword?: boolean;
+  /** Operator-facing instance identity for standalone login pages. */
+  branding?: PageOptions["branding"];
 }
 
 export function renderLogin(options: LoginOptions = {}): string {
@@ -100,14 +100,15 @@ export function renderLogin(options: LoginOptions = {}): string {
       <button class="if-button if-button--primary" type="submit">Sign in</button>
     </form>`
     : "";
+  const branding = pageBranding(options);
   const body = `
     <h1>Sign in</h1>
-    <p class="lede">Sign in to ${escapeHtml(PRODUCT_NAME)} — the merge gate operated by ${escapeHtml(OPERATOR_NAME)} — to view jobs, logs, and APIs.</p>
+    <p class="lede">Sign in to ${escapeHtml(branding.name)} to view jobs, logs, and APIs.</p>
     ${errorCopy ? `<p class="error" role="alert">${escapeHtml(errorCopy)}</p>` : ""}
     ${githubButton}
     ${githubButton && passwordForm ? `<p class="muted">or</p>` : ""}
     ${passwordForm}`;
-  return layout(`${PRODUCT_NAME} sign in`, body, { live: false, accountMenu: false, rail: false });
+  return layout(`${branding.name} sign in`, body, { live: false, accountMenu: false, rail: false, branding });
 }
 
 const JOB_TYPE_FILTERS: { value: JobRow["job_type"]; label: string }[] = [
@@ -317,7 +318,7 @@ export function renderHome(jobs: JobRow[], store: JobStore, options: PageOptions
           </div>`
     }
     ${paginationNav}`;
-  return layout(PRODUCT_NAME, body, { nav: view === "ops" ? "operations" : "queue", ...options });
+  return layout(pageBranding(options).name, body, { nav: view === "ops" ? "operations" : "queue", ...options });
 }
 
 /**
@@ -593,7 +594,7 @@ export function renderJob(
     ${stale ? `<p class="warn" role="status">${escapeHtml(staleBanner())}</p>` : ""}
     <h1>${heading}${prExternalLinkHtml(job)}</h1>
     <p class="lede">${escapeHtml(job.pr_title || "")}${flavor ? ` · ${escapeHtml(flavor)}` : ""}</p>
-    ${options.chatEnabled ? `<p><a href="/jobs/${job.id}/chat">Ask Maomao about this change →</a></p>` : ""}
+    ${options.chatEnabled ? `<p><a href="/jobs/${job.id}/chat">Ask ${escapeHtml(pageBranding(options).name)} about this change →</a></p>` : ""}
     ${isBrief ? `<p><a href="/jobs/${job.id}/brief">Repo brief →</a></p>` : ""}
     ${jobActions}
     ${
@@ -971,7 +972,7 @@ export function renderReviewerBoard(
           ? `<div class="empty" role="status"><p><strong>Page ${pagination.page} is beyond the last page (${totalPages}).</strong></p><p class="muted">${pagination.total} runs${stateFilter ? ` with status ${escapeHtml(stateFilter)}` : ""} — <a href="/reviewers?page=${totalPages}${stateParam}">back to page ${totalPages}</a>.</p></div>`
           : `<div class="empty" role="status"><p><strong>No reviewer runs${stateFilter ? ` with status ${escapeHtml(stateFilter)}` : ""}.</strong></p><p class="muted">Runs appear here as soon as a review job picks specialists.</p></div>`
     }`;
-  return layout(`${PRODUCT_NAME} reviewers`, body, { nav: "reviewers", ...options });
+  return layout(`${pageBranding(options).name} reviewers`, body, { nav: "reviewers", ...options });
 }
 
 function renderRouting(job: JobRow): string {
@@ -1553,6 +1554,7 @@ export interface ConfigPageData {
   /** Keyset cursor for the "Older deliveries" link; null when exhausted. */
   deliveriesBefore?: string | null;
   identity?: UiIdentity;
+  branding?: PageOptions["branding"];
 }
 
 /** Env-derived values are operator-controlled but unbounded: clamp length and
@@ -1976,6 +1978,7 @@ export function renderConfigPage(data: ConfigPageData): string {
     showLogout: data.canWrite || Boolean(data.csrfToken),
     csrfToken: data.csrfToken,
     identity: data.identity,
+    branding: data.branding,
     surface: "operator",
     nav: "settings",
     settingsSection: "effective",
@@ -2159,6 +2162,7 @@ export function renderProfilesPage(data: ConfigPageData): string {
     showLogout: data.canWrite || Boolean(data.csrfToken),
     csrfToken: data.csrfToken,
     identity: data.identity,
+    branding: data.branding,
     surface: "operator",
     nav: "settings",
     settingsSection: "profiles",
@@ -2168,6 +2172,7 @@ export function renderProfilesPage(data: ConfigPageData): string {
 export interface DraftEditPageData {
   revision: ConfigRevisionView;
   identity?: UiIdentity;
+  branding?: PageOptions["branding"];
   csrfToken?: string;
   canWrite: boolean;
   notice?: string;
@@ -2208,6 +2213,7 @@ export function renderDraftEditPage(data: DraftEditPageData): string {
     showLogout: data.canWrite || Boolean(data.csrfToken),
     csrfToken: data.csrfToken,
     identity: data.identity,
+    branding: data.branding,
     surface: "operator",
     nav: "settings",
     settingsSection: "profiles",
@@ -2254,6 +2260,7 @@ export function renderNewProfilePage(data: ConfigPageData): string {
     showLogout: data.canWrite || Boolean(data.csrfToken),
     csrfToken: data.csrfToken,
     identity: data.identity,
+    branding: data.branding,
     surface: "operator",
     nav: "settings",
     settingsSection: "profiles",
@@ -2306,6 +2313,7 @@ export function renderConfigDeliveriesPage(data: ConfigPageData): string {
     showLogout: data.canWrite || Boolean(data.csrfToken),
     csrfToken: data.csrfToken,
     identity: data.identity,
+    branding: data.branding,
     surface: "operator",
     nav: "settings",
     settingsSection: "deliveries",
@@ -2324,6 +2332,7 @@ export function renderConfigAuditPage(data: ConfigPageData): string {
     showLogout: data.canWrite || Boolean(data.csrfToken),
     csrfToken: data.csrfToken,
     identity: data.identity,
+    branding: data.branding,
     surface: "operator",
     nav: "settings",
     settingsSection: "audit",
@@ -2389,6 +2398,7 @@ export interface PromptConfigPageData {
   notice?: string;
   error?: string;
   identity?: UiIdentity;
+  branding?: PageOptions["branding"];
 }
 
 function promptCatalog(): Array<{ id: string; title: string; defaultBody: string }> {
@@ -2612,6 +2622,7 @@ export function renderPromptConfigPage(data: PromptConfigPageData): string {
     showLogout: data.canWrite || Boolean(data.csrfToken),
     csrfToken: data.csrfToken,
     identity: data.identity,
+    branding: data.branding,
     surface: "operator",
     nav: "settings",
     settingsSection: "prompts",
@@ -2621,6 +2632,7 @@ export function renderPromptConfigPage(data: PromptConfigPageData): string {
 export interface ScanPageData {
   canScan: boolean;
   identity?: UiIdentity;
+  branding?: PageOptions["branding"];
   csrfToken?: string;
   issueCreationEnabled: boolean;
   profileRevision: { id: number; name: string } | null;
@@ -2637,6 +2649,7 @@ export type ScanConfirmNotice =
 
 export interface ScanConfirmData {
   identity?: UiIdentity;
+  branding?: PageOptions["branding"];
   csrfToken: string;
   repo: string;
   branch: string;
@@ -2722,6 +2735,7 @@ export function renderScanConfirmPage(data: ScanConfirmData): string {
     showLogout: Boolean(data.csrfToken),
     csrfToken: data.csrfToken,
     identity: data.identity,
+    branding: data.branding,
     surface: "operator",
     nav: "operations",
   });
@@ -2768,6 +2782,7 @@ export function renderScanPage(data: ScanPageData): string {
     showLogout: data.canScan || Boolean(data.csrfToken),
     csrfToken: data.csrfToken,
     identity: data.identity,
+    branding: data.branding,
     surface: "operator",
     nav: "operations",
   });
@@ -2843,6 +2858,7 @@ export interface ScanIssuePreviewItem {
 
 export interface ScanIssuePreviewData {
   identity?: UiIdentity;
+  branding?: PageOptions["branding"];
   csrfToken: string;
   job: { id: number; repoFullName: string; headSha: string };
   items: ScanIssuePreviewItem[];
@@ -2902,6 +2918,7 @@ export function renderScanIssuePreviewPage(data: ScanIssuePreviewData): string {
     showLogout: Boolean(data.csrfToken),
     csrfToken: data.csrfToken,
     identity: data.identity,
+    branding: data.branding,
     surface: "operator",
     nav: "operations",
   });
@@ -2910,6 +2927,7 @@ export function renderScanIssuePreviewPage(data: ScanIssuePreviewData): string {
 export interface BriefPageData {
   canBrief: boolean;
   identity?: UiIdentity;
+  branding?: PageOptions["branding"];
   csrfToken?: string;
   recentBriefs: Array<{ id: number; repoFullName: string; headSha: string }>;
   /** Resolved model shown as the run's limits; empty string means the server default. */
@@ -2928,6 +2946,7 @@ export type BriefConfirmNotice =
 
 export interface BriefConfirmData {
   identity?: UiIdentity;
+  branding?: PageOptions["branding"];
   csrfToken: string;
   repo: string;
   ref: string;
@@ -2996,6 +3015,7 @@ export function renderBriefConfirmPage(data: BriefConfirmData): string {
     showLogout: Boolean(data.csrfToken),
     csrfToken: data.csrfToken,
     identity: data.identity,
+    branding: data.branding,
     surface: "operator",
     nav: "operations",
   });
@@ -3045,6 +3065,7 @@ export function renderBriefPage(data: BriefPageData): string {
     showLogout: data.canBrief || Boolean(data.csrfToken),
     csrfToken: data.csrfToken,
     identity: data.identity,
+    branding: data.branding,
     surface: "operator",
     nav: "operations",
   });
@@ -3053,6 +3074,7 @@ export function renderBriefPage(data: BriefPageData): string {
 export interface PausePageData {
   canOperate: boolean;
   identity?: UiIdentity;
+  branding?: PageOptions["branding"];
   csrfToken?: string;
   pauses: Array<{ id: number; repoFullName: string; expiresAt: string; actor: string }>;
   /** Active instance-wide pause, when the operator switch is on. */
@@ -3135,6 +3157,7 @@ export function renderPausePage(data: PausePageData): string {
     showLogout: data.canOperate || Boolean(data.csrfToken),
     csrfToken: data.csrfToken,
     identity: data.identity,
+    branding: data.branding,
     surface: "operator",
     nav: "queue",
   });
@@ -3146,6 +3169,7 @@ export interface BriefTabData {
   /** Zero-based index into payload.sections; undefined renders the TOC. */
   sectionIndex?: number;
   identity?: UiIdentity;
+  branding?: PageOptions["branding"];
   csrfToken?: string;
 }
 
@@ -3187,6 +3211,7 @@ export function renderBriefTabPage(data: BriefTabData): string {
     showLogout: Boolean(data.csrfToken),
     csrfToken: data.csrfToken,
     identity: data.identity,
+    branding: data.branding,
     surface: "operator",
     nav: "operations",
   });
@@ -3194,6 +3219,7 @@ export function renderBriefTabPage(data: BriefTabData): string {
 
 export interface CancelConfirmData {
   identity?: UiIdentity;
+  branding?: PageOptions["branding"];
   csrfToken?: string;
   showLogout?: boolean;
   job: { id: number; repoFullName: string; prNumber: number; prTitle: string; headSha: string; jobType: string };
@@ -3224,6 +3250,7 @@ export function renderCancelConfirmPage(data: CancelConfirmData): string {
     showLogout: data.showLogout ?? false,
     csrfToken: data.csrfToken,
     identity: data.identity,
+    branding: data.branding,
     surface: "operator",
   });
 }

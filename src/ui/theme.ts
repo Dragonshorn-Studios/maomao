@@ -6,14 +6,14 @@ export const THEME_HREF = "/assets/maomao.css";
 
 export const THEME_CSS = `
 /*
- * Mergehenna is themed by the vendored Infernal SaaS stylesheet
+ * Theme packs are composed on top of the vendored Infernal SaaS stylesheet
  * (assets/infernal.css, loaded before this one): data-if-theme and
- * data-if-brand="mergehenna" on the root element resolve every --if-* token,
- * so these aliases track the active theme with no per-mode duplication. The
- * app's historical token names map onto the library so existing components
- * pick up the Infernal palette without rewrites. Interactive chrome uses
- * --action*; semantic state colors keep their own names so a completed state
- * never reads as a clickable accent.
+ * data-if-brand on the root element resolve the base --if-* tokens. Product
+ * packs may override those tokens here without editing the vendored library.
+ * The app's historical token names map onto the library so existing components
+ * pick up the active pack without rewrites. Interactive chrome uses --action*;
+ * semantic state colors keep their own names so a completed state never reads
+ * as a clickable accent.
  */
 :root {
   --paper: var(--if-bg);
@@ -65,15 +65,222 @@ export const THEME_CSS = `
 
 }
 
+/* Apothecary is the base Maomao pack: the pre-rebrand parchment/jade palette
+   restated in Infernal token space. These rules intentionally live here rather
+   than in the vendored infernal.css library. */
+[data-if-brand="apothecary"] {
+  --if-bg: #121612;
+  --if-bg-raised: #1a1f1a;
+  --if-surface: #1a1f1a;
+  --if-surface-2: #232a23;
+  --if-surface-hover: #2b332b;
+  --if-line: #2e352e;
+  --if-line-strong: #4a524a;
+  --if-text: #e8e4d6;
+  --if-text-soft: #a8a494;
+  --if-muted: #8c8a7e;
+  --if-accent: #7dcea0;
+  --if-accent-ink: #121612;
+  --if-accent-soft: #1c3328;
+  --if-accent-line: #3f6b52;
+  --if-success: #7dcea0;
+  --if-success-soft: #1c3328;
+  --if-warning: #e0b45c;
+  --if-warning-soft: #3a3220;
+  --if-danger: #e88989;
+  --if-danger-soft: #3a2224;
+  --if-info: #9dbbe0;
+  --if-info-soft: #223242;
+  --if-shadow: 0 1px 0 rgba(0, 0, 0, 0.25);
+  --code-bg: #0e120e;
+  --code-fg: #d9d4c4;
+  --if-radius-sm: 3px;
+  --if-radius: 3px;
+  --if-font: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  --if-mono: ui-monospace, "SFMono-Regular", "Cascadia Mono", "Cascadia Code", "Liberation Mono", Menlo, Monaco, Consolas, monospace;
+  --if-display: "Iowan Old Style", Palatino, "Palatino Linotype", "Book Antiqua", Georgia, "Times New Roman", serif;
+}
+[data-if-brand="apothecary"][data-if-theme="light"] {
+  --if-bg: #f3efe3;
+  --if-bg-raised: #faf7ee;
+  --if-surface: #faf7ee;
+  --if-surface-2: #ece6d6;
+  --if-surface-hover: #e4ddca;
+  --if-line: #cfc8b6;
+  --if-line-strong: #b7b09c;
+  --if-text: #1a221c;
+  --if-text-soft: #5a6258;
+  --if-muted: #7a776b;
+  --if-accent: #1f6a4e;
+  --if-accent-ink: #f3efe3;
+  --if-accent-soft: #d5eadc;
+  --if-accent-line: #9fc9b3;
+  --if-success: #1f6a4e;
+  --if-success-soft: #d5eadc;
+  --if-warning: #8a5a10;
+  --if-warning-soft: #f1e4c4;
+  --if-danger: #9c2432;
+  --if-danger-soft: #f3d6d6;
+  --if-info: #2f5d88;
+  --if-info-soft: #dfe9f1;
+  --if-shadow: 0 1px 0 rgba(26, 34, 28, 0.04);
+  --code-bg: #eae4d4;
+  --code-fg: #1a221c;
+}
+[data-if-brand="apothecary"][data-if-theme="light"] body {
+  background: repeating-linear-gradient(to bottom, transparent 0, transparent calc(1.4rem - 1px), color-mix(in srgb, var(--line) 32%, transparent) calc(1.4rem - 1px), color-mix(in srgb, var(--line) 32%, transparent) 1.4rem), var(--paper);
+}
+[data-if-brand="apothecary"][data-if-theme="dark"] body,
+[data-if-brand="apothecary"]:not([data-if-theme]) body {
+  background: repeating-linear-gradient(to bottom, transparent 0, transparent calc(1.4rem - 1px), color-mix(in srgb, var(--line) 32%, transparent) calc(1.4rem - 1px), color-mix(in srgb, var(--line) 32%, transparent) 1.4rem), var(--paper);
+}
+
+/* Infernal's component library hardcodes part of its SaaS geometry and dark
+   code wells. Apothecary keeps circular affordances circular, but otherwise
+   returns rectangular surfaces, controls, navigation, and code blocks to the
+   base Maomao geometry instead of letting those library values leak through. */
+[data-if-brand="apothecary"] .if-badge,
+[data-if-brand="apothecary"] .if-tabs,
+[data-if-brand="apothecary"] .if-tab,
+[data-if-brand="apothecary"] .if-progress,
+[data-if-brand="apothecary"] .if-avatar,
+[data-if-brand="apothecary"] .if-activity,
+[data-if-brand="apothecary"] .if-skeleton,
+[data-if-brand="apothecary"] .if-dialog,
+[data-if-brand="apothecary"] .if-popover,
+[data-if-brand="apothecary"] .if-menu-item,
+[data-if-brand="apothecary"] .if-brand__mark,
+[data-if-brand="apothecary"] .if-nav-link,
+[data-if-brand="apothecary"] .if-stack-track a,
+[data-if-brand="apothecary"] .if-stack-track span,
+[data-if-brand="apothecary"] .if-reviewer-card,
+[data-if-brand="apothecary"] .if-reviewer-card__icon,
+[data-if-brand="apothecary"] .if-finding,
+[data-if-brand="apothecary"] .if-tool-card,
+[data-if-brand="apothecary"] .if-approval,
+[data-if-brand="apothecary"] .if-metric-strip,
+[data-if-brand="apothecary"] .if-command-list,
+[data-if-brand="apothecary"] .if-log,
+[data-if-brand="apothecary"] .if-screen-preview,
+[data-if-brand="apothecary"] .if-rail-layout,
+[data-if-brand="apothecary"] .if-rail__logo,
+[data-if-brand="apothecary"] .if-rail__button,
+[data-if-brand="apothecary"] .if-context-nav__item {
+  border-radius: 3px;
+}
+[data-if-brand="apothecary"] .if-chat__bubble {
+  border-radius: 3px;
+}
+[data-if-brand="apothecary"] .if-avatar--round {
+  border-radius: 50%;
+}
+[data-if-brand="apothecary"] .if-code,
+[data-if-brand="apothecary"] .if-diff,
+[data-if-brand="apothecary"] .if-log {
+  background: var(--code-bg);
+  border-color: var(--line);
+  color: var(--code-fg);
+}
+
+[data-if-brand="apothecary"] .appearance {
+  border-radius: 0;
+  padding: 0.1rem;
+  gap: 0.1rem;
+}
+[data-if-brand="apothecary"] .appearance button {
+  border-radius: 0;
+  font-size: 0.75rem;
+  font-weight: inherit;
+}
+
+[data-if-brand="apothecary"] .state,
+[data-if-brand="apothecary"] .kind-chip,
+[data-if-brand="apothecary"] .sev {
+  border-radius: 0;
+}
+
+/* The pre-Infernal UI was flat parchment: rectangular controls, no floating
+   hover lift, and live work marked by a thin side rule rather than a copper
+   glow pooled under the card. Keep those effects exclusive to mergehenna. */
+[data-if-brand="apothecary"] .if-button,
+[data-if-brand="apothecary"] .if-input,
+[data-if-brand="apothecary"] .if-select,
+[data-if-brand="apothecary"] .if-textarea,
+[data-if-brand="apothecary"] .if-rail__button[aria-pressed="true"]::before {
+  border-radius: 0;
+}
+[data-if-brand="apothecary"] .if-card--interactive:hover {
+  transform: none;
+}
+[data-if-brand="apothecary"] .if-card--ember::before,
+[data-if-brand="apothecary"] .if-card--ember::after,
+[data-if-brand="apothecary"] .if-stack-review::before,
+[data-if-brand="apothecary"] .if-stack-review::after,
+[data-if-brand="apothecary"] .if-panel:has(#build-progress)::before,
+[data-if-brand="apothecary"] .if-panel:has(#build-progress)::after,
+[data-if-brand="apothecary"] .specimen.is-live::after {
+  content: none;
+}
+[data-if-brand="apothecary"] .specimen.is-live::before {
+  inset: 0.65rem auto 0.65rem 0;
+  width: 3px;
+  background: var(--live);
+  filter: none;
+  animation: breathe 2.6s ease-in-out infinite;
+}
+[data-if-brand="apothecary"] .if-h1,
+[data-if-brand="apothecary"] .if-h2,
+[data-if-brand="apothecary"] .if-brand__title,
+[data-if-brand="apothecary"] .if-kpi__value {
+  font-family: var(--if-display);
+  letter-spacing: 0.01em;
+}
+
+
+@media (prefers-color-scheme: light) {
+  :root[data-if-brand="apothecary"]:not([data-if-theme]) {
+    color-scheme: light;
+  --if-bg: #f3efe3;
+  --if-bg-raised: #faf7ee;
+  --if-surface: #faf7ee;
+  --if-surface-2: #ece6d6;
+  --if-surface-hover: #e4ddca;
+  --if-line: #cfc8b6;
+  --if-line-strong: #b7b09c;
+  --if-text: #1a221c;
+  --if-text-soft: #5a6258;
+  --if-muted: #7a776b;
+  --if-accent: #1f6a4e;
+  --if-accent-ink: #f3efe3;
+  --if-accent-soft: #d5eadc;
+  --if-accent-line: #9fc9b3;
+  --if-success: #1f6a4e;
+  --if-success-soft: #d5eadc;
+  --if-warning: #8a5a10;
+  --if-warning-soft: #f1e4c4;
+  --if-danger: #9c2432;
+  --if-danger-soft: #f3d6d6;
+  --if-info: #2f5d88;
+  --if-info-soft: #dfe9f1;
+  --if-shadow: 0 1px 0 rgba(26, 34, 28, 0.04);
+  --code-bg: #eae4d4;
+  --code-fg: #1a221c;
+  }
+  :root[data-if-brand="apothecary"]:not([data-if-theme]) body {
+    background: repeating-linear-gradient(to bottom, transparent 0, transparent calc(1.4rem - 1px), color-mix(in srgb, var(--line) 32%, transparent) calc(1.4rem - 1px), color-mix(in srgb, var(--line) 32%, transparent) 1.4rem), var(--paper);
+  }
+}
+
 /* No-JS light fallback: the shell's theme is applied by the appearance boot
    script setting data-if-theme, and infernal's :root base is dark — so a
    client without JavaScript would be locked to dark regardless of OS
    preference. When the attribute is absent (only possible without JS) and
    the OS prefers light, re-state the library's light + mergehenna-brand
-   token values. Keep in sync with the infernal.css [data-if-theme="light"]
-   block and its mergehenna brand override when re-vendoring. */
+   token values for the mergehenna pack. Apothecary has its own pack rules
+   above. Keep in sync with the infernal.css [data-if-theme="light"] block and
+   its mergehenna brand override when re-vendoring. */
 @media (prefers-color-scheme: light) {
-  :root:not([data-if-theme]) {
+  :root[data-if-brand="mergehenna"]:not([data-if-theme]) {
     color-scheme: light;
     --if-bg: #f2eff4;
     --if-bg-raised: #f9f7fb;

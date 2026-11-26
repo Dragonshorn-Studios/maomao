@@ -75,9 +75,7 @@ import {
   TYPEAHEAD_JS,
   MODEL_PICKER_HREF,
   MODEL_PICKER_JS,
-  MERGEHENNA_FAVICON_SVG,
-  FAVICON_PNG_BASE64,
-  LARGE_ICON_PNG_BASE64,
+  themePackAssets,
   type PageOptions,
   type QueueView,
   type ScanConfirmNotice,
@@ -386,8 +384,8 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
   const passwordGateOn = uiGateEnabled(ctx.config.uiPassword, ctx.config.uiSessionSecret);
   const gateOn = oauthOn || passwordGateOn;
   const passwordLoginOn = passwordGateOn && (!oauthOn || ctx.config.uiLocalLogin);
-  const pageOpts = { showLogout: gateOn, uiFlavor: ctx.config.uiFlavor };
-  const loginPageOpts = { showGithub: oauthOn, showPassword: passwordLoginOn };
+  const pageOpts = { showLogout: gateOn, uiFlavor: ctx.config.uiFlavor, branding: ctx.config.branding };
+  const loginPageOpts = { showGithub: oauthOn, showPassword: passwordLoginOn, branding: ctx.config.branding };
   const renderLoginDenied = (c: Context<AppEnv>) => {
     deleteCookie(c, SESSION_COOKIE, { path: "/" });
     return c.html(renderLogin({ ...loginPageOpts, error: "oauth-denied" }), 403);
@@ -697,18 +695,19 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
 
   app.get(TELEMETRY_PAGE_HREF, (c) => staticAsset(c, TELEMETRY_PAGE_JS, "text/javascript; charset=utf-8"));
 
-  // Brand icons: fixed constants from src/ui/icons.ts (no filesystem, no traversal).
+  // Brand icons come from the configured built-in pack; asset paths stay stable.
+  const brandAssets = themePackAssets(ctx.config.branding.themePack);
   const iconAssets: Array<[string, string, string]> = [
     // [path, content-type, source]
-    ["/assets/favicon.svg", "image/svg+xml", MERGEHENNA_FAVICON_SVG],
-    ["/assets/icon.svg", "image/svg+xml", MERGEHENNA_FAVICON_SVG],
+    ["/assets/favicon.svg", "image/svg+xml", brandAssets.faviconSvg],
+    ["/assets/icon.svg", "image/svg+xml", brandAssets.faviconSvg],
   ];
   for (const [path, contentType, body] of iconAssets) {
     app.get(path, (c) => staticAsset(c, body, `${contentType}; charset=utf-8`));
   }
   const pngAssets: Array<[string, string]> = [
-    ["/assets/favicon.png", FAVICON_PNG_BASE64],
-    ["/assets/icon.png", LARGE_ICON_PNG_BASE64],
+    ["/assets/favicon.png", brandAssets.faviconPngBase64],
+    ["/assets/icon.png", brandAssets.iconPngBase64],
   ];
   for (const [path, base64] of pngAssets) {
     app.get(path, (c) => staticAsset(c, new Uint8Array(Buffer.from(base64, "base64")), "image/png"));
@@ -1329,6 +1328,7 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
     } = {},
   ): ConfigPageData => ({
     identity: c.get("identity"),
+    branding: ctx.config.branding,
     revisions: ctx.store.configs.listRevisions(),
     profileRoutes: ctx.store.configs.listProfileRoutes(),
     audit: [],
@@ -2110,6 +2110,7 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
     }
     return c.html(
       renderDraftEditPage({
+        branding: ctx.config.branding,
         revision,
         identity: c.get("identity"),
         canWrite: gateOn,
@@ -2124,6 +2125,7 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
     if (!gateOn) return c.redirect("/", 302);
     return c.html(
       renderConfigAuditPage({
+        branding: ctx.config.branding,
         identity: c.get("identity"),
         revisions: [],
         audit: ctx.store.configs.listAudit(100),
@@ -2145,6 +2147,7 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
     const oldest = deliveries[deliveries.length - 1];
     return c.html(
       renderConfigDeliveriesPage({
+        branding: ctx.config.branding,
         identity: c.get("identity"),
         revisions: [],
         audit: [],
@@ -2296,6 +2299,7 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
       ) =>
         c.html(
           renderDraftEditPage({
+            branding: ctx.config.branding,
             revision: existing,
             identity: c.get("identity"),
             canWrite: gateOn,
@@ -2310,6 +2314,7 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
         return runProfileModelTest(c, bodyPreview, (opts) =>
           c.html(
             renderDraftEditPage({
+              branding: ctx.config.branding,
               revision: existing,
               identity: c.get("identity"),
               canWrite: gateOn,
@@ -2610,6 +2615,7 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
     } = {},
   ) => ({
     identity: c.get("identity"),
+    branding: ctx.config.branding,
     revisions: promptViews(),
     fixtures: fixtureViews(),
     evaluations: evaluationViews(),
@@ -2819,6 +2825,7 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
     return {
       canScan: Boolean(c.get("identity")),
       identity: c.get("identity"),
+    branding: ctx.config.branding,
       csrfToken: gateOn ? ensureCsrfToken(c, ctx.config.uiSessionSecret) : undefined,
       issueCreationEnabled: ctx.config.issueCreationEnabled,
       profileRevision: profileRevision ? { id: profileRevision.id, name: profileRevision.name } : null,
@@ -2967,6 +2974,7 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
         return c.html(
           renderScanConfirmPage({
             identity: c.get("identity"),
+            branding: ctx.config.branding,
             csrfToken: ensureCsrfToken(c, ctx.config.uiSessionSecret),
             repo: `${parsed.owner}/${parsed.repo}`,
             branch: head.defaultBranch,
@@ -3028,6 +3036,7 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
       .slice(0, 8)
       .map((job) => ({ id: job.id, repoFullName: job.repo_full_name, headSha: job.head_sha }));
     return {
+      branding: ctx.config.branding,
       canBrief: Boolean(c.get("identity")),
       identity: c.get("identity"),
       csrfToken: gateOn ? ensureCsrfToken(c, ctx.config.uiSessionSecret) : undefined,
@@ -3171,6 +3180,7 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
                 : { kind: "incomplete" };
         return c.html(
           renderBriefConfirmPage({
+            branding: ctx.config.branding,
             identity: c.get("identity"),
             csrfToken: ensureCsrfToken(c, ctx.config.uiSessionSecret),
             repo: `${parsed.owner}/${parsed.repo}`,
@@ -3228,6 +3238,7 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
       sectionParam !== undefined && /^\d+$/.test(sectionParam) ? Number(sectionParam) : undefined;
     return c.html(
       renderBriefTabPage({
+        branding: ctx.config.branding,
         job,
         payload,
         sectionIndex,
@@ -3243,6 +3254,7 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
   ): PausePageData => ({
     canOperate: Boolean(configActor(c)),
     identity: c.get("identity"),
+    branding: ctx.config.branding,
     csrfToken: ensureCsrfToken(c, ctx.config.uiSessionSecret),
     pauses: ctx.store.listActivePauses().map((pause) => ({
       id: pause.id,
@@ -3529,6 +3541,7 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
     return c.html(
       renderScanIssuePreviewPage({
         identity: c.get("identity"),
+        branding: ctx.config.branding,
         csrfToken: ensureCsrfToken(c, ctx.config.uiSessionSecret),
         job: { id: job.id, repoFullName: job.repo_full_name, headSha: job.head_sha },
         items,
@@ -4014,6 +4027,7 @@ function renderCancelConfirm(c: Context<AppEnv>, ctx: ServerContext, pageOpts: P
   return c.html(
     renderCancelConfirmPage({
       identity: c.get("identity"),
+      branding: ctx.config.branding,
       csrfToken: pageOpts.showLogout ? ensureCsrfToken(c, ctx.config.uiSessionSecret) : undefined,
       showLogout: pageOpts.showLogout,
       job: {

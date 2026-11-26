@@ -13,7 +13,7 @@ import {
   type RoutingMode,
 } from "./routing/types.js";
 import type { Severity } from "./schema.js";
-import type { UiFlavor } from "./ui/copy.js";
+import { loadInstanceBranding, type InstanceBranding, type UiFlavor } from "./branding.js";
 
 export type JobState =
   | "queued"
@@ -116,7 +116,9 @@ export interface Config {
   modelCatalog: string[];
   /** Explicit issue creation from health scans. Disabled by default. */
   issueCreationEnabled: boolean;
-  /** UI flavor copy: "apothecary" (branded default) or "plain" (no flavor). */
+  /** Operator-facing instance identity and visual/copy pack selection. */
+  branding: InstanceBranding;
+  /** Resolved flavor copy pack; independent from the visual theme pack. */
   uiFlavor: UiFlavor;
   /** Opt-in GitHub review verdicts. Defaults keep every review COMMENT-only. */
   reviewAllowApprove: boolean;
@@ -244,13 +246,6 @@ function parsePolicy(raw: string | undefined): PoisonAlertPolicy {
   throw new Error(`POISON_ALERT_POLICY must be one of ${POISON_ALERT_POLICIES.join(", ")}`);
 }
 
-function parseUiFlavor(raw: string | undefined): UiFlavor {
-  const value = raw?.trim().toLowerCase() ?? "";
-  if (value === "") return "apothecary";
-  if (value === "apothecary" || value === "plain") return value;
-  throw new Error("UI_FLAVOR must be apothecary or plain");
-}
-
 function parseSeverity(raw: string | undefined, fallback: Severity, source = "severity list"): Severity {
   const value = (raw?.trim().toLowerCase() || fallback) as Severity;
   if (["blocker", "high", "medium", "low", "info"].includes(value)) return value;
@@ -305,6 +300,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   const pullRequestActions = (actions.length > 0 ? actions : DEFAULT_ACTIONS).filter((action) =>
     DEFAULT_ACTIONS.includes(action),
   ) as PullRequestAction[];
+  const branding = loadInstanceBranding(env);
 
   return {
     host: env.HOST?.trim() || "0.0.0.0",
@@ -353,7 +349,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     publicUrl: env.MAOMAO_PUBLIC_URL?.trim().replace(/\/+$/, "") || "",
     modelCatalog: parseCsv(env.MODEL_CATALOG),
     issueCreationEnabled: parseBoolean(env.GITHUB_ISSUE_CREATION_ENABLED, false),
-    uiFlavor: parseUiFlavor(env.UI_FLAVOR),
+    branding,
+    uiFlavor: branding.copyFlavor,
     reviewAllowApprove: parseBoolean(env.GITHUB_REVIEW_ALLOW_APPROVE, false),
     reviewAllowRequestChanges: parseBoolean(env.GITHUB_REVIEW_ALLOW_REQUEST_CHANGES, false),
     reviewRequestChangesMinSeverity: parseSeverity(

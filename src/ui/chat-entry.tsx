@@ -21,7 +21,7 @@ import {
   type ThreadMessageLike,
 } from "@assistant-ui/react";
 import { createRoot } from "react-dom/client";
-import { useEffect, type ReactElement } from "react";
+import { createContext, useContext, useEffect, type ReactElement } from "react";
 import { sseDataEvents } from "./sse.js";
 import { applySseEvent, emptyAssistantStream, toAssistantContent } from "./chat-stream.js";
 
@@ -29,8 +29,11 @@ interface ChatConfig {
   streamUrl: string;
   csrfToken?: string;
   suggestions?: string[];
+  assistantName?: string;
   messages?: Array<{ role: "user" | "assistant"; content: string }>;
 }
+
+const AssistantNameContext = createContext("Maomao");
 
 const FALLBACK = "The explainer could not answer. Check the server logs or try again.";
 
@@ -44,6 +47,7 @@ function chatConfig(): ChatConfig | undefined {
       streamUrl: parsed.streamUrl,
       csrfToken: parsed.csrfToken ?? undefined,
       suggestions: Array.isArray(parsed.suggestions) ? parsed.suggestions.filter((item): item is string => typeof item === "string") : undefined,
+      assistantName: typeof parsed.assistantName === "string" && parsed.assistantName.trim() ? parsed.assistantName : undefined,
       messages: Array.isArray(parsed.messages)
         ? parsed.messages.filter(
             (item): item is { role: "user" | "assistant"; content: string } =>
@@ -151,7 +155,9 @@ const groupBy = groupPartByType({
   "tool-call": ["group-chainOfThought", "group-tool"],
 });
 
-const AssistantParts = () => (
+const AssistantParts = () => {
+  const assistantName = useContext(AssistantNameContext);
+  return (
   <MessagePrimitive.GroupedParts groupBy={groupBy} indicator="always">
     {({ part, children }) => {
       switch (part.type) {
@@ -185,13 +191,14 @@ const AssistantParts = () => (
             />
           );
         case "indicator":
-          return <p className="muted chat-indicator">Maomao is thinking…</p>;
+          return <p className="muted chat-indicator">{assistantName} is thinking…</p>;
         default:
           return null;
       }
     }}
   </MessagePrimitive.GroupedParts>
-);
+  );
+};
 
 const CopyBar = () => (
   <ActionBarPrimitive.Root hideWhenRunning autohide="never" className="chat-action-bar">
@@ -211,7 +218,7 @@ const UserMessage = () => (
 
 const AssistantMessage = () => (
   <MessagePrimitive.Root className="chat-bubble chat-bubble-assistant">
-    <span className="muted">Maomao</span>
+    <span className="muted">{useContext(AssistantNameContext)}</span>
     <AssistantParts />
     <ErrorPrimitive.Root>
       <ErrorPrimitive.Message className="chat-error" role="alert" />
@@ -257,7 +264,7 @@ const Thread = ({ config }: { config: ChatConfig }) => (
   <ThreadPrimitive.Root className="chat-thread">
     <ThreadPrimitive.Viewport className="chat-viewport" autoScroll>
       <ThreadPrimitive.Empty>
-        <p className="muted">No messages yet. Ask about the reviewed change — the explainer sees the exact head commit and Maomao&apos;s findings, and can read the repository, but can never modify anything.</p>
+        <p className="muted">No messages yet. Ask about the reviewed change — the explainer sees the exact head commit and the review findings, and can read the repository, but can never modify anything.</p>
       </ThreadPrimitive.Empty>
       <ThreadPrimitive.Messages components={{ UserMessage, AssistantMessage }} />
       <ThreadPrimitive.ScrollToBottom className="chat-scroll-bottom">Latest</ThreadPrimitive.ScrollToBottom>
@@ -287,9 +294,11 @@ function ChatApp({ config }: { config: ChatConfig }): ReactElement {
     document.querySelector(".chat-transcript")?.setAttribute("hidden", "hidden");
   }, []);
   return (
-    <AssistantRuntimeProvider runtime={runtime}>
-      <Thread config={config} />
-    </AssistantRuntimeProvider>
+    <AssistantNameContext.Provider value={config.assistantName ?? "Maomao"}>
+      <AssistantRuntimeProvider runtime={runtime}>
+        <Thread config={config} />
+      </AssistantRuntimeProvider>
+    </AssistantNameContext.Provider>
   );
 }
 
