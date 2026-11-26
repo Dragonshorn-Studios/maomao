@@ -5,6 +5,7 @@ import { JobStore } from "../jobs/store.js";
 import type { JobQueue } from "../jobs/queue.js";
 import { createApp } from "../server.js";
 import { seedDemoJobs } from "./fixtures.js";
+import { UiSettingsStore } from "../ui/settings.js";
 
 /**
  * UI-only preview with fixture jobs. Does not run the review pipeline.
@@ -44,7 +45,7 @@ const queue = {
   start() {},
 } as unknown as JobQueue;
 
-const app = createApp({ config, store, queue, startedAt: Date.now() });
+const app = createApp({ config, store, queue, uiSettings: new UiSettingsStore(db), startedAt: Date.now() });
 
 serve({ fetch: app.fetch, hostname: config.host, port: config.port }, (info) => {
   console.log(`Maomao demo UI on http://${info.address}:${info.port}`);

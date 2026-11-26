@@ -24,6 +24,7 @@ import { ProviderCredentialStore } from "./opencode/credentials.js";
 import { TelemetrySettingsStore } from "./telemetry/settings.js";
 import { TrustedCheckSettingsStore } from "./checks/settings.js";
 import { MergeModeSettingsStore } from "./merge/settings.js";
+import { UiSettingsStore } from "./ui/settings.js";
 import { ModelDiscovery } from "./opencode/models.js";
 import { generateForgeKeyHex } from "./forge/secretbox.js";
 import { computeSignature } from "./gitlab/signature.js";
@@ -6826,6 +6827,102 @@ describe("global review pause", () => {
     expect(denied.status).toBe(403);
     expect(store.getGlobalPause()).toBeUndefined();
     log.mockRestore();
+  });
+});
+
+describe("appearance config routes", () => {
+  it("saves instance-wide branding, applies it immediately, and clears it", async () => {
+    const uiSettings = new UiSettingsStore(openDb(":memory:"));
+    const { app } = testApp(
+      { UI_PASSWORD: "hunter2", UI_SESSION_SECRET: "session-secret-for-tests" },
+      undefined,
+      undefined,
+      { uiSettings },
+    );
+    const { session } = await loginSession(app);
+    const page = await app.request("/config/appearance", { headers: { cookie: session } });
+    const { csrfCookie, csrfToken, html } = await csrfArtifacts(page);
+    expect(html).toContain("Appearance");
+    expect(html).toContain('name="themePack"');
+    expect(html).toContain('name="description"');
+
+    const saved = await app.request("/config/appearance", {
+      method: "POST",
+      headers: { cookie: `${session}; ${csrfCookie}`, "content-type": "application/x-www-form-urlencoded" },
+      body:
+        `themePack=mergehenna&copyFlavor=plain` +
+        `&name=${encodeURIComponent("Review Desk")}` +
+        `&tagline=${encodeURIComponent("Operator console")}` +
+        `&description=${encodeURIComponent("Instance-local review frontend")}` +
+        `&csrf_token=${encodeURIComponent(csrfToken)}`,
+    });
+    expect(saved.status).toBe(303);
+    expect(uiSettings.stored()).toMatchObject({
+      themePack: "mergehenna",
+      copyFlavor: "plain",
+      name: "Review Desk",
+    });
+
+    const home = await app.request("/", { headers: { cookie: session } });
+    const homeHtml = await home.text();
+    expect(homeHtml).toContain('data-if-brand="mergehenna"');
+    expect(homeHtml).toContain("Review Desk");
+
+    const favicon = await app.request("/assets/favicon.svg");
+    expect(await favicon.text()).toBe(themePackAssets("mergehenna").faviconSvg);
+
+    const artifacts = await csrfArtifacts(await app.request("/config/appearance", { headers: { cookie: session } }));
+    const cleared = await app.request("/config/appearance/delete", {
+      method: "POST",
+      headers: { cookie: `${session}; ${artifacts.csrfCookie}`, "content-type": "application/x-www-form-urlencoded" },
+      body: `csrf_token=${encodeURIComponent(artifacts.csrfToken)}`,
+    });
+    expect(cleared.status).toBe(303);
+    const reset = await app.request("/", { headers: { cookie: session } });
+    expect(await reset.text()).toContain('data-if-brand="apothecary"');
+  });
+
+  it("honors stored branding as soon as the app is created", async () => {
+    const uiSettings = new UiSettingsStore(openDb(":memory:"));
+    expect(uiSettings.save({ themePack: "mergehenna", name: "Boot Console" })).toEqual({ ok: true });
+    const { app } = testApp(
+      { UI_PASSWORD: "hunter2", UI_SESSION_SECRET: "session-secret-for-tests" },
+      undefined,
+      undefined,
+      { uiSettings },
+    );
+    const { session } = await loginSession(app);
+    const home = await app.request("/", { headers: { cookie: session } });
+    const html = await home.text();
+    expect(html).toContain('data-if-brand="mergehenna"');
+    expect(html).toContain("Boot Console");
+  });
+
+  it("keeps environment branding authoritative over stored values", async () => {
+    const uiSettings = new UiSettingsStore(openDb(":memory:"));
+    const { app } = testApp(
+      {
+        UI_PASSWORD: "hunter2",
+        UI_SESSION_SECRET: "session-secret-for-tests",
+        UI_INSTANCE_NAME: "Environment Console",
+      },
+      undefined,
+      undefined,
+      { uiSettings },
+    );
+    const { session } = await loginSession(app);
+    const artifacts = await csrfArtifacts(await app.request("/config/appearance", { headers: { cookie: session } }));
+    const saved = await app.request("/config/appearance", {
+      method: "POST",
+      headers: { cookie: `${session}; ${artifacts.csrfCookie}`, "content-type": "application/x-www-form-urlencoded" },
+      body: `themePack=mergehenna&copyFlavor=&name=${encodeURIComponent("Stored Console")}&csrf_token=${encodeURIComponent(artifacts.csrfToken)}`,
+    });
+    expect(saved.status).toBe(303);
+    const home = await app.request("/", { headers: { cookie: session } });
+    const html = await home.text();
+    expect(html).toContain("Environment Console");
+    expect(html).not.toContain("Stored Console");
+    expect(html).toContain('data-if-brand="mergehenna"');
   });
 });
 

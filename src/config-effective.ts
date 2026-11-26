@@ -2,6 +2,7 @@ import type { Config } from "./config.js";
 import type { ProfileRevisionRow } from "./config-revisions.js";
 import { telemetryUserIdEnabled } from "./telemetry/traces.js";
 import type { TelemetrySettingsStore } from "./telemetry/settings.js";
+import type { StoredInstanceBranding } from "./branding.js";
 
 /**
  * Read-only, non-sensitive effective-configuration view for the /config page.
@@ -57,6 +58,7 @@ export function effectiveConfigEntries(
   env: NodeJS.ProcessEnv,
   activeRevision: ProfileRevisionRow | null,
   telemetry: Pick<TelemetrySettingsStore, "status" | "sharedStatus">,
+  storedBranding: StoredInstanceBranding = {},
 ): EffectiveConfigEntry[] {
   const entries: EffectiveConfigEntry[] = [];
   const src = (envKey: string): ConfigValueSource =>
@@ -552,11 +554,16 @@ export function effectiveConfigEntries(
     envKey: "UI_PASSWORD",
   });
 
-  row("Interface", "Instance display name", "UI_INSTANCE_NAME", config.branding.name);
-  row("Interface", "Instance tagline", "UI_INSTANCE_TAGLINE", config.branding.tagline);
-  row("Interface", "Instance description", "UI_INSTANCE_DESCRIPTION", config.branding.description);
-  row("Interface", "Theme pack", "UI_THEME_PACK", config.branding.themePack);
-  row("Interface", "Flavor copy pack", "UI_FLAVOR", config.branding.copyFlavor);
+  const brandingRow = (label: string, envKey: string, value: string, storedValue: unknown, inheritedFromStoredTheme = false) => {
+    const stored = typeof storedValue === "string" && storedValue.trim() !== "";
+    const source: ConfigValueSource = envSet(env[envKey]) ? "environment" : stored || inheritedFromStoredTheme ? "stored" : "default";
+    add({ group: "Interface", label, value, source, envKey });
+  };
+  brandingRow("Instance display name", "UI_INSTANCE_NAME", config.branding.name, storedBranding.name, Boolean(storedBranding.themePack));
+  brandingRow("Instance tagline", "UI_INSTANCE_TAGLINE", config.branding.tagline, storedBranding.tagline, Boolean(storedBranding.themePack));
+  brandingRow("Instance description", "UI_INSTANCE_DESCRIPTION", config.branding.description, storedBranding.description, Boolean(storedBranding.themePack));
+  brandingRow("Theme pack", "UI_THEME_PACK", config.branding.themePack, storedBranding.themePack);
+  brandingRow("Flavor copy pack", "UI_FLAVOR", config.branding.copyFlavor, storedBranding.copyFlavor, Boolean(storedBranding.themePack && !storedBranding.copyFlavor));
 
   const chatGroup = `Ask ${config.branding.name}`;
   row(chatGroup, "Explainer enabled", "MAOMAO_EXPLAIN_ENABLED", String(config.chat.enabled));
