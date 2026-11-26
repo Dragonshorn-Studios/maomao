@@ -108,6 +108,7 @@ export class GitHubProvider implements ForgePort {
       htmlUrl: review.htmlUrl,
       userLogin: review.userLogin,
       verdict: review.verdict,
+      dismissed: review.dismissed,
     }));
   }
 

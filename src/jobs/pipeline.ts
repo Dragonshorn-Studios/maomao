@@ -782,7 +782,19 @@ async function treeEquivalentReview(
       provider.getCommitTree!(target, job.base_sha),
       provider.getCommitTree!(target, job.head_sha),
     ]);
-    if (priorBaseTree === baseTree && priorHeadTree === headTree) return prior;
+    if (priorBaseTree === baseTree && priorHeadTree === headTree) {
+      const summaries = await provider.listSummaries(target);
+      const priorSummary = summaries.find((summary) => summary.id === prior.github_review_id);
+      if (!priorSummary) {
+        deps.store.log(job.id, `Prior published review ${prior.github_review_id} is no longer visible; running normal review`, "warn");
+        return undefined;
+      }
+      if (priorSummary.dismissed) {
+        deps.store.log(job.id, `Prior published review ${prior.github_review_id} was dismissed; running normal review`);
+        return undefined;
+      }
+      return prior;
+    }
   } catch (error) {
     deps.store.log(
       job.id,
@@ -917,7 +929,7 @@ async function runJob(
     const reviewerTimeouts = profileReviewerTimeouts(profileDefinition);
     const profileBudget = createProfileBudget(profileDefinition);
     const snapshot = carriedPrior
-      ? { headSha: job.head_sha, items: [] }
+      ? treeEquivalentSnapshot(deps, job, await reconciliationContext(deps, provider, job))
       : await reconcileAndRoute(deps, provider, job, workspace.repoDir, workspace.dir, diff, signal, profileBudget, profileDefinition);
     throwIfStale(store, jobId, signal);
 
@@ -2607,12 +2619,16 @@ async function routeSpecialists(
 function verifyOnlyAggregate(job: JobRow, snapshot: ReconciliationSnapshot, carriedPrior?: JobRow): AggregatorResult {
   if (job.review_mode === "carried" && carriedPrior) {
     const priorReview = carriedPrior.github_review_url ? ` Prior review: ${carriedPrior.github_review_url}` : "";
+    const unresolved = snapshot.items.filter((item) => item.status !== "resolved" && item.status !== "dismissed").length;
+    const dismissed = snapshot.items.filter((item) => item.status === "dismissed").length;
+    const resolved = snapshot.items.filter((item) => item.status === "resolved").length;
     return {
       schema_version: 1,
-      verdict: carriedPrior.review_event === "APPROVE" ? "clean" : "comment",
+      verdict: unresolved === 0 && (snapshot.items.length > 0 || carriedPrior.review_event === "APPROVE") ? "clean" : "comment",
       summary:
         `Carry-forward validation at ${job.head_sha.slice(0, 8)}: base and head trees are identical to reviewed job ${carriedPrior.id} at ${carriedPrior.head_sha.slice(0, 8)}. ` +
-        `No verifier, specialist, or aggregation pass was rerun; the prior ${carriedPrior.review_event} verdict is carried forward because the reviewed diff is byte-equivalent.${priorReview}`,
+        `No verifier, specialist, or aggregation pass was rerun; the prior ${carriedPrior.review_event} verdict is carried forward only while its findings remain open. ` +
+        `${unresolved} finding(s) remain open, ${resolved} resolved, ${dismissed} dismissed.${priorReview}`,
       findings: [],
     };
   }
@@ -2637,17 +2653,14 @@ function verifyOnlyAggregate(job: JobRow, snapshot: ReconciliationSnapshot, carr
   };
 }
 
-async function reconcileAndRoute(
+async function reconciliationContext(
   deps: PipelineDeps,
   forge: ForgePort,
   job: JobRow,
-  repoDir: string,
-  workspaceDir: string,
-  diff: string,
-  signal: AbortSignal,
-  profileBudget?: ProfileBudget,
-  profileDefinition?: ProfileDefinition | null,
-): Promise<ReconciliationSnapshot> {
+): Promise<{
+  humanOverrides: HumanOverrideContext;
+  priors: ReturnType<typeof collectPriorFindings>;
+}> {
   deps.store.setJobState(job.id, "reconciling");
   const threads = await forge.listDiscussions(forgeTargetOf(job));
   const humanOverrides = await loadHumanOverrides(deps, forge, job, threads);
@@ -2664,6 +2677,59 @@ async function reconcileAndRoute(
     job.id,
     `Reconciling ${priors.length} prior finding(s) for ${job.repo_full_name}#${job.pr_number} @ ${job.head_sha}`,
   );
+  return { humanOverrides, priors };
+}
+
+function treeEquivalentSnapshot(
+  deps: PipelineDeps,
+  job: JobRow,
+  context: { humanOverrides: HumanOverrideContext; priors: ReturnType<typeof collectPriorFindings> },
+): ReconciliationSnapshot {
+  const items = context.priors.map((prior) => {
+    const base = {
+      fingerprint: prior.fingerprint,
+      confidence: 1,
+      threadId: prior.threadId,
+      commentId: prior.commentId,
+      originalPath: prior.path,
+      originalLine: prior.line,
+      currentPath: prior.path,
+      currentLine: prior.line,
+      category: prior.category,
+      summary: prior.summary,
+      body: prior.body,
+      severity: prior.severity,
+    };
+    if (prior.dismissed) {
+      return { ...base, status: "dismissed" as const, reason: "authorized human override" };
+    }
+    if (prior.settledResolved) {
+      return {
+        ...base,
+        status: "resolved" as const,
+        reason: prior.githubAlreadyResolved ? "Forge thread already resolved" : "already resolved; no open thread to re-check",
+        githubAlreadyResolved: true,
+      };
+    }
+    return { ...base, status: "still_valid" as const, reason: "tree-equivalent diff; finding location and content are unchanged" };
+  });
+  const snapshot: ReconciliationSnapshot = { headSha: job.head_sha, items, humanOverrides: context.humanOverrides };
+  deps.store.patchJob(job.id, { reconciliation_json: JSON.stringify(snapshot) });
+  return snapshot;
+}
+
+async function reconcileAndRoute(
+  deps: PipelineDeps,
+  forge: ForgePort,
+  job: JobRow,
+  repoDir: string,
+  workspaceDir: string,
+  diff: string,
+  signal: AbortSignal,
+  profileBudget?: ProfileBudget,
+  profileDefinition?: ProfileDefinition | null,
+): Promise<ReconciliationSnapshot> {
+  const { humanOverrides, priors } = await reconciliationContext(deps, forge, job);
   const items = await classifyPriorFindings({
     onVerifierError: (message) => deps.store.log(job.id, `Verifier failed: ${message}`, "warn"),
     config: deps.config,
@@ -3123,7 +3189,12 @@ async function publishReview(
   const allReviewersDone = job.review_mode === "carried" || (runs.length > 0 && runs.every((run) => run.state === "done" && !run.validation_error));
   const aggregatorFallback = (deps.store.getJob(job.id)?.aggregator_fallback ?? 0) === 1;
   const carriedVerdict = carriedPrior?.review_event;
-  const decision = job.review_mode === "carried" && (carriedVerdict === "APPROVE" || carriedVerdict === "COMMENT" || carriedVerdict === "REQUEST_CHANGES")
+  const carriedStillOpen = snapshot.items.length === 0 || snapshot.items.some((item) => item.status !== "resolved" && item.status !== "dismissed");
+  const carriedEventAllowed =
+    carriedVerdict === "COMMENT" ||
+    (carriedVerdict === "APPROVE" && deps.config.reviewAllowApprove) ||
+    (carriedVerdict === "REQUEST_CHANGES" && deps.config.reviewAllowRequestChanges);
+  const decision = job.review_mode === "carried" && carriedStillOpen && carriedEventAllowed && (carriedVerdict === "APPROVE" || carriedVerdict === "COMMENT" || carriedVerdict === "REQUEST_CHANGES")
     ? {
         event: carriedVerdict as ForgeVerdict,
         reason: `carried forward from tree-equivalent review job ${carriedPrior?.id} at ${carriedPrior?.head_sha.slice(0, 8)}`,

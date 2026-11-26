@@ -105,7 +105,7 @@ export interface GithubPort {
     owner: string,
     repo: string,
     pullNumber: number,
-  ): Promise<{ id: number; body: string; commitId?: string; htmlUrl?: string; userLogin?: string; verdict?: ForgeVerdict }[]>;
+  ): Promise<{ id: number; body: string; commitId?: string; htmlUrl?: string; userLogin?: string; verdict?: ForgeVerdict; dismissed?: boolean }[]>;
   dismissReview?(input: {
     installationId: number;
     owner: string;
@@ -470,6 +470,7 @@ export class GithubClient implements GithubPort, ManualTriggerPort {
       userLogin: review.user?.login ?? undefined,
       verdict:
         review.state === "CHANGES_REQUESTED" ? "REQUEST_CHANGES" : review.state === "APPROVED" ? "APPROVE" : "COMMENT",
+      dismissed: review.state === "DISMISSED",
     }));
   }
 

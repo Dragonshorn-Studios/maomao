@@ -8431,8 +8431,10 @@ describe("tree-equivalent review carry-forward", () => {
     return prior.job.id;
   }
 
-  function carryGithub(trees: Record<string, string>, posted: Array<{ event?: string; body: string }>) {
+  function carryGithub(trees: Record<string, string>, posted: Array<{ event?: string; body: string }>, priorDismissed = false) {
     return githubPort({
+      listReviews: async () => [{ id: 77, body: "prior", commitId: "old-head", userLogin: "maomao[bot]", verdict: "APPROVE" as const, dismissed: priorDismissed }],
+      dismissReview: async () => {},
       getCommit: async (_installationId: number, _owner: string, _repo: string, ref: string) => ({
         sha: ref,
         message: "",
@@ -8489,6 +8491,7 @@ describe("tree-equivalent review carry-forward", () => {
       REVIEWER_ROUTING: "fixed",
       REVIEWER_ROLES: "correctness",
       GITHUB_REVIEW_ALLOW_APPROVE: "true",
+      GITHUB_REVIEW_ALLOW_REQUEST_CHANGES: "true",
       POST_EMPTY_REVIEW: "true",
     });
     const store = new JobStore(openDb(":memory:"));
@@ -8513,6 +8516,105 @@ describe("tree-equivalent review carry-forward", () => {
     expect(modelCalls).toBe(0);
     expect(posted[0]?.event).toBe("REQUEST_CHANGES");
     expect(posted[0]?.body).toContain("prior REQUEST_CHANGES verdict is carried forward");
+  });
+
+
+  it("does not carry a blocking verdict after its findings were dismissed", async () => {
+    const config = loadConfig({
+      REVIEWER_ROUTING: "fixed",
+      REVIEWER_ROLES: "correctness",
+      GITHUB_REVIEW_ALLOW_APPROVE: "true",
+      GITHUB_REVIEW_ALLOW_REQUEST_CHANGES: "true",
+      POST_EMPTY_REVIEW: "true",
+    });
+    const store = new JobStore(openDb(":memory:"));
+    approvedPrior(store, "REQUEST_CHANGES");
+    store.dismissFinding({
+      repoFullName: "acme/widgets",
+      prNumber: 4,
+      fingerprint: "dismissed-finding",
+      actor: "maintainer",
+      command: "false positive",
+      reviewedSha: "old-head",
+      summary: "bug",
+    });
+    const created = store.enqueue(jobInput("new-base", "new-head", "pull_request.synchronize"));
+    const posted: Array<{ event?: string; body: string }> = [];
+    let modelCalls = 0;
+    const opencode: OpenCodePort = {
+      async run() {
+        modelCalls += 1;
+        throw new Error("model must not run for a tree-equivalent carry-forward");
+      },
+    };
+    const github = carryGithub(
+      { "old-base": "base-tree", "old-head": "head-tree", "new-base": "base-tree", "new-head": "head-tree" },
+      posted,
+    );
+    const pipeline = createPipeline({ config, store, github, checkout: await fixtureCheckout(), opencode });
+    await pipeline.run(created.job.id);
+
+    expect(store.getJob(created.job.id)?.review_event).toBe("APPROVE");
+    expect(modelCalls).toBe(0);
+    expect(posted[0]?.event).toBe("APPROVE");
+  });
+
+  it("downgrades a carried approval when approvals are disabled", async () => {
+    const config = loadConfig({
+      REVIEWER_ROUTING: "fixed",
+      REVIEWER_ROLES: "correctness",
+      GITHUB_REVIEW_ALLOW_APPROVE: "false",
+      POST_EMPTY_REVIEW: "true",
+    });
+    const store = new JobStore(openDb(":memory:"));
+    approvedPrior(store);
+    const created = store.enqueue(jobInput("new-base", "new-head", "pull_request.synchronize"));
+    const posted: Array<{ event?: string; body: string }> = [];
+    const github = carryGithub(
+      { "old-base": "base-tree", "old-head": "head-tree", "new-base": "base-tree", "new-head": "head-tree" },
+      posted,
+    );
+    const pipeline = createPipeline({
+      config,
+      store,
+      github,
+      checkout: await fixtureCheckout(),
+      opencode: { async run() { throw new Error("model must not run"); } },
+    });
+    await pipeline.run(created.job.id);
+
+    expect(store.getJob(created.job.id)?.review_event).toBe("COMMENT");
+    expect(posted[0]?.event).toBe("COMMENT");
+  });
+
+
+  it("runs analysis when the prior native review was dismissed", async () => {
+    const config = loadConfig({ REVIEWER_ROUTING: "fixed", REVIEWER_ROLES: "correctness", POST_EMPTY_REVIEW: "true" });
+    const store = new JobStore(openDb(":memory:"));
+    approvedPrior(store);
+    const created = store.enqueue(jobInput("new-base", "new-head", "pull_request.synchronize"));
+    const posted: Array<{ event?: string; body: string }> = [];
+    let modelCalls = 0;
+    const opencode: OpenCodePort = {
+      async run(input) {
+        modelCalls += 1;
+        const roleMatch = input.prompt.match(/Role id: (\w+)/);
+        const text = roleMatch
+          ? reviewerJson(roleMatch[1])
+          : JSON.stringify({ schema_version: 1, verdict: "comment", summary: "Please fix the finding.", findings: [] });
+        return { stdout: text, stderr: "", exitCode: 0, text, usage: { promptTokens: 3, completionTokens: 2 } };
+      },
+    };
+    const github = carryGithub(
+      { "old-base": "base-tree", "old-head": "head-tree", "new-base": "base-tree", "new-head": "head-tree" },
+      posted,
+      true,
+    );
+    const pipeline = createPipeline({ config, store, github, checkout: await fixtureCheckout(), opencode });
+    await pipeline.run(created.job.id);
+
+    expect(store.getJob(created.job.id)?.review_mode).toBe("full");
+    expect(modelCalls).toBeGreaterThan(0);
   });
 
   it.each([
