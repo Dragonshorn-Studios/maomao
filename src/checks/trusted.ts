@@ -156,7 +156,9 @@ function parseDefinition(name: TrustedCheckName, raw: unknown): CheckDefinition 
   ) {
     throw new Error(`trusted check ${name} memoryBytes must be an integer between 64 MiB and 8 GiB`);
   }
-  const memoryBytes = typeof value.memoryBytes === "number" ? value.memoryBytes : 2 * 1024 * 1024 * 1024;
+  // RLIMIT_AS covers virtual address space, not resident memory. Go/Wazero-based
+  // scanners reserve several GiB of virtual memory before doing any scanning.
+  const memoryBytes = typeof value.memoryBytes === "number" ? value.memoryBytes : 8 * 1024 * 1024 * 1024;
   return { path, interpreter, timeoutMs, cpuSeconds, memoryBytes };
 }
 
@@ -305,6 +307,8 @@ export class TrustedCheckRunner {
         MAOMAO_TRUSTED_DIR: sandboxed ? "/trusted" : trustedDir,
         HOME: "/tmp",
         TMPDIR: "/tmp",
+        SEMGREP_SEND_METRICS: "off",
+        SEMGREP_ENABLE_VERSION_CHECK: "0",
       };
       if (sandboxed) {
         const binds: string[] = [];
@@ -312,6 +316,14 @@ export class TrustedCheckRunner {
           try {
             await access(dir);
             binds.push("--ro-bind", dir, dir);
+          } catch {}
+        }
+        // Some scanner runtimes initialize TLS at startup even though the sandbox
+        // has no network. Expose only public CA bundles, never the host /etc tree.
+        for (const file of ["/etc/ssl/certs/ca-certificates.crt", "/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem", "/etc/ssl/ca-bundle.pem"]) {
+          try {
+            await access(file);
+            binds.push("--ro-bind", file, file);
           } catch {}
         }
         command = "bwrap";
@@ -323,7 +335,6 @@ export class TrustedCheckRunner {
           "--clearenv",
           "--uid", "0",
           "--gid", "0",
-          "--proc", "/proc",
           "--dev", "/dev",
           ...binds,
           "--ro-bind", trustedDir, "/trusted",
@@ -340,6 +351,8 @@ export class TrustedCheckRunner {
           "--setenv", "MAOMAO_TRUSTED_DIR", "/trusted",
           "--setenv", "HOME", "/tmp",
           "--setenv", "TMPDIR", "/tmp",
+          "--setenv", "SEMGREP_SEND_METRICS", "off",
+          "--setenv", "SEMGREP_ENABLE_VERSION_CHECK", "0",
           "--chdir", "/trusted",
           ...childArgs,
         ];

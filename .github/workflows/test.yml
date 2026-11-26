@@ -160,3 +160,10 @@ jobs:
           fi
           test -f docker-compose.override.yml
           docker compose config >/dev/null
+
+  docker-trusted-checks-smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build image and execute trusted checks in Docker
+        run: ./scripts/docker-smoke-test.sh maomao-docker-smoke:ci
