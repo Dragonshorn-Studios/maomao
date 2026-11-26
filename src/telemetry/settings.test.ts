@@ -127,7 +127,7 @@ describe("channel resolution", () => {
 
   it("status reports per-field sources and fingerprints stored auth", () => {
     const { store: s } = store();
-    s.set("logs", { url: "https://oo.test/api/default/s/_json", token: "tok-1234abcd" });
+    s.set("logs", { url: "https://oo.test/api/default/s/_json", token: "tok-1234abcd" }); // gitleaks:allow — intentionally fake scanner fixture
     const statuses = s.status({ OPENOBSERVE_LOGS_TOKEN: "envtok" });
     const logs = statuses.find((c) => c.channel === "logs")!;
     expect(logs.urlSource).toBe("stored");

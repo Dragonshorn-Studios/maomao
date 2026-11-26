@@ -289,11 +289,11 @@ describe("safeHttpRequest", () => {
 describe("secretbox", () => {
   it("round-trips secrets and hints only the tail", () => {
     const key = Buffer.from(generateForgeKeyHex(), "hex");
-    const sealed = sealSecret(key, "glpat-abcdef123456");
+    const sealed = sealSecret(key, "glpat-abcdef123456"); // gitleaks:allow — intentionally fake scanner fixture
     expect(sealed).toMatch(/^v1\./);
-    expect(sealed).not.toContain("glpat-abcdef123456");
-    expect(openSecret(key, sealed)).toBe("glpat-abcdef123456");
-    expect(secretFingerprint("glpat-abcdef123456")).toBe("3456");
+    expect(sealed).not.toContain("glpat-abcdef123456"); // gitleaks:allow — intentionally fake scanner fixture
+    expect(openSecret(key, sealed)).toBe("glpat-abcdef123456"); // gitleaks:allow — intentionally fake scanner fixture
+    expect(secretFingerprint("glpat-abcdef123456")).toBe("3456"); // gitleaks:allow — intentionally fake scanner fixture
   });
 
   it("fails with the wrong key or a malformed sealed value", () => {
@@ -325,7 +325,7 @@ describe("ForgeConnectionStore", () => {
       tokenType: "project" as const,
       scopeType: "group" as const,
       scopePath: "acme",
-      webhookSecret: "whsec-1234567890",
+      webhookSecret: "whsec-1234567890", // gitleaks:allow — intentionally fake scanner fixture
       allowPrivateNetwork: true,
       allowInsecureHttp: false,
       allowApprove: false,
@@ -342,7 +342,7 @@ describe("ForgeConnectionStore", () => {
     expect(row.token_fingerprint).toBe("7890");
     const opened = store.open(row.id);
     expect(opened.token).toBe("glpat-token-1234567890");
-    expect(opened.webhookSecret).toBe("whsec-1234567890");
+    expect(opened.webhookSecret).toBe("whsec-1234567890"); // gitleaks:allow — intentionally fake scanner fixture
     expect(opened.instance.apiBaseUrl).toBe("https://gitlab.corp.internal/api/v4");
     expect(store.list("gitlab")).toHaveLength(1);
     expect(store.list("github")).toHaveLength(0);
@@ -351,10 +351,10 @@ describe("ForgeConnectionStore", () => {
   it("rotates the token via update and reports it through the fingerprint", () => {
     const store = newStore();
     const row = store.create(input());
-    store.update(row.id, { token: "glpat-rotated-9876543" });
+    store.update(row.id, { token: "glpat-rotated-9876543" }); // gitleaks:allow — intentionally fake scanner fixture
     const updated = store.get(row.id)!;
     expect(updated.token_fingerprint).toBe("6543");
-    expect(store.open(row.id).token).toBe("glpat-rotated-9876543");
+    expect(store.open(row.id).token).toBe("glpat-rotated-9876543"); // gitleaks:allow — intentionally fake scanner fixture
   });
 
   it("records probe results without inventing values", () => {

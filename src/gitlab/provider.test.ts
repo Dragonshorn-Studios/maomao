@@ -155,7 +155,7 @@ function connectionOn(store: ForgeConnectionStore, origin: string, overrides: Re
     provider: "gitlab",
     label: "acme",
     instanceUrl: origin,
-    token: "glpat-provider-token-value",
+    token: "glpat-provider-token-value", // gitleaks:allow — intentionally fake scanner fixture
     tokenType: "group",
     scopeType: "group",
     scopePath: "acme",
@@ -473,9 +473,9 @@ describe("GitLabProvider against the API v4 mock", () => {
     // Bearer is REST-only.
     expect(spec.gitAuthArgs.join(" ")).toContain("Authorization: Basic ");
     expect(spec.gitAuthArgs.join(" ")).not.toContain("Bearer");
-    expect(spec.secrets.some((secret) => secret.includes("glpat-provider-token-value"))).toBe(true);
+    expect(spec.secrets.some((secret) => secret.includes("glpat-provider-token-value"))).toBe(true); // gitleaks:allow — intentionally fake scanner fixture
     const basic = spec.secrets.find((secret) => !secret.startsWith("glpat-") && secret !== spec.gitAuthArgs[1]);
-    expect(spec.gitAuthArgs.join(" ")).not.toContain("glpat-provider-token-value");
+    expect(spec.gitAuthArgs.join(" ")).not.toContain("glpat-provider-token-value"); // gitleaks:allow — intentionally fake scanner fixture
     void basic;
   });
 
