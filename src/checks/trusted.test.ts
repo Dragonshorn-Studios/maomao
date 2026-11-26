@@ -55,7 +55,7 @@ function configFor(revision: string, trusted: string, workspaceRoot: string, uns
 
 describe("TrustedCheckRunner", () => {
   it("runs a pinned script, normalizes the result, and redacts exact secret values", async () => {
-    const secret = "ghp_testsecret123456789";
+    const secret = "ghp_testsecret123456789"; // gitleaks:allow — intentionally fake scanner fixture
     const fixture = await trustedFixture(`cat > "$MAOMAO_RESULT_PATH" <<'JSON'
 {"status":"failure","scanner":{"name":"fixture","version":"1"},"findings":[{"severity":"high","category":"secret","file":"a.ts","line":2,"summary":"token found","evidence":"value ${secret}","secret":"${secret}"}]}
 JSON

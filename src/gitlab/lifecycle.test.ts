@@ -300,7 +300,7 @@ describe("GitLab finding lifecycle parity", () => {
         provider: "gitlab",
         label: "acme",
         instanceUrl: origin,
-        token: "glpat-lifecycle-token-value",
+        token: "glpat-lifecycle-token-value", // gitleaks:allow — intentionally fake scanner fixture
         tokenType: "group",
         scopeType: "group",
         scopePath: "acme",
