@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "required_checks": [
+    "maomao/merge-readiness",
+    "test",
+    "docker-trusted-checks-smoke"
+  ]
+}
