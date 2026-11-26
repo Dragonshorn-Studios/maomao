@@ -128,11 +128,11 @@ export const THEME_CSS = `
   --code-fg: #1a221c;
 }
 [data-if-brand="apothecary"][data-if-theme="light"] body {
-  background: repeating-linear-gradient(0deg, transparent 0 27px, rgba(90, 98, 88, 0.055) 27px 28px), var(--paper);
+  background: repeating-linear-gradient(to bottom, transparent 0, transparent calc(1.4rem - 1px), color-mix(in srgb, var(--line) 32%, transparent) calc(1.4rem - 1px), color-mix(in srgb, var(--line) 32%, transparent) 1.4rem), var(--paper);
 }
 [data-if-brand="apothecary"][data-if-theme="dark"] body,
 [data-if-brand="apothecary"]:not([data-if-theme]) body {
-  background: repeating-linear-gradient(0deg, transparent 0 27px, rgba(232, 228, 214, 0.035) 27px 28px), var(--paper);
+  background: repeating-linear-gradient(to bottom, transparent 0, transparent calc(1.4rem - 1px), color-mix(in srgb, var(--line) 32%, transparent) calc(1.4rem - 1px), color-mix(in srgb, var(--line) 32%, transparent) 1.4rem), var(--paper);
 }
 
 /* Infernal's component library hardcodes part of its SaaS geometry and dark
@@ -199,6 +199,43 @@ export const THEME_CSS = `
   border-radius: 0;
 }
 
+/* The pre-Infernal UI was flat parchment: rectangular controls, no floating
+   hover lift, and live work marked by a thin side rule rather than a copper
+   glow pooled under the card. Keep those effects exclusive to mergehenna. */
+[data-if-brand="apothecary"] .if-button,
+[data-if-brand="apothecary"] .if-input,
+[data-if-brand="apothecary"] .if-select,
+[data-if-brand="apothecary"] .if-textarea,
+[data-if-brand="apothecary"] .if-rail__button[aria-pressed="true"]::before {
+  border-radius: 0;
+}
+[data-if-brand="apothecary"] .if-card--interactive:hover {
+  transform: none;
+}
+[data-if-brand="apothecary"] .if-card--ember::before,
+[data-if-brand="apothecary"] .if-card--ember::after,
+[data-if-brand="apothecary"] .if-stack-review::before,
+[data-if-brand="apothecary"] .if-stack-review::after,
+[data-if-brand="apothecary"] .if-panel:has(#build-progress)::before,
+[data-if-brand="apothecary"] .if-panel:has(#build-progress)::after,
+[data-if-brand="apothecary"] .specimen.is-live::after {
+  content: none;
+}
+[data-if-brand="apothecary"] .specimen.is-live::before {
+  inset: 0.65rem auto 0.65rem 0;
+  width: 3px;
+  background: var(--live);
+  filter: none;
+  animation: breathe 2.6s ease-in-out infinite;
+}
+[data-if-brand="apothecary"] .if-h1,
+[data-if-brand="apothecary"] .if-h2,
+[data-if-brand="apothecary"] .if-brand__title,
+[data-if-brand="apothecary"] .if-kpi__value {
+  font-family: var(--if-display);
+  letter-spacing: 0.01em;
+}
+
 
 @media (prefers-color-scheme: light) {
   :root[data-if-brand="apothecary"]:not([data-if-theme]) {
@@ -228,7 +265,7 @@ export const THEME_CSS = `
   --if-shadow: 0 1px 0 rgba(26, 34, 28, 0.04);
   }
   :root[data-if-brand="apothecary"]:not([data-if-theme]) body {
-    background: repeating-linear-gradient(0deg, transparent 0 27px, rgba(90, 98, 88, 0.055) 27px 28px), var(--paper);
+    background: repeating-linear-gradient(to bottom, transparent 0, transparent calc(1.4rem - 1px), color-mix(in srgb, var(--line) 32%, transparent) calc(1.4rem - 1px), color-mix(in srgb, var(--line) 32%, transparent) 1.4rem), var(--paper);
   }
 }
 
