@@ -32,6 +32,9 @@ import {
 import { enqueueClaimResult, emitWebhookHandled, recordWebhookDelivery } from "../forge/deliveries.js";
 import { logForgeWrite } from "../telemetry/forge-log.js";
 import { mergeGroupMetadata, mergeGroupPrimaryPrNumber, parseMergeGroupPayload } from "./merge-group.js";
+import { REVIEW_CHECK_NAME } from "../checks/review-check.js";
+import { MERGE_READINESS_NAME } from "../merge/lifecycle.js";
+import { TRUSTED_CHECK_NAMES, trustedCheckNativeName } from "../checks/trusted.js";
 
 export interface WebhookRequest {
   event: string;
@@ -177,6 +180,49 @@ export interface PullRequestWebhookPayload {
     base?: { sha?: string; ref?: string };
     head?: { sha?: string; ref?: string; repo?: { full_name?: string } | null };
   };
+}
+
+export interface CheckRunWebhookPayload {
+  action?: string;
+  installation?: { id?: number; account?: { id?: number } };
+  repository?: {
+    id?: number;
+    full_name?: string;
+    name?: string;
+    owner?: { login?: string; id?: number };
+  };
+  check_run?: {
+    id?: number;
+    name?: string;
+    head_sha?: string;
+    pull_requests?: Array<{
+      number?: number;
+      base?: { sha?: string; ref?: string };
+      head?: { sha?: string; ref?: string };
+    }>;
+  };
+  sender?: { login?: string; type?: string };
+}
+
+export interface CheckSuiteWebhookPayload {
+  action?: string;
+  installation?: { id?: number; account?: { id?: number } };
+  repository?: {
+    id?: number;
+    full_name?: string;
+    name?: string;
+    owner?: { login?: string; id?: number };
+  };
+  check_suite?: {
+    id?: number;
+    head_sha?: string;
+    pull_requests?: Array<{
+      number?: number;
+      base?: { sha?: string; ref?: string };
+      head?: { sha?: string; ref?: string };
+    }>;
+  };
+  sender?: { login?: string; type?: string };
 }
 
 export async function verifyGithubSignature(secret: string, rawBody: string, signature: string): Promise<boolean> {
@@ -447,6 +493,14 @@ async function handleGithubWebhookRequest(input: GithubWebhookInput): Promise<We
 
   if (input.request.event === "pull_request_review_comment") {
     return handleReviewCommentWebhook(input);
+  }
+
+  if (input.request.event === "check_run") {
+    return handleCheckRunWebhook(input);
+  }
+
+  if (input.request.event === "check_suite") {
+    return handleCheckSuiteWebhook(input);
   }
 
   if (input.request.event !== "pull_request") {
@@ -803,6 +857,73 @@ function mdInline(text: string): string {
   return "`" + text.replace(/[\r\n]+/g, " ").replace(/`/g, "'") + "`";
 }
 
+type FullReviewRequest =
+  | { kind: "upgraded"; jobId: number }
+  | { kind: "in-flight"; jobId: number; state: string }
+  | { kind: "retire-failed"; jobId: number }
+  | { kind: "skipped"; jobId: number; skippedReason?: string }
+  | { kind: "created"; jobId: number; enqueue: EnqueueResult };
+
+/** Shared exact-head full-review enqueue semantics for operator-initiated reruns. */
+async function enqueueFullReview(
+  input: {
+    config: Config;
+    store: JobStore;
+    github: GithubPort & Partial<ManualTriggerPort>;
+  },
+  options: {
+    pull: ResolvedPull;
+    installationId: number;
+    webhookDeliveryId?: string;
+    webhookEvent: string;
+  },
+): Promise<FullReviewRequest> {
+  const { pull } = options;
+  const occupant = input.store.reviewJobAtDedupSlot(pull.repoFullName, pull.prNumber, pull.headSha);
+  if (occupant && !TERMINAL_JOB_STATES.includes(occupant.state)) {
+    if (occupant.state === "queued" && occupant.review_mode === "verify") {
+      input.store.patchJob(occupant.id, { review_mode: "full" });
+      return { kind: "upgraded", jobId: occupant.id };
+    }
+    return { kind: "in-flight", jobId: occupant.id, state: occupant.state };
+  }
+  if (occupant) {
+    const retired = input.store.retireJobDedupKey(occupant.id, `rereview:${occupant.id}`);
+    if (!retired) return { kind: "retire-failed", jobId: occupant.id };
+  }
+
+  const enqueue = enqueuePullJob(input.store, input.config, {
+    repoFullName: pull.repoFullName,
+    repoOwner: pull.repoOwner,
+    repoName: pull.repoName,
+    installationId: options.installationId, // the webhook's installation — ResolvedPull leaves it 0
+    githubAccountId: pull.accountId || undefined,
+    githubRepositoryId: pull.repositoryId || undefined,
+    prNumber: pull.prNumber,
+    prTitle: pull.prTitle,
+    prBody: pull.prBody,
+    prHtmlUrl: pull.prHtmlUrl,
+    prAuthor: pull.prAuthor,
+    baseSha: pull.baseSha,
+    headSha: pull.headSha,
+    baseRef: pull.baseRef,
+    headRef: pull.headRef,
+    webhookDeliveryId: options.webhookDeliveryId,
+    webhookEvent: options.webhookEvent,
+    reviewMode: "full",
+  });
+  if (!enqueue.created) {
+    return { kind: "skipped", jobId: enqueue.job.id, skippedReason: enqueue.skippedReason };
+  }
+  await registerQueuedReviewer({
+    github: input.github,
+    config: input.config,
+    store: input.store,
+    job: enqueue.job,
+  });
+  return { kind: "created", jobId: enqueue.job.id, enqueue };
+}
+
 /**
  * "@<bot> review": an explicit operator re-review request. Unlike escalate
  * (a flag on the latest job) this produces a fresh FULL pr_review at the
@@ -939,16 +1060,21 @@ async function handleReviewCommand(
     return finish("review-draft", { ok: true, ignored: true, reason: "draft pull request" });
   }
 
-  const occupant = input.store.reviewJobAtDedupSlot(repoFullName, prNumber, pull.headSha);
-  if (occupant && !TERMINAL_JOB_STATES.includes(occupant.state)) {
-    // A queued verify-first job holds the slot but has not run: upgrade it
-    // to a full pass instead of stalling on the dedup.
-    if (occupant.state === "queued" && occupant.review_mode === "verify") {
-      input.store.patchJob(occupant.id, { review_mode: "full" });
-      await reply(`Re-review requested — queued job ${occupant.id} upgraded to a full specialist review.`);
-      return finish("review-upgraded", { ok: true, jobId: occupant.id, dispatchJobId: occupant.id });
-    }
-    await reply(`A review is already ${occupant.state} at this head — job ${occupant.id}.`);
+  const rerun = await enqueueFullReview(
+    { config: input.config, store: input.store, github: input.github },
+    {
+      pull,
+      installationId,
+      webhookDeliveryId: input.request.deliveryId,
+      webhookEvent: "issue_comment.review",
+    },
+  );
+  if (rerun.kind === "upgraded") {
+    await reply(`Re-review requested — queued job ${rerun.jobId} upgraded to a full specialist review.`);
+    return finish("review-upgraded", { ok: true, jobId: rerun.jobId, dispatchJobId: rerun.jobId });
+  }
+  if (rerun.kind === "in-flight") {
+    await reply(`A review is already ${rerun.state} at this head — job ${rerun.jobId}.`);
     logJobSkipped(input.store, {
       reason: "in_flight",
       repo: repoFullName,
@@ -956,45 +1082,21 @@ async function handleReviewCommand(
       event: input.request.event,
       deliveryId: input.request.deliveryId,
     });
-    return finish("review-in-flight", { ok: true, jobId: occupant.id, reason: `job already ${occupant.state} for this SHA` });
+    return finish("review-in-flight", { ok: true, jobId: rerun.jobId, reason: `job already ${rerun.state} for this SHA` });
   }
-  if (occupant) {
-    const retired = input.store.retireJobDedupKey(occupant.id, `rereview:${occupant.id}`);
-    if (!retired) {
-      await reply(`Could not re-review — job ${occupant.id} still holds this head's review slot.`);
-      logJobSkipped(input.store, {
-        reason: "retire_failed",
-        repo: repoFullName,
-        pr: prNumber,
-        event: input.request.event,
-        deliveryId: input.request.deliveryId,
-      });
-      return finish("review-retire-failed", { ok: false, error: "could not retire dedup slot", jobId: occupant.id });
-    }
+  if (rerun.kind === "retire-failed") {
+    await reply(`Could not re-review — job ${rerun.jobId} still holds this head's review slot.`);
+    logJobSkipped(input.store, {
+      reason: "retire_failed",
+      repo: repoFullName,
+      pr: prNumber,
+      event: input.request.event,
+      deliveryId: input.request.deliveryId,
+    });
+    return finish("review-retire-failed", { ok: false, error: "could not retire dedup slot", jobId: rerun.jobId });
   }
-
-  const enqueue = enqueuePullJob(input.store, input.config, {
-    repoFullName: pull.repoFullName,
-    repoOwner: pull.repoOwner,
-    repoName: pull.repoName,
-    installationId, // the webhook's installation — ResolvedPull leaves it 0
-    githubAccountId: pull.accountId || undefined,
-    githubRepositoryId: pull.repositoryId || undefined,
-    prNumber: pull.prNumber,
-    prTitle: pull.prTitle,
-    prBody: pull.prBody,
-    prHtmlUrl: pull.prHtmlUrl,
-    prAuthor: pull.prAuthor,
-    baseSha: pull.baseSha,
-    headSha: pull.headSha,
-    baseRef: pull.baseRef,
-    headRef: pull.headRef,
-    webhookDeliveryId: input.request.deliveryId,
-    webhookEvent: "issue_comment.review",
-    reviewMode: "full",
-  });
-  if (!enqueue.created) {
-    await reply(`Re-review not queued — ${mdInline(enqueue.skippedReason ?? "a job already exists for this head")}.`);
+  if (rerun.kind === "skipped") {
+    await reply(`Re-review not queued — ${mdInline(rerun.skippedReason ?? "a job already exists for this head")}.`);
     logJobSkipped(input.store, {
       reason: "dedup",
       repo: repoFullName,
@@ -1002,16 +1104,269 @@ async function handleReviewCommand(
       event: input.request.event,
       deliveryId: input.request.deliveryId,
     });
-    return finish("review-skipped", { ok: true, created: false, skippedReason: enqueue.skippedReason, jobId: enqueue.job.id });
+    return finish("review-skipped", { ok: true, created: false, skippedReason: rerun.skippedReason, jobId: rerun.jobId });
   }
-  await registerQueuedReviewer({
-    github: input.github,
-    config: input.config,
-    store: input.store,
-    job: enqueue.job,
+  await reply(`Queued a full re-review of ${mdInline(pull.headSha.slice(0, 8))} — job ${rerun.jobId}.`);
+  return finish("review", { ok: true, created: true, jobId: rerun.jobId, enqueue: rerun.enqueue });
+}
+
+const RERUNNABLE_CHECK_NAMES = new Set([
+  REVIEW_CHECK_NAME,
+  MERGE_READINESS_NAME,
+  ...TRUSTED_CHECK_NAMES.map((name) => trustedCheckNativeName(name)),
+]);
+
+type CheckPullLink = {
+  number?: number;
+  head?: { sha?: string };
+};
+
+function matchingPayloadPullNumbers(pulls: CheckPullLink[], headSha: string): Set<number> {
+  return new Set(
+    pulls
+      .filter((pull) => pull.number && (!pull.head?.sha || pull.head.sha === headSha))
+      .map((pull) => pull.number!)
+      .filter((number) => Number.isInteger(number) && number > 0),
+  );
+}
+
+function resolveCheckRerunPullNumber(
+  payloadPullNumbers: Set<number>,
+  publicationPrNumbers: number[] = [],
+): number | undefined {
+  const publicationNumbers = [...new Set(publicationPrNumbers)].filter((number) => Number.isInteger(number) && number > 0);
+  let candidates = publicationNumbers;
+  if (candidates.length && payloadPullNumbers.size) {
+    candidates = candidates.filter((number) => payloadPullNumbers.has(number));
+  }
+  if (!candidates.length && !publicationNumbers.length) {
+    candidates = [...payloadPullNumbers];
+  }
+  return candidates.length === 1 ? candidates[0] : undefined;
+}
+
+async function processCheckRerequest(
+  input: GithubWebhookInput,
+  context: {
+    resultPrefix: "check-run" | "check-suite";
+    webhookEvent: "check_run.rerequested" | "check_suite.rerequested";
+    objectNoun: "check run" | "check suite";
+    headSha: string;
+    publicationCheckName: string;
+    installationId: number;
+    accountId?: number;
+    repositoryId?: number;
+    repoOwner: string;
+    repoName: string;
+    repoFullName: string;
+    actorLogin?: string;
+    actorType?: string;
+    payloadPullNumbers: Set<number>;
+  },
+): Promise<WebhookHandleResult> {
+  const prefix = context.resultPrefix;
+  const finish = (result: string, body: Record<string, unknown>, status = 200): WebhookHandleResult => {
+    input.store.claimWebhookDelivery(input.request.deliveryId, input.request.event, result);
+    return {
+      status,
+      body,
+      dispatchJobId: typeof body.dispatchJobId === "number" ? body.dispatchJobId : undefined,
+      enqueue: body.enqueue as WebhookHandleResult["enqueue"],
+    };
+  };
+  const ignore = (result: string, reason: string, extra: Record<string, unknown> = {}) =>
+    finish(result, { ok: true, ignored: true, reason, ...extra }, 202);
+
+  if (!context.actorLogin || isBotActor({ login: context.actorLogin, type: context.actorType })) {
+    return ignore(`${prefix}-unauthorized`, "check rerun requester is missing or is a bot");
+  }
+  if (!input.github || typeof input.github.getPull !== "function") {
+    return ignore(`${prefix}-missing-github`, "missing github context for check rerun");
+  }
+
+  const publicationPrNumbers = input.store
+    .listCheckPublicationsForHead({
+      repoFullName: context.repoFullName,
+      headSha: context.headSha,
+      name: context.publicationCheckName,
+    })
+    .map((publication) => publication.pr_number);
+  const prNumber = resolveCheckRerunPullNumber(context.payloadPullNumbers, publicationPrNumbers);
+  if (!prNumber) {
+    return ignore(`${prefix}-unresolved-pr`, `${context.objectNoun} is not linked to exactly one matching pull request`);
+  }
+
+  const permission = await input.github.getCollaboratorPermission(
+    context.installationId,
+    context.repoOwner,
+    context.repoName,
+    context.actorLogin,
+  );
+  if (!canIssueOverride(permission)) {
+    return ignore(`${prefix}-unauthorized`, "actor is not authorized to rerun checks", { actor: context.actorLogin, permission });
+  }
+
+  let pull: ResolvedPull;
+  try {
+    pull = await input.github.getPull(context.installationId, context.repoOwner, context.repoName, prNumber);
+  } catch (error) {
+    return { status: 400, body: { error: `pull unresolved: ${error instanceof Error ? error.message : String(error)}` } };
+  }
+
+  const auth = rejectUnauthorized(input.config, {
+    installationId: pull.installationId || context.installationId,
+    accountId: pull.accountId || context.accountId,
+    repositoryId: pull.repositoryId || context.repositoryId,
   });
-  await reply(`Queued a full re-review of ${mdInline(pull.headSha.slice(0, 8))} — job ${enqueue.job.id}.`);
-  return finish("review", { ok: true, created: true, jobId: enqueue.job.id, enqueue });
+  if (!auth.ok) return ignore(`${prefix}-unauthorized-target`, auth.reason);
+  if (input.store.hasMergedPull(context.repoFullName, prNumber)) {
+    return ignore(`${prefix}-merged`, "pull request already merged");
+  }
+  if (pull.draft && !input.config.reviewDrafts) {
+    return ignore(`${prefix}-draft`, "draft pull request");
+  }
+  if (pull.headSha !== context.headSha) {
+    return ignore(`${prefix}-stale`, `${context.objectNoun} SHA is not the pull request's current head`, {
+      requestedHeadSha: context.headSha,
+      currentHeadSha: pull.headSha,
+    });
+  }
+
+  const rerun = await enqueueFullReview(
+    { config: input.config, store: input.store, github: input.github },
+    {
+      pull,
+      installationId: context.installationId,
+      webhookDeliveryId: input.request.deliveryId,
+      webhookEvent: context.webhookEvent,
+    },
+  );
+  if (rerun.kind === "upgraded") {
+    return finish(`${prefix}-rerun-upgraded`, { ok: true, jobId: rerun.jobId, dispatchJobId: rerun.jobId });
+  }
+  if (rerun.kind === "in-flight") {
+    return finish(`${prefix}-rerun-in-flight`, { ok: true, jobId: rerun.jobId, reason: `job already ${rerun.state} for this SHA` });
+  }
+  if (rerun.kind === "retire-failed") {
+    return finish(`${prefix}-rerun-retire-failed`, { ok: false, error: "could not retire dedup slot", jobId: rerun.jobId });
+  }
+  if (rerun.kind === "skipped") {
+    return finish(`${prefix}-rerun-skipped`, {
+      ok: true,
+      created: false,
+      skippedReason: rerun.skippedReason,
+      jobId: rerun.jobId,
+    });
+  }
+  return finish(`${prefix}-rerun`, { ok: true, created: true, jobId: rerun.jobId, enqueue: rerun.enqueue });
+}
+
+/**
+ * GitHub's check-run rerun button produces `check_run.rerequested`. Maomao's
+ * checks are publications from one exact-head review job rather than four
+ * independently executable scanners, so any Maomao check rerun requeues that
+ * whole job. The event still resolves the live pull and refuses a stale SHA.
+ */
+async function handleCheckRunWebhook(input: GithubWebhookInput): Promise<WebhookHandleResult> {
+  let payload: CheckRunWebhookPayload;
+  try {
+    payload = JSON.parse(input.request.rawBody) as CheckRunWebhookPayload;
+  } catch {
+    return { status: 400, body: { error: "invalid JSON" } };
+  }
+
+  const finish = (result: string, body: Record<string, unknown>, status = 200): WebhookHandleResult => {
+    input.store.claimWebhookDelivery(input.request.deliveryId, input.request.event, result);
+    return {
+      status,
+      body,
+      dispatchJobId: typeof body.dispatchJobId === "number" ? body.dispatchJobId : undefined,
+      enqueue: body.enqueue as WebhookHandleResult["enqueue"],
+    };
+  };
+  const ignore = (result: string, reason: string, extra: Record<string, unknown> = {}) =>
+    finish(result, { ok: true, ignored: true, reason, ...extra }, 202);
+
+  if (payload.action !== "rerequested") {
+    return ignore(`check-run-action-${payload.action ?? "unknown"}`, `ignored check_run action ${payload.action ?? "unknown"}`);
+  }
+  const checkRun = payload.check_run;
+  const installationId = numericId(payload.installation?.id);
+  const repoOwner = payload.repository?.owner?.login;
+  const repoName = payload.repository?.name;
+  const repoFullName = payload.repository?.full_name;
+  if (!checkRun?.name || !checkRun.head_sha || !installationId || !repoOwner || !repoName || !repoFullName) {
+    return { status: 400, body: { error: "check_run payload missing installation, repository, or check-run context" } };
+  }
+  if (!RERUNNABLE_CHECK_NAMES.has(checkRun.name)) {
+    return ignore("check-run-not-maomao", `check run ${checkRun.name} is not managed by Maomao`);
+  }
+
+  return processCheckRerequest(input, {
+    resultPrefix: "check-run",
+    webhookEvent: "check_run.rerequested",
+    objectNoun: "check run",
+    headSha: checkRun.head_sha,
+    publicationCheckName: checkRun.name,
+    installationId,
+    accountId: numericId(payload.installation?.account?.id) ?? numericId(payload.repository?.owner?.id),
+    repositoryId: numericId(payload.repository?.id),
+    repoOwner,
+    repoName,
+    repoFullName,
+    actorLogin: payload.sender?.login,
+    actorType: payload.sender?.type,
+    payloadPullNumbers: matchingPayloadPullNumbers(checkRun.pull_requests ?? [], checkRun.head_sha),
+  });
+}
+
+/**
+ * GitHub's "re-run all checks" control targets the whole per-app check suite.
+ * It has the same exact-head safety requirements as an individual check rerun.
+ */
+async function handleCheckSuiteWebhook(input: GithubWebhookInput): Promise<WebhookHandleResult> {
+  let payload: CheckSuiteWebhookPayload;
+  try {
+    payload = JSON.parse(input.request.rawBody) as CheckSuiteWebhookPayload;
+  } catch {
+    return { status: 400, body: { error: "invalid JSON" } };
+  }
+
+  const finish = (result: string, body: Record<string, unknown>, status = 200): WebhookHandleResult => {
+    input.store.claimWebhookDelivery(input.request.deliveryId, input.request.event, result);
+    return { status, body };
+  };
+  const ignore = (result: string, reason: string) =>
+    finish(result, { ok: true, ignored: true, reason }, 202);
+
+  if (payload.action !== "rerequested") {
+    return ignore(`check-suite-action-${payload.action ?? "unknown"}`, `ignored check_suite action ${payload.action ?? "unknown"}`);
+  }
+  const checkSuite = payload.check_suite;
+  const installationId = numericId(payload.installation?.id);
+  const repoOwner = payload.repository?.owner?.login;
+  const repoName = payload.repository?.name;
+  const repoFullName = payload.repository?.full_name;
+  if (!checkSuite?.head_sha || !installationId || !repoOwner || !repoName || !repoFullName) {
+    return { status: 400, body: { error: "check_suite payload missing installation, repository, or check-suite context" } };
+  }
+
+  return processCheckRerequest(input, {
+    resultPrefix: "check-suite",
+    webhookEvent: "check_suite.rerequested",
+    objectNoun: "check suite",
+    headSha: checkSuite.head_sha,
+    publicationCheckName: REVIEW_CHECK_NAME,
+    installationId,
+    accountId: numericId(payload.installation?.account?.id) ?? numericId(payload.repository?.owner?.id),
+    repositoryId: numericId(payload.repository?.id),
+    repoOwner,
+    repoName,
+    repoFullName,
+    actorLogin: payload.sender?.login,
+    actorType: payload.sender?.type,
+    payloadPullNumbers: matchingPayloadPullNumbers(checkSuite.pull_requests ?? [], checkSuite.head_sha),
+  });
 }
 
 // Stack commands are privileged: allowlisted bot identities, or humans with

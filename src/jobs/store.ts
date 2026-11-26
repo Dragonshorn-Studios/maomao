@@ -1453,6 +1453,23 @@ export class JobStore {
       | undefined;
   }
 
+  /** Durable PR associations for one logical native check at one exact SHA. */
+  listCheckPublicationsForHead(input: {
+    repoFullName: string;
+    headSha: string;
+    name: string;
+    provider?: string;
+    providerInstance?: string;
+  }): CheckPublicationRow[] {
+    const scope = normalizeScope({ provider: input.provider, instance: input.providerInstance });
+    return this.db
+      .prepare(
+        `SELECT * FROM check_publications
+         WHERE provider = ? AND provider_instance = ? AND repo_full_name = ? AND head_sha = ? AND name = ?`,
+      )
+      .all(scope.provider, scope.instance, input.repoFullName, input.headSha, input.name) as CheckPublicationRow[];
+  }
+
   recordTrustedCheckResult(input: CheckPublicationKey & {
     jobId: number;
     status: string;
