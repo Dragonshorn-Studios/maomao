@@ -32,6 +32,7 @@ export {
 export { renderPromptConfigPage, type PromptConfigPageData } from "./pages.js";
 export { renderConnectionsPage, type ConnectionsPageData } from "./connections.js";
 export { renderProvidersPage, type ProvidersPageData } from "./providers.js";
+export { renderAppearancePage, type AppearancePageData } from "./appearance.js";
 export { renderHealthPage, type HealthPageData } from "./health.js";
 export {
   renderScanPage,

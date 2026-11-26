@@ -273,6 +273,16 @@ function migrate(db: SqliteDb): void {
       updated_at TEXT NOT NULL
     );
 
+    CREATE TABLE IF NOT EXISTS ui_settings (
+      id INTEGER PRIMARY KEY CHECK (id = 1),
+      theme_pack TEXT NOT NULL DEFAULT '',
+      copy_flavor TEXT NOT NULL DEFAULT '',
+      name TEXT NOT NULL DEFAULT '',
+      tagline TEXT NOT NULL DEFAULT '',
+      description TEXT NOT NULL DEFAULT '',
+      updated_at TEXT NOT NULL
+    );
+
     CREATE TABLE IF NOT EXISTS merge_mode_settings (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       provider TEXT NOT NULL DEFAULT '',

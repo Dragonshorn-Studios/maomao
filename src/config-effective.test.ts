@@ -6,6 +6,7 @@ import { loadConfig } from "./config.js";
 import { effectiveConfigEntries } from "./config-effective.js";
 import type { ProfileRevisionRow } from "./config-revisions.js";
 import { TelemetrySettingsStore } from "./telemetry/settings.js";
+import { resolveInstanceBranding } from "./branding.js";
 
 function telemetryStore(): TelemetrySettingsStore {
   return new TelemetrySettingsStore(
@@ -67,6 +68,23 @@ describe("effectiveConfigEntries", () => {
       "(empty — reconciliation verification disabled; priors left open)",
     );
     expect(find(entries, "Router model (env/defaults)").value).toBe("(empty — deterministic routing in hybrid mode)");
+  });
+
+  it("labels stored instance branding separately from defaults and env overrides", () => {
+    const stored = { themePack: "mergehenna" as const, copyFlavor: "plain" as const, name: "Review Desk" };
+    const config = loadConfig({});
+    config.branding = resolveInstanceBranding({}, stored);
+    const entries = effectiveConfigEntries(config, {}, null, telemetryStore(), stored);
+    expect(find(entries, "Instance display name").source).toBe("stored");
+    expect(find(entries, "Instance tagline").source).toBe("stored");
+    expect(find(entries, "Theme pack").source).toBe("stored");
+    expect(find(entries, "Flavor copy pack").source).toBe("stored");
+
+    const envConfig = loadConfig({ UI_INSTANCE_NAME: "Env Console" });
+    envConfig.branding = resolveInstanceBranding({ UI_INSTANCE_NAME: "Env Console" }, stored);
+    const envEntries = effectiveConfigEntries(envConfig, { UI_INSTANCE_NAME: "Env Console" }, null, telemetryStore(), stored);
+    expect(find(envEntries, "Instance display name").source).toBe("environment");
+    expect(find(envEntries, "Theme pack").source).toBe("stored");
   });
 
   it("labels environment-backed values and their variable wins over defaults", () => {

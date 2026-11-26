@@ -20,6 +20,8 @@ import { ForgeRegistry } from "./forge/registry.js"
 import { TelemetrySettingsStore, telemetryConfigPath } from "./telemetry/settings.js";
 import { TrustedCheckSettingsStore } from "./checks/settings.js";
 import { MergeModeSettingsStore } from "./merge/settings.js";
+import { UiSettingsStore } from "./ui/settings.js";
+import { resolveInstanceBranding } from "./branding.js";
 import { ForgejoMergeReconciler } from "./merge/reconcile.js";
 import { emitAppLog } from "./telemetry/app-log.js";
 import { RepoRateLimiter } from "./github/rate-limit.js";
@@ -56,6 +58,10 @@ assertRuntimeConfig(config, {
 const telemetrySettings = new TelemetrySettingsStore(telemetryConfigPath(process.env));
 const trustedCheckSettings = new TrustedCheckSettingsStore(db, config.trustedChecks);
 const mergeModeSettings = new MergeModeSettingsStore(db);
+const uiSettings = new UiSettingsStore(db);
+const bootBranding = resolveInstanceBranding(process.env, uiSettings.stored());
+config.branding = bootBranding;
+config.uiFlavor = bootBranding.copyFlavor;
 const store = new JobStore(db, config.modelCatalog, {
   emitJobSummaries: config.jobSummaries,
   telemetry: telemetrySettings,
@@ -146,6 +152,7 @@ const app = createApp({
   telemetrySettings,
   trustedCheckSettings,
   mergeModeSettings,
+  uiSettings,
   rateLimiter,
   startedAt: Date.now(),
   env: process.env,

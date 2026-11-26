@@ -63,6 +63,7 @@ import {
   renderLogin,
   renderPromptConfigPage,
   renderHealthPage,
+  renderAppearancePage,
   THEME_CSS,
   THEME_URL,
   INFERNAL_CSS,
@@ -108,6 +109,8 @@ import { parseBriefPayload } from "./jobs/brief.js";
 import { MERGE_READINESS_NAME, mergeLifecycleFor } from "./merge/lifecycle.js";
 import { MergeCapabilityService } from "./merge/capability.js";
 import type { MergeModeSettingsStore } from "./merge/settings.js";
+import type { UiSettingsStore } from "./ui/settings.js";
+import { resolveInstanceBranding, type UiFlavor, type UiThemePack } from "./branding.js";
 import { renderMergeModesPage } from "./ui/merge-modes.js";
 import type { ForgeRegistry } from "./forge/registry.js";
 import type { JobRow } from "./jobs/store.js";
@@ -172,6 +175,8 @@ export interface ServerContext {
   trustedCheckSettings?: TrustedCheckSettingsStore;
   /** Operator-managed merge-mode opt-in policy for /config/merge-modes. */
   mergeModeSettings?: MergeModeSettingsStore;
+  /** Operator-managed instance branding for /config/appearance. */
+  uiSettings?: UiSettingsStore;
   /** Injectable transport for the telemetry connection probe (tests). */
   telemetryFetch?: typeof fetch;
   /** The environment loadConfig consumed; defaults to process.env. Injectable for tests. */
@@ -386,6 +391,13 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
   const passwordLoginOn = passwordGateOn && (!oauthOn || ctx.config.uiLocalLogin);
   const pageOpts = { showLogout: gateOn, uiFlavor: ctx.config.uiFlavor, branding: ctx.config.branding, mentionName: ctx.config.poisonAlert.mentionName };
   const loginPageOpts = { showGithub: oauthOn, showPassword: passwordLoginOn, branding: ctx.config.branding };
+  const applyInstanceBranding = (env: NodeJS.ProcessEnv) => {
+    const branding = resolveInstanceBranding(env, ctx.uiSettings?.stored() ?? {});
+    Object.assign(ctx.config.branding, branding);
+    ctx.config.uiFlavor = branding.copyFlavor;
+    pageOpts.uiFlavor = branding.copyFlavor;
+  };
+  if (ctx.uiSettings) applyInstanceBranding(ctx.env ?? process.env);
   const renderLoginDenied = (c: Context<AppEnv>) => {
     deleteCookie(c, SESSION_COOKIE, { path: "/" });
     return c.html(renderLogin({ ...loginPageOpts, error: "oauth-denied" }), 403);
@@ -695,22 +707,22 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
 
   app.get(TELEMETRY_PAGE_HREF, (c) => staticAsset(c, TELEMETRY_PAGE_JS, "text/javascript; charset=utf-8"));
 
-  // Brand icons come from the configured built-in pack; asset paths stay stable.
-  const brandAssets = themePackAssets(ctx.config.branding.themePack);
-  const iconAssets: Array<[string, string, string]> = [
-    // [path, content-type, source]
-    ["/assets/favicon.svg", "image/svg+xml", brandAssets.faviconSvg],
-    ["/assets/icon.svg", "image/svg+xml", brandAssets.faviconSvg],
+  // Brand icons come from the active built-in pack; asset paths stay stable
+  // while the operator appearance setting may change the pack at runtime.
+  const brandAssets = () => themePackAssets(ctx.config.branding.themePack);
+  const iconAssets: Array<[string, string, () => string]> = [
+    ["/assets/favicon.svg", "image/svg+xml", () => brandAssets().faviconSvg],
+    ["/assets/icon.svg", "image/svg+xml", () => brandAssets().faviconSvg],
   ];
   for (const [path, contentType, body] of iconAssets) {
-    app.get(path, (c) => staticAsset(c, body, `${contentType}; charset=utf-8`));
+    app.get(path, (c) => staticAsset(c, body(), `${contentType}; charset=utf-8`));
   }
-  const pngAssets: Array<[string, string]> = [
-    ["/assets/favicon.png", brandAssets.faviconPngBase64],
-    ["/assets/icon.png", brandAssets.iconPngBase64],
+  const pngAssets: Array<[string, () => string]> = [
+    ["/assets/favicon.png", () => brandAssets().faviconPngBase64],
+    ["/assets/icon.png", () => brandAssets().iconPngBase64],
   ];
   for (const [path, base64] of pngAssets) {
-    app.get(path, (c) => staticAsset(c, new Uint8Array(Buffer.from(base64, "base64")), "image/png"));
+    app.get(path, (c) => staticAsset(c, new Uint8Array(Buffer.from(base64(), "base64")), "image/png"));
   }
 
   app.post("/webhooks/github", async (c) => {
@@ -1702,6 +1714,58 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
     );
   };
 
+  const renderAppearance = (
+    c: Context<AppEnv>,
+    extra: { notice?: string; error?: string; status?: number } = {},
+  ) => {
+    if (!ctx.uiSettings) return c.text("Appearance settings are unavailable on this process", 503);
+    const env = ctx.env ?? process.env;
+    const stored = ctx.uiSettings.stored();
+    return c.html(
+      renderAppearancePage({
+        effective: resolveInstanceBranding(env, stored),
+        stored,
+        hasStored: ctx.uiSettings.hasStored(),
+        env,
+        csrfToken: gateOn ? ensureCsrfToken(c, ctx.config.uiSessionSecret) : undefined,
+        canWrite: gateOn,
+        options: { ...pageOpts, identity: c.get("identity"), notice: extra.notice, error: extra.error },
+      }),
+      (extra.status ?? 200) as 200 | 400 | 503,
+    );
+  };
+
+  app.get("/config/appearance", (c) => {
+    if (!gateOn) return c.redirect("/", 302);
+    return renderAppearance(c, { notice: c.req.query("notice") ?? undefined });
+  });
+
+  app.post("/config/appearance", async (c) => {
+    if (!gateOn) return c.redirect("/", 302);
+    if (!ctx.uiSettings) return c.text("Appearance settings are unavailable on this process", 503);
+    const body = await c.req.parseBody();
+    const text = (name: string) => (typeof body[name] === "string" ? (body[name] as string) : undefined);
+    const result = ctx.uiSettings.save({
+      themePack: text("themePack") as UiThemePack | undefined,
+      copyFlavor: text("copyFlavor") as UiFlavor | undefined,
+      name: text("name"),
+      tagline: text("tagline"),
+      description: text("description"),
+    });
+    if (!result.ok) return renderAppearance(c, { error: result.error, status: 400 });
+    applyInstanceBranding(ctx.env ?? process.env);
+    return c.redirect(`/config/appearance?notice=${encodeURIComponent("Appearance saved. New pages use the updated instance branding immediately.")}`, 303);
+  });
+
+  app.post("/config/appearance/delete", (c) => {
+    if (!gateOn) return c.redirect("/", 302);
+    if (!ctx.uiSettings) return c.text("Appearance settings are unavailable on this process", 503);
+    const result = ctx.uiSettings.clear();
+    applyInstanceBranding(ctx.env ?? process.env);
+    const note = result.removed ? "Stored appearance settings cleared." : "No stored appearance settings.";
+    return c.redirect(`/config/appearance?notice=${encodeURIComponent(note)}`, 303);
+  });
+
   app.get("/config/trusted-checks", (c) => {
     if (!gateOn) return c.redirect("/", 302);
     return renderTrustedChecks(c, { notice: c.req.query("notice") ?? undefined, error: c.req.query("error") ?? undefined });
@@ -2072,6 +2136,7 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
           ctx.env ?? process.env,
           ctx.store.configs.getActiveRevision("default") ?? null,
           telemetrySettings(),
+          ctx.uiSettings?.stored() ?? {},
         ),
       }),
     );

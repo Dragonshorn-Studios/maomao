@@ -79,6 +79,7 @@ export type QueueView = "merge" | "ops" | "all";
  * config sub-nav: connections and health join the operator surfaces here. */
 export type SettingsSection =
   | "effective"
+  | "appearance"
   | "profiles"
   | "providers"
   | "telemetry"
@@ -96,9 +97,15 @@ export function pageBranding(options: Pick<PageOptions, "branding"> | undefined)
 
 const SETTINGS_NAV: Array<{ group: string; items: Array<[SettingsSection, string, string]> }> = [
   {
-    group: "Review configuration",
+    group: "Instance",
     items: [
       ["effective", "/config", "Effective configuration"],
+      ["appearance", "/config/appearance", "Appearance"],
+    ],
+  },
+  {
+    group: "Review configuration",
+    items: [
       ["profiles", "/config/profiles", "Profiles"],
       ["prompts", "/config/prompts", "Specialist prompts"],
       ["trusted-checks", "/config/trusted-checks", "Trusted checks"],
