@@ -92,8 +92,12 @@ export const THEME_CSS = `
   --if-info: #9dbbe0;
   --if-info-soft: #223242;
   --if-shadow: 0 1px 0 rgba(0, 0, 0, 0.25);
+  --code-bg: #0e120e;
+  --code-fg: #d9d4c4;
   --if-radius-sm: 3px;
-  --if-radius: 5px;
+  --if-radius: 3px;
+  --if-font: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  --if-mono: ui-monospace, "SFMono-Regular", "Cascadia Mono", "Cascadia Code", "Liberation Mono", Menlo, Monaco, Consolas, monospace;
   --if-display: "Iowan Old Style", Palatino, "Palatino Linotype", "Book Antiqua", Georgia, "Times New Roman", serif;
 }
 [data-if-brand="apothecary"][data-if-theme="light"] {
@@ -120,6 +124,8 @@ export const THEME_CSS = `
   --if-info: #2f5d88;
   --if-info-soft: #dfe9f1;
   --if-shadow: 0 1px 0 rgba(26, 34, 28, 0.04);
+  --code-bg: #eae4d4;
+  --code-fg: #1a221c;
 }
 [data-if-brand="apothecary"][data-if-theme="light"] body {
   background: repeating-linear-gradient(0deg, transparent 0 27px, rgba(90, 98, 88, 0.055) 27px 28px), var(--paper);
@@ -127,6 +133,64 @@ export const THEME_CSS = `
 [data-if-brand="apothecary"][data-if-theme="dark"] body,
 [data-if-brand="apothecary"]:not([data-if-theme]) body {
   background: repeating-linear-gradient(0deg, transparent 0 27px, rgba(232, 228, 214, 0.035) 27px 28px), var(--paper);
+}
+
+/* Infernal's component library hardcodes part of its SaaS geometry and dark
+   code wells. Apothecary keeps circular affordances circular, but otherwise
+   returns rectangular surfaces, controls, navigation, and code blocks to the
+   base Maomao geometry instead of letting those library values leak through. */
+[data-if-brand="apothecary"] .if-badge,
+[data-if-brand="apothecary"] .if-tabs,
+[data-if-brand="apothecary"] .if-tab,
+[data-if-brand="apothecary"] .if-progress,
+[data-if-brand="apothecary"] .if-avatar,
+[data-if-brand="apothecary"] .if-activity,
+[data-if-brand="apothecary"] .if-skeleton,
+[data-if-brand="apothecary"] .if-dialog,
+[data-if-brand="apothecary"] .if-popover,
+[data-if-brand="apothecary"] .if-menu-item,
+[data-if-brand="apothecary"] .if-brand__mark,
+[data-if-brand="apothecary"] .if-nav-link,
+[data-if-brand="apothecary"] .if-stack-track a,
+[data-if-brand="apothecary"] .if-stack-track span,
+[data-if-brand="apothecary"] .if-reviewer-card,
+[data-if-brand="apothecary"] .if-reviewer-card__icon,
+[data-if-brand="apothecary"] .if-finding,
+[data-if-brand="apothecary"] .if-tool-card,
+[data-if-brand="apothecary"] .if-approval,
+[data-if-brand="apothecary"] .if-metric-strip,
+[data-if-brand="apothecary"] .if-command-list,
+[data-if-brand="apothecary"] .if-log,
+[data-if-brand="apothecary"] .if-screen-preview,
+[data-if-brand="apothecary"] .if-rail-layout,
+[data-if-brand="apothecary"] .if-rail__logo,
+[data-if-brand="apothecary"] .if-rail__button,
+[data-if-brand="apothecary"] .if-context-nav__item {
+  border-radius: 3px;
+}
+[data-if-brand="apothecary"] .if-chat__bubble {
+  border-radius: 3px;
+}
+[data-if-brand="apothecary"] .if-avatar--round {
+  border-radius: 50%;
+}
+[data-if-brand="apothecary"] .if-code,
+[data-if-brand="apothecary"] .if-diff,
+[data-if-brand="apothecary"] .if-log {
+  background: var(--code-bg);
+  border-color: var(--line);
+  color: var(--code-fg);
+}
+
+[data-if-brand="apothecary"] .appearance {
+  border-radius: 0;
+  padding: 0.1rem;
+  gap: 0.1rem;
+}
+[data-if-brand="apothecary"] .appearance button {
+  border-radius: 0;
+  font-size: 0.75rem;
+  font-weight: inherit;
 }
 
 
