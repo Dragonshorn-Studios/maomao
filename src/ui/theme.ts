@@ -193,6 +193,12 @@ export const THEME_CSS = `
   font-weight: inherit;
 }
 
+[data-if-brand="apothecary"] .state,
+[data-if-brand="apothecary"] .kind-chip,
+[data-if-brand="apothecary"] .sev {
+  border-radius: 0;
+}
+
 
 @media (prefers-color-scheme: light) {
   :root[data-if-brand="apothecary"]:not([data-if-theme]) {
