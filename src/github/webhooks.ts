@@ -2,6 +2,7 @@ import { verify } from "@octokit/webhooks-methods";
 import type { Config, PullRequestAction } from "../config.js";
 import { TERMINAL_JOB_STATES } from "../config.js";
 import { canIssueOverride, parseOverrideCommand } from "../findings/commands.js";
+import { commandMentionNames } from "../mentions.js";
 import {
   isMaomaoLogin,
   isMaomaoThread,
@@ -154,7 +155,7 @@ export interface ReviewCommentWebhookPayload {
     body?: string;
     path?: string | null;
     in_reply_to_id?: number | null;
-    user?: { login?: string };
+    user?: { login?: string; type?: string };
     author_association?: string;
   };
 }
@@ -724,6 +725,7 @@ async function handleIssueComment(input: {
   // Stack commands run before the bot filter: allowlisted automation
   // identities (MAOMAO_STACK_AUTHORS) may issue them; every other actor is
   // authorized by collaborator permission inside the handler.
+  const mentionNames = commandMentionNames(input.config.poisonAlert);
   const stackCommand = parseStackCommand(body);
   if (stackCommand || looksLikeStackCommand(body)) {
     return handleStackCommand(input, payload, stackCommand);
@@ -736,10 +738,10 @@ async function handleIssueComment(input: {
   }
   // "@<bot> review" — explicit re-review request: enqueues a fresh full
   // specialist pass on the current head, never a verify-first run.
-  if (mentionsReviewCommand(body, input.config.poisonAlert.mentionName)) {
+  if (mentionsReviewCommand(body, mentionNames)) {
     return handleReviewCommand(input, payload);
   }
-  if (!mentionsEscalateCommand(body, input.config.poisonAlert.mentionName, input.config.poisonAlert.escalateCommand)) {
+  if (!mentionsEscalateCommand(body, mentionNames, input.config.poisonAlert.escalateCommand)) {
     return { status: 202, body: { ok: true, ignored: true, reason: "not an escalate command" } };
   }
   const installationId = payload.installation?.id;
@@ -2164,6 +2166,17 @@ async function handleStackBodyMarker(
   return fallThroughOnError(await runStackEnd(ctx, marker.stackId));
 }
 
+async function webhookAppSlug(input: { config: Config; github?: GithubPort }): Promise<string> {
+  if (input.config.github.appSlug) return input.config.github.appSlug;
+  try {
+    return (await input.github?.getAppSlug?.()) || "";
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    console.error(`github webhook: app slug lookup failed; falling back to default bot identity: ${detail}`);
+    return "";
+  }
+}
+
 async function handleReviewCommentWebhook(input: {
   config: Config;
   store: JobStore;
@@ -2187,7 +2200,8 @@ async function handleReviewCommentWebhook(input: {
 
   const comment = payload.comment;
   const body = comment?.body ?? "";
-  const parsed = parseOverrideCommand(body);
+  const mentionNames = commandMentionNames(input.config.poisonAlert);
+  const parsed = parseOverrideCommand(body, mentionNames);
   if (!parsed) {
     return { status: 202, body: { ok: true, ignored: true, reason: "not an override command" } };
   }
@@ -2203,7 +2217,9 @@ async function handleReviewCommentWebhook(input: {
   }
 
   const actor = comment.user?.login;
-  if (!actor || isMaomaoLogin(actor, input.config.github.appSlug)) {
+  const appSlug = await webhookAppSlug(input);
+  const actorIsBot = (comment.user?.type ?? "").toLowerCase() === "bot";
+  if (!actor || actorIsBot || isMaomaoLogin(actor, appSlug)) {
     return { status: 202, body: { ok: true, ignored: true, reason: "ignored bot or missing author" } };
   }
 

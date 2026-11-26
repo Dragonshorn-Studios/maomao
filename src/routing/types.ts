@@ -13,14 +13,14 @@ export const POISON_ALERT_POLICIES = [
 ] as const;
 export type PoisonAlertPolicy = (typeof POISON_ALERT_POLICIES)[number];
 
-/** Policies whose plan includes the internal laboratory re-check (manual only after @maomao escalate). */
+/** Policies whose plan includes the internal laboratory re-check (manual only after the configured escalate command). */
 export const POLICIES_WITH_INTERNAL = [
   "internal_only",
   "internal_then_external",
   "internal_and_external",
 ] as const;
 
-/** Policies whose plan includes the external fire-and-forget dispatch (manual only after @maomao escalate). */
+/** Policies whose plan includes the external fire-and-forget dispatch (manual only after the configured escalate command). */
 export const POLICIES_WITH_EXTERNAL = ["external_only", "internal_then_external", "internal_and_external"] as const;
 
 export const EXTERNAL_DISPATCH_STATUSES = ["not_requested", "dispatching", "dispatched", "dispatch_failed"] as const;
@@ -114,6 +114,8 @@ export interface PoisonAlertExternalConfig {
 export interface PoisonAlertConfig {
   policy: PoisonAlertPolicy;
   mentionName: string;
+  /** Additional command mentions accepted alongside the primary persona. */
+  mentionAliases: string[];
   escalateCommand: string;
   internal: PoisonAlertInternalConfig;
   external: PoisonAlertExternalConfig;

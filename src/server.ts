@@ -384,7 +384,7 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
   const passwordGateOn = uiGateEnabled(ctx.config.uiPassword, ctx.config.uiSessionSecret);
   const gateOn = oauthOn || passwordGateOn;
   const passwordLoginOn = passwordGateOn && (!oauthOn || ctx.config.uiLocalLogin);
-  const pageOpts = { showLogout: gateOn, uiFlavor: ctx.config.uiFlavor, branding: ctx.config.branding };
+  const pageOpts = { showLogout: gateOn, uiFlavor: ctx.config.uiFlavor, branding: ctx.config.branding, mentionName: ctx.config.poisonAlert.mentionName };
   const loginPageOpts = { showGithub: oauthOn, showPassword: passwordLoginOn, branding: ctx.config.branding };
   const renderLoginDenied = (c: Context<AppEnv>) => {
     deleteCookie(c, SESSION_COOKIE, { path: "/" });

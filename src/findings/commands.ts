@@ -1,3 +1,4 @@
+import { mentionAlternation } from "../mentions.js";
 export type DismissToken = "ignore" | "bury" | "seedling";
 export type OverrideVerb = DismissToken | "reopen";
 
@@ -24,13 +25,14 @@ export function canIssueOverride(permission: string | undefined, authorAssociati
   return normalized === "none" && authorAssociation === "OWNER";
 }
 
-export function parseOverrideCommand(raw: string): ParsedOverrideCommand | undefined {
+export function parseOverrideCommand(raw: string, mentionNames: string | readonly string[] = "maomao"): ParsedOverrideCommand | undefined {
   const collapsed = normalizeCommentBody(raw);
   if (!collapsed) return undefined;
   if (isSeedlingOnly(collapsed)) {
     return { command: "dismiss", token: "seedling" };
   }
-  const mention = collapsed.match(/^@maomao(?:\[bot\])?\s+(ignore|bury|reopen)\s*[.!?]?\s*$/i);
+  const mentions = mentionAlternation(mentionNames);
+  const mention = collapsed.match(new RegExp(`^@(?:${mentions})(?:\\[bot\\])?\\s+(ignore|bury|reopen)\\s*[.!?]?\\s*$`, "i"));
   if (!mention?.[1]) return undefined;
   const verb = mention[1].toLowerCase() as OverrideVerb;
   if (verb === "reopen") return { command: "reopen", token: "reopen" };

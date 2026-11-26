@@ -367,6 +367,9 @@ describe("monitoring pages", () => {
         reconciliation_reason: "GitHub thread already resolved",
       }),
     ).toBe("GitHub thread already resolved");
+    expect(
+      findingOverrideNote({ status: "dismissed", dismissed_by: "octocat", dismiss_command: "bury" }, "mergehenna"),
+    ).toContain("via @mergehenna bury");
   });
 
   it("marks specialist findings unconfirmed until the aggregator finishes", () => {
@@ -576,6 +579,8 @@ describe("poison alert card", () => {
     const waiting = renderJob(store.getJob(job.id)!, store.listReviewerRuns(job.id), store.listLogs(job.id));
     const waitingCard = waiting.slice(waiting.indexOf("<h2>Poison alert</h2>"));
     expect(waitingCard).toContain("waiting for a manual @maomao escalate");
+    const brandedWaiting = renderJob(store.getJob(job.id)!, store.listReviewerRuns(job.id), store.listLogs(job.id), { mentionName: "mergehenna" });
+    expect(brandedWaiting.slice(brandedWaiting.indexOf("<h2>Poison alert</h2>"))).toContain("waiting for a manual @mergehenna escalate");
     expect(waitingCard).not.toContain("Internal model");
     expect(waitingCard).not.toContain("External dispatch");
 

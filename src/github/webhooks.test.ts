@@ -644,6 +644,55 @@ describe("webhook handling", () => {
     expect(store.getJob(jobId!)?.manual_escalate_requested).toBe(1);
   });
 
+  it("accepts configured primary and legacy alias escalate mentions", async () => {
+    const secret = "s3cret";
+    const config = loadConfig({
+      GITHUB_WEBHOOK_SECRET: secret,
+      GITHUB_APP_ID: "1",
+      GITHUB_APP_PRIVATE_KEY: "k",
+      REVIEWER_ROUTING: "fixed",
+      REVIEWER_ROLES: "correctness",
+      POISON_ALERT_POLICY: "manual",
+      POISON_ALERT_EXTERNAL_ENABLED: "true",
+      MAOMAO_MENTION: "mergehenna",
+    });
+    const store = new JobStore(openDb(":memory:"));
+    const prBody = JSON.stringify(prPayload());
+    await handleGithubWebhook({
+      config,
+      store,
+      request: { event: "pull_request", deliveryId: "persona-pr", signature: sign(secret, prBody), rawBody: prBody },
+    });
+    const jobId = store.listJobs(1)[0]!.id;
+    store.patchJob(jobId, { routing_profile: "poison-alert", github_review_id: "1" });
+
+    for (const [delivery, body] of [
+      ["persona-escalate-primary", "@mergehenna escalate"],
+      ["persona-escalate-legacy", "@maomao escalate"],
+    ] as const) {
+      store.patchJob(jobId, { manual_escalate_requested: 0 });
+      const rawBody = JSON.stringify({
+        action: "created",
+        installation: { id: 42 },
+        repository: { full_name: "acme/widgets", name: "widgets", owner: { login: "acme" } },
+        issue: { number: 7, pull_request: { url: "https://github.com/acme/widgets/pull/7" } },
+        comment: {
+          body,
+          user: { login: "alice", type: "User" },
+          author_association: "OWNER",
+        },
+      });
+      const result = await handleGithubWebhook({
+        config,
+        store,
+        github: githubForCommands({ permission: "none" }),
+        request: { event: "issue_comment", deliveryId: delivery, signature: sign(secret, rawBody), rawBody },
+      });
+      expect(result.dispatchJobId).toBe(jobId);
+      expect(store.getJob(jobId)?.manual_escalate_requested).toBe(1);
+    }
+  });
+
   it("runs @maomao review as an authorized full re-review at the current head", async () => {
     const secret = "s3cret";
     const config = loadConfig({
@@ -1216,13 +1265,14 @@ function reviewCommentBody(overrides: Record<string, unknown> = {}) {
 describe("review thread override commands", () => {
   const secret = "s3cret";
 
-  async function post(rawBody: string, extra: { deliveryId?: string; github?: ReturnType<typeof githubForCommands> } = {}) {
+  async function post(rawBody: string, extra: { deliveryId?: string; github?: ReturnType<typeof githubForCommands>; configEnv?: Record<string, string> } = {}) {
     const config = loadConfig({
       GITHUB_WEBHOOK_SECRET: secret,
       GITHUB_APP_ID: "1",
       GITHUB_APP_PRIVATE_KEY: "k",
       GITHUB_APP_SLUG: "maomao",
       REVIEWER_ROLES: "correctness",
+      ...(extra.configEnv ?? {}),
     });
     const store = extra.github
       ? undefined
@@ -1258,6 +1308,67 @@ describe("review thread override commands", () => {
       expect(resolved).toEqual(["PRRT_1"]);
       expect(store.getFinding("acme/widgets", 7, "deadbeefdeadbeef")?.status).toBe("dismissed");
     }
+  });
+
+  it("accepts configured primary and legacy alias override mentions", async () => {
+    for (const [delivery, body] of [
+      ["persona-primary", "@mergehenna bury"],
+      ["persona-legacy", "@maomao bury"],
+    ] as const) {
+      const resolved: string[] = [];
+      const { result } = await post(
+        reviewCommentBody({ comment: { id: delivery.length + 500, body, in_reply_to_id: 11, user: { login: "octocat" } } }),
+        {
+          deliveryId: delivery,
+          github: githubForCommands({ resolved }),
+          configEnv: { MAOMAO_MENTION: "mergehenna" },
+        },
+      );
+      expect(result.status).toBe(200);
+      expect(result.body.command).toBe("dismiss");
+      expect(resolved).toEqual(["PRRT_1"]);
+    }
+
+    const other = await post(
+      reviewCommentBody({ comment: { id: 501, body: "@other bury", in_reply_to_id: 11, user: { login: "octocat" } } }),
+      { deliveryId: "persona-other", configEnv: { MAOMAO_MENTION: "mergehenna" } },
+    );
+    expect(other.result.status).toBe(202);
+    expect(other.result.body.reason).toBe("not an override command");
+  });
+
+  it("ignores comments authored by the renamed app bot login", async () => {
+    const result = await post(
+      reviewCommentBody({
+        comment: {
+          id: 502,
+          body: "@mergehenna bury",
+          in_reply_to_id: 11,
+          user: { login: "mergehenna[bot]", type: "Bot" },
+        },
+      }),
+      { deliveryId: "persona-bot", configEnv: { MAOMAO_MENTION: "mergehenna", GITHUB_APP_SLUG: "mergehenna" } },
+    );
+    expect(result.result.status).toBe(202);
+    expect(result.result.body.reason).toBe("ignored bot or missing author");
+
+    const dynamicSlug = await post(
+      reviewCommentBody({
+        comment: {
+          id: 503,
+          body: "@mergehenna bury",
+          in_reply_to_id: 11,
+          user: { login: "mergehenna[bot]" },
+        },
+      }),
+      {
+        deliveryId: "persona-bot-dynamic-slug",
+        github: { ...githubForCommands(), getAppSlug: async () => "mergehenna" },
+        configEnv: { MAOMAO_MENTION: "mergehenna", GITHUB_APP_SLUG: "" },
+      },
+    );
+    expect(dynamicSlug.result.status).toBe(202);
+    expect(dynamicSlug.result.body.reason).toBe("ignored bot or missing author");
   });
 
   it("rejects unauthorized users and never resolves human threads", async () => {

@@ -158,7 +158,7 @@ Create a GitHub App for your user or org. Maomao needs **least privilege**:
 
 Do **not** grant Actions write, Administration, Secrets, merge, or branch push. After you change App permissions, open each installation and **accept the new permissions** — tokens keep the old scopes until you do, and resolve still fails with `Resource not accessible by integration`.
 
-Subscribe the app to **Pull request**, **Pull request review comment**, **Merge group**, and **Issue comment** (the last is for `@maomao escalate` in `manual` poison-alert policy). GitHub Apps with **Checks: write** are automatically subscribed to `check_run` and `check_suite` events; Maomao uses their `rerequested` actions to support GitHub's individual-check and re-run-all controls. Set the webhook URL to:
+Subscribe the app to **Pull request**, **Pull request review comment**, **Merge group**, and **Issue comment** (the last is for the configured `@<mention> escalate` command in `manual` poison-alert policy). GitHub Apps with **Checks: write** are automatically subscribed to `check_run` and `check_suite` events; Maomao uses their `rerequested` actions to support GitHub's individual-check and re-run-all controls. Set the webhook URL to:
 
 ```text
 https://<your-host>/webhooks/github
@@ -224,7 +224,7 @@ In GitLab (project or group → Settings → Webhooks), point the webhook at:
 https://<your-host>/webhooks/gitlab/<connection-id>
 ```
 
-The connection id is shown on the connections page. Subscribe **Merge request events** and **Note events**. Maomao handles `open`, `reopen`, source-branch `update` (title-only edits never enqueue), and `merge` (cancels in-flight reviews and permanently gates the MR). Notes inside Maomao finding discussions accept `@maomao ignore`, `@maomao bury`, `@maomao reopen`, and `🌱`; commands are authorized by project/group membership (Developer or above). Notes authored by the connection's bot are ignored.
+The connection id is shown on the connections page. Subscribe **Merge request events** and **Note events**. Maomao handles `open`, `reopen`, source-branch `update` (title-only edits never enqueue), and `merge` (cancels in-flight reviews and permanently gates the MR). Notes inside Maomao finding discussions accept `@<mention> ignore`, `@<mention> bury`, `@<mention> reopen`, and `🌱` (`<mention>` is the configured command mention, `maomao` by default); commands are authorized by project/group membership (Developer or above). Notes authored by the connection's bot are ignored.
 
 ### Minimum roles
 
@@ -233,7 +233,7 @@ The connection id is shown on the connections page. Subscribe **Merge request ev
 | Review summary + inline discussions | Developer (project token with `api` + `read_repository`) |
 | Resolve/reopen finding discussions | Developer |
 | Approve clean reviews (opt-in per connection) | Maintainer, and the bot must be allowed to approve |
-| `@maomao` commands | Developer or above (project/group membership) |
+| `@<mention>` commands | Developer or above (project/group membership) |
 
 ### Rotation and troubleshooting
 
@@ -241,7 +241,7 @@ The connection id is shown on the connections page. Subscribe **Merge request ev
 - "Probe now" validates the token against `GET /api/v4/user` and records the bot identity, token scopes (where the instance exposes them), and instance version. Approval capability and any version-dependent behavior degrade to plain review comments when unsupported — the review never fails because of a missing verdict.
 - Clone failures on self-managed instances: check the private-network opt-in and the CA bundle first; credentials never appear in clone URLs or logs.
 - If every review stops arriving, check that the webhook shows recent deliveries in GitLab (a row of failures usually means the token was rotated without updating the connection) and that the connection is still enabled.
-- Discussion listing is capped at **2000** threads (100 per page). Webhook `@maomao` commands on a truncated listing are **not applied** (a redelivery can retry). Review reconciliation logs when the cap is hit; threads past it are invisible, so late buries and forge-resolved priors on very large MRs can be missed.
+- Discussion listing is capped at **2000** threads (100 per page). Webhook `@<mention>` commands on a truncated listing are **not applied** (a redelivery can retry). Review reconciliation logs when the cap is hit; threads past it are invisible, so late buries and forge-resolved priors on very large MRs can be missed.
 
 ## Configure Forgejo
 
@@ -457,7 +457,7 @@ Internal: a second, bounded pass with `POISON_ALERT_INTERNAL_MODEL` (any configu
 
 External: fire-and-forget **after** Maomao publishes its own review. Targets are JSON in `POISON_ALERT_EXTERNAL_TARGETS_JSON` (`mention`, `command`, or signed `webhook`). Webhook URLs/secrets are env refs; HTTPS is required and private/loopback destinations are rejected. Mention/command fields are validated so configuration cannot inject comment content.
 
-Policies: `internal_only`, `external_only`, `internal_then_external` (external only if the internal pass still meets `POISON_ALERT_EXTERNAL_MIN_SEVERITY`), `internal_and_external`, `manual` (`@maomao escalate` from write/maintain/admin collaborators, or a personal-repo OWNER when the collaborator API 404s, loop-safe against bot/marker comments). Partial target failure is stored as `dispatch_failed` and can be retried.
+Policies: `internal_only`, `external_only`, `internal_then_external` (external only if the internal pass still meets `POISON_ALERT_EXTERNAL_MIN_SEVERITY`), `internal_and_external`, `manual` (`@<mention> escalate` from write/maintain/admin collaborators, or a personal-repo OWNER when the collaborator API 404s, loop-safe against bot/marker comments). Partial target failure is stored as `dispatch_failed` and can be retried.
 
 Maomao does not queue, claim, poll, or ingest external review results. The UI shows immediate dispatch status only.
 
@@ -716,7 +716,7 @@ OpenCode is still a powerful process. Keep Maomao on a locked-down host and do n
 
 - Actionable findings → one `COMMENT` review, SHA-anchored (`commit_id` = job head SHA), with inline comments when GitHub accepts the locations; APPROVE reviews are body-only and list advisory findings in the review body instead
 - No findings → silent unless `POST_EMPTY_REVIEW=true`
-- **Opt-in queue badge** (`GITHUB_REQUEST_REVIEWER_ON_ENQUEUE=true`): the moment a review job is enqueued (webhook, paste-URL form, `@maomao review`, stack trigger on the top PR), Maomao requests its own bot (`<app-slug>[bot]`) as a reviewer on the PR — GitHub's Reviewers sidebar shows the review as pending while the job waits for a queue slot, and posting a review clears the request automatically. The attempt is bounded (10s) and best-effort: GitHub refuses some re-requests (a bot that already reviewed) — refusals are logged on the job and never fail the webhook or the job. A job that ends without posting leaves the request pending until a later review lands. One caveat: the stack trigger's summary on the top PR is an issue comment, which does not clear a review request — that badge clears only when the top member's own review job posts a review. No new App permission is needed (Pull requests write covers it; the slug is taken from `GITHUB_APP_SLUG` or fetched once from the App API).
+- **Opt-in queue badge** (`GITHUB_REQUEST_REVIEWER_ON_ENQUEUE=true`): the moment a review job is enqueued (webhook, paste-URL form, `@<mention> review`, stack trigger on the top PR), Maomao requests its own bot (`<app-slug>[bot]`) as a reviewer on the PR — GitHub's Reviewers sidebar shows the review as pending while the job waits for a queue slot, and posting a review clears the request automatically. The attempt is bounded (10s) and best-effort: GitHub refuses some re-requests (a bot that already reviewed) — refusals are logged on the job and never fail the webhook or the job. A job that ends without posting leaves the request pending until a later review lands. One caveat: the stack trigger's summary on the top PR is an issue comment, which does not clear a review request — that badge clears only when the top member's own review job posts a review. No new App permission is needed (Pull requests write covers it; the slug is taken from `GITHUB_APP_SLUG` or fetched once from the App API).
 - **Opt-in verdicts** (both default to `false`):
   - `GITHUB_REVIEW_ALLOW_APPROVE=true` — publishes `APPROVE` for clean reviews, but only when every specialist finished without errors, the aggregator did not fall back, and the job is not stale. Any degraded run degrades the review to `COMMENT` (reason logged and shown on the job page). A clean review with `POST_EMPTY_REVIEW=false` posts nothing, so no APPROVE can be delivered either. `GITHUB_REVIEW_APPROVE_MAX_SEVERITY` (e.g. `low`) additionally approves reviews whose surviving findings are all at or below that severity — unset keeps the strict clean-only rule. Approval bodies list those advisory findings with their hidden finding markers instead of posting inline threads. REQUEST_CHANGES keeps precedence: anything at or above `GITHUB_REVIEW_REQUEST_CHANGES_MIN_SEVERITY` never approves.
   - `GITHUB_REVIEW_ALLOW_REQUEST_CHANGES=true` — publishes `REQUEST_CHANGES` when surviving findings meet `GITHUB_REVIEW_REQUEST_CHANGES_MIN_SEVERITY` (default `blocker`), subject to the same safety gates as APPROVE. Note that GitHub may **block merges** on `REQUEST_CHANGES` where branch protection requires reviews.
@@ -813,7 +813,7 @@ Configuration lives under `/config` as a set of focused pages joined by a shared
 - `MODEL_CATALOG` (comma-separated `provider/model` values) optionally restricts models to an operator-approved catalog. Configuration contains no credentials; export/import is schema-versioned JSON, and imports always land as drafts.
 - All write actions require an operator GitHub OAuth identity and are recorded in the audit history (`/config/audit`).
 
-## Finding reconciliation and `@maomao bury`
+## Finding reconciliation and `@<mention> bury`
 
 When a later commit arrives, Maomao fetches its own review threads (open **and** already-resolved), applies any human overrides, and re-checks remaining **unresolved** findings against the **current head SHA** with a narrow verifier. Threads GitHub already marked resolved are caught and stored as `resolved` without another verifier pass. Only then does it risk-route (the `poison-alert` insertion point) and run specialists.
 
@@ -829,20 +829,35 @@ Classifications:
 
 Model absence is non-evidence: a finding disappearing from a new generative review is **not** by itself proof it was fixed. Failed or stale jobs never close existing threads. If Maomao intended to close a conversation and could not (missing thread id, moved without a replacement comment, GitHub mutation failed), the job log records that as a warning and the finding card shows the reconciliation reason.
 
+### Command mention persona and GitHub App rename cutover
+
+`MAOMAO_MENTION` is the primary command persona used in instructions and webhook command parsing. It defaults to `maomao`; an operator-facing instance can use `mergehenna` without changing the Maomao software name or stable machine contracts. `MAOMAO_MENTION` is deliberately separate from `GITHUB_APP_SLUG`: the mention is what users type, while the App slug determines the real bot login (`<slug>[bot]`) whose own comments are ignored.
+
+When the primary mention is not `maomao`, legacy `@maomao` remains enabled by default as a migration alias. Add further comma-separated aliases with `MAOMAO_MENTION_ALIASES` (for example `maomao,mergehenna-staging`). After the cutover, set `MAOMAO_MENTION_ALIASES=none` to accept only the primary mention. Mention matching is case-insensitive and also tolerates the `[bot]` suffix. Bot-authorship recognition includes the configured/current App slug and the historical `maomao[bot]` login so pre-rename review threads remain owned by the instance.
+
+Manual GitHub App rename/cutover procedure:
+
+1. In the GitHub App settings, rename the display name if desired; Maomao cannot perform this registration change for you.
+2. Save the change, then confirm the resulting App slug and bot login. Prefer setting `GITHUB_APP_SLUG` explicitly; when omitted, Maomao can fetch the slug from the App API where available.
+3. Set `MAOMAO_MENTION` to the new persona (for example `mergehenna`) and restart Maomao.
+4. Keep legacy aliases enabled during a communicated migration window so existing muscle memory and documentation examples keep working.
+5. Tell users the cutover time and the new command form, then set `MAOMAO_MENTION_ALIASES=none` (or an empty value) after the window if legacy mentions should stop working.
+6. Do not rewrite historical comments or hidden markers. Stable check contexts such as `maomao/review` remain unchanged.
+
 ### Manual overrides
 
 Reply **inside a Maomao review thread** (not on a human comment, and not as a reaction):
 
 | Comment body | Effect |
 | --- | --- |
-| `@maomao ignore` | Dismiss this finding |
-| `@maomao bury` | Same as ignore |
+| `@<mention> ignore` | Dismiss this finding |
+| `@<mention> bury` | Same as ignore |
 | `🌱` (nothing else in the comment) | Same as ignore |
-| `@maomao reopen` | Clear the dismissal and unresolve the thread when GitHub allows it |
+| `@<mention> reopen` | Clear the dismissal and unresolve the thread when GitHub allows it |
 
 `dismissed` means “acknowledged and intentionally ignored”, not “fixed”. `resolved` and `dismissed` stay distinct in SQLite, logs, and the job Findings list. Open findings stay full cards; buried and resolved rows collapse under a muted count until you expand them (status badge, location, and title stay visible in the summary).
 
-Dismissal is scoped to that **finding fingerprint on that pull request**, not the whole repository. The same fingerprint will not be re-reported on later SHAs of that PR unless someone `@maomao reopen`s it.
+Dismissal is scoped to that **finding fingerprint on that pull request**, not the whole repository. The same fingerprint will not be re-reported on later SHAs of that PR unless someone reopens it with the configured mention.
 
 Who may issue commands: repository `write`, `maintain`, or `admin`. A personal-repository `OWNER` association is accepted only when the collaborator API reports `none` (GitHub 404s some owners); it never upgrades an explicit `read`/`triage` permission. Org members who 404 the collaborator API are ignored (fail closed). Webhook signatures are verified. Duplicate deliveries and repeated commands are no-ops.
 

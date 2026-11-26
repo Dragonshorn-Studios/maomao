@@ -452,6 +452,8 @@ export function effectiveConfigEntries(
 
   // --- Poison alerts ---
   row("Poison alerts", "Policy", "POISON_ALERT_POLICY", config.poisonAlert.policy);
+  row("Poison alerts", "Primary command mention", "MAOMAO_MENTION", `@${config.poisonAlert.mentionName}`);
+  row("Poison alerts", "Mention aliases", "MAOMAO_MENTION_ALIASES", config.poisonAlert.mentionAliases.map((name) => `@${name}`).join(", ") || "(none)");
   row(
     "Poison alerts",
     "Internal re-check",

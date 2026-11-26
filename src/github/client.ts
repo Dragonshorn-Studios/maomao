@@ -1000,7 +1000,12 @@ export class GithubClient implements GithubPort, ManualTriggerPort {
 
 export function maomaoBotLogins(appSlug: string): string[] {
   const slug = (appSlug || "maomao").replace(/\[bot\]$/i, "").toLowerCase();
-  return [`${slug}[bot]`, slug];
+  const logins = [`${slug}[bot]`, slug];
+  // Historical review comments and markers were authored as maomao[bot]
+  // before instance rebranding; keep recognizing that login after an App
+  // rename without changing the configured primary command persona.
+  if (slug !== "maomao") logins.push("maomao[bot]", "maomao");
+  return logins;
 }
 
 export function isMaomaoLogin(login: string | undefined, appSlug: string): boolean {

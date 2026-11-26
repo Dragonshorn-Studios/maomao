@@ -11,6 +11,7 @@
  */
 import type { Config } from "../config.js";
 import { canIssueOverride, parseOverrideCommand } from "../findings/commands.js";
+import { commandMentionNames } from "../mentions.js";
 import { parseFindingMarker } from "../findings/identity.js";
 import { isAllowlistedOverrideAuthor, sanitizeCommentText, threadFingerprintIndex } from "../findings/overrides.js";
 import { accessLevelToPermission, GitLabApiClient, toForgeDiscussions, type GitLabCommandApi } from "./client.js";
@@ -390,8 +391,9 @@ async function handleNoteEvent(input: {
   if (commentLooksLikeMaomaoEscalation(body) || parseFindingMarker(body)) {
     return ignored("ignored maomao marker comment");
   }
-  const command = parseOverrideCommand(body);
-  const escalate = mentionsEscalateCommand(body, input.config.poisonAlert.mentionName, input.config.poisonAlert.escalateCommand);
+  const mentionNames = commandMentionNames(input.config.poisonAlert);
+  const command = parseOverrideCommand(body, mentionNames);
+  const escalate = mentionsEscalateCommand(body, mentionNames, input.config.poisonAlert.escalateCommand);
   if (!command && !escalate) {
     return ignored("not a maomao command");
   }
