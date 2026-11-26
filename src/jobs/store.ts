@@ -60,7 +60,7 @@ export interface JobRow {
   profile_revision_id: number | null;
   job_type: JobType;
   /** "full" runs the specialist pipeline; "verify" only reconciles open findings (issue #123). */
-  review_mode: "full" | "verify";
+  review_mode: "full" | "verify" | "carried";
   scan_branch: string | null;
   /** Repo-brief payload (TOC + persisted file fragments), JSON; null for other job types. */
   brief_json: string | null;
@@ -1200,6 +1200,31 @@ export class JobStore {
         `SELECT * FROM jobs
          WHERE provider = ? AND provider_instance = ? AND repo_full_name = ? AND pr_number = ?
            AND job_type = 'pr_review' AND state = 'completed' AND head_sha != ?
+         ORDER BY finished_at DESC, id DESC
+         LIMIT 1`,
+      )
+      .get(resolved.provider, resolved.instance, repoFullName, prNumber, headSha) as JobRow | undefined;
+  }
+
+  /**
+   * Newest published review for a pull request at another head, including a
+   * completed row later marked stale by the replacement head's enqueue. The
+   * stale transition is exactly what a tree-preserving rebase does, so carry-
+   * forward cannot require the row to still read 'completed'.
+   */
+  latestPublishedReviewAtOtherHead(
+    repoFullName: string,
+    prNumber: number,
+    headSha: string,
+    scope?: Partial<ForgeScope>,
+  ): JobRow | undefined {
+    const resolved = normalizeScope(scope);
+    return this.db
+      .prepare(
+        `SELECT * FROM jobs
+         WHERE provider = ? AND provider_instance = ? AND repo_full_name = ? AND pr_number = ?
+           AND job_type = 'pr_review' AND state IN ('completed', 'stale') AND head_sha != ?
+           AND github_review_id IS NOT NULL
          ORDER BY finished_at DESC, id DESC
          LIMIT 1`,
       )

@@ -757,6 +757,42 @@ async function runBudgetedAggregation(
   return aggregated;
 }
 
+const CARRY_FORWARD_WEBHOOK_EVENTS = new Set(["pull_request.synchronize", "stack_review"]);
+
+/**
+ * A pure restack/rebase carries a published verdict only when both sides of the
+ * reviewed diff are tree-identical. Head-tree equality alone is insufficient:
+ * a moved base can change the meaning of the same final tree.
+ */
+async function treeEquivalentReview(
+  deps: PipelineDeps,
+  provider: ForgePort,
+  job: JobRow,
+): Promise<JobRow | undefined> {
+  if (job.job_type !== "pr_review" || !CARRY_FORWARD_WEBHOOK_EVENTS.has(job.webhook_event ?? "")) return undefined;
+  if (!provider.getCommitTree) return undefined;
+  const prior = deps.store.latestPublishedReviewAtOtherHead(job.repo_full_name, job.pr_number, job.head_sha, scopeOf(job));
+  if (!prior || !["APPROVE", "COMMENT", "REQUEST_CHANGES"].includes(prior.review_event ?? "") || !prior.github_review_id) return undefined;
+  if (prior.profile_revision_id !== job.profile_revision_id) return undefined;
+  try {
+    const target = forgeTargetOf(job);
+    const [priorBaseTree, priorHeadTree, baseTree, headTree] = await Promise.all([
+      provider.getCommitTree!(target, prior.base_sha),
+      provider.getCommitTree!(target, prior.head_sha),
+      provider.getCommitTree!(target, job.base_sha),
+      provider.getCommitTree!(target, job.head_sha),
+    ]);
+    if (priorBaseTree === baseTree && priorHeadTree === headTree) return prior;
+  } catch (error) {
+    deps.store.log(
+      job.id,
+      `Tree-equivalence probe failed; running normal review: ${error instanceof Error ? error.message : String(error)}`,
+      "warn",
+    );
+  }
+  return undefined;
+}
+
 async function runJob(
   deps: PipelineDeps,
   forge: ForgeRegistry,
@@ -766,7 +802,7 @@ async function runJob(
   trustedHooks: TrustedPipelineHooks,
 ): Promise<void> {
   const { store, config } = deps;
-  const job = store.getJob(jobId);
+  let job = store.getJob(jobId);
   if (!job) {
     // No row exists to log into; the queue runner still records the failure.
     console.warn(`pipeline: job ${jobId} vanished before run`);
@@ -828,7 +864,27 @@ async function runJob(
     const target = forgeTargetOf(job);
     const provider = forge.forJob(job);
     throwIfStale(store, jobId, signal);
-    await dismissSupersededApprovals(deps, provider, job);
+    const carriedPrior = await treeEquivalentReview(deps, provider, job);
+    // In the byte-equivalent case the old review is not semantically stale,
+    // so do not dismiss it merely because the commit object was rewritten.
+    if (!carriedPrior) await dismissSupersededApprovals(deps, provider, job);
+    if (carriedPrior) {
+      job = { ...job, review_mode: "carried" };
+      store.patchJob(jobId, { review_mode: "carried" });
+      store.log(
+        jobId,
+        `Tree-equivalent rebase: base and head trees match reviewed job ${carriedPrior.id} @ ${carriedPrior.head_sha.slice(0, 8)}; analysis will be carried forward`,
+      );
+      for (const run of store.listReviewerRuns(jobId)) {
+        if (run.state === "queued") {
+          store.patchReviewer(run.id, {
+            state: "cancelled",
+            validation_error: "tree-equivalent carry-forward — specialist review not run",
+            finished_at: nowIso(),
+          });
+        }
+      }
+    }
     const clone = await provider.cloneSpec(target);
     const diff = await provider.getChangeDiff(target, config.maxDiffBytes);
     const diffBytes = Buffer.byteLength(diff, "utf8");
@@ -860,7 +916,9 @@ async function runJob(
     const profileDefinition = profileDefinitionForJob(store, job);
     const reviewerTimeouts = profileReviewerTimeouts(profileDefinition);
     const profileBudget = createProfileBudget(profileDefinition);
-    const snapshot = await reconcileAndRoute(deps, provider, job, workspace.repoDir, workspace.dir, diff, signal, profileBudget, profileDefinition);
+    const snapshot = carriedPrior
+      ? { headSha: job.head_sha, items: [] }
+      : await reconcileAndRoute(deps, provider, job, workspace.repoDir, workspace.dir, diff, signal, profileBudget, profileDefinition);
     throwIfStale(store, jobId, signal);
 
     // Verify-first (issue #123): the reconciler already re-checked every open
@@ -868,10 +926,10 @@ async function runJob(
     // directly — no router call, no specialist fan-out, no aggregation.
     let aggregated: AggregatorResult;
     let reviewerCount = 0;
-    if (job.review_mode === "verify") {
-      aggregated = verifyOnlyAggregate(job, snapshot);
+    if (job.review_mode === "verify" || job.review_mode === "carried") {
+      aggregated = verifyOnlyAggregate(job, snapshot, carriedPrior);
       store.patchJob(jobId, { aggregator_normalized: JSON.stringify(aggregated, null, 2) });
-      store.log(jobId, `Verify-first pass: ${aggregated.summary}`);
+      store.log(jobId, `${job.review_mode === "carried" ? "Carry-forward validation" : "Verify-first pass"}: ${aggregated.summary}`);
     } else {
       await routeSpecialists(deps, job, diff, workspace.repoDir, [workspace.diffPath, workspace.metaPath], signal, profileBudget);
       const routed = store.getJob(jobId);
@@ -960,7 +1018,7 @@ async function runJob(
 
     store.setJobState(jobId, "publishing", { aggregator_state: "done" });
     void checks.publish(store.getJob(jobId) ?? job, { status: "in_progress", stage: "publishing" });
-    const publication = await publishReview(deps, provider, job, aggregated, reviewerCount, snapshot, diff, workspace.repoDir, signal);
+    const publication = await publishReview(deps, provider, job, aggregated, reviewerCount, snapshot, diff, workspace.repoDir, signal, carriedPrior);
     const posted = publication.posted;
     const afterPublish = store.getJob(jobId) ?? job;
     if (posted) {
@@ -2546,7 +2604,18 @@ async function routeSpecialists(
  * `findingsForPublish` still re-publishes "moved" items inline from the
  * snapshot. The verdict is "clean" only when nothing open survived.
  */
-function verifyOnlyAggregate(job: JobRow, snapshot: ReconciliationSnapshot): AggregatorResult {
+function verifyOnlyAggregate(job: JobRow, snapshot: ReconciliationSnapshot, carriedPrior?: JobRow): AggregatorResult {
+  if (job.review_mode === "carried" && carriedPrior) {
+    const priorReview = carriedPrior.github_review_url ? ` Prior review: ${carriedPrior.github_review_url}` : "";
+    return {
+      schema_version: 1,
+      verdict: carriedPrior.review_event === "APPROVE" ? "clean" : "comment",
+      summary:
+        `Carry-forward validation at ${job.head_sha.slice(0, 8)}: base and head trees are identical to reviewed job ${carriedPrior.id} at ${carriedPrior.head_sha.slice(0, 8)}. ` +
+        `No verifier, specialist, or aggregation pass was rerun; the prior ${carriedPrior.review_event} verdict is carried forward because the reviewed diff is byte-equivalent.${priorReview}`,
+      findings: [],
+    };
+  }
   let resolved = 0;
   let moved = 0;
   let stillOpen = 0;
@@ -3013,6 +3082,7 @@ async function publishReview(
   diff: string,
   repoDir: string,
   signal: AbortSignal,
+  carriedPrior?: JobRow,
 ): Promise<ReviewPublication> {
   if (deps.store.isStale(job.id)) return { clean: false, event: "COMMENT" };
   const target = forgeTargetOf(job);
@@ -3050,20 +3120,26 @@ async function publishReview(
 
   // Only the orchestrator selects the GitHub event; specialists never do.
   const runs = deps.store.listReviewerRuns(job.id);
-  const allReviewersDone = runs.length > 0 && runs.every((run) => run.state === "done" && !run.validation_error);
+  const allReviewersDone = job.review_mode === "carried" || (runs.length > 0 && runs.every((run) => run.state === "done" && !run.validation_error));
   const aggregatorFallback = (deps.store.getJob(job.id)?.aggregator_fallback ?? 0) === 1;
-  const decision = resolveReviewEvent({
-    allowApprove: deps.config.reviewAllowApprove,
-    allowRequestChanges: deps.config.reviewAllowRequestChanges,
-    minSeverity: deps.config.reviewRequestChangesMinSeverity,
-    approveMaxSeverity: deps.config.reviewApproveMaxSeverity,
-    clean,
-    findings: publishable,
-    allReviewersDone,
-    aggregatorFallback,
-    withheldCount,
-    stale: deps.store.isStale(job.id),
-  });
+  const carriedVerdict = carriedPrior?.review_event;
+  const decision = job.review_mode === "carried" && (carriedVerdict === "APPROVE" || carriedVerdict === "COMMENT" || carriedVerdict === "REQUEST_CHANGES")
+    ? {
+        event: carriedVerdict as ForgeVerdict,
+        reason: `carried forward from tree-equivalent review job ${carriedPrior?.id} at ${carriedPrior?.head_sha.slice(0, 8)}`,
+      }
+    : resolveReviewEvent({
+        allowApprove: deps.config.reviewAllowApprove,
+        allowRequestChanges: deps.config.reviewAllowRequestChanges,
+        minSeverity: deps.config.reviewRequestChangesMinSeverity,
+        approveMaxSeverity: deps.config.reviewApproveMaxSeverity,
+        clean,
+        findings: publishable,
+        allReviewersDone,
+        aggregatorFallback,
+        withheldCount,
+        stale: deps.store.isStale(job.id),
+      });
 
   const escalatesExisting =
     already && decision.event === "REQUEST_CHANGES" && already.verdict != null && already.verdict !== "REQUEST_CHANGES";
@@ -3115,7 +3191,7 @@ async function publishReview(
   }
 
   // Withheld findings still post: the suppression notice must reach the PR.
-  if (clean && withheldCount === 0 && !deps.config.postEmptyReview) {
+  if (clean && withheldCount === 0 && !deps.config.postEmptyReview && job.review_mode !== "carried") {
     const reason = `${decision.reason}; not posting because POST_EMPTY_REVIEW is false`;
     deps.store.log(job.id, `Clean review with no findings; POST_EMPTY_REVIEW is false, not posting`);
     deps.store.patchJob(job.id, { review_event: "COMMENT", review_event_reason: reason });

@@ -146,7 +146,7 @@ export interface GithubPort {
     owner: string,
     repo: string,
     ref: string,
-  ): Promise<{ sha: string; message: string }>;
+  ): Promise<{ sha: string; message: string; treeSha?: string }>;
   listOpenIssuesByMarker?(
     installationId: number,
     owner: string,
@@ -653,7 +653,7 @@ export class GithubClient implements GithubPort, ManualTriggerPort {
   async getCommit(installationId: number, owner: string, repo: string, ref: string) {
     const octokit = this.installationOctokit(installationId);
     const response = await octokit.rest.repos.getCommit({ owner, repo, ref });
-    return { sha: response.data.sha, message: response.data.commit?.message ?? "" };
+    return { sha: response.data.sha, message: response.data.commit?.message ?? "", treeSha: response.data.commit?.tree?.sha };
   }
 
   async listOpenIssuesByMarker(installationId: number, owner: string, repo: string, marker: string) {

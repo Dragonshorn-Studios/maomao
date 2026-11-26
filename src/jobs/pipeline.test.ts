@@ -8399,3 +8399,157 @@ describe("merge-group participant review evidence", () => {
     expect(checkRuns.some((run) => run.name === "maomao/merge-readiness" && run.status === "completed" && run.conclusion === "failure")).toBe(true);
   });
 });
+
+describe("tree-equivalent review carry-forward", () => {
+  const jobInput = (baseSha: string, headSha: string, webhookEvent?: string) => ({
+    repoFullName: "acme/widgets",
+    repoOwner: "acme",
+    repoName: "widgets",
+    installationId: 9,
+    prNumber: 4,
+    prTitle: "Change example",
+    prBody: "",
+    prHtmlUrl: "",
+    prAuthor: "dev",
+    baseSha,
+    headSha,
+    baseRef: "main",
+    headRef: "feat",
+    webhookEvent,
+    reviewers: [{ role: "correctness", title: "Correctness" }],
+    jobType: "pr_review" as const,
+  });
+
+  function approvedPrior(store: JobStore, reviewEvent = "APPROVE") {
+    const prior = store.enqueue(jobInput("old-base", "old-head"));
+    store.setJobState(prior.job.id, "completed", {
+      finished_at: new Date().toISOString(),
+      review_event: reviewEvent,
+      github_review_id: "77",
+      github_review_url: "https://example.test/reviews/77",
+    });
+    return prior.job.id;
+  }
+
+  function carryGithub(trees: Record<string, string>, posted: Array<{ event?: string; body: string }>) {
+    return githubPort({
+      getCommit: async (_installationId: number, _owner: string, _repo: string, ref: string) => ({
+        sha: ref,
+        message: "",
+        treeSha: trees[ref],
+      }),
+      createCommentReview: async (input: { event?: "APPROVE" | "COMMENT" | "REQUEST_CHANGES"; body: string }) => {
+        posted.push({ event: input.event, body: input.body });
+        return { id: "99", url: "https://example.test/reviews/99" };
+      },
+    } as unknown as Partial<GithubPort>) as GithubPort;
+  }
+
+  it("carries an approval without model analysis when base and head trees are unchanged", async () => {
+    const config = loadConfig({
+      REVIEWER_ROUTING: "fixed",
+      REVIEWER_ROLES: "correctness",
+      GITHUB_REVIEW_ALLOW_APPROVE: "true",
+      POST_EMPTY_REVIEW: "false",
+    });
+    const store = new JobStore(openDb(":memory:"));
+    approvedPrior(store);
+    const created = store.enqueue(jobInput("new-base", "new-head", "pull_request.synchronize"));
+    const posted: Array<{ event?: string; body: string }> = [];
+    let modelCalls = 0;
+    const opencode: OpenCodePort = {
+      async run() {
+        modelCalls += 1;
+        throw new Error("model must not run for a tree-equivalent carry-forward");
+      },
+    };
+    const github = carryGithub(
+      { "old-base": "base-tree", "old-head": "head-tree", "new-base": "base-tree", "new-head": "head-tree" },
+      posted,
+    );
+    const pipeline = createPipeline({ config, store, github, checkout: await fixtureCheckout(), opencode });
+    await pipeline.run(created.job.id);
+
+    const job = store.getJob(created.job.id);
+    expect(job?.state).toBe("completed");
+    expect(job?.review_mode).toBe("carried");
+    expect(job?.review_event).toBe("APPROVE");
+    expect(job?.github_review_id).toBe("99");
+    expect(modelCalls).toBe(0);
+    expect(posted).toHaveLength(1);
+    expect(posted[0]?.event).toBe("APPROVE");
+    expect(posted[0]?.body).toContain("Carry-forward validation");
+    expect(posted[0]?.body).toContain("https://example.test/reviews/77");
+    expect(store.listReviewerRuns(created.job.id).every((run) => run.state === "cancelled")).toBe(true);
+  });
+
+
+  it("carries a non-approval verdict without rerunning analysis", async () => {
+    const config = loadConfig({
+      REVIEWER_ROUTING: "fixed",
+      REVIEWER_ROLES: "correctness",
+      GITHUB_REVIEW_ALLOW_APPROVE: "true",
+      POST_EMPTY_REVIEW: "true",
+    });
+    const store = new JobStore(openDb(":memory:"));
+    approvedPrior(store, "REQUEST_CHANGES");
+    const created = store.enqueue(jobInput("new-base", "new-head", "pull_request.synchronize"));
+    const posted: Array<{ event?: string; body: string }> = [];
+    let modelCalls = 0;
+    const opencode: OpenCodePort = {
+      async run() {
+        modelCalls += 1;
+        throw new Error("model must not run for a tree-equivalent carry-forward");
+      },
+    };
+    const github = carryGithub(
+      { "old-base": "base-tree", "old-head": "head-tree", "new-base": "base-tree", "new-head": "head-tree" },
+      posted,
+    );
+    const pipeline = createPipeline({ config, store, github, checkout: await fixtureCheckout(), opencode });
+    await pipeline.run(created.job.id);
+
+    expect(store.getJob(created.job.id)?.review_event).toBe("REQUEST_CHANGES");
+    expect(modelCalls).toBe(0);
+    expect(posted[0]?.event).toBe("REQUEST_CHANGES");
+    expect(posted[0]?.body).toContain("prior REQUEST_CHANGES verdict is carried forward");
+  });
+
+  it.each([
+    ["a changed head tree", "other-head-tree", "base-tree", "pull_request.synchronize"],
+    ["a changed base tree", "head-tree", "other-base-tree", "pull_request.synchronize"],
+    ["a manual review command", "head-tree", "base-tree", "issue_comment.created"],
+  ])("runs analysis for %s", async (_label, newHeadTree, newBaseTree, webhookEvent) => {
+    const config = loadConfig({
+      REVIEWER_ROUTING: "fixed",
+      REVIEWER_ROLES: "correctness",
+      GITHUB_REVIEW_ALLOW_APPROVE: "true",
+      POST_EMPTY_REVIEW: "true",
+    });
+    const store = new JobStore(openDb(":memory:"));
+    approvedPrior(store);
+    const created = store.enqueue(jobInput("new-base", "new-head", webhookEvent));
+    const posted: Array<{ event?: string; body: string }> = [];
+    let modelCalls = 0;
+    const opencode: OpenCodePort = {
+      async run(input) {
+        modelCalls += 1;
+        const roleMatch = input.prompt.match(/Role id: (\w+)/);
+        const text = roleMatch
+          ? reviewerJson(roleMatch[1])
+          : JSON.stringify({ schema_version: 1, verdict: "comment", summary: "Please fix the finding.", findings: [] });
+        return { stdout: text, stderr: "", exitCode: 0, text, usage: { promptTokens: 3, completionTokens: 2 } };
+      },
+    };
+    const github = carryGithub(
+      { "old-base": "base-tree", "old-head": "head-tree", "new-base": newBaseTree, "new-head": newHeadTree },
+      posted,
+    );
+    const pipeline = createPipeline({ config, store, github, checkout: await fixtureCheckout(), opencode });
+    await pipeline.run(created.job.id);
+
+    expect(store.getJob(created.job.id)?.review_mode).toBe("full");
+    expect(modelCalls).toBeGreaterThan(0);
+    expect(posted[0]?.body).not.toContain("Carry-forward validation");
+  });
+});
