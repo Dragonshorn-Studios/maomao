@@ -2,6 +2,7 @@ import { createHash, createHmac } from "node:crypto";
 import { lookup } from "node:dns/promises";
 import { isIP } from "node:net";
 import type { ExternalTarget } from "./types.js";
+import { mentionAlternation } from "../mentions.js";
 
 const BLOCKED_HOSTS = new Set(["localhost", "localhost.localdomain", "metadata.google.internal"]);
 
@@ -147,9 +148,9 @@ export function isBotActor(input: { login?: string; type?: string }): boolean {
   return type === "bot" || login.endsWith("[bot]") || login.endsWith("bot");
 }
 
-export function mentionsEscalateCommand(body: string, mentionName: string, command: string): boolean {
-  const mention = mentionName.replace(/^@/, "");
-  const pattern = new RegExp(`(^|\\s)@${escapeRegExp(mention)}\\s+${escapeRegExp(command)}\\b`, "i");
+export function mentionsEscalateCommand(body: string, mentionNames: string | readonly string[], command: string): boolean {
+  const mentions = mentionAlternation(mentionNames);
+  const pattern = new RegExp(`(^|\\s)@(?:${mentions})(?:\\[bot\\])?\\s+${escapeRegExp(command)}\\b`, "i");
   return pattern.test(body);
 }
 
@@ -158,9 +159,9 @@ export function mentionsEscalateCommand(body: string, mentionName: string, comma
  * the comment handler turns it into a fresh full specialist pass on the
  * current head, never a verify-first run.
  */
-export function mentionsReviewCommand(body: string, mentionName: string): boolean {
-  const mention = escapeRegExp(mentionName.replace(/^@/, ""));
-  return new RegExp(`(^|\\s)@${mention}\\s+(?:re-?)?review\\b`, "i").test(body);
+export function mentionsReviewCommand(body: string, mentionNames: string | readonly string[]): boolean {
+  const mentions = mentionAlternation(mentionNames);
+  return new RegExp(`(^|\\s)@(?:${mentions})(?:\\[bot\\])?\\s+(?:re-?)?review\\b`, "i").test(body);
 }
 
 function escapeRegExp(value: string): string {

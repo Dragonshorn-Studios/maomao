@@ -236,5 +236,6 @@ describe("maomaoBotLogins", () => {
   it("builds the bot login with and without the suffix", () => {
     expect(maomaoBotLogins("maomao")).toEqual(["maomao[bot]", "maomao"]);
     expect(maomaoBotLogins("maomao[bot]")).toEqual(["maomao[bot]", "maomao"]);
+    expect(maomaoBotLogins("mergehenna")).toEqual(["mergehenna[bot]", "mergehenna", "maomao[bot]", "maomao"]);
   });
 });

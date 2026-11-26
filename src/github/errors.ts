@@ -120,7 +120,7 @@ export function githubRetryReason(kind: "thread" | "issue", error: unknown): str
   return `GitHub resolve failed (${detail}); will retry next review.`;
 }
 
-/** Same Contents-write hint for @maomao dismiss/reopen command warnings. */
+/** Same Contents-write hint for dismiss/reopen command warnings. */
 export function describeThreadResolveError(error: unknown): string {
   return integrationPermissionHint("thread", describeGithubError(error));
 }

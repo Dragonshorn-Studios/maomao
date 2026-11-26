@@ -14,6 +14,7 @@ import {
 } from "./routing/types.js";
 import type { Severity } from "./schema.js";
 import { loadInstanceBranding, type InstanceBranding, type UiFlavor } from "./branding.js";
+import { normalizeMentionName, parseMentionAliases } from "./mentions.js";
 
 export type JobState =
   | "queued"
@@ -269,9 +270,11 @@ function loadRouting(env: NodeJS.ProcessEnv): RouterConfig {
 
 function loadPoisonAlert(env: NodeJS.ProcessEnv): PoisonAlertConfig {
   const fallback = env.POISON_ALERT_INTERNAL_FALLBACK?.trim().toLowerCase() === "fail" ? "fail" : "keep_first_pass";
+  const mentionName = normalizeMentionName(env.MAOMAO_MENTION);
   return {
     policy: parsePolicy(env.POISON_ALERT_POLICY),
-    mentionName: env.MAOMAO_MENTION?.trim().replace(/^@/, "") || "maomao",
+    mentionName,
+    mentionAliases: parseMentionAliases(env.MAOMAO_MENTION_ALIASES, mentionName),
     escalateCommand: validateCommandText(env.POISON_ALERT_ESCALATE_COMMAND?.trim() || "escalate"),
     internal: {
       enabled: parseBoolean(env.POISON_ALERT_INTERNAL_ENABLED, false),

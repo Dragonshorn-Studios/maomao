@@ -291,10 +291,10 @@ export function findingStatusLabel(status: string): { text: string; hint: string
   }
 }
 
-export function findingCommandLabel(command: string | null | undefined): string {
+export function findingCommandLabel(command: string | null | undefined, mentionName = "maomao"): string {
   if (!command) return "";
   if (command === "seedling") return "🌱";
-  if (command === "ignore" || command === "bury" || command === "reopen") return `@maomao ${command}`;
+  if (command === "ignore" || command === "bury" || command === "reopen") return `@${mentionName} ${command}`;
   return command;
 }
 
@@ -304,10 +304,10 @@ export function findingOverrideNote(finding: {
   dismiss_command?: string | null;
   reopened_by?: string | null;
   reconciliation_reason?: string | null;
-}): string | undefined {
+}, mentionName = "maomao"): string | undefined {
   if (finding.status === "dismissed") {
     const who = finding.dismissed_by ? ` by ${finding.dismissed_by}` : "";
-    const via = findingCommandLabel(finding.dismiss_command);
+    const via = findingCommandLabel(finding.dismiss_command, mentionName);
     return `Buried${who}${via ? ` via ${via}` : ""}. Intentionally ignored, not marked fixed.`;
   }
   const reason = finding.reconciliation_reason?.trim();

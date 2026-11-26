@@ -26,6 +26,8 @@ export interface PageOptions {
   /** Latest reviewed head SHA for this pull request, for stale-finding detection. */
   prHeadSha?: string;
   uiFlavor?: UiFlavor;
+  /** Configured command persona used in user-facing command examples. */
+  mentionName?: string;
   /** Pagination state; only the paginated home renders (including the POST /reviews error re-render) pass it. */
   pagination?: { hasOlder: boolean; hasNewer: boolean };
   /** Active family view of the home queue; the view tabs render only on home. */

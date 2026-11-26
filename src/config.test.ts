@@ -296,6 +296,19 @@ describe("instance branding", () => {
     expect(config.uiFlavor).toBe("plain");
   });
 
+  it("loads a primary mention with legacy and configured aliases", () => {
+    expect(loadConfig({}).poisonAlert.mentionName).toBe("maomao");
+    expect(loadConfig({}).poisonAlert.mentionAliases).toEqual([]);
+    expect(loadConfig({ MAOMAO_MENTION: "@mergehenna" }).poisonAlert).toMatchObject({
+      mentionName: "mergehenna",
+      mentionAliases: ["maomao"],
+    });
+    expect(loadConfig({ MAOMAO_MENTION: "mergehenna", MAOMAO_MENTION_ALIASES: "maomao, staging_bot" }).poisonAlert.mentionAliases).toEqual(["maomao", "staging_bot"]);
+    expect(loadConfig({ MAOMAO_MENTION: "mergehenna", MAOMAO_MENTION_ALIASES: "none" }).poisonAlert.mentionAliases).toEqual([]);
+    expect(loadConfig({ MAOMAO_MENTION: "mergehenna", MAOMAO_MENTION_ALIASES: "" }).poisonAlert.mentionAliases).toEqual([]);
+    expect(() => loadConfig({ MAOMAO_MENTION: "two words" })).toThrow(/MAOMAO_MENTION/);
+  });
+
   it("uses a selected theme pack's copy flavor by default and rejects invalid choices", () => {
     expect(loadConfig({ UI_THEME_PACK: "mergehenna" }).uiFlavor).toBe("mergehenna");
     expect(() => loadConfig({ UI_THEME_PACK: "copper" })).toThrow(/UI_THEME_PACK/);

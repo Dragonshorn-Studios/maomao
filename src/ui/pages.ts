@@ -664,7 +664,7 @@ export function renderJob(
     </dl>
     ${job.job_type === "pr_review" && options.mergeLifecycle ? renderMergeLifecycle(options.mergeLifecycle, job, options.mergeCapabilities) : ""}
     ${hidesReviewDetails ? "" : renderRouting(job)}
-    ${hidesReviewDetails ? "" : renderEscalation(job)}
+    ${hidesReviewDetails ? "" : renderEscalation(job, options.mentionName)}
     ${options.stackMembers?.length ? renderStackMembers(options.stackMembers) : ""}
     ${job.failure_reason ? `<p class="error" role="alert"><strong>Failure:</strong> ${escapeHtml(job.failure_reason)}</p>` : ""}
     ${hidesReviewDetails ? "" : `<div class="section-head">
@@ -680,6 +680,7 @@ export function renderJob(
     <h2 id="findings">Findings</h2>
     ${renderFindings(metrics, options.prFindings ?? [], {
       prHeadSha: options.prHeadSha,
+      mentionName: options.mentionName,
       prHtmlUrl: job.pr_html_url,
     })}
     ${options.scanIssueCreation ? renderScanIssueCreation(options.scanIssueCreation, options.csrfToken) : ""}
@@ -1002,7 +1003,7 @@ function renderRouting(job: JobRow): string {
     </article>`;
 }
 
-function renderEscalation(job: JobRow): string {
+function renderEscalation(job: JobRow, mentionName = "maomao"): string {
   // The pipeline persists poison_alert_policy only once work starts, so an absent policy is
   // rendered as "pending" (a live poison-alert job has not reached its escalation plan yet).
   const policy = job.poison_alert_policy || "";
@@ -1030,7 +1031,7 @@ function renderEscalation(job: JobRow): string {
       : externalRequested
         ? "external dispatch only"
         : policy === "manual" || (!policy && !internalObserved && !externalObserved)
-          ? "waiting for a manual @maomao escalate"
+          ? `waiting for a manual @${mentionName} escalate`
           : "escalation pending";
 
   const channels: string[] = [];
@@ -1302,7 +1303,7 @@ function renderAggregator(job: JobRow, metrics: JobMetrics): string {
 function renderFindings(
   metrics: JobMetrics,
   persisted: FindingRow[] = [],
-  context: { prHeadSha?: string; prHtmlUrl?: string } = {},
+  context: { prHeadSha?: string; prHtmlUrl?: string; mentionName?: string } = {},
 ): string {
   const unconfirmed = !metrics.findingsConfirmed;
   const items = metrics.findingsConfirmed
@@ -1390,14 +1391,14 @@ export function renderFindingCard(
     unconfirmed: boolean;
     record?: FindingRow;
   },
-  context: { prHeadSha?: string; prHtmlUrl?: string } = {},
+  context: { prHeadSha?: string; prHtmlUrl?: string; mentionName?: string } = {},
   collapsed = false,
 ): string {
   const sev = severityLabel(input.severity);
   const loc = findingLocation({ file: input.file, line: input.line ?? undefined });
   const record = input.record;
   const status = record && record.status !== "open" ? findingStatusLabel(record.status) : undefined;
-  const override = record ? findingOverrideNote(record) : undefined;
+  const override = record ? findingOverrideNote(record, context.mentionName) : undefined;
   const buried = record?.status === "dismissed";
   const resolved = record?.status === "resolved";
   const stale = Boolean(

@@ -96,6 +96,10 @@ describe("escalation marker and loop guards", () => {
   it("recognizes escalate commands and ignores bots", () => {
     expect(mentionsEscalateCommand("hey @maomao escalate please", "maomao", "escalate")).toBe(true);
     expect(mentionsEscalateCommand("@maomao review", "maomao", "escalate")).toBe(false);
+    expect(mentionsEscalateCommand("@mergehenna escalate please", ["mergehenna", "maomao"], "escalate")).toBe(true);
+    expect(mentionsEscalateCommand("@maomao escalate please", ["mergehenna", "maomao"], "escalate")).toBe(true);
+    expect(mentionsEscalateCommand("@mergehenna[bot] escalate please", ["mergehenna"], "escalate")).toBe(true);
+    expect(mentionsEscalateCommand("@other escalate please", ["mergehenna", "maomao"], "escalate")).toBe(false);
     expect(isBotActor({ login: "maomao[bot]", type: "Bot" })).toBe(true);
   });
 
@@ -107,6 +111,9 @@ describe("escalation marker and loop guards", () => {
     expect(mentionsReviewCommand("a reviewer commented", "maomao")).toBe(false);
     expect(mentionsReviewCommand("@maomao reviewers", "maomao")).toBe(false);
     expect(mentionsReviewCommand("@otherbot review", "maomao")).toBe(false);
+    expect(mentionsReviewCommand("@mergehenna review", ["mergehenna", "maomao"])).toBe(true);
+    expect(mentionsReviewCommand("@maomao review", ["mergehenna", "maomao"])).toBe(true);
+    expect(mentionsReviewCommand("some @maomao review discussion", ["mergehenna"])).toBe(false);
   });
 
   it("is idempotent per provider, repo, PR, SHA, and policy", () => {

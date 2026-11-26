@@ -54,6 +54,15 @@ describe("override commands", () => {
     expect(parseOverrideCommand("@maomao reopen")).toEqual({ command: "reopen", token: "reopen" });
   });
 
+  it("accepts configured primary and legacy alias mentions only", () => {
+    const mentions = ["mergehenna", "maomao"];
+    expect(parseOverrideCommand("@mergehenna bury", mentions)).toEqual({ command: "dismiss", token: "bury" });
+    expect(parseOverrideCommand("@maomao reopen", mentions)).toEqual({ command: "reopen", token: "reopen" });
+    expect(parseOverrideCommand("@mergehenna[bot] ignore", mentions)).toEqual({ command: "dismiss", token: "ignore" });
+    expect(parseOverrideCommand("@other bury", mentions)).toBeUndefined();
+    expect(parseOverrideCommand("@maomao bury", ["mergehenna"])).toBeUndefined();
+  });
+
   it("rejects longer discussion that only mentions a command", () => {
     expect(parseOverrideCommand("@maomao bury this later")).toBeUndefined();
     expect(parseOverrideCommand("please ignore")).toBeUndefined();
