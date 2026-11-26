@@ -100,7 +100,8 @@ export function buildReviewBody(input: {
     const shown = demoted.slice(0, DEMOTED_BODY_LIMIT);
     const lines = shown.map((entry) => {
       const fingerprint = entry.finding.fingerprint ?? fingerprintFinding(entry.finding);
-      return `- **${entry.finding.severity}**: ${entry.finding.summary} — \`${entry.finding.file}:${entry.finding.line}\`\n  ${findingMarker(fingerprint, input.headSha)}`;
+      const location = entry.finding.file && entry.finding.line ? ` — \`${entry.finding.file}:${entry.finding.line}\`` : "";
+      return `- **${entry.finding.severity}**: ${entry.finding.summary}${location}\n  ${findingMarker(fingerprint, input.headSha)}`;
     });
     if (demoted.length > shown.length) lines.push(`- … and ${demoted.length - shown.length} more`);
     body += `\n#### Findings not shown inline\n\nThese findings are listed here instead of as inline comments:\n\n${lines.join("\n")}\n`;
