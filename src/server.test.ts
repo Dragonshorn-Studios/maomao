@@ -6868,6 +6868,11 @@ describe("appearance config routes", () => {
     expect(homeHtml).toContain('data-if-brand="mergehenna"');
     expect(homeHtml).toContain("Review Desk");
 
+    const config = await app.request("/config", { headers: { cookie: session } });
+    const configHtml = await config.text();
+    expect(configHtml).toContain('data-if-brand="mergehenna"');
+    expect(configHtml).toContain("Review Desk");
+
     const favicon = await app.request("/assets/favicon.svg");
     expect(await favicon.text()).toBe(themePackAssets("mergehenna").faviconSvg);
 

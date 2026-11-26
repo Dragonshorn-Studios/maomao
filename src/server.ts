@@ -2128,6 +2128,7 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
     return c.html(
       renderConfigPage({
         identity: c.get("identity"),
+        branding: ctx.config.branding,
         revisions: [],
         audit: [],
         canWrite: gateOn,
