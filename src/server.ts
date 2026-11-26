@@ -1328,6 +1328,7 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
     } = {},
   ): ConfigPageData => ({
     identity: c.get("identity"),
+    branding: ctx.config.branding,
     revisions: ctx.store.configs.listRevisions(),
     profileRoutes: ctx.store.configs.listProfileRoutes(),
     audit: [],
@@ -2109,6 +2110,7 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
     }
     return c.html(
       renderDraftEditPage({
+        branding: ctx.config.branding,
         revision,
         identity: c.get("identity"),
         canWrite: gateOn,
@@ -2123,6 +2125,7 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
     if (!gateOn) return c.redirect("/", 302);
     return c.html(
       renderConfigAuditPage({
+        branding: ctx.config.branding,
         identity: c.get("identity"),
         revisions: [],
         audit: ctx.store.configs.listAudit(100),
@@ -2144,6 +2147,7 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
     const oldest = deliveries[deliveries.length - 1];
     return c.html(
       renderConfigDeliveriesPage({
+        branding: ctx.config.branding,
         identity: c.get("identity"),
         revisions: [],
         audit: [],
@@ -2295,6 +2299,7 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
       ) =>
         c.html(
           renderDraftEditPage({
+            branding: ctx.config.branding,
             revision: existing,
             identity: c.get("identity"),
             canWrite: gateOn,
@@ -2309,6 +2314,7 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
         return runProfileModelTest(c, bodyPreview, (opts) =>
           c.html(
             renderDraftEditPage({
+              branding: ctx.config.branding,
               revision: existing,
               identity: c.get("identity"),
               canWrite: gateOn,
@@ -2609,6 +2615,7 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
     } = {},
   ) => ({
     identity: c.get("identity"),
+    branding: ctx.config.branding,
     revisions: promptViews(),
     fixtures: fixtureViews(),
     evaluations: evaluationViews(),
@@ -2818,6 +2825,7 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
     return {
       canScan: Boolean(c.get("identity")),
       identity: c.get("identity"),
+    branding: ctx.config.branding,
       csrfToken: gateOn ? ensureCsrfToken(c, ctx.config.uiSessionSecret) : undefined,
       issueCreationEnabled: ctx.config.issueCreationEnabled,
       profileRevision: profileRevision ? { id: profileRevision.id, name: profileRevision.name } : null,
@@ -2966,6 +2974,7 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
         return c.html(
           renderScanConfirmPage({
             identity: c.get("identity"),
+            branding: ctx.config.branding,
             csrfToken: ensureCsrfToken(c, ctx.config.uiSessionSecret),
             repo: `${parsed.owner}/${parsed.repo}`,
             branch: head.defaultBranch,
@@ -3027,6 +3036,7 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
       .slice(0, 8)
       .map((job) => ({ id: job.id, repoFullName: job.repo_full_name, headSha: job.head_sha }));
     return {
+      branding: ctx.config.branding,
       canBrief: Boolean(c.get("identity")),
       identity: c.get("identity"),
       csrfToken: gateOn ? ensureCsrfToken(c, ctx.config.uiSessionSecret) : undefined,
@@ -3170,6 +3180,7 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
                 : { kind: "incomplete" };
         return c.html(
           renderBriefConfirmPage({
+            branding: ctx.config.branding,
             identity: c.get("identity"),
             csrfToken: ensureCsrfToken(c, ctx.config.uiSessionSecret),
             repo: `${parsed.owner}/${parsed.repo}`,
@@ -3227,6 +3238,7 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
       sectionParam !== undefined && /^\d+$/.test(sectionParam) ? Number(sectionParam) : undefined;
     return c.html(
       renderBriefTabPage({
+        branding: ctx.config.branding,
         job,
         payload,
         sectionIndex,
@@ -3242,6 +3254,7 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
   ): PausePageData => ({
     canOperate: Boolean(configActor(c)),
     identity: c.get("identity"),
+    branding: ctx.config.branding,
     csrfToken: ensureCsrfToken(c, ctx.config.uiSessionSecret),
     pauses: ctx.store.listActivePauses().map((pause) => ({
       id: pause.id,
@@ -3528,6 +3541,7 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
     return c.html(
       renderScanIssuePreviewPage({
         identity: c.get("identity"),
+        branding: ctx.config.branding,
         csrfToken: ensureCsrfToken(c, ctx.config.uiSessionSecret),
         job: { id: job.id, repoFullName: job.repo_full_name, headSha: job.head_sha },
         items,
@@ -4013,6 +4027,7 @@ function renderCancelConfirm(c: Context<AppEnv>, ctx: ServerContext, pageOpts: P
   return c.html(
     renderCancelConfirmPage({
       identity: c.get("identity"),
+      branding: ctx.config.branding,
       csrfToken: pageOpts.showLogout ? ensureCsrfToken(c, ctx.config.uiSessionSecret) : undefined,
       showLogout: pageOpts.showLogout,
       job: {

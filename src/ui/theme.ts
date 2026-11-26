@@ -263,6 +263,8 @@ export const THEME_CSS = `
   --if-info: #2f5d88;
   --if-info-soft: #dfe9f1;
   --if-shadow: 0 1px 0 rgba(26, 34, 28, 0.04);
+  --code-bg: #eae4d4;
+  --code-fg: #1a221c;
   }
   :root[data-if-brand="apothecary"]:not([data-if-theme]) body {
     background: repeating-linear-gradient(to bottom, transparent 0, transparent calc(1.4rem - 1px), color-mix(in srgb, var(--line) 32%, transparent) calc(1.4rem - 1px), color-mix(in srgb, var(--line) 32%, transparent) 1.4rem), var(--paper);

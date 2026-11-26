@@ -1554,6 +1554,7 @@ export interface ConfigPageData {
   /** Keyset cursor for the "Older deliveries" link; null when exhausted. */
   deliveriesBefore?: string | null;
   identity?: UiIdentity;
+  branding?: PageOptions["branding"];
 }
 
 /** Env-derived values are operator-controlled but unbounded: clamp length and
@@ -1977,6 +1978,7 @@ export function renderConfigPage(data: ConfigPageData): string {
     showLogout: data.canWrite || Boolean(data.csrfToken),
     csrfToken: data.csrfToken,
     identity: data.identity,
+    branding: data.branding,
     surface: "operator",
     nav: "settings",
     settingsSection: "effective",
@@ -2160,6 +2162,7 @@ export function renderProfilesPage(data: ConfigPageData): string {
     showLogout: data.canWrite || Boolean(data.csrfToken),
     csrfToken: data.csrfToken,
     identity: data.identity,
+    branding: data.branding,
     surface: "operator",
     nav: "settings",
     settingsSection: "profiles",
@@ -2169,6 +2172,7 @@ export function renderProfilesPage(data: ConfigPageData): string {
 export interface DraftEditPageData {
   revision: ConfigRevisionView;
   identity?: UiIdentity;
+  branding?: PageOptions["branding"];
   csrfToken?: string;
   canWrite: boolean;
   notice?: string;
@@ -2209,6 +2213,7 @@ export function renderDraftEditPage(data: DraftEditPageData): string {
     showLogout: data.canWrite || Boolean(data.csrfToken),
     csrfToken: data.csrfToken,
     identity: data.identity,
+    branding: data.branding,
     surface: "operator",
     nav: "settings",
     settingsSection: "profiles",
@@ -2255,6 +2260,7 @@ export function renderNewProfilePage(data: ConfigPageData): string {
     showLogout: data.canWrite || Boolean(data.csrfToken),
     csrfToken: data.csrfToken,
     identity: data.identity,
+    branding: data.branding,
     surface: "operator",
     nav: "settings",
     settingsSection: "profiles",
@@ -2307,6 +2313,7 @@ export function renderConfigDeliveriesPage(data: ConfigPageData): string {
     showLogout: data.canWrite || Boolean(data.csrfToken),
     csrfToken: data.csrfToken,
     identity: data.identity,
+    branding: data.branding,
     surface: "operator",
     nav: "settings",
     settingsSection: "deliveries",
@@ -2325,6 +2332,7 @@ export function renderConfigAuditPage(data: ConfigPageData): string {
     showLogout: data.canWrite || Boolean(data.csrfToken),
     csrfToken: data.csrfToken,
     identity: data.identity,
+    branding: data.branding,
     surface: "operator",
     nav: "settings",
     settingsSection: "audit",
@@ -2390,6 +2398,7 @@ export interface PromptConfigPageData {
   notice?: string;
   error?: string;
   identity?: UiIdentity;
+  branding?: PageOptions["branding"];
 }
 
 function promptCatalog(): Array<{ id: string; title: string; defaultBody: string }> {
@@ -2613,6 +2622,7 @@ export function renderPromptConfigPage(data: PromptConfigPageData): string {
     showLogout: data.canWrite || Boolean(data.csrfToken),
     csrfToken: data.csrfToken,
     identity: data.identity,
+    branding: data.branding,
     surface: "operator",
     nav: "settings",
     settingsSection: "prompts",
@@ -2622,6 +2632,7 @@ export function renderPromptConfigPage(data: PromptConfigPageData): string {
 export interface ScanPageData {
   canScan: boolean;
   identity?: UiIdentity;
+  branding?: PageOptions["branding"];
   csrfToken?: string;
   issueCreationEnabled: boolean;
   profileRevision: { id: number; name: string } | null;
@@ -2638,6 +2649,7 @@ export type ScanConfirmNotice =
 
 export interface ScanConfirmData {
   identity?: UiIdentity;
+  branding?: PageOptions["branding"];
   csrfToken: string;
   repo: string;
   branch: string;
@@ -2723,6 +2735,7 @@ export function renderScanConfirmPage(data: ScanConfirmData): string {
     showLogout: Boolean(data.csrfToken),
     csrfToken: data.csrfToken,
     identity: data.identity,
+    branding: data.branding,
     surface: "operator",
     nav: "operations",
   });
@@ -2769,6 +2782,7 @@ export function renderScanPage(data: ScanPageData): string {
     showLogout: data.canScan || Boolean(data.csrfToken),
     csrfToken: data.csrfToken,
     identity: data.identity,
+    branding: data.branding,
     surface: "operator",
     nav: "operations",
   });
@@ -2844,6 +2858,7 @@ export interface ScanIssuePreviewItem {
 
 export interface ScanIssuePreviewData {
   identity?: UiIdentity;
+  branding?: PageOptions["branding"];
   csrfToken: string;
   job: { id: number; repoFullName: string; headSha: string };
   items: ScanIssuePreviewItem[];
@@ -2903,6 +2918,7 @@ export function renderScanIssuePreviewPage(data: ScanIssuePreviewData): string {
     showLogout: Boolean(data.csrfToken),
     csrfToken: data.csrfToken,
     identity: data.identity,
+    branding: data.branding,
     surface: "operator",
     nav: "operations",
   });
@@ -2911,6 +2927,7 @@ export function renderScanIssuePreviewPage(data: ScanIssuePreviewData): string {
 export interface BriefPageData {
   canBrief: boolean;
   identity?: UiIdentity;
+  branding?: PageOptions["branding"];
   csrfToken?: string;
   recentBriefs: Array<{ id: number; repoFullName: string; headSha: string }>;
   /** Resolved model shown as the run's limits; empty string means the server default. */
@@ -2929,6 +2946,7 @@ export type BriefConfirmNotice =
 
 export interface BriefConfirmData {
   identity?: UiIdentity;
+  branding?: PageOptions["branding"];
   csrfToken: string;
   repo: string;
   ref: string;
@@ -2997,6 +3015,7 @@ export function renderBriefConfirmPage(data: BriefConfirmData): string {
     showLogout: Boolean(data.csrfToken),
     csrfToken: data.csrfToken,
     identity: data.identity,
+    branding: data.branding,
     surface: "operator",
     nav: "operations",
   });
@@ -3046,6 +3065,7 @@ export function renderBriefPage(data: BriefPageData): string {
     showLogout: data.canBrief || Boolean(data.csrfToken),
     csrfToken: data.csrfToken,
     identity: data.identity,
+    branding: data.branding,
     surface: "operator",
     nav: "operations",
   });
@@ -3054,6 +3074,7 @@ export function renderBriefPage(data: BriefPageData): string {
 export interface PausePageData {
   canOperate: boolean;
   identity?: UiIdentity;
+  branding?: PageOptions["branding"];
   csrfToken?: string;
   pauses: Array<{ id: number; repoFullName: string; expiresAt: string; actor: string }>;
   /** Active instance-wide pause, when the operator switch is on. */
@@ -3136,6 +3157,7 @@ export function renderPausePage(data: PausePageData): string {
     showLogout: data.canOperate || Boolean(data.csrfToken),
     csrfToken: data.csrfToken,
     identity: data.identity,
+    branding: data.branding,
     surface: "operator",
     nav: "queue",
   });
@@ -3147,6 +3169,7 @@ export interface BriefTabData {
   /** Zero-based index into payload.sections; undefined renders the TOC. */
   sectionIndex?: number;
   identity?: UiIdentity;
+  branding?: PageOptions["branding"];
   csrfToken?: string;
 }
 
@@ -3188,6 +3211,7 @@ export function renderBriefTabPage(data: BriefTabData): string {
     showLogout: Boolean(data.csrfToken),
     csrfToken: data.csrfToken,
     identity: data.identity,
+    branding: data.branding,
     surface: "operator",
     nav: "operations",
   });
@@ -3195,6 +3219,7 @@ export function renderBriefTabPage(data: BriefTabData): string {
 
 export interface CancelConfirmData {
   identity?: UiIdentity;
+  branding?: PageOptions["branding"];
   csrfToken?: string;
   showLogout?: boolean;
   job: { id: number; repoFullName: string; prNumber: number; prTitle: string; headSha: string; jobType: string };
@@ -3225,6 +3250,7 @@ export function renderCancelConfirmPage(data: CancelConfirmData): string {
     showLogout: data.showLogout ?? false,
     csrfToken: data.csrfToken,
     identity: data.identity,
+    branding: data.branding,
     surface: "operator",
   });
 }
