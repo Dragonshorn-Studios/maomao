@@ -644,6 +644,55 @@ describe("webhook handling", () => {
     expect(store.getJob(jobId!)?.manual_escalate_requested).toBe(1);
   });
 
+  it("accepts configured primary and legacy alias escalate mentions", async () => {
+    const secret = "s3cret";
+    const config = loadConfig({
+      GITHUB_WEBHOOK_SECRET: secret,
+      GITHUB_APP_ID: "1",
+      GITHUB_APP_PRIVATE_KEY: "k",
+      REVIEWER_ROUTING: "fixed",
+      REVIEWER_ROLES: "correctness",
+      POISON_ALERT_POLICY: "manual",
+      POISON_ALERT_EXTERNAL_ENABLED: "true",
+      MAOMAO_MENTION: "mergehenna",
+    });
+    const store = new JobStore(openDb(":memory:"));
+    const prBody = JSON.stringify(prPayload());
+    await handleGithubWebhook({
+      config,
+      store,
+      request: { event: "pull_request", deliveryId: "persona-pr", signature: sign(secret, prBody), rawBody: prBody },
+    });
+    const jobId = store.listJobs(1)[0]!.id;
+    store.patchJob(jobId, { routing_profile: "poison-alert", github_review_id: "1" });
+
+    for (const [delivery, body] of [
+      ["persona-escalate-primary", "@mergehenna escalate"],
+      ["persona-escalate-legacy", "@maomao escalate"],
+    ] as const) {
+      store.patchJob(jobId, { manual_escalate_requested: 0 });
+      const rawBody = JSON.stringify({
+        action: "created",
+        installation: { id: 42 },
+        repository: { full_name: "acme/widgets", name: "widgets", owner: { login: "acme" } },
+        issue: { number: 7, pull_request: { url: "https://github.com/acme/widgets/pull/7" } },
+        comment: {
+          body,
+          user: { login: "alice", type: "User" },
+          author_association: "OWNER",
+        },
+      });
+      const result = await handleGithubWebhook({
+        config,
+        store,
+        github: githubForCommands({ permission: "none" }),
+        request: { event: "issue_comment", deliveryId: delivery, signature: sign(secret, rawBody), rawBody },
+      });
+      expect(result.dispatchJobId).toBe(jobId);
+      expect(store.getJob(jobId)?.manual_escalate_requested).toBe(1);
+    }
+  });
+
   it("runs @maomao review as an authorized full re-review at the current head", async () => {
     const secret = "s3cret";
     const config = loadConfig({
