@@ -205,10 +205,11 @@ export function persistThreadsAsFindings(input: {
     const comment = findingComment(thread);
     const marker = parseDiscussionFindingMarker(thread);
     if (!marker || !comment) continue;
-    // Approval-body republication intentionally has no replacement thread;
-    // do not let the historical inline thread overwrite that newer surface.
-    if (bodyPublished.has(marker.id)) continue;
     const existing = input.store.getFinding(input.job.repo_full_name, input.job.pr_number, marker.id, scopeOf(input.job));
+    // Approval-body republication intentionally has no replacement thread;
+    // do not let the historical inline thread overwrite that durable surface.
+    const currentInlinePublication = published.has(marker.id) && !thread.isResolved;
+    if (bodyPublished.has(marker.id) || (existing?.publication_surface === "approval_body" && !currentInlinePublication)) continue;
     if (existing?.status === "dismissed") continue;
     // Republished fingerprint: ignore the already-resolved conversation so the
     // new open thread can attach. The obsolete thread stays resolved on GitHub.

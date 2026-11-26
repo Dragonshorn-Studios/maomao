@@ -84,6 +84,8 @@ export function buildReviewBody(input: {
   findingsCount: number;
   reviewerCount: number;
   demoted?: DemotedFinding[];
+  /** Maximum body-listed findings; defaults to the legacy demoted-inline cap. */
+  demotedLimit?: number;
   /** Count of findings withheld by the out-of-checkout path gate (issue #176). */
   withheldCount?: number;
   /** The offending path refs — published so a legitimately suppressed finding is investigable. Paths name files; they cannot carry file contents. */
@@ -98,7 +100,7 @@ export function buildReviewBody(input: {
   let body = `${header}${input.summary.trim()}\n`;
   const demoted = input.demoted ?? [];
   if (demoted.length > 0) {
-    const shown = demoted.slice(0, DEMOTED_BODY_LIMIT);
+    const shown = demoted.slice(0, input.demotedLimit ?? DEMOTED_BODY_LIMIT);
     const lines = shown.map((entry) => {
       const fingerprint = entry.finding.fingerprint ?? fingerprintFinding(entry.finding);
       const location = entry.finding.file && entry.finding.line ? ` — \`${entry.finding.file}:${entry.finding.line}\`` : "";

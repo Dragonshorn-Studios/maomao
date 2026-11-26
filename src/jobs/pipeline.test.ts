@@ -2382,7 +2382,7 @@ describe("inline comment anchoring", () => {
     expect(logs).toContain("no replacement comment was posted");
   });
   it("resolves only approval-body findings that are actually rendered within the body cap", async () => {
-    const priors = Array.from({ length: 11 }, (_, index) => ({
+    const priors = Array.from({ length: 13 }, (_, index) => ({
       severity: "medium" as const,
       confidence: 0.9,
       category: "correctness",
@@ -2446,11 +2446,11 @@ describe("inline comment anchoring", () => {
     expect(review?.event).toBe("APPROVE");
     expect(review?.comments).toBe(0);
     expect(review?.body).toContain(fingerprints[0] ?? "");
-    expect(review?.body).not.toContain(fingerprints[10] ?? "");
+    expect(review?.body).not.toContain(fingerprints[12] ?? "");
     expect(review?.body).toContain("and 1 more");
-    expect(resolved).toEqual(fingerprints.slice(0, 10).map((fingerprint) => `thread-${fingerprint}`));
+    expect(resolved).toEqual(fingerprints.slice(0, 12).map((fingerprint) => `thread-${fingerprint}`));
     const rows = store.listFindings("acme/widgets", 4);
-    expect(rows.filter((row) => row.publication_surface === "approval_body")).toHaveLength(10);
+    expect(rows.filter((row) => row.publication_surface === "approval_body")).toHaveLength(12);
     expect(rows.find((row) => row.fingerprint === fingerprints[0])?.status).toBe("moved");
   });
 });
@@ -3838,6 +3838,7 @@ describe("review verdict events", () => {
     const created = store.enqueue({ ...jobInput("rcsha"), reviewers: [] });
     await createPipeline({ config, store, github, checkout: await fixtureCheckout(), opencode }).run(created.job.id);
     expect(posted[0]?.event).toBe("REQUEST_CHANGES");
+    expect(posted[0]?.comments).toBe(1);
     expect(store.getJob(created.job.id)?.review_event).toBe("REQUEST_CHANGES");
     expect(store.getJob(created.job.id)?.review_event_reason).toContain("high");
   });

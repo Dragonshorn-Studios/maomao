@@ -3158,12 +3158,14 @@ async function publishReview(
     );
     summary = "(summary withheld — it referenced files outside the checkout; see the Maomao job log)";
   }
+  const approvalBodyLimit = Math.max(DEMOTED_BODY_LIMIT, deps.config.maxInlineComments);
   const body = buildReviewBody({
     headSha: job.head_sha,
     summary,
     findingsCount,
     reviewerCount,
     demoted,
+    demotedLimit: approvalBodyOnly ? approvalBodyLimit : undefined,
     withheldCount,
     withheldRefs: [...withheldRefs],
   });
@@ -3227,7 +3229,7 @@ async function publishReview(
     // so a moved prior thread may close even though there is no new inline thread.
     // Persist only the entries actually rendered within the body cap; without
     // an inline thread, SQLite is the next run's evidence that they remain open.
-    for (const entry of demoted.slice(0, DEMOTED_BODY_LIMIT)) {
+    for (const entry of demoted.slice(0, approvalBodyLimit)) {
       const fingerprint = entry.finding.fingerprint ?? fingerprintFinding(entry.finding);
       bodyPublishedFingerprints.push(fingerprint);
       if (!postedFingerprints.includes(fingerprint)) postedFingerprints.push(fingerprint);
