@@ -550,15 +550,22 @@ export function effectiveConfigEntries(
     envKey: "UI_PASSWORD",
   });
 
-  row("Ask Maomao", "Explainer enabled", "MAOMAO_EXPLAIN_ENABLED", String(config.chat.enabled));
+  row("Interface", "Instance display name", "UI_INSTANCE_NAME", config.branding.name);
+  row("Interface", "Instance tagline", "UI_INSTANCE_TAGLINE", config.branding.tagline);
+  row("Interface", "Instance description", "UI_INSTANCE_DESCRIPTION", config.branding.description);
+  row("Interface", "Theme pack", "UI_THEME_PACK", config.branding.themePack);
+  row("Interface", "Flavor copy pack", "UI_FLAVOR", config.branding.copyFlavor);
+
+  const chatGroup = `Ask ${config.branding.name}`;
+  row(chatGroup, "Explainer enabled", "MAOMAO_EXPLAIN_ENABLED", String(config.chat.enabled));
   row(
-    "Ask Maomao",
+    chatGroup,
     "Explainer model",
     "MAOMAO_EXPLAIN_MODEL",
     config.chat.model || `${config.opencode.reviewerModel} (reviewer fallback)`,
   );
-  row("Ask Maomao", "Explainer message ceiling", "MAOMAO_EXPLAIN_MAX_MESSAGES", String(config.chat.maxMessages));
-  row("Ask Maomao", "Explainer cost ceiling (USD)", "MAOMAO_EXPLAIN_MAX_COST_USD", String(config.chat.maxCostUsd));
-  row("Ask Maomao", "Explainer timeout (ms)", "MAOMAO_EXPLAIN_TIMEOUT_MS", String(config.chat.timeoutMs));
+  row(chatGroup, "Explainer message ceiling", "MAOMAO_EXPLAIN_MAX_MESSAGES", String(config.chat.maxMessages));
+  row(chatGroup, "Explainer cost ceiling (USD)", "MAOMAO_EXPLAIN_MAX_COST_USD", String(config.chat.maxCostUsd));
+  row(chatGroup, "Explainer timeout (ms)", "MAOMAO_EXPLAIN_TIMEOUT_MS", String(config.chat.timeoutMs));
   return entries;
 }

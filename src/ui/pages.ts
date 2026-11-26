@@ -17,8 +17,6 @@ import { elapsedMs, escapeHtml, formatDuration, shortSha } from "../util.js";
 import { KNOWN_REVIEWER_ROLES, composeReviewerPrompt, promptBodyFromRolePrompt } from "../prompts.js";
 import { composedPipelineStages } from "../prompt-previews.js";
 import {
-  OPERATOR_NAME,
-  PRODUCT_NAME,
   cancelledBannerCopy,
   diffUnavailableCopy,
   emptyQueueCopy,
@@ -45,7 +43,7 @@ import {
 } from "./copy.js";
 import { externalLinkGlyph, pancakeMark, roleGlyph, stackMark } from "./glyphs.js";
 import { TYPEAHEAD_URL } from "./typeahead.js";
-import { csrfInput, layout, type PageOptions, type QueueView, type UiIdentity } from "./layout.js";
+import { csrfInput, layout, pageBranding, type PageOptions, type QueueView, type UiIdentity } from "./layout.js";
 import {
   findingLocation,
   formatCost,
@@ -68,7 +66,7 @@ const LOGIN_ERRORS: Record<LoginError, string> = {
   csrf: "This form's security token was missing or expired. Go back and try again.",
   "oauth-state": "Sign-in could not be verified (the state was missing, expired, or replayed). Start again.",
   "oauth-denied":
-    "Your GitHub account is not authorized to operate this Maomao instance. Ask an operator to add your GitHub user id, or sign out of GitHub and retry with a different account.",
+    "Your GitHub account is not authorized to operate this instance. Ask an operator to add your GitHub user id, or sign out of GitHub and retry with a different account.",
   "oauth-failed": "GitHub sign-in failed. Try again shortly.",
   "oauth-cancelled": "GitHub sign-in was cancelled. You can try again.",
 };
@@ -79,6 +77,8 @@ export interface LoginOptions {
   csrfToken?: string;
   showGithub?: boolean;
   showPassword?: boolean;
+  /** Operator-facing instance identity for standalone login pages. */
+  branding?: PageOptions["branding"];
 }
 
 export function renderLogin(options: LoginOptions = {}): string {
@@ -100,14 +100,15 @@ export function renderLogin(options: LoginOptions = {}): string {
       <button class="if-button if-button--primary" type="submit">Sign in</button>
     </form>`
     : "";
+  const branding = pageBranding(options);
   const body = `
     <h1>Sign in</h1>
-    <p class="lede">Sign in to ${escapeHtml(PRODUCT_NAME)} — the merge gate operated by ${escapeHtml(OPERATOR_NAME)} — to view jobs, logs, and APIs.</p>
+    <p class="lede">Sign in to ${escapeHtml(branding.name)} to view jobs, logs, and APIs.</p>
     ${errorCopy ? `<p class="error" role="alert">${escapeHtml(errorCopy)}</p>` : ""}
     ${githubButton}
     ${githubButton && passwordForm ? `<p class="muted">or</p>` : ""}
     ${passwordForm}`;
-  return layout(`${PRODUCT_NAME} sign in`, body, { live: false, accountMenu: false, rail: false });
+  return layout(`${branding.name} sign in`, body, { live: false, accountMenu: false, rail: false, branding });
 }
 
 const JOB_TYPE_FILTERS: { value: JobRow["job_type"]; label: string }[] = [
@@ -317,7 +318,7 @@ export function renderHome(jobs: JobRow[], store: JobStore, options: PageOptions
           </div>`
     }
     ${paginationNav}`;
-  return layout(PRODUCT_NAME, body, { nav: view === "ops" ? "operations" : "queue", ...options });
+  return layout(pageBranding(options).name, body, { nav: view === "ops" ? "operations" : "queue", ...options });
 }
 
 /**
@@ -593,7 +594,7 @@ export function renderJob(
     ${stale ? `<p class="warn" role="status">${escapeHtml(staleBanner())}</p>` : ""}
     <h1>${heading}${prExternalLinkHtml(job)}</h1>
     <p class="lede">${escapeHtml(job.pr_title || "")}${flavor ? ` · ${escapeHtml(flavor)}` : ""}</p>
-    ${options.chatEnabled ? `<p><a href="/jobs/${job.id}/chat">Ask Maomao about this change →</a></p>` : ""}
+    ${options.chatEnabled ? `<p><a href="/jobs/${job.id}/chat">Ask ${escapeHtml(pageBranding(options).name)} about this change →</a></p>` : ""}
     ${isBrief ? `<p><a href="/jobs/${job.id}/brief">Repo brief →</a></p>` : ""}
     ${jobActions}
     ${
@@ -971,7 +972,7 @@ export function renderReviewerBoard(
           ? `<div class="empty" role="status"><p><strong>Page ${pagination.page} is beyond the last page (${totalPages}).</strong></p><p class="muted">${pagination.total} runs${stateFilter ? ` with status ${escapeHtml(stateFilter)}` : ""} — <a href="/reviewers?page=${totalPages}${stateParam}">back to page ${totalPages}</a>.</p></div>`
           : `<div class="empty" role="status"><p><strong>No reviewer runs${stateFilter ? ` with status ${escapeHtml(stateFilter)}` : ""}.</strong></p><p class="muted">Runs appear here as soon as a review job picks specialists.</p></div>`
     }`;
-  return layout(`${PRODUCT_NAME} reviewers`, body, { nav: "reviewers", ...options });
+  return layout(`${pageBranding(options).name} reviewers`, body, { nav: "reviewers", ...options });
 }
 
 function renderRouting(job: JobRow): string {

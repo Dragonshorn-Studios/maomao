@@ -1,12 +1,8 @@
 import type { CancelReason, JobState, ReviewerState } from "../config.js";
 import type { Severity } from "../schema.js";
+import type { UiFlavor } from "../branding.js";
 
-/** Mergehenna is the product; maomao stays on as the operator running it. */
-export const PRODUCT_NAME = "Mergehenna";
-export const OPERATOR_NAME = "maomao";
-export const PRODUCT_TAGLINE = "Merge gate review console";
-export const PRODUCT_DESCRIPTION =
-  "Self-hosted multi-agent pull request review, operated by maomao and powered by OpenCode.";
+export type { UiFlavor } from "../branding.js";
 
 export interface LabeledState {
   text: string;
@@ -158,14 +154,15 @@ export function cancelledBannerCopy(job: {
   return { text: "Cancelled." };
 }
 
-export type UiFlavor = "apothecary" | "plain";
-
 export function flavorForJob(state: string, prNumber: number, flavor: UiFlavor = "apothecary"): string | undefined {
   if (flavor === "plain") {
     if (state === "sniffing") return "Laboratory re-check in progress";
     return undefined;
   }
   // pr_number 0 jobs (scans, repo briefs) are not pull requests.
+  if (flavor === "mergehenna" && (state === "reviewing" || state === "preparing")) {
+    return prNumber === 0 ? "Tracing the checkout…" : `Tracing PR #${prNumber}…`;
+  }
   if (state === "reviewing" || state === "preparing") return prNumber === 0 ? "Reading the checkout…" : `Examining PR #${prNumber}…`;
   if (state === "routing") return `Choosing specialists for PR #${prNumber}…`;
   if (state === "reconciling") return `Reconciling prior findings for PR #${prNumber}`;
@@ -182,7 +179,7 @@ export function reviewerFlavor(
   flavor: UiFlavor = "apothecary",
 ): string | undefined {
   if (flavor === "plain") return undefined;
-  if (state === "running" || state === "queued") return "Hunting through the diff…";
+  if (state === "running" || state === "queued") return flavor === "mergehenna" ? "Tracing the diff…" : "Hunting through the diff…";
   if (state === "done") {
     return findingCount > 0 ? `Returned with ${findingCount} finding(s)` : "Returned without a catch";
   }
@@ -192,6 +189,7 @@ export function reviewerFlavor(
 /** One-line summary for a completed job in cat-hunt flavor. */
 export function huntersReturnedCopy(reviewers: number, findings: number, flavor: UiFlavor = "apothecary"): string {
   if (flavor === "plain") return `${reviewers} reviewers returned from the diff · ${findings} findings`;
+  if (flavor === "mergehenna") return `${reviewers} tracers returned from the diff · ${findings} findings`;
   return `${reviewers} cats returned from the diff · ${findings} findings`;
 }
 

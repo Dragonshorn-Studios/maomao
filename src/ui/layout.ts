@@ -1,12 +1,13 @@
 import { escapeHtml } from "../util.js";
 import { CSRF_FIELD } from "../auth.js";
 import type { FindingRow } from "../findings/types.js";
-import { OPERATOR_NAME, PRODUCT_DESCRIPTION, PRODUCT_NAME, PRODUCT_TAGLINE, type UiFlavor } from "./copy.js";
+import { DEFAULT_INSTANCE_BRANDING, softwareAttribution, type InstanceBranding } from "../branding.js";
+import type { UiFlavor } from "./copy.js";
 import { mergehennaMark, operatorMark } from "./glyphs.js";
 import { THEME_URL } from "./theme.js";
 import { INFERNAL_URL } from "./infernal.js";
 import { diskAssetUrl, PIERRE_DIFFS_HREF } from "./paths.js";
-import { FAVICON_SVG_URL, FAVICON_PNG_URL, ICON_PNG_URL } from "./icons.js";
+import { themePackAssetUrls } from "./icons.js";
 
 export interface UiIdentity {
   login: string;
@@ -61,6 +62,8 @@ export interface PageOptions {
   recentJobs?: Array<{ id: number; title: string; state: string }>;
   /** Login renders without the rail: there is nowhere useful to navigate to. */
   rail?: boolean;
+  /** Operator-facing instance identity; defaults to unconfigured Maomao/apothecary. */
+  branding?: InstanceBranding;
 }
 
 /** Top-level product areas shown in the shell's icon rail. */
@@ -84,6 +87,10 @@ export type SettingsSection =
   | "deliveries"
   | "connections"
   | "health";
+
+export function pageBranding(options: Pick<PageOptions, "branding"> | undefined): InstanceBranding {
+  return options?.branding ?? DEFAULT_INSTANCE_BRANDING;
+}
 
 const SETTINGS_NAV: Array<{ group: string; items: Array<[SettingsSection, string, string]> }> = [
   {
@@ -254,8 +261,15 @@ function railItem(options: PageOptions, [area, href, label, glyph]: [NavArea, st
 
 /** The shell's first column: icon rail with product areas, utilities pinned low. */
 function railHtml(options: PageOptions): string {
+  const branding = pageBranding(options);
+  const assets = themePackAssetUrls(branding.themePack);
+  const attribution = softwareAttribution(branding);
+  const title = attribution ? `${branding.name} — ${attribution}` : branding.name;
+  const mark = branding.themePack === "mergehenna"
+    ? mergehennaMark()
+    : `<img src="${assets.faviconSvg}" width="22" height="22" alt=""/>`;
   return `<nav class="shell-rail if-rail" aria-label="Product areas">
-    <a class="if-rail__logo shell-rail__logo" href="/" title="${escapeHtml(PRODUCT_NAME)} — operated by ${escapeHtml(OPERATOR_NAME)}" aria-label="${escapeHtml(PRODUCT_NAME)} home">${mergehennaMark()}</a>
+    <a class="if-rail__logo shell-rail__logo" href="/" title="${escapeHtml(title)}" aria-label="${escapeHtml(branding.name)} home">${mark}</a>
     ${RAIL_ITEMS.map((entry) => railItem(options, entry)).join("\n    ")}
     <span class="if-rail__spacer"></span>
     ${RAIL_UTILITIES.map((entry) => railItem(options, entry)).join("\n    ")}
@@ -398,22 +412,25 @@ export function layout(title: string, body: string, options: PageOptions = {}): 
   </script>`
     : "";
   const rail = options.rail !== false;
+  const branding = pageBranding(options);
+  const assets = themePackAssetUrls(branding.themePack);
+  const attribution = softwareAttribution(branding);
   const contextNav = options.settingsSection
     ? settingsContextNav(options.settingsSection)
     : options.recentJobs?.length
       ? recentContextNav(options.recentJobs)
       : "";
   return `<!doctype html>
-<html lang="en" data-if-brand="mergehenna">
+<html lang="en" data-if-brand="${escapeHtml(branding.themePack)}" data-brand-pack="${escapeHtml(branding.themePack)}">
 <head>
   <meta charset="utf-8"/>
   <meta name="viewport" content="width=device-width, initial-scale=1"/>
   <meta name="color-scheme" content="light dark"/>
-  <meta name="description" content="${escapeHtml(PRODUCT_DESCRIPTION)}"/>
+  <meta name="description" content="${escapeHtml(branding.description)}"/>
   <title>${escapeHtml(title)}</title>
-  <link rel="icon" href="${FAVICON_SVG_URL}" type="image/svg+xml"/>
-  <link rel="alternate icon" href="${FAVICON_PNG_URL}"/>
-  <link rel="apple-touch-icon" href="${ICON_PNG_URL}"/>
+  <link rel="icon" href="${assets.faviconSvg}" type="image/svg+xml"/>
+  <link rel="alternate icon" href="${assets.faviconPng}"/>
+  <link rel="apple-touch-icon" href="${assets.iconPng}"/>
   <link rel="stylesheet" href="${INFERNAL_URL}"/>
   <link rel="stylesheet" href="${THEME_URL}"/>
   <script src="${diskAssetUrl(PIERRE_DIFFS_HREF)}" defer></script>
@@ -428,8 +445,8 @@ export function layout(title: string, body: string, options: PageOptions = {}): 
     ${contextNav}
     <div class="shell-content">
       <header class="top">
-        <a class="brand" href="/"><img class="brand-mark" src="${FAVICON_SVG_URL}" width="28" height="28" alt=""/><span class="brand-text"><span class="brand-name">${escapeHtml(PRODUCT_NAME)}</span><span class="brand-caption">operated by ${escapeHtml(OPERATOR_NAME)}</span></span></a>
-        <span class="tag">${escapeHtml(PRODUCT_TAGLINE)}</span>
+        <a class="brand" href="/"><img class="brand-mark" src="${assets.faviconSvg}" width="28" height="28" alt=""/><span class="brand-text"><span class="brand-name">${escapeHtml(branding.name)}</span>${attribution ? `<span class="brand-caption">${escapeHtml(attribution)}</span>` : ""}</span></a>
+        <span class="tag">${escapeHtml(branding.tagline)}</span>
         <span class="grow"></span>
         <div class="appearance" role="group" aria-label="Appearance">
           <button type="button" data-appearance="light" aria-pressed="false">Light</button>

@@ -10,6 +10,7 @@ import { INFERNAL_URL } from "../ui/infernal.js";
 import { THEME_URL } from "../ui/theme.js";
 import { VIEWPORTS, type ViewportName, type WorkbenchStory, type WorkbenchVariant } from "./contract.js";
 import type { DesignTokens } from "./tokens.js";
+import type { UiThemePack } from "../branding.js";
 
 export const WORKBENCH_BASE = "/dev/ui";
 
@@ -158,7 +159,7 @@ function workbenchShell(
 ): string {
   const theme = options.theme ?? "light";
   return `<!doctype html>
-<html lang="en" data-theme="${theme}" data-if-theme="${theme}" data-if-brand="mergehenna">
+<html lang="en" data-theme="${theme}" data-if-theme="${theme}" data-if-brand="apothecary" data-brand-pack="apothecary">
 <head>
   <meta charset="utf-8"/>
   <meta name="viewport" content="width=device-width, initial-scale=1"/>
@@ -334,13 +335,16 @@ export function renderStoryPage(
   viewport: ViewportName,
   theme: Theme,
   frozen: boolean,
-  composition: { uses: WorkbenchStory[]; usedBy: WorkbenchStory[] } = { uses: [], usedBy: [] },
+  composition: { uses: WorkbenchStory[]; usedBy: WorkbenchStory[]; brand?: UiThemePack } = { uses: [], usedBy: [] },
 ): string {
   const preset = VIEWPORTS[viewport];
+  const brand = composition.brand ?? "apothecary";
   const query = new URLSearchParams();
   query.set("viewport", viewport);
   query.set("theme", theme);
+  if (brand !== "apothecary") query.set("brand", brand);
   if (frozen) query.set("frozen", "1");
+  const brandParam = brand === "apothecary" ? "" : `&brand=${brand}`;
 
   const variantLinks = story.variants
     .map((candidate) =>
@@ -355,14 +359,20 @@ export function renderStoryPage(
     .map((name) =>
       chip(
         name,
-        `?viewport=${name}&theme=${theme}${frozen ? "&frozen=1" : ""}`,
+        `?viewport=${name}&theme=${theme}${brandParam}${frozen ? "&frozen=1" : ""}`,
         name === viewport,
       ),
     )
     .join("");
   const themeLinks = (["light", "dark"] as const)
     .map((name) =>
-      chip(name, `?viewport=${viewport}&theme=${name}${frozen ? "&frozen=1" : ""}`, name === theme),
+      chip(name, `?viewport=${viewport}&theme=${name}${brandParam}${frozen ? "&frozen=1" : ""}`, name === theme),
+    )
+    .join("");
+
+  const brandLinks = (["apothecary", "mergehenna"] as const)
+    .map((name) =>
+      chip(name, `?viewport=${viewport}&theme=${theme}${name === "apothecary" ? "" : "&brand=mergehenna"}${frozen ? "&frozen=1" : ""}`, name === brand),
     )
     .join("");
 
@@ -389,6 +399,7 @@ export function renderStoryPage(
   ${variantLinks}
   ${viewportLinks}
   ${themeLinks}
+  ${brandLinks}
   ${frozen ? '<span class="workbench-chip" aria-current="true">frozen</span>' : ""}
 </header>
 <main class="workbench-main">
@@ -416,6 +427,8 @@ export function renderStoryPage(
 export interface FrameOptions {
   frozen: boolean;
   theme: Theme;
+  /** Visual brand pack for the frame; defaults to unconfigured apothecary. */
+  brand?: UiThemePack;
   viewport: ViewportName;
   /** Extra script tags for the frame head (vendor bundles that exist). */
   headScripts?: string[];
@@ -443,7 +456,7 @@ export function renderFrame(
     : "";
 
   return `<!doctype html>
-<html lang="en" data-theme="${options.theme}" data-if-theme="${options.theme}" data-if-brand="mergehenna"${options.frozen ? ' data-workbench-frozen="1"' : ""}>
+<html lang="en" data-theme="${options.theme}" data-if-theme="${options.theme}" data-if-brand="${options.brand ?? "apothecary"}" data-brand-pack="${options.brand ?? "apothecary"}"${options.frozen ? ' data-workbench-frozen="1"' : ""}>
 <head>
   <meta charset="utf-8"/>
   <meta name="viewport" content="width=device-width, initial-scale=1"/>

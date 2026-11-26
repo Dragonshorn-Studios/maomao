@@ -7,6 +7,7 @@
  * registry itself is app knowledge and lives in stories.ts.
  */
 import { z } from "zod";
+import type { InstanceBranding } from "../branding.js";
 
 /** Story and variant ids appear in URLs, so they must stay slugs. */
 export const SLUG_PATTERN = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
@@ -73,7 +74,7 @@ export interface WorkbenchStory {
    * Renders the variant into the HTML fragment shown inside the frame. The
    * fragment is production markup — the workbench never rewrites it.
    */
-  preview: (variant: WorkbenchVariant) => string;
+  preview: (variant: WorkbenchVariant, context?: { branding: InstanceBranding }) => string;
 }
 
 /** One variant as published in the catalog JSON. */

@@ -1,10 +1,11 @@
 /**
  * The app's design tokens, parsed from the two-layer theme CSS.
  *
- * Mergehenna's palette lives in the vendored Infernal SaaS stylesheet
- * (`src/ui/infernal.ts`): `:root` holds the dark values, blocks keyed on
- * `[data-if-theme="light"]` carry the light overrides and `[data-if-brand]`
- * blocks the brand accents. The app theme (`src/ui/theme.ts`) then aliases
+ * The vendored Infernal SaaS stylesheet (`src/ui/infernal.ts`) supplies the
+ * base token machinery: `:root` holds dark values, blocks keyed on
+ * `[data-if-theme="light"]` carry light overrides, and `[data-if-brand]`
+ * blocks carry brand accents. `src/ui/theme.ts` composes the active pack (the
+ * gallery documents unconfigured apothecary) and then aliases
  * its historical token names onto the `--if-*` values in a single
  * theme-independent `:root` block — an alias like `--paper: var(--if-bg)`
  * resolves to a different hex per theme because the `--if-*` token it points
@@ -135,9 +136,15 @@ function tokenSets(rawCss: string): { light: Map<string, string>; dark: Map<stri
       rooted.add(block);
     }
   }
-  // The app roots every page at data-if-brand="mergehenna": competing brand
-  // blocks are unreachable in the real cascade, not alternatives.
-  const brandReachable = (selector: string) => !selector.includes("data-if-brand") || selector.includes('data-if-brand="mergehenna"');
+  // The token gallery documents the unconfigured apothecary pack: competing
+  // brand blocks are unreachable in that cascade, not alternatives.
+  const brandReachable = (selector: string) =>
+    // :not([data-if-theme]) blocks are no-JS fallbacks, not an additional
+    // cascade layer in the explicit light/dark token sets.
+    !selector.includes(":not([data-if-theme])") &&
+    (!selector.includes("data-if-brand") ||
+      selector.includes('data-if-brand="apothecary"') ||
+      (!selector.includes('data-if-brand="mergehenna"') && !selector.includes('data-if-brand="machine"')));
   for (const block of blocks) {
     // Brand blocks without a theme selector apply in both themes.
     if (brandReachable(block.selector) && block.selector.includes("data-if-brand") && !themed(block.selector)) {

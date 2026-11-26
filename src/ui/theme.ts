@@ -6,14 +6,14 @@ export const THEME_HREF = "/assets/maomao.css";
 
 export const THEME_CSS = `
 /*
- * Mergehenna is themed by the vendored Infernal SaaS stylesheet
+ * Theme packs are composed on top of the vendored Infernal SaaS stylesheet
  * (assets/infernal.css, loaded before this one): data-if-theme and
- * data-if-brand="mergehenna" on the root element resolve every --if-* token,
- * so these aliases track the active theme with no per-mode duplication. The
- * app's historical token names map onto the library so existing components
- * pick up the Infernal palette without rewrites. Interactive chrome uses
- * --action*; semantic state colors keep their own names so a completed state
- * never reads as a clickable accent.
+ * data-if-brand on the root element resolve the base --if-* tokens. Product
+ * packs may override those tokens here without editing the vendored library.
+ * The app's historical token names map onto the library so existing components
+ * pick up the active pack without rewrites. Interactive chrome uses --action*;
+ * semantic state colors keep their own names so a completed state never reads
+ * as a clickable accent.
  */
 :root {
   --paper: var(--if-bg);
@@ -65,15 +65,113 @@ export const THEME_CSS = `
 
 }
 
+/* Apothecary is the base Maomao pack: the pre-rebrand parchment/jade palette
+   restated in Infernal token space. These rules intentionally live here rather
+   than in the vendored infernal.css library. */
+[data-if-brand="apothecary"] {
+  --if-bg: #121612;
+  --if-bg-raised: #1a1f1a;
+  --if-surface: #1a1f1a;
+  --if-surface-2: #232a23;
+  --if-surface-hover: #2b332b;
+  --if-line: #2e352e;
+  --if-line-strong: #4a524a;
+  --if-text: #e8e4d6;
+  --if-text-soft: #a8a494;
+  --if-muted: #8c8a7e;
+  --if-accent: #7dcea0;
+  --if-accent-ink: #121612;
+  --if-accent-soft: #1c3328;
+  --if-accent-line: #3f6b52;
+  --if-success: #7dcea0;
+  --if-success-soft: #1c3328;
+  --if-warning: #e0b45c;
+  --if-warning-soft: #3a3220;
+  --if-danger: #e88989;
+  --if-danger-soft: #3a2224;
+  --if-info: #9dbbe0;
+  --if-info-soft: #223242;
+  --if-shadow: 0 1px 0 rgba(0, 0, 0, 0.25);
+  --if-radius-sm: 3px;
+  --if-radius: 5px;
+  --if-display: "Iowan Old Style", Palatino, "Palatino Linotype", "Book Antiqua", Georgia, "Times New Roman", serif;
+}
+[data-if-brand="apothecary"][data-if-theme="light"] {
+  --if-bg: #f3efe3;
+  --if-bg-raised: #faf7ee;
+  --if-surface: #faf7ee;
+  --if-surface-2: #ece6d6;
+  --if-surface-hover: #e4ddca;
+  --if-line: #cfc8b6;
+  --if-line-strong: #b7b09c;
+  --if-text: #1a221c;
+  --if-text-soft: #5a6258;
+  --if-muted: #7a776b;
+  --if-accent: #1f6a4e;
+  --if-accent-ink: #f3efe3;
+  --if-accent-soft: #d5eadc;
+  --if-accent-line: #9fc9b3;
+  --if-success: #1f6a4e;
+  --if-success-soft: #d5eadc;
+  --if-warning: #8a5a10;
+  --if-warning-soft: #f1e4c4;
+  --if-danger: #9c2432;
+  --if-danger-soft: #f3d6d6;
+  --if-info: #2f5d88;
+  --if-info-soft: #dfe9f1;
+  --if-shadow: 0 1px 0 rgba(26, 34, 28, 0.04);
+}
+[data-if-brand="apothecary"][data-if-theme="light"] body {
+  background: repeating-linear-gradient(0deg, transparent 0 27px, rgba(90, 98, 88, 0.055) 27px 28px), var(--paper);
+}
+[data-if-brand="apothecary"][data-if-theme="dark"] body,
+[data-if-brand="apothecary"]:not([data-if-theme]) body {
+  background: repeating-linear-gradient(0deg, transparent 0 27px, rgba(232, 228, 214, 0.035) 27px 28px), var(--paper);
+}
+
+
+@media (prefers-color-scheme: light) {
+  :root[data-if-brand="apothecary"]:not([data-if-theme]) {
+    color-scheme: light;
+  --if-bg: #f3efe3;
+  --if-bg-raised: #faf7ee;
+  --if-surface: #faf7ee;
+  --if-surface-2: #ece6d6;
+  --if-surface-hover: #e4ddca;
+  --if-line: #cfc8b6;
+  --if-line-strong: #b7b09c;
+  --if-text: #1a221c;
+  --if-text-soft: #5a6258;
+  --if-muted: #7a776b;
+  --if-accent: #1f6a4e;
+  --if-accent-ink: #f3efe3;
+  --if-accent-soft: #d5eadc;
+  --if-accent-line: #9fc9b3;
+  --if-success: #1f6a4e;
+  --if-success-soft: #d5eadc;
+  --if-warning: #8a5a10;
+  --if-warning-soft: #f1e4c4;
+  --if-danger: #9c2432;
+  --if-danger-soft: #f3d6d6;
+  --if-info: #2f5d88;
+  --if-info-soft: #dfe9f1;
+  --if-shadow: 0 1px 0 rgba(26, 34, 28, 0.04);
+  }
+  :root[data-if-brand="apothecary"]:not([data-if-theme]) body {
+    background: repeating-linear-gradient(0deg, transparent 0 27px, rgba(90, 98, 88, 0.055) 27px 28px), var(--paper);
+  }
+}
+
 /* No-JS light fallback: the shell's theme is applied by the appearance boot
    script setting data-if-theme, and infernal's :root base is dark — so a
    client without JavaScript would be locked to dark regardless of OS
    preference. When the attribute is absent (only possible without JS) and
    the OS prefers light, re-state the library's light + mergehenna-brand
-   token values. Keep in sync with the infernal.css [data-if-theme="light"]
-   block and its mergehenna brand override when re-vendoring. */
+   token values for the mergehenna pack. Apothecary has its own pack rules
+   above. Keep in sync with the infernal.css [data-if-theme="light"] block and
+   its mergehenna brand override when re-vendoring. */
 @media (prefers-color-scheme: light) {
-  :root:not([data-if-theme]) {
+  :root[data-if-brand="mergehenna"]:not([data-if-theme]) {
     color-scheme: light;
     --if-bg: #f2eff4;
     --if-bg-raised: #f9f7fb;

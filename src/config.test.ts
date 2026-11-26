@@ -265,6 +265,45 @@ describe("loadConfig", () => {
   });
 });
 
+describe("instance branding", () => {
+  it("defaults to Maomao with the apothecary visual and copy packs", () => {
+    const config = loadConfig({});
+    expect(config.branding).toEqual({
+      name: "Maomao",
+      tagline: "PR examination console",
+      description: "Self-hosted multi-agent pull request review powered by OpenCode.",
+      themePack: "apothecary",
+      copyFlavor: "apothecary",
+    });
+    expect(config.uiFlavor).toBe("apothecary");
+  });
+
+  it("loads mergehenna defaults and keeps visual and copy selection independent", () => {
+    const config = loadConfig({
+      UI_THEME_PACK: "mergehenna",
+      UI_FLAVOR: "plain",
+      UI_INSTANCE_NAME: "Henhouse",
+      UI_INSTANCE_TAGLINE: "Reviews with feathers",
+      UI_INSTANCE_DESCRIPTION: "A custom review instance.",
+    });
+    expect(config.branding).toEqual({
+      name: "Henhouse",
+      tagline: "Reviews with feathers",
+      description: "A custom review instance.",
+      themePack: "mergehenna",
+      copyFlavor: "plain",
+    });
+    expect(config.uiFlavor).toBe("plain");
+  });
+
+  it("uses a selected theme pack's copy flavor by default and rejects invalid choices", () => {
+    expect(loadConfig({ UI_THEME_PACK: "mergehenna" }).uiFlavor).toBe("mergehenna");
+    expect(() => loadConfig({ UI_THEME_PACK: "copper" })).toThrow(/UI_THEME_PACK/);
+    expect(() => loadConfig({ UI_FLAVOR: "cat" })).toThrow(/UI_FLAVOR/);
+    expect(() => loadConfig({ UI_INSTANCE_NAME: "two\nlines" })).toThrow(/UI_INSTANCE_NAME/);
+  });
+});
+
 describe("env parsers", () => {
   it("parses booleans, csv, and numbers", () => {
     expect(parseBoolean("yes", false)).toBe(true);

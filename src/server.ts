@@ -75,9 +75,7 @@ import {
   TYPEAHEAD_JS,
   MODEL_PICKER_HREF,
   MODEL_PICKER_JS,
-  MERGEHENNA_FAVICON_SVG,
-  FAVICON_PNG_BASE64,
-  LARGE_ICON_PNG_BASE64,
+  themePackAssets,
   type PageOptions,
   type QueueView,
   type ScanConfirmNotice,
@@ -386,8 +384,8 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
   const passwordGateOn = uiGateEnabled(ctx.config.uiPassword, ctx.config.uiSessionSecret);
   const gateOn = oauthOn || passwordGateOn;
   const passwordLoginOn = passwordGateOn && (!oauthOn || ctx.config.uiLocalLogin);
-  const pageOpts = { showLogout: gateOn, uiFlavor: ctx.config.uiFlavor };
-  const loginPageOpts = { showGithub: oauthOn, showPassword: passwordLoginOn };
+  const pageOpts = { showLogout: gateOn, uiFlavor: ctx.config.uiFlavor, branding: ctx.config.branding };
+  const loginPageOpts = { showGithub: oauthOn, showPassword: passwordLoginOn, branding: ctx.config.branding };
   const renderLoginDenied = (c: Context<AppEnv>) => {
     deleteCookie(c, SESSION_COOKIE, { path: "/" });
     return c.html(renderLogin({ ...loginPageOpts, error: "oauth-denied" }), 403);
@@ -697,18 +695,19 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
 
   app.get(TELEMETRY_PAGE_HREF, (c) => staticAsset(c, TELEMETRY_PAGE_JS, "text/javascript; charset=utf-8"));
 
-  // Brand icons: fixed constants from src/ui/icons.ts (no filesystem, no traversal).
+  // Brand icons come from the configured built-in pack; asset paths stay stable.
+  const brandAssets = themePackAssets(ctx.config.branding.themePack);
   const iconAssets: Array<[string, string, string]> = [
     // [path, content-type, source]
-    ["/assets/favicon.svg", "image/svg+xml", MERGEHENNA_FAVICON_SVG],
-    ["/assets/icon.svg", "image/svg+xml", MERGEHENNA_FAVICON_SVG],
+    ["/assets/favicon.svg", "image/svg+xml", brandAssets.faviconSvg],
+    ["/assets/icon.svg", "image/svg+xml", brandAssets.faviconSvg],
   ];
   for (const [path, contentType, body] of iconAssets) {
     app.get(path, (c) => staticAsset(c, body, `${contentType}; charset=utf-8`));
   }
   const pngAssets: Array<[string, string]> = [
-    ["/assets/favicon.png", FAVICON_PNG_BASE64],
-    ["/assets/icon.png", LARGE_ICON_PNG_BASE64],
+    ["/assets/favicon.png", brandAssets.faviconPngBase64],
+    ["/assets/icon.png", brandAssets.iconPngBase64],
   ];
   for (const [path, base64] of pngAssets) {
     app.get(path, (c) => staticAsset(c, new Uint8Array(Buffer.from(base64, "base64")), "image/png"));

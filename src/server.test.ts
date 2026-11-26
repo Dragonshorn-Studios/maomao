@@ -15,6 +15,7 @@ import type { OpenCodePort } from "./opencode/parse.js";
 import { ChatService } from "./chat/service.js";
 import { ChatStore } from "./chat/store.js";
 import { assetVersion, CHAT_BUNDLE_HREF } from "./ui/paths.js";
+import { themePackAssets } from "./ui/icons.js";
 
 type OpenCodeLike = OpenCodePort;
 import { createApp } from "./server.js";
@@ -1038,7 +1039,7 @@ describe("oauth operator login", () => {
     const state = stateFrom(start.headers.get("location"));
     const callback = await app.request(`/login/github/callback?code=good-code&state=${state}`);
     expect(callback.status).toBe(403);
-    expect(await callback.text()).toContain("not authorized to operate this Maomao instance");
+    expect(await callback.text()).toContain("not authorized to operate this instance");
     // The deny path clears the stale session cookie instead of leaving it in place.
     expect(callback.headers.get("set-cookie") ?? "").toContain(`${SESSION_COOKIE}=;`);
     expect(String(warn.mock.calls.find(([msg]) => String(msg).includes("oauth login denied"))?.[0])).toContain("id=4242");
@@ -4913,6 +4914,35 @@ describe("home queue family views", () => {
     expect(impossible).toContain("health_scan 2");
     expect(impossible).toContain("repo_brief 3");
     expect(impossible).not.toContain('type" value="pr_review" selected');
+  });
+});
+
+describe("instance branding integration", () => {
+  it("serves the Maomao/apothecary identity by default", async () => {
+    const { app } = testApp();
+    const html = await (await app.request("/")).text();
+    expect(html).toContain('data-if-brand="apothecary"');
+    expect(html).toContain('<span class="brand-name">Maomao</span>');
+    expect(html).not.toContain('data-if-brand="mergehenna"');
+    const icon = await app.request("/assets/favicon.svg");
+    expect(icon.status).toBe(200);
+    expect(await icon.text()).toContain("#1f6a4e");
+    const png = Buffer.from(await (await app.request("/assets/favicon.png")).arrayBuffer());
+    expect(png.equals(Buffer.from(themePackAssets("apothecary").faviconPngBase64, "base64"))).toBe(true);
+  });
+
+  it("serves configured mergehenna identity and pack assets", async () => {
+    const { app } = testApp({ UI_THEME_PACK: "mergehenna" });
+    const html = await (await app.request("/")).text();
+    expect(html).toContain('data-if-brand="mergehenna"');
+    expect(html).toContain('<span class="brand-name">Mergehenna</span>');
+    expect(html).toContain("powered by Maomao");
+    const icon = await app.request("/assets/favicon.svg");
+    expect(icon.status).toBe(200);
+    expect(await icon.text()).toContain("#f4a86d");
+    const png = Buffer.from(await (await app.request("/assets/favicon.png")).arrayBuffer());
+    expect(png.equals(Buffer.from(themePackAssets("mergehenna").faviconPngBase64, "base64"))).toBe(true);
+    expect(png.equals(Buffer.from(themePackAssets("apothecary").faviconPngBase64, "base64"))).toBe(false);
   });
 });
 

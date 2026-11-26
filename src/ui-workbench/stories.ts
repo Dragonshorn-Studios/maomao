@@ -9,7 +9,7 @@ import type { JobRow, JobStore, ReviewerRunRow } from "../jobs/store.js";
 import { KNOWN_REVIEWER_ROLES } from "../prompts.js";
 import type { ChatConversationRow, ChatMessageRow } from "../chat/store.js";
 import { jobMetricsFromRuns } from "../ui/metrics.js";
-import { layoutBody } from "../ui/layout.js";
+import { layoutBody, type PageOptions } from "../ui/layout.js";
 import { forgeBadgeTitleHtml } from "../ui/forge-badge.js";
 import { modelPicker } from "../ui/model-picker.js";
 import { escapeHtml } from "../util.js";
@@ -528,7 +528,7 @@ export const STORIES: WorkbenchStory[] = [
       { id: "failed", title: "Failed" },
       { id: "long-text", title: "Long title and many findings" },
     ],
-    preview: (variant) => {
+    preview: (variant, context) => {
       const table = {
         completed: { job: CARD_COMPLETED_JOB, runs: CARD_COMPLETED_RUNS },
         reviewing: { job: CARD_REVIEWING_JOB, runs: CARD_REVIEWING_RUNS },
@@ -539,7 +539,7 @@ export const STORIES: WorkbenchStory[] = [
       const metrics = jobMetricsFromRuns(job, runs);
       // The card is an <li>; the production list wraps it, so the frame shows
       // the card exactly as the dashboard does.
-      return `<ol class="queue">${renderQueueCard(job, metrics, "apothecary", WORKBENCH_CSRF)}</ol>`;
+      return `<ol class="queue">${renderQueueCard(job, metrics, context?.branding.copyFlavor ?? "apothecary", WORKBENCH_CSRF)}</ol>`;
     },
   },
   {
@@ -556,14 +556,19 @@ export const STORIES: WorkbenchStory[] = [
       { id: "failed", title: "Failed aggregation" },
       { id: "stale", title: "Stale (superseded commit)" },
     ],
-    preview: (variant) => {
+    preview: (variant, context) => {
       const table = {
         "completed-with-findings": { job: DETAIL_COMPLETED_JOB, runs: DETAIL_COMPLETED_RUNS },
         failed: { job: DETAIL_FAILED_JOB, runs: DETAIL_FAILED_RUNS },
         stale: { job: DETAIL_STALE_JOB, runs: [] },
       };
       const { job, runs } = byId(table, variant.id);
-      const options: JobPageOptions = { csrfToken: WORKBENCH_CSRF, chatEnabled: true };
+      const options: JobPageOptions = {
+        csrfToken: WORKBENCH_CSRF,
+        chatEnabled: true,
+        uiFlavor: context?.branding.copyFlavor ?? "apothecary",
+        branding: context?.branding,
+      };
       if (variant.id === "completed-with-findings") {
         options.mergeLifecycle = {
           state: "ready",
@@ -627,11 +632,13 @@ export const STORIES: WorkbenchStory[] = [
       { id: "mixed", title: "Mixed run states" },
       { id: "empty", title: "No runs" },
     ],
-    preview: (variant) => {
+    preview: (variant, context) => {
       const rows = variant.id === "empty" ? [] : BOARD_MIXED_ROWS;
       return layoutBody(
         renderReviewerBoard(rows as Parameters<typeof renderReviewerBoard>[0], {
           runPagination: variant.id === "empty" ? undefined : { page: 2, pageSize: 25, total: 118 },
+          uiFlavor: context?.branding.copyFlavor ?? "apothecary",
+          branding: context?.branding,
         }),
       );
     },
@@ -676,11 +683,15 @@ export const STORIES: WorkbenchStory[] = [
       { id: "empty-queue", title: "Empty queue" },
       { id: "error-notice", title: "Error notice" },
     ],
-    preview: (variant) => {
-      const options =
+    preview: (variant, context) => {
+      const options: PageOptions =
         variant.id === "error-notice"
-          ? { error: "Could not load the job list: the database is locked. Retry in a moment." }
-          : {};
+          ? {
+              error: "Could not load the job list: the database is locked. Retry in a moment.",
+              uiFlavor: context?.branding.copyFlavor ?? "apothecary",
+              branding: context?.branding,
+            }
+          : { uiFlavor: context?.branding.copyFlavor ?? "apothecary", branding: context?.branding };
       return layoutBody(renderHome([], emptyStore(), options));
     },
   },
@@ -698,9 +709,13 @@ export const STORIES: WorkbenchStory[] = [
       { id: "conversation", title: "Existing conversation" },
       { id: "failed", title: "Last message failed" },
     ],
-    preview: (variant) => {
+    preview: (variant, context) => {
+      const brandedChat = (data: ChatPageData) => {
+        data.options = { ...data.options, uiFlavor: context?.branding.copyFlavor ?? "apothecary", branding: context?.branding };
+        return chatPreview(data);
+      };
       if (variant.id === "conversation") {
-        return chatPreview(
+        return brandedChat(
           chatData({
             conversation: {
               id: 7,
@@ -742,7 +757,7 @@ export const STORIES: WorkbenchStory[] = [
         );
       }
       if (variant.id === "failed") {
-        return chatPreview(
+        return brandedChat(
           chatData({
             conversation: {
               id: 8,
@@ -773,7 +788,7 @@ export const STORIES: WorkbenchStory[] = [
           }),
         );
       }
-      return chatPreview(chatData({}));
+      return brandedChat(chatData({}));
     },
   },
   {

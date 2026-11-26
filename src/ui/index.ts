@@ -63,4 +63,6 @@ export {
   LARGE_ICON_SVG,
   LARGE_ICON_PNG_BASE64,
   MERGEHENNA_FAVICON_SVG,
+  themePackAssets,
+  themePackAssetUrls,
 } from "./icons.js";

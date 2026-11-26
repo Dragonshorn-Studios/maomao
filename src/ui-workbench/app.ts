@@ -15,10 +15,16 @@ import { frameHeadScripts } from "./assets.js";
 import { designTokens } from "./tokens.js";
 import { STORIES } from "./stories.js";
 import { FAKE_CHAT_STREAM_URL } from "./stories.js";
+import { loadInstanceBranding } from "../branding.js";
 
 /** The theme a request asks for. Anything but `dark` is the light theme. */
 function themeOf(requested: string | undefined): "light" | "dark" {
   return requested === "dark" ? "dark" : "light";
+}
+
+/** Brand a frame asks for; unknown values fall back to the unconfigured pack. */
+function brandingOf(requested: string | undefined) {
+  return loadInstanceBranding({ UI_THEME_PACK: requested === "mergehenna" ? "mergehenna" : "apothecary" });
 }
 
 export interface WorkbenchAppOptions {
@@ -89,12 +95,14 @@ export function createWorkbenchApp(options: WorkbenchAppOptions = {}): Hono {
     const viewport = resolveViewport(c.req.query("viewport"), story.defaultViewport);
     const theme = c.req.query("theme") === "dark" ? "dark" : "light";
     const frozen = c.req.query("frozen") === "1";
-    const fragment = story.preview(variant);
+    const branding = brandingOf(c.req.query("brand"));
+    const fragment = story.preview(variant, { branding });
 
     return c.html(
       renderFrame(story, variant, fragment, {
         frozen,
         theme,
+        brand: branding.themePack,
         viewport: viewport.name,
         headScripts: frameHeadScripts(fragment),
       }),
@@ -115,6 +123,7 @@ export function createWorkbenchApp(options: WorkbenchAppOptions = {}): Hono {
       renderStoryPage(story, variant, viewport.name, theme, frozen, {
         uses: registry.uses(story),
         usedBy: registry.usedBy(story),
+        brand: brandingOf(c.req.query("brand")).themePack,
       }),
     );
   });
@@ -133,6 +142,7 @@ export function createWorkbenchApp(options: WorkbenchAppOptions = {}): Hono {
       renderStoryPage(story, variant, viewport.name, theme, frozen, {
         uses: registry.uses(story),
         usedBy: registry.usedBy(story),
+        brand: brandingOf(c.req.query("brand")).themePack,
       }),
     );
   });
