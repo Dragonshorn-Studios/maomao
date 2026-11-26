@@ -7,6 +7,12 @@ services:
       - "${MAOMAO_PORT:-3000}:3000"
     env_file:
       - .env
+    # Trusted checks run bubblewrap inside the container. Docker's default
+    # seccomp/AppArmor confinement blocks the nested namespace/mount operations
+    # even though the service itself runs as the unprivileged node user.
+    security_opt:
+      - seccomp=unconfined
+      - apparmor=unconfined
     environment:
       DATABASE_PATH: /data/maomao.sqlite
       WORKSPACE_ROOT: /data/workspaces

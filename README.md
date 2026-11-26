@@ -303,7 +303,7 @@ The pinned checkout contains `maomao-trusted-checks.json`:
 }
 ```
 
-Paths are validated inside the trusted checkout. Supported interpreters are `sh`, `bash`, and `python3`. Optional `cpuSeconds` and `memoryBytes` fields override the default CPU/memory resource limits within operator caps (at most 900 seconds and 8 GiB); timeout is always enforced. This repository's `trusted-checks/` directory contains reference Gitleaks and Semgrep wrappers plus a small Semgrep baseline; copy or vendor them into your operator-controlled trusted-checks repository, adjust policy/rules there, and pin the promotion commit SHA. Scanner binaries are runtime prerequisites and are not installed by Maomao.
+Paths are validated inside the trusted checkout. Supported interpreters are `sh`, `bash`, and `python3`. Optional `cpuSeconds` and `memoryBytes` fields override the default CPU/memory resource limits within operator caps (at most 900 seconds and 8 GiB); timeout is always enforced. The default memory ceiling is 8 GiB of virtual address space because Go/Wazero-based scanners reserve several GiB before scanning; it is not a resident-memory measurement. This repository's `trusted-checks/` directory contains reference Gitleaks and Semgrep wrappers plus a small Semgrep baseline; copy or vendor them into your operator-controlled trusted-checks repository, adjust policy/rules there, and pin the promotion commit SHA. The stock Docker image includes the reference scanner runtime (Python, bubblewrap, `prlimit`, pinned Gitleaks, and pinned Semgrep); host installations and custom scanner dependencies remain operator-managed.
 
 ### Scanner contract and redaction
 
@@ -324,7 +324,9 @@ Allowed statuses are `success`, `failure`, `error`, and `skipped`; severities us
 
 ### Isolation and lifecycle
 
-Production execution requires `bwrap` (bubblewrap). The sandbox unshares the network and namespaces, exposes only system runtime paths plus the trusted checkout and exact PR workspace needed by the scanner, and gives the scanner a dedicated writable output directory. If bubblewrap cannot be found, checks report an error rather than running unsandboxed. `MAOMAO_TRUSTED_CHECKS_ALLOW_UNSAFE_LOCAL=1` is an explicit development/test escape hatch only; never enable it for production reviews.
+Production execution requires `bwrap` (bubblewrap). The sandbox unshares the network and namespaces, exposes only system runtime paths plus the trusted checkout and exact PR workspace needed by the scanner, mounts only public CA certificate bundles from `/etc` for runtimes that initialize TLS offline, and gives the scanner a dedicated writable output directory. It does not mount `/proc`. If bubblewrap cannot be found, checks report an error rather than running unsandboxed. `MAOMAO_TRUSTED_CHECKS_ALLOW_UNSAFE_LOCAL=1` is an explicit development/test escape hatch only; never enable it for production reviews.
+
+Docker's default seccomp/AppArmor confinement blocks the nested namespace and mount operations bubblewrap needs. The stock Compose file therefore sets `seccomp=unconfined` and `apparmor=unconfined` on the Maomao container while still running the service as the unprivileged `node` user. That weakens the *outer* Docker confinement; the scanner still runs inside the inner network-less bubblewrap sandbox. If that tradeoff is not acceptable, run Maomao directly on a suitably constrained host or isolated VM instead of enabling the unsafe local scanner mode.
 
 When trusted checks are configured, PR jobs publish queued/in-progress/native terminal states for both checks. Scanner results and pinned revisions are persisted in `trusted_check_results`, and native-check publication remains bound to the immutable PR head SHA. A cancelled, stale, timed-out, crashed, missing, or otherwise incomplete scan can never become a success.
 
