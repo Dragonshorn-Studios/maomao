@@ -580,7 +580,7 @@ export function renderJob(
         ? `Merge group · ${escapeHtml(job.repo_full_name)} @ ${escapeHtml(shortSha(job.head_sha, 12))}`
         : isStack
           ? `Stack · ${forgeBadgeTitleHtml(job, job.repo_full_name, job.pr_number)}`
-          : `${forgeBadgeTitleHtml(job, job.repo_full_name, job.pr_number)}${job.review_mode === "verify" ? " · verify" : ""}`;
+          : `${forgeBadgeTitleHtml(job, job.repo_full_name, job.pr_number)}${job.review_mode === "verify" ? " · verify" : job.review_mode === "carried" ? " · carried" : ""}`;
   const cancelledBanner =
     job.state === "cancelled"
       ? renderCancelledBanner(job)
@@ -893,7 +893,7 @@ export function renderMemberCard(job: JobRow, position: number): string {
     <div class="meta-row member-meta">
       <span class="pair">SHA <strong><code class="sha">${escapeHtml(shortSha(job.head_sha, 10))}</code></strong></span>
       <span class="pair">Elapsed <strong class="metric">${escapeHtml(elapsed)}</strong></span>
-      ${job.review_mode === "verify" ? `<span class="pair muted" title="Verify-first pass — specialists skipped">verify-first</span>` : ""}
+      ${job.review_mode === "verify" ? `<span class="pair muted" title="Verify-first pass — specialists skipped">verify-first</span>` : job.review_mode === "carried" ? `<span class="pair muted" title="Tree-equivalent carry-forward — analysis skipped">carry-forward</span>` : ""}
     </div>
   </li>`;
 }
@@ -928,7 +928,7 @@ export function renderReviewerBoard(
         <td class="run-role"><span class="role">${roleGlyph(row.role)}<strong>${escapeHtml(row.role)}</strong></span></td>
         <td class="run-title"><a href="/jobs/${row.job_id}">${forgeBadgeTitleHtml({ provider: row.forge_provider, provider_instance: row.provider_instance }, row.repo_full_name, row.pr_number)} · ${escapeHtml(row.pr_title || "(no title)")}</a></td>
         <td class="run-owner muted">${escapeHtml(owner)}</td>
-        <td class="muted">${escapeHtml(row.job_type === "stack_review" ? "stack" : row.review_mode === "verify" ? "verify-first" : "full")}</td>
+        <td class="muted">${escapeHtml(row.job_type === "stack_review" ? "stack" : row.review_mode === "verify" ? "verify-first" : row.review_mode === "carried" ? "carry-forward" : "full")}</td>
         <td><code class="sha">${escapeHtml(shortSha(row.head_sha, 10))}</code></td>
         <td class="run-elapsed muted">${escapeHtml(formatDuration(elapsedMs(row.started_at, row.finished_at)))}</td>
         <td class="run-state">${renderState(row.state, state.text, state.hint, state.mark)}</td>

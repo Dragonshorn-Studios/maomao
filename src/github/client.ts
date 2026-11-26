@@ -105,7 +105,7 @@ export interface GithubPort {
     owner: string,
     repo: string,
     pullNumber: number,
-  ): Promise<{ id: number; body: string; commitId?: string; htmlUrl?: string; userLogin?: string; verdict?: ForgeVerdict }[]>;
+  ): Promise<{ id: number; body: string; commitId?: string; htmlUrl?: string; userLogin?: string; verdict?: ForgeVerdict; dismissed?: boolean }[]>;
   dismissReview?(input: {
     installationId: number;
     owner: string;
@@ -146,7 +146,7 @@ export interface GithubPort {
     owner: string,
     repo: string,
     ref: string,
-  ): Promise<{ sha: string; message: string }>;
+  ): Promise<{ sha: string; message: string; treeSha?: string }>;
   listOpenIssuesByMarker?(
     installationId: number,
     owner: string,
@@ -470,6 +470,7 @@ export class GithubClient implements GithubPort, ManualTriggerPort {
       userLogin: review.user?.login ?? undefined,
       verdict:
         review.state === "CHANGES_REQUESTED" ? "REQUEST_CHANGES" : review.state === "APPROVED" ? "APPROVE" : "COMMENT",
+      dismissed: review.state === "DISMISSED",
     }));
   }
 
@@ -653,7 +654,7 @@ export class GithubClient implements GithubPort, ManualTriggerPort {
   async getCommit(installationId: number, owner: string, repo: string, ref: string) {
     const octokit = this.installationOctokit(installationId);
     const response = await octokit.rest.repos.getCommit({ owner, repo, ref });
-    return { sha: response.data.sha, message: response.data.commit?.message ?? "" };
+    return { sha: response.data.sha, message: response.data.commit?.message ?? "", treeSha: response.data.commit?.tree?.sha };
   }
 
   async listOpenIssuesByMarker(installationId: number, owner: string, repo: string, marker: string) {

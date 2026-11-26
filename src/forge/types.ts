@@ -223,6 +223,8 @@ export interface ForgeSummary {
   userLogin?: string;
   /** Native review verdict when the forge exposes one (GitHub reviews do; note-only forges do not). */
   verdict?: ForgeVerdict;
+  /** True when a native review dismissal has withdrawn this summary. */
+  dismissed?: boolean;
 }
 
 

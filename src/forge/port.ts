@@ -33,6 +33,8 @@ export interface ForgePort {
   getChangeDiff(target: ForgeRepoTarget, maxBytes?: number): Promise<string>;
   /** Diff of one commit on the default branch (health scans). Optional: providers without it cannot run health scans. */
   getCommitDiff?(target: Omit<ForgeRepoTarget, "changeNumber">, sha: string): Promise<string>;
+  /** Tree object id for one commit, used to prove a rebase preserved the reviewed diff exactly. */
+  getCommitTree?(target: Omit<ForgeRepoTarget, "changeNumber">, sha: string): Promise<string>;
 
   /** Existing review summaries on the change; marker-scanned for idempotent publish. */
   listSummaries(target: ForgeRepoTarget): Promise<ForgeSummary[]>;

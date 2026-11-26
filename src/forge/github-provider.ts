@@ -85,6 +85,15 @@ export class GitHubProvider implements ForgePort {
     return this.client.getCommitDiff(this.installationId, target.repoOwner, target.repoName, sha);
   }
 
+  async getCommitTree(target: Omit<ForgeRepoTarget, "changeNumber">, sha: string): Promise<string> {
+    if (!this.client.getCommit) {
+      throw new Error("tree-equivalent review carry-forward requires a GitHub client with commit support");
+    }
+    const commit = await this.client.getCommit(this.installationId, target.repoOwner, target.repoName, sha);
+    if (!commit.treeSha) throw new Error(`GitHub commit ${sha} did not expose a tree SHA`);
+    return commit.treeSha;
+  }
+
   async listSummaries(target: ForgeRepoTarget): Promise<ForgeSummary[]> {
     const reviews = await this.client.listReviews(
       this.installationId,
@@ -99,6 +108,7 @@ export class GitHubProvider implements ForgePort {
       htmlUrl: review.htmlUrl,
       userLogin: review.userLogin,
       verdict: review.verdict,
+      dismissed: review.dismissed,
     }));
   }
 
