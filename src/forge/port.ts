@@ -38,6 +38,8 @@ export interface ForgePort {
   listSummaries(target: ForgeRepoTarget): Promise<ForgeSummary[]>;
   /** Publish a summary with optional inline comments; degrade instead of dying when inlines are rejected. */
   publishReview(input: ForgePublishInput): Promise<ForgePublishResult>;
+  /** Dismiss one prior native approval when the forge supports it. Optional because note-only forges have no approval dismissal. */
+  dismissReview?(target: ForgeRepoTarget, reviewId: string, message: string): Promise<void>;
 
   /** Whether this adapter exposes native check/status publication; API permissions are still validated at runtime. */
   supportsNativeChecks?(): boolean;

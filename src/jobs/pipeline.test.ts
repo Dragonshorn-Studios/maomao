@@ -3533,6 +3533,54 @@ describe("review verdict events", () => {
     expect(job?.state).toBe("completed");
   });
 
+  it("publishes advisory findings in the approval body without inline comments", async () => {
+    const store = new JobStore(openDb(":memory:"));
+    const posted: { event?: string; body: string; comments: number }[] = [];
+    const config = loadConfig({
+      REVIEWER_ROLES: "correctness",
+      OPENCODE_REVIEWER_MODEL: "test/model",
+      POST_EMPTY_REVIEW: "true",
+      GITHUB_REVIEW_ALLOW_APPROVE: "true",
+      GITHUB_REVIEW_APPROVE_MAX_SEVERITY: "low",
+      GITHUB_APP_ID: "1",
+      GITHUB_WEBHOOK_SECRET: "s",
+      GITHUB_APP_PRIVATE_KEY: "k",
+    });
+    const github: GithubPort = githubPort({
+      getPullDiff: async () => "",
+      listReviews: async () => [],
+      createCommentReview: async (input) => {
+        posted.push({ event: input.event, body: input.body, comments: input.comments.length });
+        return { id: "96", url: "u" };
+      },
+    });
+    const opencode: OpenCodePort = {
+      async run(input) {
+        const roleMatch = input.prompt.match(/Role id: (\w+)/);
+        const finding = {
+          severity: "low",
+          confidence: 0.8,
+          category: "correctness",
+          file: "example.ts",
+          line: 1,
+          summary: "advisory nit",
+          ...(roleMatch ? { reason: "small issue" } : { body: "small issue" }),
+        };
+        const text = roleMatch
+          ? JSON.stringify({ schema_version: 1, reviewer: roleMatch[1], verdict: "findings", findings: [finding] })
+          : JSON.stringify({ schema_version: 1, verdict: "comment", summary: "one advisory", findings: [finding] });
+        return { stdout: text, stderr: "", exitCode: 0, text, usage: {} };
+      },
+    };
+    const created = store.enqueue({ ...jobInput("approvebodysha"), reviewers: [] });
+    await createPipeline({ config, store, github, checkout: await fixtureCheckout(), opencode }).run(created.job.id);
+    expect(posted).toHaveLength(1);
+    expect(posted[0]?.event).toBe("APPROVE");
+    expect(posted[0]?.comments).toBe(0);
+    expect(posted[0]?.body).toContain("advisory nit");
+    expect(posted[0]?.body).toContain("maomao-finding");
+  });
+
   it("stays COMMENT by default for a clean review", async () => {
     const store = new JobStore(openDb(":memory:"));
     const posted: { event?: string }[] = [];
@@ -3556,6 +3604,46 @@ describe("review verdict events", () => {
     );
     expect(posted[0]?.event).toBe("COMMENT");
     expect(store.getJob(created.job.id)?.review_event).toBe("COMMENT");
+  });
+
+  it("dismisses only stale Maomao approvals for different head SHAs", async () => {
+    const store = new JobStore(openDb(":memory:"));
+    const posted: { event?: string }[] = [];
+    const dismissed: number[] = [];
+    const { config, opencode, github } = cleanReviewPipeline(store, posted, {
+      listReviews: async () => [
+        { id: 11, body: "old approval", commitId: "oldsha", userLogin: "maomao[bot]", verdict: "APPROVE" },
+        { id: 12, body: "current approval", commitId: "newsha", userLogin: "maomao[bot]", verdict: "APPROVE" },
+        { id: 13, body: "human approval", commitId: "oldsha", userLogin: "octocat", verdict: "APPROVE" },
+        { id: 14, body: "old comment", commitId: "oldsha", userLogin: "maomao[bot]", verdict: "COMMENT" },
+      ],
+      dismissReview: async (input) => {
+        dismissed.push(input.reviewId);
+      },
+    });
+    const created = store.enqueue({ ...jobInput("newsha"), reviewers: [] });
+    await createPipeline({ config, store, github, checkout: await fixtureCheckout(), opencode }).run(created.job.id);
+    expect(dismissed).toEqual([11]);
+    expect(posted[0]?.event).toBe("APPROVE");
+  });
+
+  it("fails closed when a stale Maomao approval cannot be dismissed", async () => {
+    const store = new JobStore(openDb(":memory:"));
+    const posted: { event?: string }[] = [];
+    const { config, opencode, github } = cleanReviewPipeline(store, posted, {
+      listReviews: async () => [
+        { id: 11, body: "old approval", commitId: "oldsha", userLogin: "maomao[bot]", verdict: "APPROVE" },
+      ],
+      dismissReview: async () => {
+        throw new Error("dismissal forbidden");
+      },
+    });
+    const created = store.enqueue({ ...jobInput("newsha"), reviewers: [] });
+    await createPipeline({ config, store, github, checkout: await fixtureCheckout(), opencode }).run(created.job.id);
+    expect(posted).toHaveLength(0);
+    const job = store.getJob(created.job.id);
+    expect(job?.state).toBe("failed");
+    expect(job?.failure_reason).toContain("cannot dismiss stale Maomao approval");
   });
 
   it("records the suppressed decision when a clean review is not posted", async () => {

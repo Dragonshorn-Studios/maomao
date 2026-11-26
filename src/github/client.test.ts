@@ -196,6 +196,34 @@ describe("finding thread markers", () => {
   });
 });
 
+describe("GithubClient.dismissReview", () => {
+  it("calls the GitHub review dismissal endpoint with the numeric review id", async () => {
+    const calls: Record<string, unknown>[] = [];
+    const client = new GithubClient(loadConfig({ GITHUB_APP_ID: "1" }));
+    (client as unknown as { installationOctokit: () => unknown }).installationOctokit = () => ({
+      rest: {
+        pulls: {
+          dismissReview: async (input: Record<string, unknown>) => {
+            calls.push(input);
+            return { data: {} };
+          },
+        },
+      },
+    });
+    await client.dismissReview({
+      installationId: 9,
+      owner: "acme",
+      repo: "widgets",
+      pullNumber: 4,
+      reviewId: 123,
+      message: "superseded",
+    });
+    expect(calls).toEqual([
+      { owner: "acme", repo: "widgets", pull_number: 4, review_id: 123, message: "superseded" },
+    ]);
+  });
+});
+
 describe("createReviewWithFallback", () => {
   const comments: PullReviewComment[] = [
     { path: "a.ts", line: 1, body: "c1" },

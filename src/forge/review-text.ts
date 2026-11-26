@@ -98,12 +98,12 @@ export function buildReviewBody(input: {
   const demoted = input.demoted ?? [];
   if (demoted.length > 0) {
     const shown = demoted.slice(0, DEMOTED_BODY_LIMIT);
-    const lines = shown.map(
-      (entry) =>
-        `- **${entry.finding.severity}**: ${entry.finding.summary} — \`${entry.finding.file}:${entry.finding.line}\``,
-    );
+    const lines = shown.map((entry) => {
+      const fingerprint = entry.finding.fingerprint ?? fingerprintFinding(entry.finding);
+      return `- **${entry.finding.severity}**: ${entry.finding.summary} — \`${entry.finding.file}:${entry.finding.line}\`\n  ${findingMarker(fingerprint, input.headSha)}`;
+    });
     if (demoted.length > shown.length) lines.push(`- … and ${demoted.length - shown.length} more`);
-    body += `\n#### Findings not shown inline\n\nThese locations are not part of the diff hunks, so they are listed here instead:\n\n${lines.join("\n")}\n`;
+    body += `\n#### Findings not shown inline\n\nThese findings are listed here instead of as inline comments:\n\n${lines.join("\n")}\n`;
   }
   if (input.withheldCount) {
     const refs = input.withheldRefs ?? [];
