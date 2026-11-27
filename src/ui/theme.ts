@@ -2550,6 +2550,14 @@ body.operator main th {
 .gd-line:hover .gd-comment-trigger, .gd-line:focus-within .gd-comment-trigger { opacity: .85; }
 .gd-preview-controls { display: flex; gap: .5rem; margin-top: 1rem; }
 .gd-preview-payload { max-height: 28rem; overflow: auto; white-space: pre-wrap; }
+
+.gd-comparison { margin-block: var(--if-space-4, 1rem); }
+.gd-comparison ul { padding-left: 1.25rem; }
+.gd-compare-pair { margin-bottom: 1rem; padding-bottom: .75rem; border-bottom: 1px solid var(--if-border, color-mix(in srgb, currentColor 18%, transparent)); }
+.gd-compare-side { margin-block: .45rem; }
+.gd-compare-side p { margin: .25rem 0; }
+.gd-compare-actions { display: flex; flex-wrap: wrap; gap: .5rem; margin-top: .5rem; align-items: center; }
+
 .gd-walkthrough { margin-block: var(--if-space-4, 1rem); }
 .gd-walkthrough-content h3 { margin-bottom: .2rem; }
 .gd-walkthrough-controls { display: flex; gap: .5rem; margin-top: .75rem; }

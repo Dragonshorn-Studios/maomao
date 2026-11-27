@@ -7,6 +7,7 @@ import { JobStore } from "../jobs/store.js";
 import { createApp } from "../server.js";
 import type { ManualTriggerPort } from "../github/client.js";
 import { GuidedWalkthroughStore } from "./walkthrough-store.js";
+import { fingerprintFinding } from "../findings/identity.js";
 
 const secret = "guided-review-test-secret";
 const baseSha = "a".repeat(40);
@@ -448,5 +449,152 @@ describe("Guided Review session API", () => {
     expect(body.walkthrough.payload?.risks[0]?.line).toBe(4);
   });
 
+
+
+  it("stores deliberate comparison pairing corrections behind ownership, version and CSRF boundaries", async () => {
+    const { app, store } = guidedTestApp();
+    const auth = operator(1001);
+    const aiFinding = {
+      severity: "medium",
+      category: "correctness",
+      file: "src/index.ts",
+      line: 20,
+      summary: "Retry can duplicate delivery",
+      body: "The retry branch can emit the same event twice.",
+    };
+    const aiFingerprint = fingerprintFinding({ file: aiFinding.file, category: aiFinding.category, summary: aiFinding.summary, body: aiFinding.body });
+    const enqueued = store.enqueue({
+      repoFullName: "acme/widgets",
+      repoOwner: "acme",
+      repoName: "widgets",
+      installationId: 1,
+      provider: "github",
+      providerInstance: "github.com",
+      prNumber: 12,
+      prTitle: "Test pull request",
+      prBody: "",
+      prHtmlUrl: "https://github.com/acme/widgets/pull/12",
+      prAuthor: "author",
+      baseSha,
+      headSha,
+      baseRef: "main",
+      headRef: "feature",
+      reviewers: [],
+    });
+    store.setJobState(enqueued.job.id, "completed", {
+      aggregator_normalized: JSON.stringify({ schema_version: 1, verdict: "comment", summary: "summary", findings: [aiFinding] }),
+    });
+    const openedResponse = await postJson(app, "/api/guided-review/sessions/open", auth.cookies, openBody(auth.csrfToken));
+    const opened = (await openedResponse.json()) as { session: { id: number; version: number } };
+    const commentResponse = await postJson(app, `/api/guided-review/sessions/${opened.session.id}/comments`, auth.cookies, {
+      version: opened.session.version,
+      clientId: "note-1",
+      kind: "inline",
+      body: "Retry can duplicate delivery",
+      path: "src/index.ts",
+      side: "RIGHT",
+      line: 20,
+      csrf_token: auth.csrfToken,
+    });
+    expect(commentResponse.status).toBe(200);
+    const commented = (await commentResponse.json()) as { session: { version: number } };
+
+    const missingCsrf = await app.request(`/guided/sessions/${opened.session.id}/comparison/pair`, {
+      method: "POST",
+      headers: { cookie: auth.cookies, "content-type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({ version: String(commented.session.version), humanClientId: "note-1", fingerprint: aiFingerprint, decision: "confirm" }).toString(),
+    });
+    expect(missingCsrf.status).toBe(403);
+
+    const response = await app.request(`/guided/sessions/${opened.session.id}/comparison/pair`, {
+      method: "POST",
+      headers: { cookie: auth.cookies, "content-type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({ version: String(commented.session.version), humanClientId: "note-1", fingerprint: aiFingerprint, decision: "confirm", csrf_token: auth.csrfToken }).toString(),
+    });
+    expect(response.status).toBe(303);
+    const row = store.guidedReview.getOwned(opened.session.id, { actorProvider: "github", actorId: "1001" });
+    expect(row?.comparison_state_json).toContain('"decision":"confirm"');
+    expect(row?.version).toBe(commented.session.version + 1);
+
+    const stranger = operator(2002);
+    const strangerResponse = await app.request(`/guided/sessions/${opened.session.id}/comparison/pair`, {
+      method: "POST",
+      headers: { cookie: stranger.cookies, "content-type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({ version: String(commented.session.version), humanClientId: "note-1", fingerprint: aiFingerprint, decision: "confirm", csrf_token: stranger.csrfToken }).toString(),
+    });
+    expect(strangerResponse.status).toBe(404);
+    const conflict = await app.request(`/guided/sessions/${opened.session.id}/comparison/pair`, {
+      method: "POST",
+      headers: { cookie: auth.cookies, "content-type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({ version: String(commented.session.version), humanClientId: "note-1", fingerprint: aiFingerprint, decision: "confirm", csrf_token: auth.csrfToken }).toString(),
+    });
+    expect(conflict.status).toBe(409);
+
+    const nextHead = store.enqueue({
+      repoFullName: "acme/widgets",
+      repoOwner: "acme",
+      repoName: "widgets",
+      installationId: 1,
+      provider: "github",
+      providerInstance: "github.com",
+      prNumber: 12,
+      prTitle: "Test pull request",
+      prBody: "",
+      prHtmlUrl: "https://github.com/acme/widgets/pull/12",
+      prAuthor: "author",
+      baseSha,
+      headSha: nextHeadSha,
+      baseRef: "main",
+      headRef: "feature",
+      reviewers: [],
+    });
+    store.setJobState(nextHead.job.id, "completed", {
+      aggregator_normalized: JSON.stringify({ schema_version: 1, verdict: "comment", summary: "summary", findings: [{ severity: "low", category: "style", file: "src/other.ts", line: 1, summary: "Newer commit-only finding" }] }),
+    });
+    const comparison = await app.request(`/api/guided-review/sessions/${opened.session.id}/comparison`, { headers: { cookie: auth.cookies } });
+    expect(comparison.status).toBe(200);
+    const comparisonBody = (await comparison.json()) as { comparison: { state: string; headSha: string; agreements: Array<{ maomao: { summary: string } }>; maomaoOnly: Array<{ summary: string }> } };
+    expect(comparisonBody.comparison).toMatchObject({ state: "stale", headSha });
+    expect([...comparisonBody.comparison.agreements.map((item) => item.maomao.summary), ...comparisonBody.comparison.maomaoOnly.map((item) => item.summary)]).toContain("Retry can duplicate delivery");
+    expect([...comparisonBody.comparison.agreements.map((item) => item.maomao.summary), ...comparisonBody.comparison.maomaoOnly.map((item) => item.summary)]).not.toContain("Newer commit-only finding");
+  });
+
+
+  it("reads comparison evidence from the newest exact-head review even when re-review retired the old dedup key", async () => {
+    const { app, store } = guidedTestApp();
+    const auth = operator(1001);
+    const input = {
+      repoFullName: "acme/widgets",
+      repoOwner: "acme",
+      repoName: "widgets",
+      installationId: 1,
+      provider: "github",
+      providerInstance: "github.com",
+      prNumber: 12,
+      prTitle: "Test pull request",
+      prBody: "",
+      prHtmlUrl: "https://github.com/acme/widgets/pull/12",
+      prAuthor: "author",
+      baseSha,
+      headSha,
+      baseRef: "main",
+      headRef: "feature",
+      reviewers: [],
+    };
+    const artifact = (summary: string) => JSON.stringify({ schema_version: 1, verdict: "comment", summary: "summary", findings: [{ severity: "medium", category: "correctness", file: "src/index.ts", line: 20, summary }] });
+    const oldJob = store.enqueue(input);
+    store.setJobState(oldJob.job.id, "completed", { aggregator_normalized: artifact("Old exact-head artifact") });
+    expect(store.retireJobDedupKey(oldJob.job.id, `rereview:${oldJob.job.id}`)).toBe(true);
+    const newJob = store.enqueue(input);
+    store.setJobState(newJob.job.id, "completed", { aggregator_normalized: artifact("Replacement exact-head artifact") });
+
+    const openedResponse = await postJson(app, "/api/guided-review/sessions/open", auth.cookies, openBody(auth.csrfToken));
+    const opened = (await openedResponse.json()) as { session: { id: number } };
+    const comparison = await app.request(`/api/guided-review/sessions/${opened.session.id}/comparison`, { headers: { cookie: auth.cookies } });
+    expect(comparison.status).toBe(200);
+    const body = (await comparison.json()) as { comparison: { jobId: number; maomaoOnly: Array<{ summary: string }> } };
+    expect(body.comparison.jobId).toBe(newJob.job.id);
+    expect(body.comparison.maomaoOnly.map((item) => item.summary)).toEqual(["Replacement exact-head artifact"]);
+  });
 
 });
