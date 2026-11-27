@@ -15,7 +15,7 @@ import { annotationForLine, diffLayoutOptions, nextLayout, type DiffLayout, synt
 
 declare global {
   // eslint-disable-next-line no-var
-  var __maomaoPierre: { enhance(): void; applyLayout(layout: "unified" | "split"): void };
+  var __maomaoPierre: { enhance(): void; applyLayout(layout: "unified" | "split"): void; scrollToGuidedLine(path: string, line: number, side: "LEFT" | "RIGHT"): boolean };
 }
 
 const LAYOUT_STORAGE_KEY = "maomao-diff-layout";
@@ -132,6 +132,34 @@ function renderGuidedFile(container: HTMLElement): void {
   instances.set(container, fileDiff);
 }
 
+function scrollToGuidedLine(path: string, line: number, side: "LEFT" | "RIGHT"): boolean {
+  if (!Number.isSafeInteger(line) || line < 1) return false;
+  const container = Array.from(document.querySelectorAll<HTMLElement>(".guided-pierre-file[data-guided-pierre]"))
+    .find((candidate) => candidate.getAttribute("data-path") === path);
+  if (!container || container.getAttribute("data-enhanced") !== "1") return false;
+  const instance = instances.get(container);
+  instance?.revealLine(line);
+  instance?.setEditorActiveLine(line, { side: side === "LEFT" ? "deletions" : "additions" });
+  const host = container.querySelector<HTMLElement>("diffs-container");
+  const shadow = host?.shadowRoot;
+  if (!shadow) return true;
+  const column = side === "LEFT" ? "deletions" : "additions";
+  const lineType = side === "LEFT" ? "deletion" : "addition";
+  const scroll = () => {
+    const row = shadow.querySelector<HTMLElement>(`code[data-${column}] [data-line="${line}"]`)
+      ?? shadow.querySelector<HTMLElement>(`code[data-unified] [data-line="${line}"][data-line-type*="${lineType}"]`)
+      ?? shadow.querySelector<HTMLElement>(`code[data-unified] [data-line="${line}"]`);
+    if (!row) return false;
+    row.scrollIntoView({ block: "center" });
+    return true;
+  };
+  if (!scroll()) {
+    window.setTimeout(scroll, 80);
+    window.setTimeout(scroll, 250);
+  }
+  return true;
+}
+
 function applyLayout(layout: DiffLayout): void {
   localStorage.setItem(LAYOUT_STORAGE_KEY, layout);
   for (const container of Array.from(document.querySelectorAll<HTMLElement>(".pierre-diff[data-enhanced], .guided-pierre-file[data-enhanced]"))) {
@@ -206,9 +234,9 @@ function enhanceAll(): void {
   }
 }
 
-export { enhanceAll as enhance, applyLayout };
+export { enhanceAll as enhance, applyLayout, scrollToGuidedLine };
 
-globalThis.__maomaoPierre = { enhance: enhanceAll, applyLayout };
+globalThis.__maomaoPierre = { enhance: enhanceAll, applyLayout, scrollToGuidedLine };
 const pierre = globalThis.__maomaoPierre;
 
 if (typeof document !== "undefined") {

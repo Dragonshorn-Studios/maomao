@@ -393,6 +393,28 @@ function migrate(db: SqliteDb): void {
       UNIQUE (actor_provider, actor_id, provider, provider_instance, repo_full_name, pr_number, base_sha, head_sha)
     );
 
+    CREATE TABLE IF NOT EXISTS guided_walkthroughs (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      fingerprint TEXT NOT NULL UNIQUE,
+      provider TEXT NOT NULL,
+      provider_instance TEXT NOT NULL,
+      repo_full_name TEXT NOT NULL,
+      pr_number INTEGER NOT NULL,
+      base_sha TEXT NOT NULL,
+      head_sha TEXT NOT NULL,
+      prompt_revision INTEGER NOT NULL,
+      model TEXT NOT NULL,
+      status TEXT NOT NULL CHECK (status IN ('pending', 'running', 'ready', 'failed', 'cancelled', 'stale')),
+      output_json TEXT NOT NULL DEFAULT '',
+      error TEXT,
+      cancel_requested INTEGER NOT NULL DEFAULT 0,
+      request_count INTEGER NOT NULL DEFAULT 1,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      started_at TEXT,
+      finished_at TEXT
+    );
+
     CREATE TABLE IF NOT EXISTS guided_review_comments (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       session_id INTEGER NOT NULL REFERENCES guided_review_sessions(id) ON DELETE CASCADE,
@@ -434,6 +456,9 @@ function migrate(db: SqliteDb): void {
     CREATE INDEX IF NOT EXISTS idx_guided_review_sessions_actor_pr
       ON guided_review_sessions(actor_provider, actor_id, provider, provider_instance, repo_full_name, pr_number, updated_at DESC);
     CREATE INDEX IF NOT EXISTS idx_guided_review_comments_session ON guided_review_comments(session_id, id);
+    CREATE INDEX IF NOT EXISTS idx_guided_walkthroughs_pull
+      ON guided_walkthroughs(provider, provider_instance, repo_full_name, pr_number, updated_at DESC);
+
 
     CREATE TABLE IF NOT EXISTS profile_routes (
       id INTEGER PRIMARY KEY AUTOINCREMENT,

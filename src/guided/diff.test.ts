@@ -116,4 +116,57 @@ Binary files a/a.png and b/a.png differ
     expect(readOnly).not.toContain("data-guided-draft");
     expect(readOnly).not.toContain("data-guided-comment-anchor");
   });
+
+  it("renders walkthrough progress states and deep-links structured evidence into the exact diff", () => {
+    const [file] = parseUnifiedDiff(`diff --git a/x.ts b/x.ts
+--- a/x.ts
++++ b/x.ts
+@@ -1 +1 @@
+-old
++new
+`);
+    const base = {
+      fingerprint: "fp",
+      error: null,
+      cancelRequested: false,
+      requestCount: 1,
+      createdAt: "now",
+      updatedAt: "now",
+      startedAt: "now",
+      finishedAt: null,
+    };
+    const running = renderGuidedDiffWorkspace({
+      files: [file],
+      sessionId: 7,
+      csrfToken: "csrf",
+      walkthrough: { ...base, status: "running" as const, payload: undefined },
+    });
+    expect(running).toContain("data-guided-walkthrough");
+    expect(running).toContain("background");
+    expect(running).toContain("data-walkthrough-cancel");
+    const ready = renderGuidedDiffWorkspace({
+      files: [file],
+      sessionId: 7,
+      csrfToken: "csrf",
+      walkthrough: {
+        ...base,
+        status: "ready" as const,
+        payload: {
+          schema_version: 1,
+          kind: "guided_walkthrough",
+          intent: { text: "Intent <unsafe>", uncertainty: "No docs" },
+          changeMap: [{ path: "x.ts", summary: "Changed behavior", evidence: "hunk evidence" }],
+          flow: "Flow",
+          decisions: [],
+          tests: "Tests unavailable",
+          risks: [{ question: "Is it safe?", path: "x.ts", line: 1, evidence: "line evidence" }],
+          generatedAt: "now",
+        },
+      },
+    });
+    expect(ready).toContain('href="#guided-file-0"');
+    expect(ready).toContain("Intent &lt;unsafe&gt;");
+    expect(ready).not.toContain("Intent <unsafe>");
+  });
+
 });

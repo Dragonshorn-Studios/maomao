@@ -3,6 +3,7 @@ import { diskAssetUrl, GUIDED_BUNDLE_HREF } from "./paths.js";
 import type { GuidedInboxItem, GuidedInboxPage } from "../guided/inbox.js";
 import type { GuidedDiffFile } from "../guided/diff.js";
 import type { GuidedCommentView, GuidedSessionView } from "../guided/store.js";
+import type { GuidedWalkthroughPayload, GuidedWalkthroughView } from "../guided/walkthrough-store.js";
 import { csrfInput, layout, type PageOptions } from "./layout.js";
 
 function qs(filters: Record<string, string | number | undefined>): string {
@@ -193,6 +194,83 @@ export function renderGuidedDraftPanel(input: { session: GuidedSessionView; comm
   </section>`;
 }
 
+
+function guidedWalkthroughStatusText(status: string): string {
+  if (status === "pending") return "Queued";
+  if (status === "running") return "Generating";
+  if (status === "ready") return "Ready";
+  if (status === "failed") return "Failed";
+  if (status === "cancelled") return "Cancelled";
+  return "Stale";
+}
+
+function guidedPathHref(path: string | undefined, anchors: Map<string, number>): string | undefined {
+  if (!path) return undefined;
+  const index = anchors.get(path);
+  return index === undefined ? undefined : `#guided-file-${index}`;
+}
+
+function renderGuidedWalkthroughPayload(payload: GuidedWalkthroughPayload, files: GuidedDiffFile[]): string {
+  const anchors = new Map(files.map((file, index) => [file.path, index]));
+  const exactLineHref = (path: string | undefined, line?: number) => {
+    if (!path || !line) return undefined;
+    const file = files.find((entry) => entry.path === path);
+    if (!file) return undefined;
+    for (const [hunkIndex, hunk] of file.hunks.entries()) {
+      const matched = hunk.lines.find((entry) => entry.newLine === line || entry.oldLine === line);
+      if (!matched) continue;
+      const side = matched.kind === "del" ? "LEFT" : "RIGHT";
+      const lineNumber = matched.kind === "del" ? matched.oldLine : matched.newLine;
+      if (lineNumber) return `#f${encodeURIComponent(file.path)}-h${hunkIndex}-L${side === "LEFT" ? "o" : "n"}${lineNumber}`;
+    }
+    return undefined;
+  };
+  const evidenceLink = (path: string | undefined, label: string, line?: number) => {
+    const href = exactLineHref(path, line) ?? guidedPathHref(path, anchors);
+    return href ? `<a href="${href}">${escapeHtml(label)}</a>` : `<span>${escapeHtml(label)}</span>`;
+  };
+  const changes = payload.changeMap.map((change) => `<li>${evidenceLink(change.path, change.path)} — ${escapeHtml(change.summary)} <span class="muted">${escapeHtml(change.evidence)}</span></li>`).join("\n");
+  const decisions = payload.decisions.map((decision) => `<li><strong>${escapeHtml(decision.title)}</strong> — ${escapeHtml(decision.details)} <span class="muted">${escapeHtml(decision.evidence)}</span></li>`).join("\n");
+  const risks = payload.risks.map((risk) => `<li>${escapeHtml(risk.question)} ${risk.path ? evidenceLink(risk.path, risk.line ? `${risk.path}:${risk.line}` : risk.path, risk.line) : ""} <span class="muted">${escapeHtml(risk.evidence)}</span></li>`).join("\n");
+  return `<div class="gd-walkthrough-content">
+    <h3>Intent as expressed</h3><p>${escapeHtml(payload.intent.text)}</p><p class="muted">Uncertainty: ${escapeHtml(payload.intent.uncertainty)}</p>
+    <h3>Change map</h3><ul>${changes || "<li>No file evidence was available.</li>"}</ul>
+    <h3>Execution and data flow</h3><p>${escapeHtml(payload.flow)}</p>
+    <h3>Decisions and invariants</h3><ul>${decisions || "<li>No consequential decisions were evidenced.</li>"}</ul>
+    <h3>Tests</h3><p>${escapeHtml(payload.tests)}</p>
+    <h3>Reviewer questions</h3><ul>${risks || "<li>No explicit risk questions were evidenced.</li>"}</ul>
+  </div>`;
+}
+
+function renderGuidedWalkthroughPanel(input: { walkthrough?: GuidedWalkthroughView; files: GuidedDiffFile[]; sessionId?: number; csrfToken?: string }): string {
+  if (!input.sessionId) return "";
+  const walkthrough = input.walkthrough;
+  const status = walkthrough?.status ?? "pending";
+  const active = status === "pending" || status === "running";
+  const payload = walkthrough?.payload;
+  const detail = active
+    ? `<p class="notice if-banner" role="status"><span class="gd-spinner" aria-hidden="true"></span> ${guidedWalkthroughStatusText(status)} walkthrough in the background. You can inspect the diff immediately; this panel updates without blocking the page.</p>`
+    : status === "failed"
+      ? `<p class="error if-banner if-banner--danger" role="alert">Walkthrough generation failed${walkthrough?.error ? `: ${escapeHtml(walkthrough.error)}` : "."} Manual review remains available.</p>`
+      : status === "cancelled"
+        ? `<p class="notice if-banner if-banner--warning">Walkthrough generation was cancelled.</p>`
+        : status === "stale"
+          ? `<p class="notice if-banner if-banner--warning">This walkthrough belongs to an older head SHA and is stale.</p>`
+          : "";
+  const controls = `<div class="gd-walkthrough-controls">
+    <button type="button" class="if-button if-button--sm" data-walkthrough-cancel${active ? "" : " hidden"}>Cancel generation</button>
+    <button type="button" class="if-button if-button--sm" data-walkthrough-retry${status === "failed" || status === "cancelled" ? "" : " hidden"}>Retry walkthrough</button>
+    <button type="button" class="if-button if-button--sm" data-walkthrough-refresh>Refresh</button>
+  </div>`;
+  return `<section class="config-section gd-walkthrough" data-guided-walkthrough data-session-id="${input.sessionId}" data-csrf="${escapeHtml(input.csrfToken ?? "")}" data-status="${escapeHtml(status)}">
+    <div class="gd-head"><h2>SHA-pinned walkthrough</h2><span class="job-chip" data-walkthrough-state>${escapeHtml(guidedWalkthroughStatusText(status))}</span></div>
+    <div data-walkthrough-detail>${detail}</div>
+    <div data-walkthrough-body>${payload && (status === "ready" || status === "stale") ? renderGuidedWalkthroughPayload(payload, input.files) : ""}</div>
+    ${controls}
+    <noscript><p class="notice if-banner if-banner--warning">Walkthrough progress updates require JavaScript. Reload this page to check generation state.</p></noscript>
+  </section>`;
+}
+
 export function renderGuidedDiffWorkspace(input: {
   files: GuidedDiffFile[];
   statusFilter?: string;
@@ -207,6 +285,7 @@ export function renderGuidedDiffWorkspace(input: {
   csrfToken?: string;
   comments?: GuidedCommentView[];
   sessionView?: GuidedSessionView;
+  walkthrough?: GuidedWalkthroughView;
   readOnly?: boolean;
 }): string {
   if (input.diffError) {
@@ -237,7 +316,8 @@ export function renderGuidedDiffWorkspace(input: {
     </article>`;
   }).join("\n");
   const draftPanel = input.sessionView ? renderGuidedDraftPanel({ session: input.sessionView, comments: input.comments ?? [], csrfToken: input.csrfToken, readOnly: input.readOnly }) : "";
-  return `${draftPanel}<section class="config-section guided-diff-workspace" data-guided-diff-workspace>
+  const walkthroughPanel = renderGuidedWalkthroughPanel({ walkthrough: input.walkthrough, files: filtered, sessionId: input.sessionId, csrfToken: input.csrfToken });
+  return `${walkthroughPanel}${draftPanel}<section class="config-section guided-diff-workspace" data-guided-diff-workspace>
     <div class="gd-head"><h2>Diff workspace</h2><button type="button" class="if-button if-button--sm guided-layout-toggle">Switch diff layout</button></div>
     <p class="muted">${input.files.length} files · ${total} changed lines${input.diffTruncated ? " · diff input truncated by configured byte bound" : ""}</p>
     <p class="error if-banner if-banner--danger" role="alert" data-guided-write-error hidden>Could not save viewed-file progress.</p>
@@ -297,7 +377,7 @@ export function renderGuidedSessionPage(input: {
         ${input.sessionId ? `<div><dt>Draft session</dt><dd>#${input.sessionId} · version ${input.sessionVersion ?? 1} · ${input.commentCount ?? 0} comments</dd></div>` : ""}
       </dl>
       ${input.canStart ? `<form method="post" action="/guided/github/${encodeURIComponent(input.repoFullName.split("/")[0])}/${encodeURIComponent(input.repoFullName.split("/")[1])}/${input.prNumber}/open">${csrfInput(input.options.csrfToken)}<button class="if-button if-button--primary" type="submit">Start guided draft</button></form>` : ""}
-      <p class="muted">The walkthrough, comparison, and publication steps land in the next Guided Review slices. Starting creates your actor-private SHA-pinned draft; returning to the same SHAs resumes it.</p>
+      <p class="muted">The comparison and publication steps land in the next Guided Review slices. Starting creates your actor-private SHA-pinned draft; returning to the same SHAs resumes it.</p>
     </section>
     ${input.diffWorkspace ?? ""}
     <script src="${diskAssetUrl(GUIDED_BUNDLE_HREF)}" defer onerror="document.querySelectorAll('[data-guided-bundle-error]').forEach(function(el){el.hidden=false})"></script>`;

@@ -6,13 +6,14 @@ import type { JobQueue } from "../jobs/queue.js";
 import { JobStore } from "../jobs/store.js";
 import { createApp } from "../server.js";
 import type { ManualTriggerPort } from "../github/client.js";
+import { GuidedWalkthroughStore } from "./walkthrough-store.js";
 
 const secret = "guided-review-test-secret";
 const baseSha = "a".repeat(40);
 const headSha = "b".repeat(40);
 const nextHeadSha = "c".repeat(40);
 
-function guidedTestApp(github?: ManualTriggerPort) {
+function guidedTestApp(github?: ManualTriggerPort, contextExtras: Partial<Parameters<typeof createApp>[0]> = {}) {
   const config = loadConfig({
     GITHUB_WEBHOOK_SECRET: "webhook-secret",
     GITHUB_APP_ID: "1",
@@ -22,9 +23,29 @@ function guidedTestApp(github?: ManualTriggerPort) {
     UI_SESSION_SECRET: secret,
     MAOMAO_ADMIN_GITHUB_IDS: "1001,2002",
   });
-  const store = new JobStore(openDb(":memory:"));
+  const db = openDb(":memory:");
+  const store = new JobStore(db);
+  const walkthroughStore = new GuidedWalkthroughStore(db);
   const queue = { enqueue() {}, abortMany() {} } as unknown as JobQueue;
-  return { app: createApp({ config, store, queue, github, startedAt: Date.now(), env: {} }), store };
+  const guidedWalkthrough = contextExtras.guidedWalkthrough ?? {
+    store: walkthroughStore,
+    service: {
+      model: () => "opencode-default",
+      ensure(session: { provider: string; provider_instance: string; repo_full_name: string; pr_number: number; base_sha: string; head_sha: string }) {
+        return walkthroughStore.open({
+          provider: session.provider,
+          instance: session.provider_instance,
+          repoFullName: session.repo_full_name,
+          prNumber: session.pr_number,
+          baseSha: session.base_sha,
+          headSha: session.head_sha,
+        }, "opencode-default");
+      },
+      retry(row: import("./walkthrough-store.js").GuidedWalkthroughRow) { return row; },
+      cancel(row: import("./walkthrough-store.js").GuidedWalkthroughRow) { return walkthroughStore.requestCancel(row.id); },
+    } as never,
+  };
+  return { app: createApp({ config, store, queue, github, startedAt: Date.now(), env: {}, guidedWalkthrough, ...contextExtras }), store, walkthroughStore };
 }
 
 function operator(id: number, login = `operator-${id}`) {
@@ -358,5 +379,74 @@ describe("Guided Review session API", () => {
     const after = await app.request(`/api/guided-review/sessions/${opened.session.id}`, { headers: { cookie: auth.cookies } });
     expect(((await after.json()) as { session: { version: number } }).session.version).toBe(beforeJson.session.version);
   });
+
+
+  it("serves actor-scoped walkthrough status without writes and supports deliberate cancellation", async () => {
+    const { app, walkthroughStore } = guidedTestApp();
+    const auth = operator(1001);
+    const other = operator(2002);
+    const openedResponse = await postJson(app, "/api/guided-review/sessions/open", auth.cookies, openBody(auth.csrfToken));
+    const opened = (await openedResponse.json()) as { session: { id: number; version: number } };
+    const row = walkthroughStore.open({
+      provider: "github",
+      instance: "github.com",
+      repoFullName: "acme/widgets",
+      prNumber: 12,
+      baseSha,
+      headSha,
+    }, "opencode-default");
+
+    const denied = await app.request(`/api/guided-review/sessions/${opened.session.id}/walkthrough`, { headers: { cookie: other.cookies } });
+    expect(denied.status).toBe(404);
+
+    const before = await app.request(`/api/guided-review/sessions/${opened.session.id}`, { headers: { cookie: auth.cookies } });
+    const beforeVersion = ((await before.json()) as { session: { version: number } }).session.version;
+    const statusResponse = await app.request(`/api/guided-review/sessions/${opened.session.id}/walkthrough`, { headers: { cookie: auth.cookies } });
+    expect(statusResponse.status).toBe(200);
+    const status = (await statusResponse.json()) as { walkthrough: { fingerprint: string; status: string } };
+    expect(status.walkthrough).toMatchObject({ fingerprint: row.fingerprint, status: "pending" });
+    const after = await app.request(`/api/guided-review/sessions/${opened.session.id}`, { headers: { cookie: auth.cookies } });
+    expect(((await after.json()) as { session: { version: number } }).session.version).toBe(beforeVersion);
+
+    const missingCsrf = await postJson(app, `/api/guided-review/sessions/${opened.session.id}/walkthrough/cancel`, auth.cookies, {});
+    expect(missingCsrf.status).toBe(403);
+    const cancel = await postJson(app, `/api/guided-review/sessions/${opened.session.id}/walkthrough/cancel`, auth.cookies, { csrf_token: auth.csrfToken });
+    expect(cancel.status).toBe(200);
+    expect(((await cancel.json()) as { walkthrough: { status: string } }).walkthrough.status).toBe("cancelled");
+  });
+
+  it("returns cached structured walkthrough evidence for the same exact-SHA fingerprint", async () => {
+    const { app, walkthroughStore } = guidedTestApp();
+    const auth = operator(1001);
+    const openedResponse = await postJson(app, "/api/guided-review/sessions/open", auth.cookies, openBody(auth.csrfToken));
+    const opened = (await openedResponse.json()) as { session: { id: number } };
+    const row = walkthroughStore.open({
+      provider: "github",
+      instance: "github.com",
+      repoFullName: "acme/widgets",
+      prNumber: 12,
+      baseSha,
+      headSha,
+    }, "opencode-default");
+    expect(walkthroughStore.claim(row.id)).toBe(true);
+    walkthroughStore.markReady(row.id, {
+      schema_version: 1,
+      kind: "guided_walkthrough",
+      intent: { text: "The PR documents a cache.", uncertainty: "No migration note was found." },
+      changeMap: [{ path: "src/cache.ts", summary: "Adds cache reuse.", evidence: "src/cache.ts hunk 1" }],
+      flow: "Requests consult the cache first.",
+      decisions: [{ title: "SHA fingerprint", details: "Invalidates moved heads.", evidence: "fingerprint fields" }],
+      tests: "Store tests cover reuse.",
+      risks: [{ question: "Are prompt revisions included?", path: "src/cache.ts", line: 4, evidence: "model key" }],
+      generatedAt: new Date().toISOString(),
+    });
+    const response = await app.request(`/api/guided-review/sessions/${opened.session.id}/walkthrough`, { headers: { cookie: auth.cookies } });
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as { walkthrough: { status: string; payload?: { changeMap: Array<{ path: string }>; risks: Array<{ line?: number }> } } };
+    expect(body.walkthrough.status).toBe("ready");
+    expect(body.walkthrough.payload?.changeMap[0]?.path).toBe("src/cache.ts");
+    expect(body.walkthrough.payload?.risks[0]?.line).toBe(4);
+  });
+
 
 });

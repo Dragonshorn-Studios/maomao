@@ -13,6 +13,8 @@ import { ModelDiscovery } from "./opencode/models.js";
 import { seedDefaultProfileRevision } from "./config-revisions.js";
 import { ChatService } from "./chat/service.js";
 import { ChatStore } from "./chat/store.js";
+import { GuidedWalkthroughStore } from "./guided/walkthrough-store.js";
+import { GuidedWalkthroughService } from "./guided/walkthrough.js";
 import { oauthCallbackUrl, oauthEnabled } from "./oauth.js";
 import { ForgeConnectionStore, countConnections } from "./forge/connections.js";
 import { ensureEnvGitLabConnection } from "./forge/bootstrap.js";
@@ -139,6 +141,12 @@ const chat = chatStore
     }
   : undefined;
 
+const guidedWalkthroughStore = new GuidedWalkthroughStore(db);
+const guidedWalkthrough = {
+  store: guidedWalkthroughStore,
+  service: new GuidedWalkthroughService({ config, store: guidedWalkthroughStore, forge, opencode, briefCache: store }),
+};
+
 const app = createApp({
   config,
   store,
@@ -148,6 +156,7 @@ const app = createApp({
   opencode,
   forgeConnections,
   chat,
+  guidedWalkthrough,
   modelDiscovery,
   telemetrySettings,
   trustedCheckSettings,
