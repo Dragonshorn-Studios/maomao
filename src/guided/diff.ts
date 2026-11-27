@@ -25,9 +25,25 @@ export interface GuidedDiffFile {
   truncated: boolean;
 }
 
+function parseDiffGitPaths(line: string): { oldPath?: string; newPath?: string } {
+  const body = line.slice("diff --git ".length);
+  const token = /^(?:"((?:\\.|[^"])*)"|(\S+))/;
+  const first = body.match(token);
+  if (!first) return {};
+  const rest = body.slice(first[0].length).trimStart();
+  const second = rest.match(token);
+  if (!second) return {};
+  const decode = (raw: string, quoted: string | undefined) => {
+    const value = quoted === undefined ? raw : raw.replace(/\\(.)/g, "$1");
+    return value.replace(/^[ab]\//, "");
+  };
+  return { oldPath: decode(first[1] ?? first[2], first[1]), newPath: decode(second[1] ?? second[2], second[1]) };
+}
+
 function unprefix(value: string): string | undefined {
-  const trimmed = value.trim();
+  let trimmed = value.trim();
   if (trimmed === "/dev/null") return undefined;
+  if (trimmed.startsWith('"') && trimmed.endsWith('"')) trimmed = trimmed.slice(1, -1).replace(/\\(.)/g, "$1");
   return trimmed.replace(/^[ab]\//, "");
 }
 
@@ -53,9 +69,7 @@ export function parseUnifiedDiff(diff: string, opts: { maxFiles?: number; maxLin
     if (raw.startsWith("diff --git ")) {
       finishFile();
       if (files.length >= maxFiles) break;
-      const match = raw.match(/^diff --git a\/(.+) b\/(.+)$/);
-      const oldPath = match?.[1];
-      const newPath = match?.[2];
+      const { oldPath, newPath } = parseDiffGitPaths(raw);
       file = {
         oldPath,
         newPath,
@@ -72,7 +86,7 @@ export function parseUnifiedDiff(diff: string, opts: { maxFiles?: number; maxLin
       continue;
     }
     if (!file) continue;
-    file.patch += `${raw}\n`;
+    if (!file.truncated) file.patch += `${raw}\n`;
     if (raw.startsWith("Binary files") || raw.startsWith("GIT binary patch")) {
       file.binary = true;
       file.status = "binary";
