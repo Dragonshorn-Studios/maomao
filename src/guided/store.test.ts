@@ -37,6 +37,47 @@ describe("GuidedReviewStore", () => {
     expect(otherHead.staleFrom?.id).toBe(first.session.id);
   });
 
+
+  it("reactivates a previously seen exact-SHA session and supersedes the draft it replaces", () => {
+    const guided = store();
+    const first = guided.open(key());
+    const second = guided.open(key({ headSha: "c".repeat(40) }));
+    expect(guided.getOwned(first.session.id, actor)?.historical_at).toBeTruthy();
+
+    const reopened = guided.open(key());
+    expect(reopened.session.id).toBe(first.session.id);
+    expect(reopened.session.historical_at).toBeNull();
+    expect(reopened.staleFrom?.id).toBe(second.session.id);
+    expect(guided.getOwned(second.session.id, actor)?.historical_at).toBeTruthy();
+    const write = guided.updateSession(first.session.id, actor, reopened.session.version, { draftSummary: "current again" });
+    expect(write.status).toBe("ok");
+
+    const repeated = guided.open(key());
+    expect(repeated.staleFrom).toBeUndefined();
+  });
+
+  it("copying into a previously seen target reactivates that target instead of leaving copied notes read-only", () => {
+    const guided = store();
+    const first = guided.open(key());
+    const second = guided.open(key({ headSha: "c".repeat(40) }));
+    const comment = guided.upsertComment(second.session.id, actor, second.session.version, {
+      clientId: "note-1",
+      kind: "general",
+      body: "carry this forward",
+    });
+    expect(comment.status).toBe("ok");
+
+    const copied = guided.copyToSha(second.session.id, actor, key().baseSha, key().headSha);
+    expect(copied.status).toBe("ok");
+    if (copied.status !== "ok") throw new Error("expected copy success");
+    expect(copied.session.id).toBe(first.session.id);
+    expect(copied.session.historical_at).toBeNull();
+    expect(copied.copied).toBe(1);
+    const write = guided.updateSession(first.session.id, actor, copied.session.version, { draftSummary: "copied target is writable" });
+    expect(write.status).toBe("ok");
+    expect(guided.getOwned(second.session.id, actor)?.historical_at).toBeTruthy();
+  });
+
   it("updates drafts atomically with version conflicts and mutation idempotency", () => {
     const guided = store();
     const opened = guided.open(key());
