@@ -17,6 +17,7 @@ import { ChatStore } from "./chat/store.js";
 import { renderChatPage } from "./ui/chat-page.js";
 import { ChatBudgetError } from "./chat/service.js";
 import type { ManualTriggerPort, GithubPort } from "./github/client.js";
+import { enumerateGithubInstallationRepositories } from "./github/enumerate.js";
 import type { OpenCodePort } from "./opencode/parse.js";
 import { authorizeGithubAccount, authorizeGithubRepository, authorizeGithubTarget, logAuthorizationRejection, logRateLimited, rejectUnauthorized } from "./github/authorize.js";
 import { registerQueuedReviewer } from "./github/reviewer-request.js";
@@ -90,6 +91,8 @@ import {
   roleFormValuesFromRole,
 } from "./ui/index.js";
 import { renderProvidersPage } from "./ui/providers.js";
+import { renderGuidedInboxPage, renderGuidedOpenError, renderGuidedSessionPage } from "./ui/guided.js";
+import { listGuidedInbox } from "./guided/inbox.js";
 import { renderTelemetryPage, TELEMETRY_PAGE_HREF, TELEMETRY_PAGE_JS, type TelemetryProbeRow } from "./ui/telemetry.js";
 import {
   TELEMETRY_CHANNELS,
@@ -1148,6 +1151,107 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
       return home({ error: message });
     }
   });
+
+  const guidedPageOpts = (c: Context<AppEnv>): PageOptions => ({
+    ...pageOpts,
+    identity: c.get("identity"),
+    csrfToken: gateOn ? ensureCsrfToken(c, ctx.config.uiSessionSecret) : undefined,
+  });
+  const guidedFiltersFrom = (c: Context<AppEnv>) => ({
+    repo: c.req.query("repo") || undefined,
+    author: c.req.query("author") || undefined,
+    reviewState: c.req.query("reviewState") || undefined,
+    maomaoState: c.req.query("maomaoState") || undefined,
+    offset: Number(c.req.query("offset") || 0) || 0,
+  });
+  const renderGuidedInbox = async (c: Context<AppEnv>, directError?: string, directUrl?: string, status = 200) => {
+    const filters = guidedFiltersFrom(c);
+    const page = await listGuidedInbox({ config: ctx.config, store: ctx.store, github: ctx.github, forgeConnections: ctx.forgeConnections, actor: guidedActor(c), filters });
+    return c.html(renderGuidedInboxPage({ options: guidedPageOpts(c), page, filters, directError, directUrl }), status as 200);
+  };
+
+  app.get("/guided", async (c) => renderGuidedInbox(c));
+
+  app.post("/guided/open", async (c) => {
+    const body = await c.req.parseBody();
+    const rawUrl = typeof body.url === "string" ? body.url : "";
+    try {
+      const parsed = parseGithubPullUrl(rawUrl);
+      return guidedTargetResponse(c, parsed.owner, parsed.repo, parsed.number, true, true);
+    } catch (error) {
+      const message = error instanceof PullUrlError ? error.message : "Could not parse that pull request URL.";
+      return renderGuidedInbox(c, message, rawUrl, 400);
+    }
+  });
+
+  const guidedTargetResponse = async (
+    c: Context<AppEnv>,
+    owner: string,
+    repo: string,
+    prNumber: number,
+    createSession: boolean,
+    redirectAfterOpen = false,
+  ): Promise<Response> => {
+    const failure = async (message: string, status: 400 | 403 | 404 | 502 = 400) =>
+      c.html(renderGuidedOpenError({ options: guidedPageOpts(c), error: message }), status);
+    if (!ctx.github) return failure("GitHub App client is not configured on this process.", 502);
+    if (!owner || !repo || !Number.isInteger(prNumber) || prNumber <= 0) return failure("Malformed pull request coordinates.", 400);
+    try {
+      const installation = await ctx.github.getRepoInstallation(owner, repo);
+      const pull = await ctx.github.getPull(installation.installationId, owner, repo, prNumber);
+      const auth = rejectUnauthorized(ctx.config, {
+        installationId: pull.installationId,
+        accountId: pull.accountId || installation.accountId,
+        repositoryId: pull.repositoryId,
+      });
+      if (!auth.ok) return failure("Not authorized to review this installation or repository.", 403);
+      if (pull.state && pull.state !== "open") return failure("Only open pull requests can enter Guided Review.", 400);
+      const actor = guidedActor(c);
+      const key = actor
+        ? {
+            ...actor,
+            provider: "github",
+            instance: "github.com",
+            repoFullName: `${owner}/${repo}`,
+            prNumber,
+            baseSha: pull.baseSha,
+            headSha: pull.headSha,
+          }
+        : undefined;
+      const opened = actor && key && createSession ? ctx.store.guidedReview.open(key) : undefined;
+      const existing = !opened && actor && key ? ctx.store.guidedReview.findExact(actor, key) : undefined;
+      const session = opened?.session ?? existing;
+      if (redirectAfterOpen) return c.redirect(`/guided/github/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/${prNumber}`, 302);
+      return c.html(renderGuidedSessionPage({
+        options: guidedPageOpts(c),
+        repoFullName: `${owner}/${repo}`,
+        prNumber,
+        title: pull.prTitle || `Pull request #${prNumber}`,
+        author: pull.prAuthor,
+        url: pull.prHtmlUrl,
+        baseSha: pull.baseSha,
+        headSha: pull.headSha,
+        sessionId: session?.id,
+        sessionVersion: session?.version,
+        commentCount: session ? ctx.store.guidedReview.activeCommentCount(session.id) : undefined,
+        readOnly: !actor,
+        canStart: Boolean(actor && !session),
+        staleFrom: opened?.staleFrom ? { id: opened.staleFrom.id, baseSha: opened.staleFrom.base_sha, headSha: opened.staleFrom.head_sha } : undefined,
+      }));
+    } catch (error) {
+      if (isPermissionDenied(error)) return failure("Not authorized to review this installation or repository.", 403);
+      console.warn(`guided inbox open failed for ${owner}/${repo}#${prNumber}: ${truncate(redactSecrets(error instanceof Error ? error.message : String(error), githubSecrets(ctx.config)), 300)}`);
+      return failure("Could not resolve current pull request metadata from GitHub.", 502);
+    }
+  };
+
+  app.get("/guided/github/:owner/:repo/:number", async (c) =>
+    guidedTargetResponse(c, c.req.param("owner"), c.req.param("repo"), Number(c.req.param("number")), false),
+  );
+
+  app.post("/guided/github/:owner/:repo/:number/open", async (c) =>
+    guidedTargetResponse(c, c.req.param("owner"), c.req.param("repo"), Number(c.req.param("number")), true, true),
+  );
 
   app.post("/api/guided-review/sessions/open", async (c) =>
     guidedRoute(c, async () => {
@@ -4102,36 +4206,8 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
   let scanRepoInflight: Promise<ScanRepoOption[]> | null = null;
 
   const enumerateScanRepos = async (): Promise<ScanRepoOption[]> => {
-    const github = ctx.github;
-    if (!github || !github.listAppInstallations || !github.listInstallationRepositories) {
-      throw new Error("this GitHub client does not support repository search");
-    }
-    const options: ScanRepoOption[] = [];
-    const installations = await github.listAppInstallations();
-    for (const installation of installations) {
-      const subject = {
-        installationId: installation.id,
-        accountId: installation.accountId,
-      };
-      if (!authorizeGithubAccount(ctx.config, subject).ok) continue;
-      try {
-        const repos = await github.listInstallationRepositories(installation.id);
-        for (const repo of repos) {
-          if (!authorizeGithubRepository(ctx.config, { ...subject, repositoryId: repo.id }).ok) continue;
-          options.push({
-            fullName: repo.fullName,
-            installationId: installation.id,
-            repositoryId: repo.id,
-            accountId: installation.accountId,
-          });
-        }
-      } catch (error) {
-        console.warn(
-          `scan: could not list repositories for installation ${installation.id}: ${error instanceof Error ? error.message : String(error)}`,
-        );
-      }
-    }
-    return options.sort((a, b) => a.fullName.localeCompare(b.fullName)).slice(0, 500);
+    if (!ctx.github) throw new Error("this GitHub client does not support repository search");
+    return enumerateGithubInstallationRepositories(ctx.github, ctx.config, "scan");
   };
 
   // Allowlist-filtered installation repositories for the scan-page typeahead.
