@@ -164,7 +164,14 @@ describe("Guided Review inbox", () => {
   });
 
   it("opens a direct URL into a SHA-pinned OAuth draft and keeps password sessions read-only", async () => {
-    const { app, store } = testApp(githubFake());
+    const github = githubFake();
+    const compareCalls: unknown[][] = [];
+    const originalCompare = github.getCompareDiff!.bind(github);
+    github.getCompareDiff = async (...args: unknown[]) => {
+      compareCalls.push(args);
+      return originalCompare(...args as [number, string, string, string, string, number?]);
+    };
+    const { app, store } = testApp(github);
     const auth = operator();
     const form = new URLSearchParams({ url: "https://github.com/acme/widgets/pull/12", csrf_token: auth.csrfToken });
     const post = await app.request("/guided/open", {
@@ -183,6 +190,7 @@ describe("Guided Review inbox", () => {
     expect(html).toContain("Diff workspace");
     expect(html).toContain("new.ts");
     expect(html).toContain("data-anchor-side=\"LEFT\"");
+    expect(compareCalls[0]?.slice(1, 5)).toEqual(["acme", "widgets", baseSha, headSha]);
     const session = store.guidedReview.latestForPull({ actorProvider: "github", actorId: "1001" }, "github", "github.com", "acme/widgets", 12);
     expect(session?.head_sha).toBe(headSha);
     const context = await app.request(`/api/guided-review/sessions/${session?.id}/file?path=${encodeURIComponent("new.ts")}&side=head`, { headers: { cookie: auth.cookies } });
@@ -195,6 +203,20 @@ describe("Guided Review inbox", () => {
     const readOnly = await app.request("/guided/github/acme/widgets/12", { headers: { cookie: password.cookies } });
     expect(readOnly.status).toBe(200);
     expect(await readOnly.text()).toContain("Password-only sessions are read-only");
+  });
+
+  it("shows oversized or failed diff fetches explicitly instead of implying coverage", async () => {
+    const github = githubFake();
+    github.getCompareDiff = async () => {
+      throw new Error("diff exceeds MAX_DIFF_BYTES (2000 > 1000)");
+    };
+    const { app } = testApp(github);
+    const auth = operator();
+    const response = await app.request("/guided/github/acme/widgets/12", { headers: { cookie: auth.cookies } });
+    expect(response.status).toBe(200);
+    const html = await response.text();
+    expect(html).toContain("Could not load the authoritative pull request diff");
+    expect(html).toContain("cannot imply unseen changes");
   });
 
   it("rejects closed direct targets and degrades when listing capability is absent", async () => {
