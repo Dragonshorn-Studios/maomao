@@ -210,7 +210,7 @@ function validatePrNumber(value: unknown): number {
   return prNumber as number;
 }
 
-function validatePath(value: unknown, name = "path"): string {
+export function validateGuidedRepoPath(value: unknown, name = "path"): string {
   const path = stringField(value, name, GUIDED_SESSION_LIMITS.pathChars);
   if (
     path.includes("\\") ||
@@ -252,7 +252,7 @@ function validateJsonValue(value: unknown, name: string): unknown {
 function validateViewedFiles(value: unknown): string[] {
   if (!Array.isArray(value)) fail("viewedFiles must be an array");
   if (value.length > GUIDED_SESSION_LIMITS.viewedFiles) fail("viewedFiles exceeds the retention limit");
-  return [...new Set(value.map((entry) => validatePath(entry, "viewedFiles entry")))];
+  return [...new Set(value.map((entry) => validateGuidedRepoPath(entry, "viewedFiles entry")))];
 }
 
 function validateSessionKey(input: GuidedSessionKey): GuidedSessionKey {
@@ -345,7 +345,7 @@ function validateCommentInput(input: GuidedCommentInput): GuidedCommentInput {
   if (kind !== "inline" && kind !== "general") fail("kind must be inline or general");
   const body = stringField(input.body, "body", GUIDED_SESSION_LIMITS.commentChars);
   const clientId = validateClientId(input.clientId);
-  const path = input.path == null ? null : validatePath(input.path);
+  const path = input.path == null ? null : validateGuidedRepoPath(input.path);
   const side = input.side == null ? null : input.side;
   if (side != null && side !== "LEFT" && side !== "RIGHT") fail("side must be LEFT or RIGHT");
   const line = input.line == null ? null : input.line;
@@ -486,7 +486,7 @@ export class GuidedReviewStore {
       }
       if (patch.currentPath !== undefined) {
         sets.push("current_path = ?");
-        values.push(patch.currentPath == null ? null : validatePath(patch.currentPath, "currentPath"));
+        values.push(patch.currentPath == null ? null : validateGuidedRepoPath(patch.currentPath, "currentPath"));
       }
       if (patch.currentHunk !== undefined) {
         sets.push("current_hunk = ?");
