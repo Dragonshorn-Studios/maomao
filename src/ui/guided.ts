@@ -114,10 +114,6 @@ export function renderGuidedOpenError(input: { options: PageOptions; error: stri
   });
 }
 
-function scriptText(value: string): string {
-  return value.replace(/<\/script/gi, "<\\/script");
-}
-
 function jsJson(value: unknown): string {
   return JSON.stringify(value).replace(/</g, "\\u003c");
 }
@@ -427,7 +423,7 @@ export function renderGuidedDiffWorkspace(input: {
       ${input.sessionId ? `<details class="gd-context"><summary>Read-only surrounding code at the pinned SHA</summary><button type="button" class="if-button if-button--sm" data-load-context="${escapeHtml(file.path)}">Load head-side file</button><pre class="gd-context-panel" hidden></pre><p class="muted">Path-boundary validated; oversized or unavailable files fail explicitly.</p></details>` : ""}
       <div class="guided-pierre-file" data-guided-pierre data-path="${escapeHtml(file.path)}" data-commentable="${input.sessionView && !input.readOnly ? "1" : ""}">
         <div class="gd-fallback">${hunks}${empty}</div>
-        <script type="text/plain" class="guided-patch-raw">${scriptText(file.patch)}</script>
+        <script type="application/json" class="guided-patch-raw">${jsJson(file.patch)}</script>
       </div>
     </article>`;
   }).join("\n");
