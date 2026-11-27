@@ -181,6 +181,7 @@ Binary files a/a.png and b/a.png differ
     expect(html).toContain('data-guided-tree-toggle');
     expect(html).not.toContain('name="file"');
     expect(html).not.toContain("IntersectionObserver");
+    expect(html).toContain("guided:wizard-step");
   });
 
   it("renders walkthrough progress states and deep-links structured evidence into the exact diff", () => {

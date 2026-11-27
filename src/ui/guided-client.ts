@@ -172,7 +172,15 @@ function enhanceDraft(root: HTMLElement): void {
     });
   }
 
+  async function flushDraftSaves(): Promise<void> {
+    window.clearTimeout(summaryTimer);
+    if (summaryDirty) saveSummary();
+    await queue;
+    if (writeFailed || conflicted) throw new Error("draft save error or conflict");
+  }
+
   let summaryTimer: number | undefined;
+  (window as Window & { __maomaoGuidedFlushDraft?: () => Promise<void> }).__maomaoGuidedFlushDraft = flushDraftSaves;
   for (const el of [summaryEl, verdictEl]) {
     el?.addEventListener("input", () => {
       summaryDirty = true;
@@ -789,16 +797,22 @@ function enhanceGuidedPublicationPreviews(): void {
     const load = async () => {
       output.textContent = "Loading exact preview…";
       try {
+        const flush = (window as Window & { __maomaoGuidedFlushDraft?: () => Promise<void> }).__maomaoGuidedFlushDraft;
+        if (flush) await flush();
         renderPublishPreview(output, await loadPublishPreview(sessionId));
       } catch (error) {
-        output.textContent = `Could not load preview: ${error instanceof Error ? error.message : String(error)}`;
+        output.textContent = `Could not load the exact preview because the draft is not saved yet: ${error instanceof Error ? error.message : String(error)}`;
       }
     };
     root.querySelector("[data-load-publish-preview]")?.addEventListener("click", (event) => {
       event.preventDefault();
       void load();
     });
-    void load();
+    document.addEventListener("guided:wizard-step", (event) => {
+      if ((event as CustomEvent<{ step?: string }>).detail?.step === "publish") void load();
+    });
+    if ((document.getElementById("gd-step-publish") as HTMLInputElement | null)?.checked) void load();
+    else output.textContent = "Open the publish step to load the exact payload after pending draft edits are saved.";
   }
 }
 
