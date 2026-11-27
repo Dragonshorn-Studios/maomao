@@ -272,11 +272,21 @@ export function createPipeline(deps: PipelineDeps) {
     const waiting: string[] = [];
     const satisfied: string[] = [];
     for (const participant of participants) {
-      const participantJob = deps.store.findLatestJobForPull(job.repo_full_name, participant.number, participant.headSha, {
-        provider: job.provider,
-        instance: job.provider_instance,
-      });
-      if (participantJob?.routing_profile !== "poison-alert") continue;
+      const participantJob = deps.store.findLatestJobForPull(
+        job.repo_full_name,
+        participant.number,
+        participant.headSha,
+        {
+          provider: job.provider,
+          instance: job.provider_instance,
+        },
+        "pr_review",
+      );
+      if (!participantJob) continue;
+      if (participantJob.routing_profile !== "poison-alert") {
+        if (!participantJob.routing_profile) waiting.push(`PR #${participant.number} at exact participant head ${participant.headSha.slice(0, 12)} has unresolved review routing`);
+        continue;
+      }
       const decision = deps.store.guidedAttention.decisionFor({
         provider: job.provider,
         instance: job.provider_instance,

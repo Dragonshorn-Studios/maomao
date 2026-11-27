@@ -8174,7 +8174,6 @@ describe("merge-group checks", () => {
       headRef: "feature",
       reviewers: [],
     }).job;
-    store.patchJob(participantJob.id, { routing_profile: "poison-alert" });
     const job = store.enqueue({
       repoFullName: "acme/widgets",
       repoOwner: "acme",
@@ -8213,13 +8212,13 @@ describe("merge-group checks", () => {
       { published: true, nativeId: "review-check" },
     );
     const commitDiffs: string[] = [];
-    const checkRuns: Array<{ headSha?: string; name?: string; status?: string; conclusion?: string }> = [];
+    const checkRuns: Array<{ headSha?: string; name?: string; status?: string; conclusion?: string; summary?: string }> = [];
     const github = githubPort({
       getCommitDiff: async (_installationId: number, _owner: string, _repo: string, sha: string) => {
         commitDiffs.push(sha);
         return "diff --git a/example.ts b/example.ts\n";
       },
-      upsertCheckRun: async (input: { headSha?: string; name?: string; status?: string; conclusion?: string }) => {
+      upsertCheckRun: async (input: { headSha?: string; name?: string; status?: string; conclusion?: string; summary?: string }) => {
         checkRuns.push(input);
         return { id: `check-${checkRuns.length}`, url: "" };
       },
@@ -8262,17 +8261,13 @@ describe("merge-group checks", () => {
     expect(checkRuns.some((run) => run.headSha === "synthetic888" && run.name === "maomao/security")).toBe(true);
     const blockedReadiness = checkRuns.filter((run) => run.headSha === "synthetic888" && run.name === "maomao/merge-readiness").at(-1);
     expect(blockedReadiness).toMatchObject({ status: "completed", conclusion: "action_required" });
+    expect(blockedReadiness?.summary).toContain("unresolved review routing");
     expect(checkRuns.some((run) => run.headSha === "synthetic888" && run.name === "maomao/merge-readiness" && run.conclusion === "success")).toBe(false);
     expect(checkRuns.some((run) => run.name === "maomao/review")).toBe(false);
     expect(store.getJob(job.id)?.state).toBe("completed");
 
-    store.guidedAttention.recordDecision(
-      { actorProvider: "github", actorId: "1001" },
-      { provider: "github", instance: "github.com", repoFullName: "acme/widgets", prNumber: 7, headSha: "2".repeat(40) },
-      "delegate_to_maomao",
-      "risk-review",
-    );
-    const unblocked = store.enqueue({
+    store.patchJob(participantJob.id, { routing_profile: "poison-alert" });
+    const undecided = store.enqueue({
       repoFullName: "acme/widgets",
       repoOwner: "acme",
       repoName: "widgets",
@@ -8290,8 +8285,53 @@ describe("merge-group checks", () => {
       jobType: "merge_group_check",
       mergeGroupJson: JSON.stringify({ pullRequests: [{ number: 7, headSha: "2".repeat(40) }] }),
     }).job;
+    await pipeline.run(undecided.id);
+    expect(checkRuns.some((run) => run.headSha === "synthetic999" && run.name === "maomao/merge-readiness" && run.conclusion === "action_required")).toBe(true);
+    expect(checkRuns.some((run) => run.headSha === "synthetic999" && run.name === "maomao/merge-readiness" && run.conclusion === "success")).toBe(false);
+
+    store.guidedAttention.recordDecision(
+      { actorProvider: "github", actorId: "1001" },
+      { provider: "github", instance: "github.com", repoFullName: "acme/widgets", prNumber: 7, headSha: "2".repeat(40) },
+      "delegate_to_maomao",
+      "risk-review",
+    );
+    store.enqueue({
+      repoFullName: "acme/widgets",
+      repoOwner: "acme",
+      repoName: "widgets",
+      installationId: 42,
+      prNumber: 7,
+      prTitle: "Stack shadow job",
+      prBody: "",
+      prHtmlUrl: "",
+      prAuthor: "dev",
+      baseSha: "base111",
+      headSha: "2".repeat(40),
+      baseRef: "main",
+      headRef: "feature",
+      reviewers: [],
+      jobType: "stack_review",
+    });
+    const unblocked = store.enqueue({
+      repoFullName: "acme/widgets",
+      repoOwner: "acme",
+      repoName: "widgets",
+      installationId: 42,
+      prNumber: 7,
+      prTitle: "GitHub merge group for main",
+      prBody: "",
+      prHtmlUrl: "",
+      prAuthor: "github-merge-queue",
+      baseSha: "base999",
+      headSha: "synthetic1000",
+      baseRef: "main",
+      headRef: "refs/heads/gh-readonly-queue/main/pr-7-z",
+      reviewers: [],
+      jobType: "merge_group_check",
+      mergeGroupJson: JSON.stringify({ pullRequests: [{ number: 7, headSha: "2".repeat(40) }] }),
+    }).job;
     await pipeline.run(unblocked.id);
-    expect(checkRuns.some((run) => run.headSha === "synthetic999" && run.name === "maomao/merge-readiness" && run.conclusion === "success")).toBe(true);
+    expect(checkRuns.some((run) => run.headSha === "synthetic1000" && run.name === "maomao/merge-readiness" && run.conclusion === "success")).toBe(true);
   });
 });
 
