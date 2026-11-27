@@ -6,6 +6,7 @@ import type { GithubPort, ManualTriggerPort, ResolvedPull } from "../github/clie
 import type { JobQueue } from "../jobs/queue.js";
 import { JobStore } from "../jobs/store.js";
 import { createApp } from "../server.js";
+import { GuidedWalkthroughStore } from "./walkthrough-store.js";
 
 const secret = "guided-inbox-test-secret";
 const baseSha = "a".repeat(40);
@@ -65,7 +66,7 @@ function githubFake(currentPull = pull()): ManualTriggerPort & Partial<GithubPor
   };
 }
 
-function testApp(github?: ManualTriggerPort & Partial<GithubPort>, env: Record<string, string> = {}) {
+function testApp(github?: ManualTriggerPort & Partial<GithubPort>, env: Record<string, string> = {}, contextExtras: Partial<Parameters<typeof createApp>[0]> = {}) {
   const config = loadConfig({
     GITHUB_WEBHOOK_SECRET: "webhook-secret",
     GITHUB_APP_ID: "1",
@@ -76,9 +77,29 @@ function testApp(github?: ManualTriggerPort & Partial<GithubPort>, env: Record<s
     MAOMAO_ADMIN_GITHUB_IDS: "1001,2002",
     ...env,
   });
-  const store = new JobStore(openDb(":memory:"));
+  const db = openDb(":memory:");
+  const store = new JobStore(db);
+  const walkthroughStore = new GuidedWalkthroughStore(db);
   const queue = { enqueue() {}, abortMany() {} } as unknown as JobQueue;
-  return { app: createApp({ config, store, queue, github, startedAt: Date.now(), env: {} }), store };
+  const guidedWalkthrough = contextExtras.guidedWalkthrough ?? {
+    store: walkthroughStore,
+    service: {
+      model: () => "opencode-default",
+      ensure(session: { provider: string; provider_instance: string; repo_full_name: string; pr_number: number; base_sha: string; head_sha: string }) {
+        return walkthroughStore.open({
+          provider: session.provider,
+          instance: session.provider_instance,
+          repoFullName: session.repo_full_name,
+          prNumber: session.pr_number,
+          baseSha: session.base_sha,
+          headSha: session.head_sha,
+        }, "opencode-default");
+      },
+      retry(row: import("./walkthrough-store.js").GuidedWalkthroughRow) { return row; },
+      cancel(row: import("./walkthrough-store.js").GuidedWalkthroughRow) { return walkthroughStore.requestCancel(row.id); },
+    } as never,
+  };
+  return { app: createApp({ config, store, queue, github, startedAt: Date.now(), env: {}, guidedWalkthrough, ...contextExtras }), store, walkthroughStore };
 }
 
 function operator(id = 1001) {
@@ -188,6 +209,8 @@ describe("Guided Review inbox", () => {
     expect(html).toContain("SHA-pinned workspace");
     expect(html).toContain(baseSha);
     expect(html).toContain("Diff workspace");
+    expect(html).toContain("SHA-pinned walkthrough");
+    expect(html).toContain("background");
     expect(html).toContain("new.ts");
     expect(html).toContain("data-anchor-side=\"LEFT\"");
     expect(compareCalls[0]?.slice(1, 5)).toEqual(["acme", "widgets", baseSha, headSha]);

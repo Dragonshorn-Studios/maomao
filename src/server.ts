@@ -95,6 +95,8 @@ import { renderProvidersPage } from "./ui/providers.js";
 import { renderGuidedDiffWorkspace, renderGuidedInboxPage, renderGuidedOpenError, renderGuidedSessionPage } from "./ui/guided.js";
 import { parseUnifiedDiff } from "./guided/diff.js";
 import { buildGuidedPublishPreview } from "./guided/publish-preview.js";
+import { guidedWalkthroughFingerprint, guidedWalkthroughView, type GuidedWalkthroughStore } from "./guided/walkthrough-store.js";
+import type { GuidedWalkthroughService } from "./guided/walkthrough.js";
 import { listGuidedInbox } from "./guided/inbox.js";
 import { renderTelemetryPage, TELEMETRY_PAGE_HREF, TELEMETRY_PAGE_JS, type TelemetryProbeRow } from "./ui/telemetry.js";
 import {
@@ -186,6 +188,8 @@ export interface ServerContext {
   modelDiscovery?: ModelDiscovery;
   /** "Ask Maomao" explainer backend; undefined until MAOMAO_EXPLAIN_ENABLED. */
   chat?: { service: ChatService; store: ChatStore };
+  /** SHA-fingerprinted Guided Review walkthrough generation. */
+  guidedWalkthrough?: { service: GuidedWalkthroughService; store: GuidedWalkthroughStore };
   /** Operator-managed OpenObserve settings for /config/telemetry; defaults to the XDG path. */
   telemetrySettings?: TelemetrySettingsStore;
   /** Operator-managed trusted-check pinning for /config/trusted-checks. */
@@ -488,7 +492,7 @@ async function guidedRoute(c: Context<AppEnv>, run: () => Promise<Response> | Re
 }
 
 type GuidedLiveMetadata =
-  | { ok: true; baseSha: string; headSha: string }
+  | { ok: true; baseSha: string; headSha: string; installationId: number }
   | { ok: false; status: 400 | 403 | 502; error: string; message: string };
 
 /**
@@ -535,7 +539,7 @@ async function resolveGuidedLiveMetadata(
     if (!auth.ok) {
       return { ok: false, status: 403, error: "forbidden", message: "Not authorized to review this installation or repository." };
     }
-    return { ok: true, baseSha: pull.baseSha, headSha: pull.headSha };
+    return { ok: true, baseSha: pull.baseSha, headSha: pull.headSha, installationId: installation.installationId };
   } catch (error) {
     if (isPermissionDenied(error)) {
       return { ok: false, status: 403, error: "forbidden", message: "Not authorized to review this installation or repository." };
@@ -549,6 +553,24 @@ async function resolveGuidedLiveMetadata(
       message: "Could not resolve current pull request metadata from GitHub; no draft was opened or changed.",
     };
   }
+}
+
+async function guidedInstallationId(ctx: ServerContext, session: { provider: string; provider_instance: string; repo_full_name: string }): Promise<number | undefined> {
+  if (session.provider !== "github" || session.provider_instance !== "github.com" || !ctx.github) return undefined;
+  const [owner, repo] = session.repo_full_name.split("/");
+  if (!owner || !repo) return undefined;
+  const installation = await ctx.github.getRepoInstallation(owner, repo);
+  let repositoryId: number | undefined;
+  if (ctx.config.allowedGithubRepositoryIds.length > 0) {
+    repositoryId = (await ctx.github.getRepository(owner, repo, installation.installationId)).id;
+  }
+  const auth = rejectUnauthorized(ctx.config, {
+    installationId: installation.installationId,
+    accountId: installation.accountId,
+    repositoryId,
+  });
+  if (!auth.ok) return undefined;
+  return installation.installationId;
 }
 
 export function createApp(ctx: ServerContext): Hono<AppEnv> {
@@ -1241,6 +1263,27 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
       const opened = actor && key && createSession ? ctx.store.guidedReview.open(key) : undefined;
       const existing = !opened && actor && key ? ctx.store.guidedReview.findExact(actor, key) : undefined;
       const session = opened?.session ?? existing;
+      let walkthrough;
+      if (session && ctx.guidedWalkthrough) {
+        try {
+          walkthrough = guidedWalkthroughView(ctx.guidedWalkthrough.service.ensure(session, installation.installationId));
+        } catch (error) {
+          const detail = truncate(redactSecrets(error instanceof Error ? error.message : String(error), githubSecrets(ctx.config)), 300);
+          console.warn(`guided walkthrough enqueue failed for session ${session.id}: ${detail}`);
+          walkthrough = {
+            fingerprint: "",
+            status: "failed" as const,
+            payload: undefined,
+            error: `Could not enqueue walkthrough generation: ${detail}`,
+            cancelRequested: false,
+            requestCount: 0,
+            createdAt: "",
+            updatedAt: "",
+            startedAt: null,
+            finishedAt: null,
+          };
+        }
+      }
       if (redirectAfterOpen) return c.redirect(`/guided/github/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/${prNumber}`, 302);
       let diffWorkspace = "";
       if (ctx.forge || ctx.github.getCompareDiff) {
@@ -1278,6 +1321,7 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
             viewedFiles: session ? (JSON.parse(session.viewed_files_json) as string[]) : [],
             csrfToken: gateOn ? ensureCsrfToken(c, ctx.config.uiSessionSecret) : undefined,
             sessionView: session ? guidedSessionView(session) : undefined,
+            walkthrough,
             comments: session ? ctx.store.guidedReview.listComments(session.id).map(guidedCommentView) : [],
             readOnly: !actor,
           });
@@ -1343,6 +1387,13 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
         input.headSha = live.headSha;
       }
       const opened = ctx.store.guidedReview.open(input);
+      if (live?.ok && ctx.guidedWalkthrough) {
+        try {
+          ctx.guidedWalkthrough.service.ensure(opened.session, live.installationId);
+        } catch (error) {
+          console.warn(`guided walkthrough enqueue failed for session ${opened.session.id}: ${truncate(redactSecrets(error instanceof Error ? error.message : String(error), githubSecrets(ctx.config)), 300)}`);
+        }
+      }
       return c.json({
         session: guidedSessionView(opened.session),
         comments: opened.comments.map(guidedCommentView),
@@ -1361,6 +1412,82 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
         session: guidedSessionView(session),
         comments: ctx.store.guidedReview.listComments(session.id).map(guidedCommentView),
       });
+    }),
+  );
+
+  app.get("/api/guided-review/sessions/:id/walkthrough", (c) =>
+    guidedRoute(c, () => {
+      const actor = guidedActor(c);
+      if (!actor) return guidedIdentityRequired(c);
+      const session = ctx.store.guidedReview.getOwned(guidedId(c.req.param("id")), actor);
+      if (!session) return c.json({ error: "guided_review_session_not_found" }, 404);
+      if (!ctx.guidedWalkthrough) return c.json({ error: "guided_walkthrough_unavailable" }, 503);
+      const fingerprint = guidedWalkthroughFingerprint(
+        {
+          provider: session.provider,
+          instance: session.provider_instance,
+          repoFullName: session.repo_full_name,
+          prNumber: session.pr_number,
+          baseSha: session.base_sha,
+          headSha: session.head_sha,
+        },
+        ctx.guidedWalkthrough.service.model(),
+      );
+      const row = ctx.guidedWalkthrough.store.getByFingerprint(fingerprint);
+      if (!row) return c.json({ walkthrough: { fingerprint, status: "pending", payload: undefined, error: null } });
+      return c.json({ walkthrough: guidedWalkthroughView(row) });
+    }),
+  );
+
+  app.post("/api/guided-review/sessions/:id/walkthrough/retry", async (c) =>
+    guidedRoute(c, async () => {
+      const actor = guidedActor(c);
+      if (!actor) return guidedIdentityRequired(c);
+      const session = ctx.store.guidedReview.getOwned(guidedId(c.req.param("id")), actor);
+      if (!session) return c.json({ error: "guided_review_session_not_found" }, 404);
+      if (!ctx.guidedWalkthrough) return c.json({ error: "guided_walkthrough_unavailable" }, 503);
+      const installationId = await guidedInstallationId(ctx, session);
+      if (!installationId) return c.json({ error: "forbidden" }, 403);
+      const fingerprint = guidedWalkthroughFingerprint(
+        {
+          provider: session.provider,
+          instance: session.provider_instance,
+          repoFullName: session.repo_full_name,
+          prNumber: session.pr_number,
+          baseSha: session.base_sha,
+          headSha: session.head_sha,
+        },
+        ctx.guidedWalkthrough.service.model(),
+      );
+      const row = ctx.guidedWalkthrough.store.getByFingerprint(fingerprint);
+      if (!row) return c.json({ error: "guided_walkthrough_not_found" }, 404);
+      const fresh = ctx.guidedWalkthrough.service.retry(row, installationId);
+      return c.json({ walkthrough: fresh ? guidedWalkthroughView(fresh) : undefined });
+    }),
+  );
+
+  app.post("/api/guided-review/sessions/:id/walkthrough/cancel", (c) =>
+    guidedRoute(c, () => {
+      const actor = guidedActor(c);
+      if (!actor) return guidedIdentityRequired(c);
+      const session = ctx.store.guidedReview.getOwned(guidedId(c.req.param("id")), actor);
+      if (!session) return c.json({ error: "guided_review_session_not_found" }, 404);
+      if (!ctx.guidedWalkthrough) return c.json({ error: "guided_walkthrough_unavailable" }, 503);
+      const fingerprint = guidedWalkthroughFingerprint(
+        {
+          provider: session.provider,
+          instance: session.provider_instance,
+          repoFullName: session.repo_full_name,
+          prNumber: session.pr_number,
+          baseSha: session.base_sha,
+          headSha: session.head_sha,
+        },
+        ctx.guidedWalkthrough.service.model(),
+      );
+      const row = ctx.guidedWalkthrough.store.getByFingerprint(fingerprint);
+      if (!row) return c.json({ error: "guided_walkthrough_not_found" }, 404);
+      ctx.guidedWalkthrough.service.cancel(row);
+      return c.json({ walkthrough: guidedWalkthroughView(ctx.guidedWalkthrough.store.get(row.id) ?? row) });
     }),
   );
 
