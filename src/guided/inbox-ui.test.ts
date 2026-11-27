@@ -242,6 +242,47 @@ describe("Guided Review inbox", () => {
     expect(html).toContain("cannot imply unseen changes");
   });
 
+
+
+  it("enforces repository authorization and failure contracts for exact-SHA file context", async () => {
+    const auth = operator();
+    const openSession = (store: JobStore) => store.guidedReview.open({
+      actorProvider: "github",
+      actorId: "1001",
+      provider: "github",
+      instance: "github.com",
+      repoFullName: "acme/widgets",
+      prNumber: 12,
+      baseSha,
+      headSha,
+    }).session;
+
+    const denied = testApp(githubFake(), { ALLOWED_GITHUB_REPOSITORY_IDS: "999" });
+    const deniedSession = openSession(denied.store);
+    const forbidden = await denied.app.request(`/api/guided-review/sessions/${deniedSession.id}/file?path=new.ts&side=head`, { headers: { cookie: auth.cookies } });
+    expect(forbidden.status).toBe(403);
+
+    const githubWithoutFiles = githubFake();
+    delete githubWithoutFiles.getFileContent;
+    const unavailable = testApp(githubWithoutFiles);
+    const unavailableSession = openSession(unavailable.store);
+    const missingCapability = await unavailable.app.request(`/api/guided-review/sessions/${unavailableSession.id}/file?path=new.ts&side=head`, { headers: { cookie: auth.cookies } });
+    expect(missingCapability.status).toBe(503);
+    expect(((await missingCapability.json()) as { error: string }).error).toBe("guided_review_context_unavailable");
+
+    const failingGithub = githubFake();
+    failingGithub.getFileContent = async () => {
+      throw new Error("upstream failed using webhook-secret");
+    };
+    const failing = testApp(failingGithub);
+    const failingSession = openSession(failing.store);
+    const upstreamFailure = await failing.app.request(`/api/guided-review/sessions/${failingSession.id}/file?path=new.ts&side=head`, { headers: { cookie: auth.cookies } });
+    expect(upstreamFailure.status).toBe(502);
+    const failureBody = await upstreamFailure.json() as { error: string; message: string };
+    expect(failureBody.error).toBe("guided_review_context_unavailable");
+    expect(failureBody.message).not.toContain("webhook-secret");
+  });
+
   it("rejects closed direct targets and degrades when listing capability is absent", async () => {
     const closed = testApp(githubFake(pull({ state: "closed" })));
     const auth = operator();

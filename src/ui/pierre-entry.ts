@@ -83,8 +83,16 @@ function renderInto(container: HTMLElement): void {
 
 function renderGuidedFile(container: HTMLElement): void {
   if (container.getAttribute("data-enhanced") === "1") return;
-  const patch = container.querySelector(".guided-patch-raw")?.textContent ?? "";
-  if (!patch.trim()) return;
+  const serializedPatch = container.querySelector(".guided-patch-raw")?.textContent ?? "";
+  if (!serializedPatch.trim()) return;
+  let patch: string;
+  try {
+    const parsed = JSON.parse(serializedPatch) as unknown;
+    if (typeof parsed !== "string") return;
+    patch = parsed;
+  } catch {
+    return;
+  }
   let metadata: FileDiffMetadata;
   try {
     metadata = getSingularPatch(patch);
