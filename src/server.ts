@@ -158,6 +158,7 @@ import {
   type GuidedSessionKey,
   type GuidedSessionPatch,
   type GuidedWriteOutcome,
+  validateGuidedRepoPath,
 } from "./guided/store.js";
 
 export interface ServerContext {
@@ -1232,6 +1233,10 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
             files,
             fileFilter: c.req.query("file") || undefined,
             statusFilter: c.req.query("status") || undefined,
+            sessionId: session?.id,
+            sessionVersion: session?.version,
+            viewedFiles: session ? (JSON.parse(session.viewed_files_json) as string[]) : [],
+            csrfToken: gateOn ? ensureCsrfToken(c, ctx.config.uiSessionSecret) : undefined,
           });
         } catch (error) {
           diffWorkspace = renderGuidedDiffWorkspace({
@@ -1313,6 +1318,43 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
         session: guidedSessionView(session),
         comments: ctx.store.guidedReview.listComments(session.id).map(guidedCommentView),
       });
+    }),
+  );
+
+  app.get("/api/guided-review/sessions/:id/file", (c) =>
+    guidedRoute(c, async () => {
+      const actor = guidedActor(c);
+      if (!actor) return guidedIdentityRequired(c);
+      const session = ctx.store.guidedReview.getOwned(guidedId(c.req.param("id")), actor);
+      if (!session) return c.json({ error: "guided_review_session_not_found" }, 404);
+      if (session.provider !== "github" || session.provider_instance !== "github.com" || !ctx.github?.getFileContent) {
+        return c.json({ error: "guided_review_context_unavailable", message: "Exact-SHA surrounding code is unavailable for this forge connection." }, 503);
+      }
+      const path = validateGuidedRepoPath(c.req.query("path"));
+      const side = c.req.query("side") === "base" ? "base" : "head";
+      const ref = side === "base" ? session.base_sha : session.head_sha;
+      const parts = session.repo_full_name.split("/");
+      if (parts.length !== 2) return c.json({ error: "invalid_input", message: "session repository is malformed" }, 400);
+      const [owner, repo] = parts;
+      try {
+        const installation = await ctx.github.getRepoInstallation(owner, repo);
+        let repositoryId: number | undefined;
+        if (ctx.config.allowedGithubRepositoryIds.length > 0) {
+          repositoryId = (await ctx.github.getRepository(owner, repo, installation.installationId)).id;
+        }
+        const auth = rejectUnauthorized(ctx.config, {
+          installationId: installation.installationId,
+          accountId: installation.accountId,
+          repositoryId,
+        });
+        if (!auth.ok) return c.json({ error: "forbidden" }, 403);
+        const content = await ctx.github.getFileContent(installation.installationId, owner, repo, path, ref, 200_000);
+        return c.json({ path, side, sha: ref, content });
+      } catch (error) {
+        if (isPermissionDenied(error)) return c.json({ error: "forbidden" }, 403);
+        const detail = truncate(redactSecrets(error instanceof Error ? error.message : String(error), githubSecrets(ctx.config)), 240);
+        return c.json({ error: "guided_review_context_unavailable", message: detail }, 502);
+      }
     }),
   );
 

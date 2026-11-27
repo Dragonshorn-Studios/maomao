@@ -56,6 +56,9 @@ function githubFake(currentPull = pull()): ManualTriggerPort & Partial<GithubPor
     async listOpenPulls() {
       return [currentPull];
     },
+    async getFileContent() {
+      return "export const surrounding = true;\n";
+    },
     async getCompareDiff() {
       return `diff --git a/old.ts b/new.ts\nrename from old.ts\nrename to new.ts\n--- a/old.ts\n+++ b/new.ts\n@@ -1,2 +1,2 @@\n const safe = 1;\n-oldLine();\n+newLine();\n`;
     },
@@ -182,6 +185,11 @@ describe("Guided Review inbox", () => {
     expect(html).toContain("data-anchor-side=\"LEFT\"");
     const session = store.guidedReview.latestForPull({ actorProvider: "github", actorId: "1001" }, "github", "github.com", "acme/widgets", 12);
     expect(session?.head_sha).toBe(headSha);
+    const context = await app.request(`/api/guided-review/sessions/${session?.id}/file?path=${encodeURIComponent("new.ts")}&side=head`, { headers: { cookie: auth.cookies } });
+    expect(context.status).toBe(200);
+    expect(((await context.json()) as { content: string }).content).toContain("surrounding");
+    const traversal = await app.request(`/api/guided-review/sessions/${session?.id}/file?path=${encodeURIComponent("../secret")}`, { headers: { cookie: auth.cookies } });
+    expect(traversal.status).toBe(400);
 
     const password = passwordOperator();
     const readOnly = await app.request("/guided/github/acme/widgets/12", { headers: { cookie: password.cookies } });

@@ -110,6 +110,14 @@ export function renderGuidedOpenError(input: { options: PageOptions; error: stri
   });
 }
 
+function scriptText(value: string): string {
+  return value.replace(/<\/script/gi, "<\\/script");
+}
+
+function jsJson(value: unknown): string {
+  return JSON.stringify(value).replace(/</g, "\\u003c");
+}
+
 function guidedDiffLineHtml(file: GuidedDiffFile, hunkIndex: number, line: GuidedDiffFile["hunks"][number]["lines"][number]): string {
   const side = line.kind === "del" ? "LEFT" : "RIGHT";
   const lineNumber = line.kind === "del" ? line.oldLine : line.newLine;
@@ -127,6 +135,10 @@ export function renderGuidedDiffWorkspace(input: {
   fileFilter?: string;
   diffError?: string;
   diffTruncated?: boolean;
+  sessionId?: number;
+  sessionVersion?: number;
+  viewedFiles?: string[];
+  csrfToken?: string;
 }): string {
   if (input.diffError) {
     return `<section class="config-section guided-diff-workspace"><h2>Diff workspace</h2><p class="error if-banner if-banner--danger" role="alert">${escapeHtml(input.diffError)}</p><p class="muted">Maomao cannot imply unseen changes were reviewed. Retry after the forge recovers or raise the diff size limit.</p></section>`;
@@ -137,19 +149,21 @@ export function renderGuidedDiffWorkspace(input: {
     (!input.fileFilter || file.path.toLowerCase().includes(input.fileFilter.toLowerCase())),
   );
   const total = input.files.reduce((sum, file) => sum + file.additions + file.deletions, 0);
-  const tree = filtered.map((file, index) => `<li><a href="#guided-file-${index}" data-guided-file-link>${escapeHtml(file.path)}</a> <span class="muted">${escapeHtml(file.status)} +${file.additions} −${file.deletions}</span></li>`).join("");
+  const viewed = new Set(input.viewedFiles ?? []);
+  const tree = filtered.map((file, index) => `<li><a href="#guided-file-${index}" data-guided-file-link>${viewed.has(file.path) ? "✓ " : ""}${escapeHtml(file.path)}</a> <span class="muted">${escapeHtml(file.status)} +${file.additions} −${file.deletions}</span></li>`).join("");
   const rendered = filtered.map((file, index) => {
     const hunks = file.hunks.map((hunk, hunkIndex) => `<details class="gd-hunk" open>
       <summary>${escapeHtml(hunk.header)}</summary>
       <table class="gd-table"><tbody>${hunk.lines.map((line) => guidedDiffLineHtml(file, hunkIndex, line)).join("\n")}</tbody></table>
     </details>`).join("\n");
     const empty = file.binary ? `<p class="muted">Binary file changed; inline diff is unavailable.</p>` : file.hunks.length === 0 ? `<p class="muted">No textual hunks are available for this file.</p>` : "";
-    return `<article class="gd-file" id="guided-file-${index}" data-guided-file data-path="${escapeHtml(file.path)}" data-status="${escapeHtml(file.status)}">
+    return `<article class="gd-file${viewed.has(file.path) ? " gd-viewed" : ""}" id="guided-file-${index}" data-guided-file data-path="${escapeHtml(file.path)}" data-status="${escapeHtml(file.status)}">
       <h3>${escapeHtml(file.path)} <span class="muted">${escapeHtml(file.status)} +${file.additions} −${file.deletions}</span></h3>
       ${file.truncated ? `<p class="notice if-banner if-banner--warning">This file exceeded the per-file rendering bound and is partially shown.</p>` : ""}
+      ${input.sessionId ? `<details class="gd-context"><summary>Read-only surrounding code at the pinned SHA</summary><button type="button" class="if-button if-button--sm" data-load-context="${escapeHtml(file.path)}">Load head-side file</button><pre class="gd-context-panel" hidden></pre><p class="muted">Path-boundary validated; oversized or unavailable files fail explicitly.</p></details>` : ""}
       <div class="guided-pierre-file" data-guided-pierre data-path="${escapeHtml(file.path)}">
         <div class="gd-fallback">${hunks}${empty}</div>
-        <script type="text/plain" class="guided-patch-raw">${escapeHtml(file.patch)}</script>
+        <script type="text/plain" class="guided-patch-raw">${scriptText(file.patch)}</script>
       </div>
     </article>`;
   }).join("\n");
@@ -166,8 +180,13 @@ export function renderGuidedDiffWorkspace(input: {
   </section>
   <script>
   (function(){
+    var guidedSessionId=${jsJson(input.sessionId ?? null)},guidedVersion=${jsJson(input.sessionVersion ?? null)},guidedCsrf=${jsJson(input.csrfToken ?? "")},guidedViewed=${jsJson(input.viewedFiles ?? [])};
     function move(delta){var rows=Array.from(document.querySelectorAll('[data-anchor-line]'));if(!rows.length)return;var current=document.activeElement&&rows.indexOf(document.activeElement);var next=rows[(current<0?0:current+delta+rows.length)%rows.length];next.tabIndex=-1;next.focus();next.scrollIntoView({block:'center'});}
     document.addEventListener('keydown',function(event){if(event.target&&/INPUT|TEXTAREA|SELECT/.test(event.target.tagName))return;if(event.key==='j'){event.preventDefault();move(1);}if(event.key==='k'){event.preventDefault();move(-1);}});
+    var viewedQueue=Promise.resolve();
+    function markViewed(path){if(!guidedSessionId||!guidedVersion||guidedViewed.indexOf(path)>=0)return;guidedViewed.push(path);viewedQueue=viewedQueue.then(async function(){try{var res=await fetch('/api/guided-review/sessions/'+guidedSessionId,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({version:guidedVersion,viewedFiles:guidedViewed,csrf_token:guidedCsrf})});if(res.ok){var body=await res.json();guidedVersion=body.session.version;var file=document.querySelector('[data-guided-file][data-path="'+CSS.escape(path)+'"]');if(file)file.classList.add('gd-viewed');}}catch{}});}
+    if('IntersectionObserver' in window){var seen=new WeakSet(),observer=new IntersectionObserver(function(entries){entries.forEach(function(entry){if(entry.isIntersecting&&!seen.has(entry.target)){seen.add(entry.target);setTimeout(function(){markViewed(entry.target.getAttribute('data-path')||'')},500);}})},{threshold:.35});document.querySelectorAll('[data-guided-file]').forEach(function(file){observer.observe(file)});}
+    document.addEventListener('click',async function(event){var button=event.target.closest('[data-load-context]');if(!button||!guidedSessionId)return;var details=button.closest('details'),panel=details&&details.querySelector('.gd-context-panel');if(!panel)return;button.disabled=true;button.textContent='Loading…';try{var res=await fetch('/api/guided-review/sessions/'+guidedSessionId+'/file?path='+encodeURIComponent(button.getAttribute('data-load-context'))+'&side=head');var body=await res.json();if(!res.ok)throw new Error(body.message||body.error||'load failed');panel.textContent=body.content;panel.hidden=false;button.textContent='Reload head-side file';}catch(error){panel.textContent='Could not load surrounding code: '+(error&&error.message?error.message:error);panel.hidden=false;button.textContent='Retry';}finally{button.disabled=false;}});
   })();
   </script>`;
 }
