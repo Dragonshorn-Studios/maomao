@@ -424,7 +424,7 @@ function migrate(db: SqliteDb): void {
       head_sha TEXT NOT NULL,
       actor_provider TEXT NOT NULL,
       actor_id TEXT NOT NULL,
-      action TEXT NOT NULL CHECK (action IN ('review_myself', 'delegate_to_maomao')),
+      action TEXT NOT NULL CHECK (action IN ('review_myself', 'delegate_to_maomao', 'skip_guided_review')),
       reason_tag TEXT NOT NULL,
       reason_detail TEXT,
       created_at TEXT NOT NULL,
@@ -707,6 +707,8 @@ function migrate(db: SqliteDb): void {
     );
   `);
 
+    rebuildGuidedAttentionActions(db);
+
     // Legacy (pre-multi-forge) databases: rebuild the provider-scoped tables so
     // the scoped keys replace the repo-name-only ones. `rebuildTableScoped`
     // skips tables that already carry the provider columns (fresh databases).
@@ -954,6 +956,22 @@ interface ColumnInfo {
  */
 const JOBS_DEDUP_UNIQUE =
   "UNIQUE (provider, provider_instance, repo_full_name, pr_number, head_sha, job_type, dedup_key)";
+
+function rebuildGuidedAttentionActions(db: SqliteDb): void {
+  const row = db
+    .prepare(`SELECT sql FROM sqlite_master WHERE type='table' AND name='guided_attention_decisions'`)
+    .get() as { sql: string } | undefined;
+  if (!row?.sql || row.sql.includes("'skip_guided_review'")) return;
+  const legacyPattern = /action\s+TEXT\s+NOT\s+NULL\s+CHECK\s*\(\s*action\s+IN\s*\(\s*'review_myself'\s*,\s*'delegate_to_maomao'\s*\)\s*\)/;
+  if (!legacyPattern.test(row.sql)) {
+    throw new Error(`Cannot migrate guided_attention_decisions: expected the legacy action CHECK constraint, got: ${row.sql}. Refusing to rebuild the table.`);
+  }
+  const newSql = row.sql.replace(
+    legacyPattern,
+    "action TEXT NOT NULL CHECK (action IN ('review_myself', 'delegate_to_maomao', 'skip_guided_review'))",
+  );
+  applyTableRebuild(db, "guided_attention_decisions", newSql);
+}
 
 function rebuildJobsForScopedJobType(db: SqliteDb): void {
   const row = db

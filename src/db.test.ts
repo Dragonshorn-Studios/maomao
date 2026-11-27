@@ -122,6 +122,53 @@ describe("usage schema migration", () => {
     }
   });
 
+  it("rebuilds legacy guided attention actions so explicit skips can persist", () => {
+    const dir = mkdtempSync(join(tmpdir(), "maomao-db-"));
+    const path = join(dir, "guided-attention-legacy.sqlite");
+    try {
+      const legacy = new Database(path);
+      legacy.exec(`
+        CREATE TABLE guided_attention_decisions (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          provider TEXT NOT NULL,
+          provider_instance TEXT NOT NULL,
+          repo_full_name TEXT NOT NULL,
+          pr_number INTEGER NOT NULL,
+          head_sha TEXT NOT NULL,
+          actor_provider TEXT NOT NULL,
+          actor_id TEXT NOT NULL,
+          action TEXT NOT NULL CHECK (action IN ('review_myself', 'delegate_to_maomao')),
+          reason_tag TEXT NOT NULL,
+          reason_detail TEXT,
+          created_at TEXT NOT NULL,
+          UNIQUE (provider, provider_instance, repo_full_name, pr_number, head_sha)
+        );
+        INSERT INTO guided_attention_decisions (
+          provider, provider_instance, repo_full_name, pr_number, head_sha,
+          actor_provider, actor_id, action, reason_tag, created_at
+        ) VALUES ('github','github.com','acme/widgets',12,'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+          'github','1001','review_myself','risk-review','2026-01-01T00:00:00.000Z');
+      `);
+      legacy.close();
+
+      const db = openDb(path);
+      const schema = db.prepare(`SELECT sql FROM sqlite_master WHERE type='table' AND name='guided_attention_decisions'`).get() as { sql: string };
+      expect(schema.sql).toContain("'skip_guided_review'");
+      db.prepare(`
+        INSERT INTO guided_attention_decisions (
+          provider, provider_instance, repo_full_name, pr_number, head_sha,
+          actor_provider, actor_id, action, reason_tag, created_at
+        ) VALUES ('github','github.com','acme/widgets',13,'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+          'github','1001','skip_guided_review','risk-review','2026-01-01T00:00:01.000Z')
+      `).run();
+      const rows = db.prepare(`SELECT action FROM guided_attention_decisions ORDER BY pr_number`).all() as { action: string }[];
+      expect(rows.map((row) => row.action)).toEqual(["review_myself", "skip_guided_review"]);
+      db.close();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it("adds exact head SHAs to legacy merged-pull markers without losing rows", () => {
     const dir = mkdtempSync(join(tmpdir(), "maomao-db-"));
     const path = join(dir, "merged-legacy.sqlite");

@@ -187,7 +187,7 @@ describe("Guided Review session API", () => {
     const github = {
       async getRepoInstallation() { return { installationId: 1, accountId: 1001 }; },
       getCollaboratorPermission: async () => "write",
-    } as ManualTriggerPort;
+    } as unknown as ManualTriggerPort;
     const { app, store } = guidedTestApp(github, { forge: forge as never }, { GITHUB_APP_SLUG: "maomao" });
     const auth = operator(1001);
     const opened = store.guidedReview.open({
@@ -813,7 +813,7 @@ describe("Guided Review session API", () => {
         return permission;
       },
     } as ManualTriggerPort;
-    const { app, store } = guidedTestApp(github, { guidedAttentionReevaluate: async (jobId) => { reevaluated.push(jobId); } });
+    const { app, store, db } = guidedTestApp(github, { guidedAttentionReevaluate: async (jobId) => { reevaluated.push(jobId); } });
     const auth = operator(1001);
     const stranger = operator(2002);
     const openedResponse = await postJson(app, "/api/guided-review/sessions/open", auth.cookies, openBody(auth.csrfToken));
@@ -859,10 +859,27 @@ describe("Guided Review session API", () => {
     expect(await skipDenied.text()).toContain("optional skip action is not available");
     expect(store.guidedAttention.decisionFor({ provider: "github", instance: "github.com", repoFullName: "acme/widgets", prNumber: 12, headSha })).toBeUndefined();
 
-    const response = await postDecision();
+    const draft = store.configs.createDraft({
+      definition: {
+        name: "default",
+        reviewers: [{ role: "correctness" }],
+        minPublishableSeverity: "info",
+        guidedReview: { poisonAlertAttention: "optional" },
+      },
+      createdBy: "octocat",
+    });
+    if (!("revision" in draft)) throw new Error("optional profile draft failed");
+    store.configs.activateRevision(draft.revision.id, "octocat");
+    db.prepare(`UPDATE jobs SET profile_revision_id = ? WHERE id = ?`).run(draft.revision.id, job.id);
+    const postSkip = () => app.request(`/guided/sessions/${opened.session.id}/attention`, {
+      method: "POST",
+      headers: { cookie: auth.cookies, "content-type": "application/x-www-form-urlencoded" },
+      body: skipForm.toString(),
+    });
+    const response = await postSkip();
     expect(response.status).toBe(303);
     expect(reevaluated).toEqual([job.id]);
-    expect(store.guidedAttention.decisionFor({ provider: "github", instance: "github.com", repoFullName: "acme/widgets", prNumber: 12, headSha })).toMatchObject({ actor_id: "1001", action: "delegate_to_maomao", head_sha: headSha });
+    expect(store.guidedAttention.decisionFor({ provider: "github", instance: "github.com", repoFullName: "acme/widgets", prNumber: 12, headSha })).toMatchObject({ actor_id: "1001", action: "skip_guided_review", head_sha: headSha });
 
     const strangerOpenedResponse = await postJson(app, "/api/guided-review/sessions/open", stranger.cookies, openBody(stranger.csrfToken));
     const strangerOpened = (await strangerOpenedResponse.json()) as { session: { id: number } };
