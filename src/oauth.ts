@@ -16,12 +16,13 @@ export function oauthCallbackUrl(config: Config): string {
   return `${config.publicUrl}/login/github/callback`;
 }
 
-export function oauthAuthorizeUrl(config: Config, state: string): string {
+export function oauthAuthorizeUrl(config: Config, state: string, scope?: string): string {
   const params = new URLSearchParams({
     client_id: config.oauthClientId,
     redirect_uri: oauthCallbackUrl(config),
     state,
   });
+  if (scope) params.set("scope", scope);
   return `https://github.com/login/oauth/authorize?${params.toString()}`;
 }
 
@@ -30,11 +31,17 @@ export function oauthAuthorizeUrl(config: Config, state: string): string {
 // GitHub has supported PKCE (S256) since 2025-07; adding it would be defense-in-depth.
 // No scope is requested, but GitHub may return previously granted scopes for repeat
 // authorizations — which is why the token is used once and then discarded.
-export async function exchangeOAuthCode(
+export interface OAuthTokenDetails {
+  accessToken: string;
+  scope: string;
+  expiresAt?: string;
+}
+
+export async function exchangeOAuthCodeDetails(
   config: Config,
   code: string,
   fetchImpl: typeof fetch = fetch,
-): Promise<string | undefined> {
+): Promise<OAuthTokenDetails | undefined> {
   let response: Response;
   try {
     response = await fetchImpl("https://github.com/login/oauth/access_token", {
@@ -56,16 +63,31 @@ export async function exchangeOAuthCode(
     console.warn(`oauth: token exchange failed with status=${response.status}`);
     return undefined;
   }
-  let body: { access_token?: unknown; error?: unknown };
+  let body: { access_token?: unknown; scope?: unknown; expires_in?: unknown; error?: unknown };
   try {
-    body = (await response.json()) as { access_token?: unknown; error?: unknown };
+    body = (await response.json()) as { access_token?: unknown; scope?: unknown; expires_in?: unknown; error?: unknown };
   } catch {
     console.warn("oauth: token exchange returned a non-JSON body");
     return undefined;
   }
-  if (typeof body.access_token === "string" && body.access_token) return body.access_token;
+  if (typeof body.access_token === "string" && body.access_token) {
+    const expiresIn = typeof body.expires_in === "number" && Number.isFinite(body.expires_in) ? body.expires_in : undefined;
+    return {
+      accessToken: body.access_token,
+      scope: typeof body.scope === "string" ? body.scope : "",
+      expiresAt: expiresIn ? new Date(Date.now() + expiresIn * 1000).toISOString() : undefined,
+    };
+  }
   console.warn(`oauth: token exchange rejected (${String(body.error ?? "unknown error")})`);
   return undefined;
+}
+
+export async function exchangeOAuthCode(
+  config: Config,
+  code: string,
+  fetchImpl: typeof fetch = fetch,
+): Promise<string | undefined> {
+  return (await exchangeOAuthCodeDetails(config, code, fetchImpl))?.accessToken;
 }
 
 export async function fetchGithubUser(
