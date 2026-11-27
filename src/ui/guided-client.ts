@@ -433,10 +433,15 @@ function appendPathLink(parent: HTMLElement, path: string | undefined, label: st
 
 function renderWalkthroughPayload(container: HTMLElement, payload: GuidedWalkthroughPayload): void {
   container.textContent = "";
-  appendText(container, "h3", "Intent as expressed");
-  appendText(container, "p", payload.intent.text);
-  appendText(container, "p", `Uncertainty: ${payload.intent.uncertainty}`, "muted");
-  appendText(container, "h3", "Change map");
+  const details = document.createElement("details");
+  details.className = "gd-walkthrough-full";
+  appendText(details, "summary", "Full exploration evidence");
+  const content = document.createElement("div");
+  content.className = "gd-walkthrough-content";
+  appendText(content, "h3", "Intent as expressed");
+  appendText(content, "p", payload.intent.text);
+  appendText(content, "p", `Uncertainty: ${payload.intent.uncertainty}`, "muted");
+  appendText(content, "h3", "Change map");
   const changes = document.createElement("ul");
   for (const change of payload.changeMap) {
     const item = document.createElement("li");
@@ -445,10 +450,10 @@ function renderWalkthroughPayload(container: HTMLElement, payload: GuidedWalkthr
     appendText(item, "span", change.evidence, "muted");
     changes.append(item);
   }
-  container.append(changes);
-  appendText(container, "h3", "Execution and data flow");
-  appendText(container, "p", payload.flow);
-  appendText(container, "h3", "Decisions and invariants");
+  content.append(changes);
+  appendText(content, "h3", "Execution and data flow");
+  appendText(content, "p", payload.flow);
+  appendText(content, "h3", "Decisions and invariants");
   const decisions = document.createElement("ul");
   for (const decision of payload.decisions) {
     const item = document.createElement("li");
@@ -457,10 +462,10 @@ function renderWalkthroughPayload(container: HTMLElement, payload: GuidedWalkthr
     appendText(item, "span", decision.evidence, "muted");
     decisions.append(item);
   }
-  container.append(decisions);
-  appendText(container, "h3", "Tests");
-  appendText(container, "p", payload.tests);
-  appendText(container, "h3", "Reviewer questions");
+  content.append(decisions);
+  appendText(content, "h3", "Tests");
+  appendText(content, "p", payload.tests);
+  appendText(content, "h3", "Reviewer questions");
   const risks = document.createElement("ul");
   for (const risk of payload.risks) {
     const item = document.createElement("li");
@@ -470,7 +475,9 @@ function renderWalkthroughPayload(container: HTMLElement, payload: GuidedWalkthr
     appendText(item, "span", risk.evidence, "muted");
     risks.append(item);
   }
-  container.append(risks);
+  content.append(risks);
+  details.append(content);
+  container.append(details);
 }
 
 function walkthroughStatusText(status: string): string {
@@ -480,6 +487,58 @@ function walkthroughStatusText(status: string): string {
   if (status === "failed") return "Failed";
   if (status === "cancelled") return "Cancelled";
   return "Stale";
+}
+
+function compactPrimerText(value: string, maxChars: number): string {
+  const normalized = value.replace(/\s+/g, " ").trim();
+  if (normalized.length <= maxChars) return normalized;
+  const clipped = normalized.slice(0, Math.max(1, maxChars - 1));
+  const boundary = Math.max(clipped.lastIndexOf(" "), Math.floor(maxChars * 0.65));
+  return `${clipped.slice(0, boundary).trimEnd()}…`;
+}
+
+function renderExplorationPrimer(view: GuidedWalkthroughView): void {
+  const root = document.querySelector<HTMLElement>("[data-guided-primer]");
+  const payload = (view.status === "ready" || view.status === "stale") ? view.payload : undefined;
+  if (root) {
+    root.dataset.status = view.status;
+    root.textContent = "";
+    const head = document.createElement("div");
+    head.className = "gd-primer-head";
+    appendText(head, "h2", "Maomao exploration primer");
+    appendText(head, "span", payload ? (view.status === "stale" ? "stale pinned head" : "independent · no findings or verdicts") : walkthroughStatusText(view.status).toLowerCase(), "job-chip");
+    root.append(head);
+    if (payload) {
+      appendText(root, "p", compactPrimerText(payload.intent.text, 420));
+      appendText(root, "p", `Flow: ${compactPrimerText(payload.flow, 520)}`, "muted");
+      appendText(root, "p", `Uncertainty: ${compactPrimerText(payload.intent.uncertainty, 220)}`, "muted");
+    } else if (view.status === "pending" || view.status === "running") {
+      appendText(root, "p", "Independent exploration is running. It explains the pinned change without using Maomao review findings or verdicts.", "muted");
+    } else if (view.status === "failed") {
+      appendText(root, "p", `Exploration failed${view.error ? `: ${view.error}` : "."} Review can continue manually.`, "muted");
+    } else if (view.status === "cancelled") {
+      appendText(root, "p", "Independent exploration was cancelled.", "muted");
+    } else {
+      appendText(root, "p", "This exploration belongs to an older pinned head.", "muted");
+    }
+  }
+  document.querySelectorAll<HTMLElement>("[data-file-primer]").forEach((element) => {
+    const path = element.dataset.path || "";
+    const change = payload?.changeMap.find((entry) => entry.path === path);
+    element.textContent = "";
+    if (!payload) {
+      element.hidden = true;
+      return;
+    }
+    appendText(element, "strong", "Maomao exploration");
+    if (change) {
+      appendText(element, "p", compactPrimerText(change.summary, 220));
+      appendText(element, "p", compactPrimerText(change.evidence, 160), "muted");
+    } else {
+      appendText(element, "p", "No concise file-specific evidence was produced by the independent exploration.", "muted");
+    }
+    element.hidden = false;
+  });
 }
 
 function enhanceWalkthrough(root: HTMLElement): void {
@@ -500,6 +559,7 @@ function enhanceWalkthrough(root: HTMLElement): void {
   }
 
   function render(view: GuidedWalkthroughView): void {
+    renderExplorationPrimer(view);
     root.dataset.status = view.status;
     if (state) state.textContent = walkthroughStatusText(view.status);
     if (detail) {

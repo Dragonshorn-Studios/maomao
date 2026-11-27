@@ -942,6 +942,16 @@ button, summary {
 .gd-diff-toolbar h2, .gd-diff-toolbar p { margin: 0; }
 .gd-diff-toolbar kbd { border: 1px solid var(--line); border-bottom-width: 2px; border-radius: .3rem; padding: .05rem .3rem; font-size: .75em; background: var(--surface); }
 .guided-diff-workspace > .muted { margin-top: .35rem; }
+.gd-primer { margin-bottom: var(--space-4); padding: .7rem .85rem; border: 1px solid var(--line); border-inline-start: .25rem solid var(--focus); border-radius: var(--if-radius); background: color-mix(in srgb, var(--surface-2) 86%, transparent); box-shadow: var(--if-shadow); }
+.gd-primer p { margin: .35rem 0 0; }
+.gd-primer h2 { font-size: .95rem; margin: 0; }
+.gd-primer-head { display: flex; flex-wrap: wrap; gap: .5rem; align-items: center; justify-content: space-between; }
+.gd-primer-head .job-chip { font-size: .72rem; }
+.gd-file-primer { padding: .55rem .8rem; border-bottom: 1px solid var(--line); background: color-mix(in srgb, var(--surface-2) 72%, transparent); font-size: .84rem; line-height: 1.35; }
+.gd-file-primer[hidden] { display: none; }
+.gd-file-primer strong { color: var(--ink-muted); font-size: .72rem; letter-spacing: .04em; text-transform: uppercase; }
+.gd-file-primer p { margin: .18rem 0 0; }
+.gd-file-primer .muted { font-size: .76rem; }
 .guided-diff-workspace .job-filters { margin-block: .65rem; padding: .55rem; border: 1px solid var(--line); border-radius: var(--if-radius); background: color-mix(in srgb, var(--surface) 82%, transparent); }
 .gd-review-secondary { display: grid; grid-template-columns: minmax(0, 1.25fr) minmax(18rem, .75fr); gap: 1rem; align-items: start; margin-top: 1rem; }
 .gd-review-secondary > * { min-width: 0; }

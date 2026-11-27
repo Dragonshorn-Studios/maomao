@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import type { SqliteDb } from "../db.js";
 import { nowIso } from "../util.js";
 
-export const GUIDED_WALKTHROUGH_PROMPT_REVISION = 1;
+export const GUIDED_WALKTHROUGH_PROMPT_REVISION = 2;
 export const GUIDED_WALKTHROUGH_OUTPUT_CHARS = 80_000;
 
 export type GuidedWalkthroughStatus = "pending" | "running" | "ready" | "failed" | "cancelled" | "stale";

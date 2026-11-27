@@ -208,6 +208,44 @@ function guidedPathHref(path: string | undefined, anchors: Map<string, number>):
   return index === undefined ? undefined : `#guided-file-${index}`;
 }
 
+function shortPrimerText(value: string, maxChars: number): string {
+  const normalized = value.replace(/\s+/g, " ").trim();
+  if (normalized.length <= maxChars) return normalized;
+  const clipped = normalized.slice(0, Math.max(1, maxChars - 1));
+  const boundary = Math.max(clipped.lastIndexOf(" "), Math.floor(maxChars * 0.65));
+  return `${clipped.slice(0, boundary).trimEnd()}…`;
+}
+
+function primerChangeFor(payload: GuidedWalkthroughPayload | undefined, path: string): GuidedWalkthroughPayload["changeMap"][number] | undefined {
+  return payload?.changeMap.find((change) => change.path === path);
+}
+
+function renderFilePrimerContent(change: GuidedWalkthroughPayload["changeMap"][number] | undefined): string {
+  if (!change) return `<strong>Maomao exploration</strong><p class="muted">No concise file-specific evidence was produced by the independent exploration.</p>`;
+  return `<strong>Maomao exploration</strong><p>${escapeHtml(shortPrimerText(change.summary, 220))}</p><p class="muted">${escapeHtml(shortPrimerText(change.evidence, 160))}</p>`;
+}
+
+function renderGuidedExplorationPrimer(input: { walkthrough?: GuidedWalkthroughView; sessionId?: number }): string {
+  if (!input.sessionId) return "";
+  const status = input.walkthrough?.status ?? "pending";
+  const payload = input.walkthrough?.payload;
+  const ready = payload && (status === "ready" || status === "stale");
+  const primerBadge = status === "stale" ? "stale pinned head" : "independent · no findings or verdicts";
+  const body = ready
+    ? `<div class="gd-primer-head"><h2>Maomao exploration primer</h2><span class="job-chip">${primerBadge}</span></div>
+      <p>${escapeHtml(shortPrimerText(payload.intent.text, 420))}</p>
+      <p class="muted"><strong>Flow:</strong> ${escapeHtml(shortPrimerText(payload.flow, 520))}</p>
+      <p class="muted">Uncertainty: ${escapeHtml(shortPrimerText(payload.intent.uncertainty, 220))}</p>`
+    : status === "pending" || status === "running"
+      ? `<div class="gd-primer-head"><h2>Maomao exploration primer</h2><span class="job-chip">${escapeHtml(guidedWalkthroughStatusText(status))}</span></div><p class="muted"><span class="gd-spinner" aria-hidden="true"></span> Independent exploration is running. It explains the pinned change without using Maomao review findings or verdicts.</p>`
+      : status === "failed"
+        ? `<div class="gd-primer-head"><h2>Maomao exploration primer</h2><span class="job-chip">failed</span></div><p class="muted">Exploration failed${input.walkthrough?.error ? `: ${escapeHtml(input.walkthrough.error)}` : "."} Review can continue manually.</p>`
+        : status === "cancelled"
+          ? `<div class="gd-primer-head"><h2>Maomao exploration primer</h2><span class="job-chip">cancelled</span></div><p class="muted">Independent exploration was cancelled.</p>`
+          : `<div class="gd-primer-head"><h2>Maomao exploration primer</h2><span class="job-chip">stale</span></div><p class="muted">This exploration belongs to an older pinned head.</p>`;
+  return `<section class="gd-primer" data-guided-primer data-status="${escapeHtml(status)}">${body}</section>`;
+}
+
 function renderGuidedWalkthroughPayload(payload: GuidedWalkthroughPayload, files: GuidedDiffFile[]): string {
   const anchors = new Map(files.map((file, index) => [file.path, index]));
   const exactLineHref = (path: string | undefined, line?: number) => {
@@ -230,14 +268,14 @@ function renderGuidedWalkthroughPayload(payload: GuidedWalkthroughPayload, files
   const changes = payload.changeMap.map((change) => `<li>${evidenceLink(change.path, change.path)} — ${escapeHtml(change.summary)} <span class="muted">${escapeHtml(change.evidence)}</span></li>`).join("\n");
   const decisions = payload.decisions.map((decision) => `<li><strong>${escapeHtml(decision.title)}</strong> — ${escapeHtml(decision.details)} <span class="muted">${escapeHtml(decision.evidence)}</span></li>`).join("\n");
   const risks = payload.risks.map((risk) => `<li>${escapeHtml(risk.question)} ${risk.path ? evidenceLink(risk.path, risk.line ? `${risk.path}:${risk.line}` : risk.path, risk.line) : ""} <span class="muted">${escapeHtml(risk.evidence)}</span></li>`).join("\n");
-  return `<div class="gd-walkthrough-content">
+  return `<details class="gd-walkthrough-full"><summary>Full exploration evidence</summary><div class="gd-walkthrough-content">
     <h3>Intent as expressed</h3><p>${escapeHtml(payload.intent.text)}</p><p class="muted">Uncertainty: ${escapeHtml(payload.intent.uncertainty)}</p>
     <h3>Change map</h3><ul>${changes || "<li>No file evidence was available.</li>"}</ul>
     <h3>Execution and data flow</h3><p>${escapeHtml(payload.flow)}</p>
     <h3>Decisions and invariants</h3><ul>${decisions || "<li>No consequential decisions were evidenced.</li>"}</ul>
     <h3>Tests</h3><p>${escapeHtml(payload.tests)}</p>
     <h3>Reviewer questions</h3><ul>${risks || "<li>No explicit risk questions were evidenced.</li>"}</ul>
-  </div>`;
+  </div></details>`;
 }
 
 function renderGuidedWalkthroughPanel(input: { walkthrough?: GuidedWalkthroughView; files: GuidedDiffFile[]; sessionId?: number; csrfToken?: string }): string {
@@ -261,7 +299,7 @@ function renderGuidedWalkthroughPanel(input: { walkthrough?: GuidedWalkthroughVi
     <button type="button" class="if-button if-button--sm" data-walkthrough-refresh>Refresh</button>
   </div>`;
   return `<section class="config-section gd-walkthrough" data-guided-walkthrough data-session-id="${input.sessionId}" data-csrf="${escapeHtml(input.csrfToken ?? "")}" data-status="${escapeHtml(status)}">
-    <div class="gd-head"><h2>SHA-pinned walkthrough</h2><span class="job-chip" data-walkthrough-state>${escapeHtml(guidedWalkthroughStatusText(status))}</span></div>
+    <div class="gd-head"><h2>Independent exploration evidence</h2><span class="job-chip" data-walkthrough-state>${escapeHtml(guidedWalkthroughStatusText(status))}</span></div>
     <div data-walkthrough-detail>${detail}</div>
     <div data-walkthrough-body>${payload && (status === "ready" || status === "stale") ? renderGuidedWalkthroughPayload(payload, input.files) : ""}</div>
     ${controls}
@@ -516,8 +554,10 @@ export function renderGuidedDiffWorkspace(input: {
   );
   const total = input.files.reduce((sum, file) => sum + file.additions + file.deletions, 0);
   const viewed = new Set(input.viewedFiles ?? []);
+  const walkthroughPayload = input.walkthrough && (input.walkthrough.status === "ready" || input.walkthrough.status === "stale") ? input.walkthrough.payload : undefined;
   const tree = filtered.map((file, index) => `<li><a href="#guided-file-${index}" data-guided-file-link>${viewed.has(file.path) ? "✓ " : ""}${escapeHtml(file.path)}</a> <span class="muted">${escapeHtml(file.status)} +${file.additions} −${file.deletions}</span></li>`).join("");
   const rendered = filtered.map((file, index) => {
+    const filePrimer = primerChangeFor(walkthroughPayload, file.path);
     const hunks = file.hunks.map((hunk, hunkIndex) => `<details class="gd-hunk" open>
       <summary>${escapeHtml(hunk.header)}</summary>
       <table class="gd-table"><tbody>${hunk.lines.map((line) => guidedDiffLineHtml(file, hunkIndex, line, input.baseSha, input.headSha, Boolean(input.sessionView && !input.readOnly))).join("\n")}</tbody></table>
@@ -525,6 +565,7 @@ export function renderGuidedDiffWorkspace(input: {
     const empty = file.binary ? `<p class="muted">Binary file changed; inline diff is unavailable.</p>` : file.hunks.length === 0 ? `<p class="muted">No textual hunks are available for this file.</p>` : "";
     return `<article class="gd-file${viewed.has(file.path) ? " gd-viewed" : ""}" id="guided-file-${index}" data-guided-file data-path="${escapeHtml(file.path)}" data-status="${escapeHtml(file.status)}">
       <h3>${escapeHtml(file.path)} <span class="muted">${escapeHtml(file.status)} +${file.additions} −${file.deletions}</span></h3>
+      <div class="gd-file-primer" data-file-primer data-path="${escapeHtml(file.path)}"${walkthroughPayload ? "" : " hidden"}>${renderFilePrimerContent(filePrimer)}</div>
       ${file.truncated ? `<p class="notice if-banner if-banner--warning">This file exceeded the per-file rendering bound and is partially shown.</p>` : ""}
       <div class="guided-pierre-file" data-guided-pierre data-path="${escapeHtml(file.path)}" data-commentable="${input.sessionView && !input.readOnly ? "1" : ""}">
         <div class="gd-fallback">${hunks}${empty}</div>
@@ -534,6 +575,7 @@ export function renderGuidedDiffWorkspace(input: {
     </article>`;
   }).join("\n");
   const draftPanel = input.sessionView ? renderGuidedDraftPanel({ session: input.sessionView, comments: input.comments ?? [], csrfToken: input.csrfToken, readOnly: input.readOnly }) : "";
+  const explorationPrimer = renderGuidedExplorationPrimer({ walkthrough: input.walkthrough, sessionId: input.sessionId });
   const walkthroughPanel = renderGuidedWalkthroughPanel({ walkthrough: input.walkthrough, files: filtered, sessionId: input.sessionId, csrfToken: input.csrfToken });
   const attentionPanel = renderGuidedAttentionPanel({ attention: input.attention, sessionId: input.sessionId, csrfToken: input.csrfToken, readOnly: input.readOnly });
   const publishPanel = renderGuidedPublishPanel({ publish: input.publish, sessionId: input.sessionId, sessionVersion: input.sessionVersion, csrfToken: input.csrfToken });
@@ -550,13 +592,13 @@ export function renderGuidedDiffWorkspace(input: {
     </form>
     <div class="gd-layout"><nav class="gd-tree" aria-label="Changed files"><div class="gd-tree-head">Changed files</div><ol>${tree}</ol></nav><div class="gd-files">${rendered || `<div class="empty">No files match this diff filter.</div>`}</div></div>
   </section>`;
-  const reviewStep = `${diffSection}<div class="gd-review-secondary">${draftPanel}${walkthroughPanel}</div>`;
+  const reviewStep = `${explorationPrimer}${diffSection}<div class="gd-review-secondary">${draftPanel}${walkthroughPanel}</div>`;
   return `<div class="gd-wizard" data-guided-wizard>
     <input class="gd-wizard-radio" type="radio" name="gd-wizard-step" id="gd-step-review" checked/>
     <input class="gd-wizard-radio" type="radio" name="gd-wizard-step" id="gd-step-compare"/>
     <input class="gd-wizard-radio" type="radio" name="gd-wizard-step" id="gd-step-publish"/>
     <nav class="gd-wizard-nav" aria-label="Guided review steps">
-      <label for="gd-step-review"><span>1</span><strong>Explore &amp; review</strong><small>walkthrough, diff, private notes</small></label>
+      <label for="gd-step-review"><span>1</span><strong>Explore &amp; review</strong><small>primer, diff, private notes</small></label>
       <label for="gd-step-compare"><span>2</span><strong>Compare &amp; decide</strong><small>Maomao evidence and attention decision</small></label>
       <label for="gd-step-publish"><span>3</span><strong>Publish</strong><small>deliberate human review publication</small></label>
     </nav>

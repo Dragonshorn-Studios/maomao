@@ -147,6 +147,8 @@ Binary files a/a.png and b/a.png differ
     expect(running).toContain("data-guided-walkthrough");
     expect(running).toContain("background");
     expect(running).toContain("data-walkthrough-cancel");
+    expect(running).toContain("data-guided-primer");
+    expect(running).toContain("without using Maomao review findings or verdicts");
     const ready = renderGuidedDiffWorkspace({
       files: [file],
       sessionId: 7,
@@ -170,6 +172,10 @@ Binary files a/a.png and b/a.png differ
     expect(ready).toContain('href="#guided-file-0"');
     expect(ready).toContain("Intent &lt;unsafe&gt;");
     expect(ready).not.toContain("Intent <unsafe>");
+    expect(ready).toContain("independent · no findings or verdicts");
+    expect(ready).toContain('data-file-primer data-path="x.ts"');
+    expect(ready).toContain("Changed behavior");
+    expect(ready).toContain("Full exploration evidence");
   });
 
 

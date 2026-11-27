@@ -209,7 +209,8 @@ describe("Guided Review inbox", () => {
     expect(html).toContain("SHA-pinned workspace");
     expect(html).toContain(baseSha);
     expect(html).toContain("Files changed");
-    expect(html).toContain("SHA-pinned walkthrough");
+    expect(html).toContain("Independent exploration evidence");
+    expect(html).toContain("data-guided-primer");
     expect(html).toContain("background");
     expect(html).toContain("new.ts");
     expect(html).toContain("data-anchor-side=\"LEFT\"");

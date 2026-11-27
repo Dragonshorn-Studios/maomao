@@ -235,6 +235,10 @@ describe("Guided Review walkthrough cache", () => {
     const input = vi.mocked(f.opencode.run).mock.calls[0]?.[0];
     expect(input?.files?.map((file) => file.split("/").pop())).toEqual(["pr.diff", "pr.json", "repo-brief.json"]);
     expect(input?.prompt).toContain("repo-brief.json");
+    expect(input?.prompt).toContain("spoiler-free exploration primer");
+    expect(input?.prompt).toContain("never mention verdicts, severities, findings");
+    expect(input?.prompt).toContain("intent.text at most 420 characters");
+    expect(input?.prompt).toContain("exactly one changeMap entry for every file");
   });
 
 });

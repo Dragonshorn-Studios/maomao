@@ -91,7 +91,9 @@ function buildPrompt(input: { target: ForgeRepoTarget; model: string }): string 
   return `You are preparing a read-only Guided Review walkthrough for ${input.target.repoFullName}#${input.target.changeNumber}.
 The exact reviewed base SHA is ${input.target.baseSha}; the exact head SHA is ${input.target.headSha}. The checkout is pinned to that head. The attached pr.diff is the exact base/head comparison and pr.json is the pull metadata. When repo-brief.json is attached, it is an exact-SHA cached repository brief with bounded file fragments; use it as context, but treat the diff as authoritative for changes.
 
-Do not review for defects, do not invent product requirements, and do not state certainty the evidence does not support. Separate what the PR/docs explicitly say from inference. If evidence is unavailable, say so.
+Do not review for defects, do not invent product requirements, and do not state certainty the evidence does not support. This is a spoiler-free exploration primer for a human who has not read Maomao's review: never mention verdicts, severities, findings, or whether the pull request is correct. Separate what the PR/docs explicitly say from inference. If evidence is unavailable, say so.
+
+Keep the primer concise: intent.text at most 420 characters, flow at most 700 characters, each changeMap summary at most 220 characters, and each evidence string at most 180 characters. Include exactly one changeMap entry for every file in pr.diff; if evidence is insufficient for a file, say that in its summary/evidence rather than omitting it.
 
 Return ONLY one JSON object with this shape:
 {
