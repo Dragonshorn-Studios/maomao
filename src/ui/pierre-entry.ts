@@ -91,7 +91,31 @@ function renderGuidedFile(container: HTMLElement): void {
   } catch {
     return;
   }
-  const fileDiff = new FileDiff({ ...diffLayoutOptions(currentLayout(), themeType()), disableFileHeader: false });
+  const path = container.getAttribute("data-path") ?? "";
+  const commentable = container.getAttribute("data-commentable") === "1";
+  const fileDiff = new FileDiff({
+    ...diffLayoutOptions(currentLayout(), themeType()),
+    disableFileHeader: false,
+    enableGutterUtility: commentable,
+    renderGutterUtility: commentable ? (getHoveredRow) => {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "gd-comment-trigger gd-comment-trigger--pierre";
+      button.textContent = "+";
+      button.title = "Add inline draft note";
+      button.setAttribute("aria-label", "Add inline draft note");
+      button.addEventListener("click", (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        const row = getHoveredRow();
+        if (!row || !path) return;
+        document.dispatchEvent(new CustomEvent("guided:line-anchor", {
+          detail: { path, side: row.side === "deletions" ? "LEFT" : "RIGHT", line: String(row.lineNumber) },
+        }));
+      });
+      return button;
+    } : undefined,
+  });
   try {
     fileDiff.render({ fileDiff: metadata, containerWrapper: container });
   } catch {

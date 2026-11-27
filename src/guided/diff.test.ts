@@ -72,4 +72,48 @@ Binary files a/a.png and b/a.png differ
 `, { maxLinesPerFile: 2 })[0];
     expect(long.truncated).toBe(true);
   });
+
+  it("renders the private draft controls and exact comment anchors only for an active actor session", () => {
+    const [file] = parseUnifiedDiff(`diff --git a/x.ts b/x.ts
+--- a/x.ts
++++ b/x.ts
+@@ -1 +1 @@
+-old
++new
+`);
+    const sessionView = {
+      id: 7,
+      actorProvider: "github",
+      actorId: "1001",
+      provider: "github",
+      instance: "github.com",
+      repoFullName: "acme/widgets",
+      prNumber: 12,
+      baseSha: "a".repeat(40),
+      headSha: "b".repeat(40),
+      status: "active" as const,
+      currentPath: null,
+      currentHunk: null,
+      position: {},
+      viewedFiles: [],
+      draftSummary: "draft <summary>",
+      draftVerdict: "COMMENT" as const,
+      walkthroughRef: null,
+      comparisonState: {},
+      version: 3,
+      historicalAt: null,
+      createdAt: "now",
+      updatedAt: "now",
+      lastOpenedAt: "now",
+    };
+    const html = renderGuidedDiffWorkspace({ files: [file], sessionView, comments: [], csrfToken: "csrf" });
+    expect(html).toContain("data-guided-draft");
+    expect(html).toContain("data-preview-publish");
+    expect(html).toContain("data-guided-comment-anchor");
+    expect(html).toContain("draft &lt;summary&gt;");
+    expect(html).not.toContain("draft <summary>");
+    const readOnly = renderGuidedDiffWorkspace({ files: [file], sessionView, comments: [], readOnly: true });
+    expect(readOnly).not.toContain("data-guided-draft");
+    expect(readOnly).not.toContain("data-guided-comment-anchor");
+  });
 });
