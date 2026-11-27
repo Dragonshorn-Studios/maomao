@@ -69,7 +69,7 @@ export interface PageOptions {
 }
 
 /** Top-level product areas shown in the shell's icon rail. */
-export type NavArea = "queue" | "operations" | "reviewers" | "settings" | "health";
+export type NavArea = "queue" | "operations" | "reviewers" | "guided" | "settings" | "health";
 
 /** The home queue's family split: the merge queue is the default surface,
  * operations collects scans and briefs, `all` is the undivided history. */
@@ -139,6 +139,7 @@ const RAIL_ITEMS: Array<[NavArea, string, string, string]> = [
   ["queue", "/", "Merge queue", "▤"],
   ["operations", "/?view=ops", "Operations", "⌗"],
   ["reviewers", "/reviewers", "Reviewer runs", "◈"],
+  ["guided", "/guided", "Guided Review", "✎"],
 ];
 
 /** Utility destinations pinned to the rail's bottom. */
@@ -348,6 +349,7 @@ function accountMenu(options: PageOptions): string {
       <nav class="account-menu-panel" aria-label="Operator">
         ${who}
         <a href="/reviewers">Reviewers</a>
+        <a href="/guided">Guided Review</a>
         <a href="/connections">Connections</a>
         <a href="/config#effective">Configuration</a>
         <a href="/health">Health</a>

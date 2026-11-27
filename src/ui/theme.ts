@@ -879,6 +879,42 @@ button, summary {
    track — let items shrink and leave truncation to the ellipsis styles. */
 .queue > li { min-width: 0; }
 
+.guided-inbox-row {
+  display: grid;
+  gap: 0.45rem;
+  padding: 0.85rem 1rem;
+  border: 1px solid var(--line);
+  border-radius: var(--if-radius, 4px);
+  background: var(--surface);
+}
+.guided-inbox-main {
+  display: grid;
+  gap: 0.25rem;
+  color: inherit;
+  text-decoration: none;
+  min-width: 0;
+}
+.guided-inbox-title { font-weight: 650; overflow-wrap: anywhere; }
+.guided-inbox-meta, .guided-inbox-facts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem 0.8rem;
+  color: var(--ink-muted);
+  font-size: 0.84rem;
+}
+.guided-inbox-facts { align-items: center; }
+.pagination {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  gap: 1rem;
+  margin-top: 1rem;
+}
+@media (max-width: 620px) {
+  .trigger label { min-width: 100%; }
+  .guided-inbox-row { padding: 0.75rem; }
+}
+
 .specimen {
   padding: 0.85rem 1rem 0.95rem;
   position: relative;
