@@ -143,6 +143,21 @@ describe("effectiveConfigEntries", () => {
     expect(reviewerSet.notEnforced).toBeFalsy();
   });
 
+  it("lists Guided Review profile rows only when the profile configures them", () => {
+    const config = loadConfig({});
+    const revision = fakeRevision({
+      guidedReview: { model: "test/guided", timeoutMs: 90_000, maxCostUsd: 0.75, poisonAlertAttention: "optional" },
+    });
+    const entries = effectiveConfigEntries(config, {}, revision, telemetryStore());
+    expect(find(entries, "Profile Guided Review model")).toMatchObject({ source: "profile", value: "test/guided", sourceDetail: "#12 (strict)" });
+    expect(find(entries, "Profile Guided Review timeout")).toMatchObject({ source: "profile", value: "90s" });
+    expect(find(entries, "Profile Guided Review cost ceiling (USD)")).toMatchObject({ source: "profile", value: "0.75" });
+    expect(find(entries, "Poison-alert Guided Review attention")).toMatchObject({ source: "profile", value: "optional" });
+
+    const absent = effectiveConfigEntries(config, {}, fakeRevision(), telemetryStore());
+    expect(absent.some((entry) => entry.label.startsWith("Profile Guided Review") || entry.label === "Poison-alert Guided Review attention")).toBe(false);
+  });
+
   it("lists every profile role as the effective set — env roles no longer gate — and annotates the env rows", () => {
     const config = loadConfig({ REVIEWER_ROLES: "correctness,security" });
     const revision = fakeRevision({

@@ -377,6 +377,13 @@ describe("profile validation and caps", () => {
     };
     expect(validateModelCatalog(withVerifier, ["openai/gpt-4.1"])).toHaveLength(1);
     expect(validateModelCatalog(withVerifier, ["openai/gpt-4.1", "openai/gpt-4.1-mini"])).toHaveLength(0);
+
+    const withGuided = {
+      ...definition,
+      guidedReview: { model: "openai/gpt-guided", poisonAlertAttention: "required" as const },
+    };
+    expect(validateModelCatalog(withGuided, ["openai/gpt-4.1"])).toHaveLength(1);
+    expect(validateModelCatalog(withGuided, ["openai/gpt-4.1", "openai/gpt-guided"])).toHaveLength(0);
   });
 
   it("rejects an invalid severity", () => {

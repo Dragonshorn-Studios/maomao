@@ -63,7 +63,23 @@ export class GuidedAttentionStore {
     const existing = this.decisionFor(key);
     if (existing) {
       const same = existing.actor_provider === actor.actorProvider && existing.actor_id === actor.actorId && existing.action === action && existing.reason_tag === reasonTag && (existing.reason_detail ?? null) === detail;
-      return { status: same ? "ok" : "conflict", row: existing };
+      if (same) return { status: "ok", row: existing };
+      // An optional-profile skip is deliberately weaker than a substantive
+      // review/delegate decision. If the profile is later tightened, the
+      // exact-head gate must remain recoverable instead of being deadlocked
+      // behind the immutable first-writer conflict rule.
+      if (existing.action === "skip_guided_review" && action !== "skip_guided_review") {
+        const superseded = this.db
+          .prepare(`UPDATE guided_attention_decisions
+            SET actor_provider = ?, actor_id = ?, action = ?, reason_tag = ?, reason_detail = ?, created_at = ?
+            WHERE id = ? AND action = 'skip_guided_review'`)
+          .run(actor.actorProvider, actor.actorId, action, reasonTag, detail, nowIso(), existing.id);
+        if (superseded.changes > 0) {
+          const row = this.decisionFor(key);
+          if (row) return { status: "ok", row };
+        }
+      }
+      return { status: "conflict", row: existing };
     }
     try {
       this.db.prepare(`INSERT INTO guided_attention_decisions

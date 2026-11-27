@@ -148,12 +148,36 @@ describe("usage schema migration", () => {
           actor_provider, actor_id, action, reason_tag, created_at
         ) VALUES ('github','github.com','acme/widgets',12,'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
           'github','1001','review_myself','risk-review','2026-01-01T00:00:00.000Z');
+        CREATE TABLE guided_walkthroughs (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          fingerprint TEXT NOT NULL UNIQUE,
+          provider TEXT NOT NULL,
+          provider_instance TEXT NOT NULL,
+          repo_full_name TEXT NOT NULL,
+          pr_number INTEGER NOT NULL,
+          base_sha TEXT NOT NULL,
+          head_sha TEXT NOT NULL,
+          prompt_revision INTEGER NOT NULL,
+          model TEXT NOT NULL,
+          status TEXT NOT NULL CHECK (status IN ('pending', 'running', 'ready', 'failed', 'cancelled', 'stale')),
+          output_json TEXT NOT NULL DEFAULT '',
+          error TEXT,
+          cancel_requested INTEGER NOT NULL DEFAULT 0,
+          request_count INTEGER NOT NULL DEFAULT 1,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          started_at TEXT,
+          finished_at TEXT
+        );
       `);
       legacy.close();
 
       const db = openDb(path);
       const schema = db.prepare(`SELECT sql FROM sqlite_master WHERE type='table' AND name='guided_attention_decisions'`).get() as { sql: string };
       expect(schema.sql).toContain("'skip_guided_review'");
+      expect(db.prepare(`SELECT name FROM sqlite_master WHERE type='index' AND name='idx_guided_attention_decisions_pull'`).get()).toBeTruthy();
+      const walkthroughColumns = (db.prepare(`PRAGMA table_info(guided_walkthroughs)`).all() as Array<{ name: string }>).map((column) => column.name);
+      expect(walkthroughColumns).toEqual(expect.arrayContaining(["timeout_ms", "max_cost_usd"]));
       db.prepare(`
         INSERT INTO guided_attention_decisions (
           provider, provider_instance, repo_full_name, pr_number, head_sha,

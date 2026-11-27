@@ -22,6 +22,18 @@ describe("GuidedAttentionStore", () => {
     expect(store.decisionFor({ ...key, headSha: "c".repeat(40) })).toBeUndefined();
   });
 
+
+
+  it("lets a substantive decision supersede an optional-profile skip without weakening first-writer conflicts", () => {
+    const store = new GuidedAttentionStore(openDb(":memory:"));
+    expect(store.recordDecision(actor, key, "skip_guided_review", "time-sensitive").status).toBe("ok");
+    const replacement = store.recordDecision({ actorProvider: "github", actorId: "2002" }, key, "review_myself", "policy");
+    expect(replacement.status).toBe("ok");
+    expect(replacement.row).toMatchObject({ action: "review_myself", actor_id: "2002", reason_tag: "policy" });
+    expect(store.recordDecision(actor, key, "delegate_to_maomao", "risk-review").status).toBe("conflict");
+    expect(store.decisionFor(key)).toMatchObject({ action: "review_myself", actor_id: "2002" });
+  });
+
   it("treats viewed files, draft content or comments as active review evidence, but not merely opening a tab", () => {
     const db = openDb(":memory:");
     new JobStore(db);

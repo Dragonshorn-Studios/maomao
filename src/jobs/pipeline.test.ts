@@ -8930,6 +8930,46 @@ describe("guided human attention merge-readiness integration", () => {
     expect(readiness?.summary).toContain("Guided Review optional");
   });
 
+  it("does not let an optional-profile skip deadlock a later required exact-head review", async () => {
+    const headSha = "8".repeat(40);
+    const { store, checks, created, pipeline } = await fixture(AUTH_DIFF, headSha, "0", { poisonAlertAttention: "optional" });
+    const key = { provider: "github", instance: "github.com", repoFullName: "acme/widgets", prNumber: 4, headSha };
+    const actor = { actorProvider: "github", actorId: "1001" };
+    store.setJobState(created.job.id, "completed", { routing_profile: "poison-alert" });
+    expect(store.guidedAttention.recordDecision(actor, key, "skip_guided_review", "time-sensitive").status).toBe("ok");
+
+    await pipeline.republishGuidedAttention(created.job.id);
+    const optionalReadiness = checks.filter((check) => check.name === "maomao/merge-readiness").at(-1);
+    expect(optionalReadiness?.conclusion).toBe("success");
+    expect(optionalReadiness?.summary).toContain("explicitly continued without Guided Review");
+
+    const requiredDraft = store.configs.createDraft({
+      definition: {
+        name: "default",
+        reviewers: [{ role: "correctness" }, { role: "security" }],
+        minPublishableSeverity: "info",
+        guidedReview: { poisonAlertAttention: "required" },
+      },
+      createdBy: "octocat",
+    });
+    if (!("revision" in requiredDraft)) throw new Error("required profile draft failed");
+    store.configs.activateRevision(requiredDraft.revision.id, "octocat");
+    const tightened = store.enqueue({ ...jobInput(headSha), reviewers: [], dedupKey: "required-exact-head-recheck" }).job;
+    store.setJobState(tightened.id, "completed", { routing_profile: "poison-alert" });
+
+    await pipeline.republishGuidedAttention(tightened.id);
+    const requiredReadiness = checks.filter((check) => check.name === "maomao/merge-readiness").at(-1);
+    expect(requiredReadiness?.conclusion).toBe("action_required");
+    expect(requiredReadiness?.summary).toContain("requires an explicit exact-SHA decision");
+
+    const replacement = store.guidedAttention.recordDecision({ actorProvider: "github", actorId: "2002" }, key, "review_myself", "policy");
+    expect(replacement.status).toBe("ok");
+    await pipeline.republishGuidedAttention(tightened.id);
+    const finalReadiness = checks.filter((check) => check.name === "maomao/merge-readiness").at(-1);
+    expect(finalReadiness?.conclusion).toBe("success");
+    expect(finalReadiness?.summary).toContain("human chose to review");
+  });
+
   it("lets diagnosis auto-continue after the configured grace with a visible reason", async () => {
     const headSha = "b".repeat(40);
     const sourceDiff = `diff --git a/src/example.ts b/src/example.ts\n${Array.from({ length: 30 }, (_, index) => `+export const value${index} = ${index};`).join("\n")}\n`;

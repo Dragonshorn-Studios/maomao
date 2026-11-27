@@ -115,6 +115,27 @@ describe("Guided Review walkthrough cache", () => {
     expect(f.opencode.run).toHaveBeenCalledWith(expect.objectContaining({ model: "profile/guided", timeoutMs: 45_000 }));
   });
 
+  it("snapshots profile execution options and enforces their cost ceiling", async () => {
+    let options = { model: "profile/guided", timeoutMs: 45_000, maxCostUsd: 0.005 };
+    const f = fixture(undefined, undefined, () => options);
+    const row = f.service.ensure(f.session, 42);
+    expect(row).toMatchObject({ model: "profile/guided", timeout_ms: 45_000, max_cost_usd: 0.005 });
+    options = { ...options, timeoutMs: 90_000, maxCostUsd: 10 };
+    const done = await waitForStatus(f.walkthroughs, row.id, ["failed"]);
+    expect(done.error).toContain("cost ceiling");
+    expect(f.opencode.run).toHaveBeenCalledWith(expect.objectContaining({ timeoutMs: 45_000 }));
+  });
+
+  it("supersedes a same-head walkthrough when its model fingerprint changes", () => {
+    const f = fixture();
+    const identity = { provider: "github", instance: "github.com", repoFullName: "acme/widgets", prNumber: 12, baseSha, headSha };
+    const oldRow = f.walkthroughs.open(identity, "old/model");
+    const newRow = f.walkthroughs.open(identity, "new/model");
+    expect(newRow.id).not.toBe(oldRow.id);
+    expect(f.walkthroughs.get(oldRow.id)?.status).toBe("stale");
+    expect(f.walkthroughs.getCurrentForIdentity(identity)?.id).toBe(newRow.id);
+  });
+
   it("marks older head fingerprints stale when a new exact head opens", () => {
     const f = fixture();
     const oldRow = f.walkthroughs.open({ provider: "github", instance: "github.com", repoFullName: "acme/widgets", prNumber: 12, baseSha, headSha }, "m");

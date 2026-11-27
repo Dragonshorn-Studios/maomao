@@ -206,7 +206,8 @@ function severityOptions(value = ""): string {
 
 export function renderGuidedDraftPanel(input: { session: GuidedSessionView; comments: GuidedCommentView[]; csrfToken?: string; readOnly?: boolean }): string {
   if (input.readOnly) return "";
-  const active = input.comments.filter((comment) => !comment.deletedAt && comment.kind === "general");
+  const active = input.comments.filter((comment) => !comment.deletedAt && (comment.kind === "general" || comment.anchorStatus === "unplaced"));
+  const hasUnplaced = active.some((comment) => comment.anchorStatus === "unplaced");
   return `<section class="config-section gd-human-draft" data-guided-draft data-session-id="${input.session.id}" data-version="${input.session.version}" data-csrf="${escapeHtml(input.csrfToken ?? "")}">
     <div class="gd-head"><h2>Your private draft</h2><span class="gd-save-state" data-save-state data-state="saved">Saved privately</span></div>
     <p class="error if-banner if-banner--danger" data-guided-bundle-error hidden>Guided draft enhancement failed to load. Run the asset build; these controls require JavaScript.</p>
@@ -220,22 +221,9 @@ export function renderGuidedDraftPanel(input: { session: GuidedSessionView; comm
       </select></label>
     </div>
     <div class="gd-step-actions"><button type="button" class="if-button if-button--primary" data-goto-step="compare">Continue to comparison</button><span class="muted">Inline notes save automatically while you review.</span></div>
-    <details class="gd-draft-details"><summary>General notes and publication controls</summary>
-    <h3>General notes</h3>
+    <details class="gd-draft-details"${hasUnplaced ? " open" : ""}><summary>General notes, stale notes, and publication controls</summary>
+    <h3>General and unplaced notes</h3>
     <div data-comment-list>${active.length ? active.map(renderGuidedComment).join("\n") : `<p class="muted">No general notes yet. Inline notes appear directly in the diff.</p>`}</div>
-    <div class="gd-inline-editor" data-inline-editor hidden>
-      <h4>Inline note <span class="muted" data-inline-target></span></h4>
-      <input type="hidden" data-comment-client-id/>
-      <label>Note <textarea data-comment-body rows="4" maxlength="4000" required></textarea></label>
-      <div class="gd-inline-fields">
-        <label>Severity <select data-comment-severity>${severityOptions()}</select></label>
-        <label>Category <input data-comment-category maxlength="80" placeholder="optional"/></label>
-        <label class="gd-check"><input type="checkbox" data-comment-publishable/> Candidate GitHub comment</label>
-      </div>
-      <button type="button" class="if-button if-button--primary" data-save-inline>Save inline note</button>
-      <button type="button" class="if-button" data-cancel-inline>Cancel</button>
-      <p class="muted">Unchecked stays private. Unplaced stale-hunk notes cannot be candidates until re-anchored.</p>
-    </div>
     <form data-general-form class="gd-general-form">
       <h4>General note</h4>
       <input type="hidden" data-comment-client-id/>
@@ -253,6 +241,19 @@ export function renderGuidedDraftPanel(input: { session: GuidedSessionView; comm
     </div>
     <div data-preview-output class="gd-preview-output" aria-live="polite"></div>
     </details>
+    <div class="gd-inline-editor" data-inline-editor hidden>
+      <h4>Inline note <span class="muted" data-inline-target></span></h4>
+      <input type="hidden" data-comment-client-id/>
+      <label>Note <textarea data-comment-body rows="4" maxlength="4000" required></textarea></label>
+      <div class="gd-inline-fields">
+        <label>Severity <select data-comment-severity>${severityOptions()}</select></label>
+        <label>Category <input data-comment-category maxlength="80" placeholder="optional"/></label>
+        <label class="gd-check"><input type="checkbox" data-comment-publishable/> Candidate GitHub comment</label>
+      </div>
+      <button type="button" class="if-button if-button--primary" data-save-inline>Save inline note</button>
+      <button type="button" class="if-button" data-cancel-inline>Cancel</button>
+      <p class="muted">Unchecked stays private. Unplaced stale-hunk notes cannot be candidates until re-anchored.</p>
+    </div>
   </section>`;
 }
 

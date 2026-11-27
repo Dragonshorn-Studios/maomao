@@ -162,6 +162,23 @@ describe("profileFormToDefinition", () => {
     expect(roundTrip.guidedPoisonAttention).toBe("optional");
   });
 
+  it("reports invalid guided-review values on their own fields", () => {
+    const invalid = profileFormToDefinition(
+      decodeProfileForm(
+        formBody({
+          guided_model: "not a valid model",
+          guided_timeout: "1801",
+          guided_max_cost_usd: "-1",
+        }),
+      ),
+    );
+    expect(invalid.ok).toBe(false);
+    if (invalid.ok) return;
+    expect(invalid.errors.guided_model).toContain("model must be provider/model");
+    expect(invalid.errors.guided_timeout).toContain("timeout must be a positive number");
+    expect(invalid.errors.guided_max_cost_usd).toContain("positive number");
+  });
+
   it("encodes alert overrides and reports violations on the alert fields", () => {
     const ok = profileFormToDefinition(
       decodeProfileForm(

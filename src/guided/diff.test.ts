@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { parseUnifiedDiff } from "./diff.js";
-import { renderGuidedDiffWorkspace, renderGuidedPublishPanel } from "../ui/guided.js";
+import { renderGuidedAttentionPanel, renderGuidedDiffWorkspace, renderGuidedPublishPanel } from "../ui/guided.js";
 
 describe("parseUnifiedDiff", () => {
   it("tracks both-side line numbers, statuses, and renames", () => {
@@ -173,7 +173,8 @@ Binary files a/a.png and b/a.png differ
       createdAt: "now",
       updatedAt: "now",
     };
-    const html = renderGuidedDiffWorkspace({ files: [file], sessionId: 7, sessionView, viewedFiles: ["src/x.ts"], comments: [comment], csrfToken: "csrf" });
+    const unplaced = { ...comment, id: 2, clientId: "c-stale", line: 99, anchorStatus: "unplaced" as const, publishable: false };
+    const html = renderGuidedDiffWorkspace({ files: [file], sessionId: 7, sessionView, viewedFiles: ["src/x.ts"], comments: [comment, unplaced], csrfToken: "csrf" });
     expect(html).toContain('data-guided-viewed-toggle data-path="src/x.ts" checked');
     expect(html).toContain('class="gd-inline-note-row"');
     expect(html).toContain("Inline &lt;note&gt;");
@@ -182,6 +183,28 @@ Binary files a/a.png and b/a.png differ
     expect(html).not.toContain('name="file"');
     expect(html).not.toContain("IntersectionObserver");
     expect(html).toContain("guided:wizard-step");
+    expect(html).toContain("Unplaced stale-hunk note");
+    expect(html).toContain('<details class="gd-draft-details" open>');
+    const detailsStart = html.indexOf('<details class="gd-draft-details"');
+    const detailsEnd = html.indexOf("</details>", detailsStart);
+    expect(html.indexOf("data-inline-editor")).toBeGreaterThan(detailsEnd);
+  });
+
+  it("renders the optional poison-alert skip action only for optional attention", () => {
+    const optional = renderGuidedAttentionPanel({
+      attention: { state: "pending", profile: "poison-alert", optional: true, message: "optional attention" },
+      sessionId: 7,
+      csrfToken: "csrf",
+    });
+    expect(optional).toContain('value="skip_guided_review"');
+    expect(optional).toContain("Continue without Guided Review");
+    expect(optional).toContain("gd-button-warning");
+    const required = renderGuidedAttentionPanel({
+      attention: { state: "pending", profile: "poison-alert", optional: false, message: "required attention" },
+      sessionId: 7,
+      csrfToken: "csrf",
+    });
+    expect(required).not.toContain('value="skip_guided_review"');
   });
 
   it("renders walkthrough progress states and deep-links structured evidence into the exact diff", () => {

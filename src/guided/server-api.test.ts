@@ -889,8 +889,16 @@ describe("Guided Review session API", () => {
       headers: { cookie: stranger.cookies, "content-type": "application/x-www-form-urlencoded" },
       body: conflictForm.toString(),
     });
-    expect(conflict.status).toBe(409);
-    expect(await conflict.text()).toContain("Another exact-SHA human-attention decision already exists");
+    expect(conflict.status).toBe(303);
+    expect(store.guidedAttention.decisionFor({ provider: "github", instance: "github.com", repoFullName: "acme/widgets", prNumber: 12, headSha })).toMatchObject({ actor_id: "2002", action: "review_myself" });
+    const afterSuperseded = new URLSearchParams({ action: "delegate_to_maomao", reasonTag: "risk-review", csrf_token: auth.csrfToken });
+    const supersededConflict = await app.request(`/guided/sessions/${opened.session.id}/attention`, {
+      method: "POST",
+      headers: { cookie: auth.cookies, "content-type": "application/x-www-form-urlencoded" },
+      body: afterSuperseded.toString(),
+    });
+    expect(supersededConflict.status).toBe(409);
+    expect(await supersededConflict.text()).toContain("Another exact-SHA human-attention decision already exists");
     const stolen = await app.request(`/guided/sessions/${opened.session.id}/attention`, {
       method: "POST",
       headers: { cookie: stranger.cookies, "content-type": "application/x-www-form-urlencoded" },

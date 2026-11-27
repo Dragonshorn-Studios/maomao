@@ -404,6 +404,8 @@ function migrate(db: SqliteDb): void {
       head_sha TEXT NOT NULL,
       prompt_revision INTEGER NOT NULL,
       model TEXT NOT NULL,
+      timeout_ms INTEGER,
+      max_cost_usd REAL,
       status TEXT NOT NULL CHECK (status IN ('pending', 'running', 'ready', 'failed', 'cancelled', 'stale')),
       output_json TEXT NOT NULL DEFAULT '',
       error TEXT,
@@ -725,6 +727,8 @@ function migrate(db: SqliteDb): void {
     CREATE INDEX IF NOT EXISTS idx_findings_pr ON findings(repo_full_name, pr_number, status);
     CREATE INDEX IF NOT EXISTS idx_findings_thread ON findings(github_thread_id);
     CREATE INDEX IF NOT EXISTS idx_findings_comment ON findings(github_comment_id);
+    CREATE INDEX IF NOT EXISTS idx_guided_attention_decisions_pull
+      ON guided_attention_decisions(provider, provider_instance, repo_full_name, pr_number, head_sha);
 
     CREATE INDEX IF NOT EXISTS idx_profile_revisions_name ON profile_revisions(name, status);
     CREATE INDEX IF NOT EXISTS idx_prompt_revisions_role ON prompt_revisions(role_id, status);
@@ -732,6 +736,8 @@ function migrate(db: SqliteDb): void {
     CREATE INDEX IF NOT EXISTS idx_stack_run_members_member_job ON stack_run_members(member_job_id, state);
   `);
 
+    ensureColumn(db, "guided_walkthroughs", "timeout_ms", "INTEGER");
+    ensureColumn(db, "guided_walkthroughs", "max_cost_usd", "REAL");
     ensureColumn(db, "jobs", "review_event", "TEXT");
     ensureColumn(db, "jobs", "review_event_reason", "TEXT");
     ensureColumn(db, "jobs", "aggregator_fallback", "INTEGER");

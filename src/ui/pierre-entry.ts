@@ -387,7 +387,7 @@ function applyLayout(layout: DiffLayout): void {
     instances.delete(container);
     container.removeAttribute("data-enhanced");
     for (const child of Array.from(container.children)) {
-      if (child.classList.contains("diff-raw") || child.classList.contains("guided-patch-raw")) continue;
+      if (child.classList.contains("diff-raw") || child.classList.contains("guided-patch-raw") || child.classList.contains("guided-annotations-raw")) continue;
       if (child.classList.contains("diff-panel") || child.classList.contains("gd-fallback")) {
         (child as HTMLElement).hidden = false;
         continue;

@@ -61,7 +61,7 @@ function enhanceDraft(root: HTMLElement): void {
   function renderComments(comments: GuidedCommentView[]): void {
     if (!listEl) return;
     listEl.textContent = "";
-    const active = comments.filter((comment) => !comment.deletedAt && comment.kind === "general");
+    const active = comments.filter((comment) => !comment.deletedAt && (comment.kind === "general" || comment.anchorStatus === "unplaced"));
     if (active.length === 0) {
       const empty = document.createElement("p");
       empty.className = "muted";
@@ -69,6 +69,8 @@ function enhanceDraft(root: HTMLElement): void {
       listEl.append(empty);
       return;
     }
+    const details = root.querySelector<HTMLDetailsElement>(".gd-draft-details");
+    if (details && active.some((comment) => comment.anchorStatus === "unplaced")) details.open = true;
     for (const comment of active) {
       const item = document.createElement("article");
       item.className = "gd-comment";
