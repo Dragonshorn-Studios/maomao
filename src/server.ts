@@ -98,7 +98,7 @@ import { renderGuidedDiffWorkspace, renderGuidedInboxPage, renderGuidedOpenError
 import { parseUnifiedDiff } from "./guided/diff.js";
 import { buildGuidedPublishPreview } from "./guided/publish-preview.js";
 import { buildGuidedComparison, comparisonOverrides } from "./guided/comparison.js";
-import { GuidedHumanPublishStore, guidedHumanPayloadHash, submitHumanGitHubReview } from "./guided/human-publish.js";
+import { GuidedHumanPublishStore, HUMAN_PUBLISH_PENDING_LEASE_MS, guidedHumanPayloadHash, submitHumanGitHubReview } from "./guided/human-publish.js";
 import { guidedWalkthroughFingerprint, guidedWalkthroughView, type GuidedWalkthroughStore } from "./guided/walkthrough-store.js";
 import type { GuidedWalkthroughService } from "./guided/walkthrough.js";
 import { listGuidedInbox } from "./guided/inbox.js";
@@ -1660,16 +1660,18 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
       const existing = reservation.row;
       const workspace = `/guided/github/${encodeURIComponent(session.repo_full_name.split("/")[0])}/${encodeURIComponent(session.repo_full_name.split("/")[1])}/${session.pr_number}#publish`;
       if (existing.status === "published") return c.redirect(workspace, 303);
-      if (existing.status === "pending" && !reservation.created) {
-        return c.html(renderGuidedOpenError({ options: guidedPageOpts(c), error: "A publication attempt is already in progress; duplicate submission is blocked." }), 409);
-      }
-      if (existing.payload_hash !== payloadHash) {
-        if (existing.status !== "failed" && existing.status !== "uncertain") {
-          return c.html(renderGuidedOpenError({ options: guidedPageOpts(c), error: "This guided draft already has a different publication payload. Reusing the same session for a changed payload is blocked to prevent duplicate or ambiguous reviews." }), 409);
+      if (!reservation.created) {
+        // Failed/uncertain rows must be atomically reclaimed before the async GitHub
+        // submission; otherwise concurrent retries can both pass the guard. A pending
+        // row is reclaimable only after the submission lease has expired, which is
+        // the recovery path for a process crash between reservation and completion.
+        const stalePendingBefore = new Date(Date.now() - HUMAN_PUBLISH_PENDING_LEASE_MS).toISOString();
+        if (!humanPublish.reopenPublication(existing.id, preview.event, payloadHash, { stalePendingBefore })) {
+          const message = existing.status === "pending"
+            ? "A publication attempt is already in progress; duplicate submission is blocked."
+            : "This guided draft already has a different publication state. Refresh before retrying.";
+          return c.html(renderGuidedOpenError({ options: guidedPageOpts(c), error: message }), 409);
         }
-        humanPublish.reopenPublication(existing.id, preview.event, payloadHash);
-        existing.payload_hash = payloadHash;
-        existing.status = "pending";
       }
       humanPublish.audit(actor, session.id, "publish_attempt", `event=${preview.event}`);
       const result = await submitHumanGitHubReview({
