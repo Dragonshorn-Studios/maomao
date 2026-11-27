@@ -365,6 +365,56 @@ function migrate(db: SqliteDb): void {
       created_at TEXT NOT NULL
     );
 
+    CREATE TABLE IF NOT EXISTS guided_review_sessions (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      actor_provider TEXT NOT NULL,
+      actor_id TEXT NOT NULL,
+      provider TEXT NOT NULL,
+      provider_instance TEXT NOT NULL,
+      repo_full_name TEXT NOT NULL,
+      pr_number INTEGER NOT NULL,
+      base_sha TEXT NOT NULL,
+      head_sha TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'archived')),
+      current_path TEXT,
+      current_hunk TEXT,
+      position_json TEXT NOT NULL DEFAULT '{}',
+      viewed_files_json TEXT NOT NULL DEFAULT '[]',
+      draft_summary TEXT NOT NULL DEFAULT '',
+      draft_verdict TEXT CHECK (draft_verdict IN ('COMMENT', 'APPROVE', 'REQUEST_CHANGES')),
+      walkthrough_ref TEXT,
+      comparison_state_json TEXT NOT NULL DEFAULT '{}',
+      version INTEGER NOT NULL DEFAULT 1,
+      historical_at TEXT,
+      last_mutation_id TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      last_opened_at TEXT NOT NULL,
+      UNIQUE (actor_provider, actor_id, provider, provider_instance, repo_full_name, pr_number, base_sha, head_sha)
+    );
+
+    CREATE TABLE IF NOT EXISTS guided_review_comments (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      session_id INTEGER NOT NULL REFERENCES guided_review_sessions(id) ON DELETE CASCADE,
+      client_id TEXT NOT NULL,
+      kind TEXT NOT NULL CHECK (kind IN ('inline', 'general')),
+      body TEXT NOT NULL,
+      path TEXT,
+      side TEXT CHECK (side IN ('LEFT', 'RIGHT')),
+      line INTEGER,
+      hunk_anchor TEXT,
+      anchor_status TEXT NOT NULL DEFAULT 'anchored' CHECK (anchor_status IN ('anchored', 'unplaced')),
+      severity TEXT CHECK (severity IN ('low', 'medium', 'high', 'critical')),
+      category TEXT,
+      publishable INTEGER NOT NULL DEFAULT 0,
+      source_comment_id INTEGER,
+      mutation_id TEXT,
+      deleted_at TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      UNIQUE (session_id, client_id)
+    );
+
     CREATE TABLE IF NOT EXISTS profile_revisions (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       name TEXT NOT NULL,
@@ -381,6 +431,9 @@ function migrate(db: SqliteDb): void {
 
     CREATE INDEX IF NOT EXISTS idx_chat_conversations_job ON chat_conversations(job_id, id);
     CREATE INDEX IF NOT EXISTS idx_chat_messages_conversation ON chat_messages(conversation_id, id);
+    CREATE INDEX IF NOT EXISTS idx_guided_review_sessions_actor_pr
+      ON guided_review_sessions(actor_provider, actor_id, provider, provider_instance, repo_full_name, pr_number, updated_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_guided_review_comments_session ON guided_review_comments(session_id, id);
 
     CREATE TABLE IF NOT EXISTS profile_routes (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
