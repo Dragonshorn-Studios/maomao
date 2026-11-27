@@ -553,22 +553,7 @@ function enhanceWalkthrough(root: HTMLElement): void {
     if (action === "retry") timer = window.setTimeout(() => void refresh(), 500);
   }
 
-  root.addEventListener("click", (event) => {
-    const anchor = event.target instanceof Element ? event.target.closest<HTMLAnchorElement>('a[href^="#f"]') : null;
-    const hash = anchor?.getAttribute("href") ?? "";
-    const match = hash.match(/^#f(.+)-h(\d+)-L([on])(\d+)$/);
-    if (!anchor || !match) return;
-    let path = "";
-    try {
-      path = decodeURIComponent(match[1]);
-    } catch {
-      return;
-    }
-    const handled = globalThis.__maomaoPierre?.scrollToGuidedLine(path, Number(match[4]), match[3] === "o" ? "LEFT" : "RIGHT") === true;
-    if (!handled) return;
-    event.preventDefault();
-    history.pushState(null, "", hash);
-  });
+  root.addEventListener("click", handleGuidedLineAnchorClick);
 
   root.querySelector("[data-walkthrough-refresh]")?.addEventListener("click", (event) => {
     event.preventDefault();
@@ -595,9 +580,64 @@ function enhanceGuidedWalkthroughs(): void {
   }
 }
 
+
+function handleGuidedLineAnchorClick(event: Event): void {
+  const anchor = event.target instanceof Element ? event.target.closest<HTMLAnchorElement>('a[href^="#f"]') : null;
+  const hash = anchor?.getAttribute("href") ?? "";
+  const match = hash.match(/^#f(.+)-h(\d+)-L([on])(\d+)$/);
+  if (!anchor || !match) return;
+  let path = "";
+  try {
+    path = decodeURIComponent(match[1]);
+  } catch {
+    return;
+  }
+  const handled = globalThis.__maomaoPierre?.scrollToGuidedLine(path, Number(match[4]), match[3] === "o" ? "LEFT" : "RIGHT") === true;
+  if (!handled) return;
+  event.preventDefault();
+  history.pushState(null, "", hash);
+}
+
+function enhanceGuidedComparisons(): void {
+  for (const root of document.querySelectorAll<HTMLElement>("[data-guided-comparison]")) {
+    if (root.dataset.enhanced === "1") continue;
+    root.dataset.enhanced = "1";
+    root.addEventListener("click", handleGuidedLineAnchorClick);
+    const sessionId = Number(root.dataset.sessionId);
+    if (!sessionId || root.dataset.state !== "pending") continue;
+    const poll = async () => {
+      try {
+        const response = await fetch(`/api/guided-review/sessions/${sessionId}/comparison`);
+        if (!response.ok) {
+          window.setTimeout(() => void poll(), 8000);
+          return;
+        }
+        const body = (await response.json()) as { comparison?: { state?: string } };
+        if (body.comparison?.state && body.comparison.state !== "pending") {
+          const active = document.activeElement;
+          const saveState = document.querySelector<HTMLElement>("[data-save-state]")?.dataset.state;
+          const draftBusy = saveState === "unsaved" || saveState === "saving" || saveState === "error" || saveState === "conflict";
+          if (draftBusy || active instanceof HTMLTextAreaElement || active instanceof HTMLInputElement || active instanceof HTMLSelectElement) {
+            window.setTimeout(() => void poll(), 5000);
+          } else {
+            window.location.reload();
+          }
+          return;
+        }
+        window.setTimeout(() => void poll(), 5000);
+      } catch {
+        window.setTimeout(() => void poll(), 8000);
+      }
+    };
+    window.setTimeout(() => void poll(), 3000);
+  }
+}
+
+
 function enhanceGuidedPage(): void {
   enhanceGuidedDrafts();
   enhanceGuidedWalkthroughs();
+  enhanceGuidedComparisons();
 }
 
 export function enhanceGuidedDrafts(): void {
