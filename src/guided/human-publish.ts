@@ -196,16 +196,18 @@ function messageOf(body: unknown): string {
   return "GitHub rejected the human review submission";
 }
 
-async function findMarkerReview(fetchImpl: typeof fetch, token: string, owner: string, repo: string, prNumber: number, actorId: string, marker: string): Promise<{ id: number; htmlUrl?: string } | undefined> {
-  const result = await githubApi(fetchImpl, token, "GET", `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/pulls/${prNumber}/reviews?per_page=100`);
-  if (!result.ok || !Array.isArray(result.body)) return undefined;
-  for (const review of result.body) {
-    if (!review || typeof review !== "object") continue;
-    const row = review as { id?: unknown; body?: unknown; html_url?: unknown; user?: { id?: unknown } };
-    if (String(row.user?.id ?? "") !== actorId || typeof row.body !== "string" || !row.body.includes(marker)) continue;
-    if (typeof row.id === "number") return { id: row.id, htmlUrl: typeof row.html_url === "string" ? row.html_url : undefined };
+async function findMarkerReview(fetchImpl: typeof fetch, token: string, owner: string, repo: string, prNumber: number, actorId: string, marker: string, expectedBody: string): Promise<{ id: number; htmlUrl?: string } | undefined> {
+  for (let page = 1; ; page += 1) {
+    const result = await githubApi(fetchImpl, token, "GET", `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/pulls/${prNumber}/reviews?per_page=100&page=${page}`);
+    if (!result.ok || !Array.isArray(result.body)) return undefined;
+    for (const review of result.body) {
+      if (!review || typeof review !== "object") continue;
+      const row = review as { id?: unknown; body?: unknown; html_url?: unknown; user?: { id?: unknown } };
+      if (String(row.user?.id ?? "") !== actorId || row.body !== expectedBody || !row.body.includes(marker)) continue;
+      if (typeof row.id === "number") return { id: row.id, htmlUrl: typeof row.html_url === "string" ? row.html_url : undefined };
+    }
+    if (result.body.length < 100) return undefined;
   }
-  return undefined;
 }
 
 export async function submitHumanGitHubReview(input: {
@@ -249,7 +251,7 @@ export async function submitHumanGitHubReview(input: {
   if (pull.head?.sha !== input.preview.target.headSha) return failure("head_changed", "The pull request head changed since this SHA-pinned draft; publication was rejected.");
 
   try {
-    const existing = await findMarkerReview(fetchImpl, input.token, owner, repo, input.prNumber, input.actorId, wrappedMarker);
+    const existing = await findMarkerReview(fetchImpl, input.token, owner, repo, input.prNumber, input.actorId, wrappedMarker, input.preview.body);
     if (existing) return { status: "duplicate", reviewId: existing.id, htmlUrl: existing.htmlUrl };
   } catch {
     // A failed duplicate check must not block the first deliberate write; the post-failure recovery check runs again.
@@ -269,7 +271,7 @@ export async function submitHumanGitHubReview(input: {
     return failure(code, result.status === 422 ? `GitHub rejected the inline review coordinates: ${messageOf(result.body)}` : messageOf(result.body));
   } catch (error) {
     try {
-      const recovered = await findMarkerReview(fetchImpl, input.token, owner, repo, input.prNumber, input.actorId, wrappedMarker);
+      const recovered = await findMarkerReview(fetchImpl, input.token, owner, repo, input.prNumber, input.actorId, wrappedMarker, input.preview.body);
       if (recovered) return { status: "published", reviewId: recovered.id, htmlUrl: recovered.htmlUrl };
     } catch {
       // Keep the original timeout classification below.
