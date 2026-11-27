@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { exchangeOAuthCode, fetchGithubUser } from "./oauth.js";
+import { exchangeOAuthCode, exchangeOAuthCodeDetails, fetchGithubUser, oauthAuthorizeUrl } from "./oauth.js";
 import type { Config } from "./config.js";
 
 function config(): Config {
@@ -21,6 +21,20 @@ describe("oauth token exchange", () => {
     const [url, init] = fetchImpl.mock.calls[0] as [string, RequestInit];
     expect(url).toBe("https://github.com/login/oauth/access_token");
     expect(JSON.parse(String(init.body))).toMatchObject({ client_id: "cid", code: "good-code" });
+  });
+
+
+  it("returns granted scope and expiry details for the separate human-publication flow", async () => {
+    const fetchImpl = vi.fn().mockResolvedValue(jsonResponse({ access_token: "tok", scope: "public_repo", expires_in: 3600 }));
+    const details = await exchangeOAuthCodeDetails(config(), "good-code", fetchImpl as unknown as typeof fetch);
+    expect(details?.accessToken).toBe("tok");
+    expect(details?.scope).toBe("public_repo");
+    expect(Date.parse(details?.expiresAt ?? "")).toBeGreaterThan(Date.now());
+  });
+
+  it("adds an explicit scope only when requested", () => {
+    expect(oauthAuthorizeUrl(config(), "state")).not.toContain("scope=");
+    expect(oauthAuthorizeUrl(config(), "state", "public_repo")).toContain("scope=public_repo");
   });
 
   it("returns undefined on GitHub's 200-with-error body (e.g. bad_verification_code)", async () => {
