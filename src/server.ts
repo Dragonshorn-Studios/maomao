@@ -70,6 +70,7 @@ import {
   INFERNAL_CSS,
   INFERNAL_HREF,
   INFERNAL_URL,
+  GUIDED_BUNDLE_HREF,
   PIERRE_DIFFS_HREF,
   CHAT_BUNDLE_HREF,
   primeDiskAssetVersion,
@@ -93,6 +94,7 @@ import {
 import { renderProvidersPage } from "./ui/providers.js";
 import { renderGuidedDiffWorkspace, renderGuidedInboxPage, renderGuidedOpenError, renderGuidedSessionPage } from "./ui/guided.js";
 import { parseUnifiedDiff } from "./guided/diff.js";
+import { buildGuidedPublishPreview } from "./guided/publish-preview.js";
 import { listGuidedInbox } from "./guided/inbox.js";
 import { renderTelemetryPage, TELEMETRY_PAGE_HREF, TELEMETRY_PAGE_JS, type TelemetryProbeRow } from "./ui/telemetry.js";
 import {
@@ -869,18 +871,34 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
     return staticAsset(c, pierreBundle, "text/javascript; charset=utf-8");
   });
 
+  let guidedBundle: string | undefined;
+  app.get(GUIDED_BUNDLE_HREF, (c) => {
+    if (guidedBundle === undefined) {
+      try {
+        guidedBundle = readFileSync(resolve(assetsDir, "guided.js"), "utf8");
+        primeDiskAssetVersion(GUIDED_BUNDLE_HREF, guidedBundle);
+      } catch {
+        console.warn("assets: guided bundle not built; run npm run build:vendor");
+        return c.text("Not found", 404);
+      }
+    }
+    return staticAsset(c, guidedBundle, "text/javascript; charset=utf-8");
+  });
+
   // Prime the vendor-bundle fingerprints eagerly: pages rendered before the
   // first asset request would otherwise embed the unversioned fallback. A
   // missing bundle stays unprimed — dev servers started before build:vendor
   // fall back to the bare path, which 404s either way until the build runs.
   for (const [href, file] of [
     [CHAT_BUNDLE_HREF, resolve(assetsDir, "chat.js")],
+    [GUIDED_BUNDLE_HREF, resolve(assetsDir, "guided.js")],
     [PIERRE_DIFFS_HREF, resolve(vendorDir, "pierre-diffs.js")],
   ] as const) {
     try {
       const body = readFileSync(file, "utf8");
       primeDiskAssetVersion(href, body);
       if (href === CHAT_BUNDLE_HREF) chatBundle = body;
+      else if (href === GUIDED_BUNDLE_HREF) guidedBundle = body;
       else pierreBundle = body;
     } catch {
       // Not built yet — the lazy path in the asset routes keeps retrying.
@@ -1259,6 +1277,9 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
             sessionVersion: session?.version,
             viewedFiles: session ? (JSON.parse(session.viewed_files_json) as string[]) : [],
             csrfToken: gateOn ? ensureCsrfToken(c, ctx.config.uiSessionSecret) : undefined,
+            sessionView: session ? guidedSessionView(session) : undefined,
+            comments: session ? ctx.store.guidedReview.listComments(session.id).map(guidedCommentView) : [],
+            readOnly: !actor,
           });
         } catch (error) {
           diffWorkspace = renderGuidedDiffWorkspace({
@@ -1377,6 +1398,20 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
         const detail = truncate(redactSecrets(error instanceof Error ? error.message : String(error), githubSecrets(ctx.config)), 240);
         return c.json({ error: "guided_review_context_unavailable", message: detail }, 502);
       }
+    }),
+  );
+
+  app.get("/api/guided-review/sessions/:id/preview", (c) =>
+    guidedRoute(c, () => {
+      const actor = guidedActor(c);
+      if (!actor) return guidedIdentityRequired(c);
+      const session = ctx.store.guidedReview.getOwned(guidedId(c.req.param("id")), actor);
+      if (!session) return c.json({ error: "guided_review_session_not_found" }, 404);
+      const preview = buildGuidedPublishPreview(
+        guidedSessionView(session),
+        ctx.store.guidedReview.listComments(session.id).map(guidedCommentView),
+      );
+      return c.json({ preview });
     }),
   );
 

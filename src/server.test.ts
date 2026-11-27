@@ -4335,6 +4335,8 @@ describe("pierre diffs vendor asset", () => {
     );
     const missing = await app.request("/assets/vendor/pierre-diffs.js");
     expect(missing.status).toBe(404);
+    const guided = await app.request("/assets/guided.js");
+    expect(guided.status).toBe(404);
   });
 
   it("serves a bundle placed into the vendor directory (fixture, not cwd dist)", async () => {

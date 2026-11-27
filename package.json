@@ -18,8 +18,8 @@
     "test": "npm run build:vendor && vitest run",
     "test:report": "npm run build:vendor && vitest run --coverage --reporter=default --reporter=json --outputFile=coverage/vitest.json",
     "test:watch": "vitest",
-    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.chat.json --noEmit && tsc -p tsconfig.e2e.json",
-    "build:vendor": "esbuild src/ui/pierre-entry.ts --bundle --minify --format=iife --global-name=__maomaoPierre --target=es2020 --outfile=dist/assets/vendor/pierre-diffs.js && esbuild src/ui/chat-entry.tsx --bundle --minify --format=iife --jsx=automatic --target=es2020 --outfile=dist/assets/chat.js"
+    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.browser.json --noEmit && tsc -p tsconfig.chat.json --noEmit && tsc -p tsconfig.e2e.json",
+    "build:vendor": "esbuild src/ui/pierre-entry.ts --bundle --minify --format=iife --global-name=__maomaoPierre --target=es2020 --outfile=dist/assets/vendor/pierre-diffs.js && esbuild src/ui/chat-entry.tsx --bundle --minify --format=iife --jsx=automatic --target=es2020 --outfile=dist/assets/chat.js && esbuild src/ui/guided-client.ts --bundle --minify --format=iife --target=es2020 --outfile=dist/assets/guided.js"
   },
   "dependencies": {
     "@hono/node-server": "^1.19.6",

@@ -57,7 +57,7 @@ export { THEME_CSS, THEME_HREF, THEME_URL } from "./theme.js";
 export { INFERNAL_CSS, INFERNAL_HREF, INFERNAL_URL } from "./infernal.js";
 export { TYPEAHEAD_JS, TYPEAHEAD_HREF } from "./typeahead.js";
 export { MODEL_PICKER_JS, MODEL_PICKER_HREF } from "./model-picker.js";
-export { PIERRE_DIFFS_HREF, CHAT_BUNDLE_HREF, primeDiskAssetVersion, diskAssetUrl } from "./paths.js";
+export { PIERRE_DIFFS_HREF, CHAT_BUNDLE_HREF, GUIDED_BUNDLE_HREF, primeDiskAssetVersion, diskAssetUrl } from "./paths.js";
 export {
   FAVICON_SVG,
   FAVICON_PNG_BASE64,
