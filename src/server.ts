@@ -23,6 +23,7 @@ import { authorizeGithubAccount, authorizeGithubRepository, authorizeGithubTarge
 import { registerQueuedReviewer } from "./github/reviewer-request.js";
 import { repoRateLimitActive, RepoRateLimiter, WindowRateLimiter } from "./github/rate-limit.js";
 import { parseGithubPullUrl, PullUrlError } from "./github/pull-url.js";
+import { canIssueOverride } from "./findings/commands.js";
 import { dispatchEnqueue, enqueuePullJob } from "./jobs/enqueue.js";
 import { cancelJob, cancelJobsForRepoType, cancelJobsForType } from "./jobs/cancel.js";
 import { LIVE_JOB_STATES } from "./config.js";
@@ -1667,6 +1668,20 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
       if (!job || job.routing_profile !== "poison-alert") {
         return c.html(renderGuidedOpenError({ options: guidedPageOpts(c), error: "This exact head has no poison-alert human-attention gate waiting for a decision." }), 400);
       }
+      const login = c.get("identity")?.login;
+      const [owner, repo] = session.repo_full_name.split("/");
+      if (!login || !owner || !repo || !ctx.github?.getCollaboratorPermission) {
+        return c.html(renderGuidedOpenError({ options: guidedPageOpts(c), error: "GitHub collaborator authorization is unavailable; no attention decision was recorded." }), 503);
+      }
+      let permission: string;
+      try {
+        permission = await ctx.github.getCollaboratorPermission(job.installation_id, owner, repo, login);
+      } catch (error) {
+        return c.html(renderGuidedOpenError({ options: guidedPageOpts(c), error: `Could not verify GitHub collaborator permission; no attention decision was recorded: ${error instanceof Error ? error.message : String(error)}` }), 502);
+      }
+      if (!canIssueOverride(permission)) {
+        return c.html(renderGuidedOpenError({ options: guidedPageOpts(c), error: `GitHub collaborator permission ${permission || "none"} cannot release a poison-alert human-attention gate. Write, maintain, or admin permission is required.` }), 403);
+      }
       const reevaluate = ctx.guidedAttentionReevaluate;
       if (!reevaluate) {
         return c.html(renderGuidedOpenError({ options: guidedPageOpts(c), error: "The Guided Review merge-readiness integration is not configured on this server; no attention decision was recorded." }), 503);
@@ -1685,7 +1700,6 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
       } catch (error) {
         return c.html(renderGuidedOpenError({ options: guidedPageOpts(c), error: `The decision was recorded, but merge-readiness re-evaluation failed: ${error instanceof Error ? error.message : String(error)}. Repeat the same decision after recovery; it is idempotent.` }), 502);
       }
-      const [owner, repo] = session.repo_full_name.split("/");
       return c.redirect(`/guided/github/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/${session.pr_number}#attention`, 303);
     }),
   );

@@ -2457,7 +2457,7 @@ export class JobStore {
     if (headSha) {
       return this.db
         .prepare(
-          `SELECT * FROM jobs WHERE provider = ? AND provider_instance = ? AND repo_full_name = ? AND pr_number = ? AND head_sha = ?`,
+          `SELECT * FROM jobs WHERE provider = ? AND provider_instance = ? AND repo_full_name = ? AND pr_number = ? AND head_sha = ? ORDER BY id DESC LIMIT 1`,
         )
         .get(resolved.provider, resolved.instance, repoFullName, prNumber, headSha) as JobRow | undefined;
     }

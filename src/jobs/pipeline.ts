@@ -250,12 +250,11 @@ export function createPipeline(deps: PipelineDeps) {
       guidedDiagnosisGraceMemory.set(job.id, "diagnosis grace disabled; automatic review continued");
       return;
     }
-    deps.store.log(job.id, `Guided Review diagnosis grace: waiting up to ${graceMs}ms for an exact-SHA human-attention decision`);
+    deps.store.log(job.id, `Guided Review diagnosis grace: allowing active exact-SHA human review up to ${graceMs}ms before automatic review continues`);
     const deadline = Date.now() + graceMs;
     while (Date.now() < deadline) {
       throwIfStale(deps.store, job.id, signal);
       await sleep(Math.min(500, deadline - Date.now()));
-      if (deps.store.guidedAttention.decisionFor(key)) return;
     }
     const detail = `diagnosis human-attention grace expired after ${graceMs}ms; automatic review continued`;
     guidedDiagnosisGraceMemory.set(job.id, detail);
@@ -267,7 +266,39 @@ export function createPipeline(deps: PipelineDeps) {
    * the bounded pre-review grace outcome; poison-alert remains non-green until
    * a persisted exact-SHA human decision.
    */
+  function resolveMergeGroupGuidedAttention(job: JobRow): GuidedAttentionOutcome {
+    const participants = mergeGroupParticipants(job);
+    if (participants.length === 0) return { state: "not_required", detail: "merge group payload has no participant pull heads" };
+    const waiting: string[] = [];
+    const satisfied: string[] = [];
+    for (const participant of participants) {
+      const participantJob = deps.store.findLatestJobForPull(job.repo_full_name, participant.number, participant.headSha, {
+        provider: job.provider,
+        instance: job.provider_instance,
+      });
+      if (participantJob?.routing_profile !== "poison-alert") continue;
+      const decision = deps.store.guidedAttention.decisionFor({
+        provider: job.provider,
+        instance: job.provider_instance,
+        repoFullName: job.repo_full_name,
+        prNumber: participant.number,
+        headSha: participant.headSha,
+      });
+      if (decision) satisfied.push(`PR #${participant.number}: ${attentionDecisionDetail(decision)}`);
+      else waiting.push(`PR #${participant.number} at exact participant head ${participant.headSha.slice(0, 12)}`);
+    }
+    if (waiting.length > 0) {
+      return {
+        state: "waiting",
+        detail: `poison-alert merge-group participant requires an explicit exact-SHA decision before the group gate can go green: ${waiting.join("; ")}`,
+      };
+    }
+    if (satisfied.length > 0) return { state: "satisfied", detail: `merge-group participant attention satisfied — ${satisfied.join("; ")}` };
+    return { state: "not_required", detail: "no merge-group participant is routed poison-alert" };
+  }
+
   function resolveGuidedHumanAttention(job: JobRow): GuidedAttentionOutcome {
+    if (job.job_type === "merge_group_check") return resolveMergeGroupGuidedAttention(job);
     if (job.job_type !== "pr_review" || job.pr_number <= 0) return { state: "not_required", detail: "not a pull review" };
     const profile = job.routing_profile ?? "diagnosis";
     if (profile === "observation") return { state: "not_required", detail: "observation profile never waits for Guided Review" };
