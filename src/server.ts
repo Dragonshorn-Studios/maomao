@@ -1233,6 +1233,8 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
             files,
             fileFilter: c.req.query("file") || undefined,
             statusFilter: c.req.query("status") || undefined,
+            baseSha: pull.baseSha,
+            headSha: pull.headSha,
             sessionId: session?.id,
             sessionVersion: session?.version,
             viewedFiles: session ? (JSON.parse(session.viewed_files_json) as string[]) : [],
