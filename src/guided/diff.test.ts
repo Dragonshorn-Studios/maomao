@@ -243,7 +243,7 @@ Binary files a/a.png and b/a.png differ
 
 describe("renderGuidedPublishPanel", () => {
   it("offers deliberate retry forms for failed and uncertain publications", () => {
-    for (const state of ["failed", "uncertain"] as const) {
+    for (const state of ["failed", "uncertain", "stale_pending"] as const) {
       const html = renderGuidedPublishPanel({
         publish: { state, message: "retry needed", canConnect: false, login: "operator" },
         sessionId: 7,
