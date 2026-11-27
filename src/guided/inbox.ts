@@ -3,6 +3,7 @@ import type { GithubPort } from "../github/client.js";
 import { enumerateGithubInstallationRepositories, type GithubInstallationRepoOption } from "../github/enumerate.js";
 import type { JobStore } from "../jobs/store.js";
 import type { GuidedActor } from "./store.js";
+import type { ForgeConnectionStore } from "../forge/connections.js";
 
 export const GUIDED_INBOX_PAGE_SIZE = 25;
 
@@ -61,11 +62,15 @@ export async function listGuidedInbox(input: {
   config: Config;
   store: JobStore;
   github?: Partial<GithubPort>;
+  forgeConnections?: ForgeConnectionStore;
   actor?: GuidedActor;
   filters?: GuidedInboxFilters;
 }): Promise<GuidedInboxPage> {
   const errors: string[] = [];
   const unsupported: string[] = [];
+  for (const connection of input.forgeConnections?.list().filter((row) => row.enabled === 1) ?? []) {
+    unsupported.push(`${connection.provider} connection "${connection.label}" cannot list open pull requests for Guided Review yet.`);
+  }
   const filters = input.filters ?? {};
   let repos: GithubInstallationRepoOption[] = [];
   if (!input.github?.listAppInstallations || !input.github.listInstallationRepositories) {

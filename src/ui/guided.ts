@@ -21,7 +21,7 @@ function stateLabel(state: string | undefined): string {
   return `Maomao ${state.replaceAll("_", " ")}`;
 }
 
-function inboxRow(item: GuidedInboxItem): string {
+function inboxRow(item: GuidedInboxItem, csrfToken: string | undefined): string {
   const requested = item.reviewRequested === undefined ? "review state unknown" : item.reviewRequested ? "review requested" : "no review requested";
   const guided = item.guidedState === "current"
     ? `Draft current${item.guidedCommentCount ? ` · ${item.guidedCommentCount} comment${item.guidedCommentCount === 1 ? "" : "s"}` : ""}`
@@ -39,6 +39,7 @@ function inboxRow(item: GuidedInboxItem): string {
       <span class="job-chip" data-state="${escapeHtml(item.maomaoState ?? "none")}">${escapeHtml(stateLabel(item.maomaoState))}</span>
       <span class="muted">${escapeHtml(requested)}</span>
       <span class="muted">${escapeHtml(guided)}</span>
+      <form method="post" action="${guidedHref(item)}/open">${csrfInput(csrfToken)}<button class="if-button if-button--sm" type="submit">Open</button></form>
     </span>
   </li>`;
 }
@@ -54,7 +55,7 @@ export function renderGuidedInboxPage(input: {
   const filterQuery = { ...filters };
   const newerOffset = Math.max(0, page.offset - page.limit);
   const olderOffset = page.offset + page.limit;
-  const rows = page.items.map(inboxRow).join("\n");
+  const rows = page.items.map((item) => inboxRow(item, input.options.csrfToken)).join("\n");
   const repoOptions = page.repos.map((repo) => `<option value="${escapeHtml(repo)}"${filters.repo === repo ? " selected" : ""}>${escapeHtml(repo)}</option>`).join("");
   const errorHtml = [...page.unsupported, ...page.errors].map((error) => `<p class="error if-banner if-banner--danger" role="alert">${escapeHtml(error)}</p>`).join("\n");
   const body = `
@@ -121,6 +122,7 @@ export function renderGuidedSessionPage(input: {
   sessionVersion?: number;
   commentCount?: number;
   readOnly?: boolean;
+  canStart?: boolean;
   staleFrom?: { id: number; baseSha: string; headSha: string };
 }): string {
   const readonly = input.readOnly
@@ -141,7 +143,8 @@ export function renderGuidedSessionPage(input: {
         <div><dt>Head</dt><dd><code>${escapeHtml(input.headSha)}</code></dd></div>
         ${input.sessionId ? `<div><dt>Draft session</dt><dd>#${input.sessionId} · version ${input.sessionVersion ?? 1} · ${input.commentCount ?? 0} comments</dd></div>` : ""}
       </dl>
-      <p class="muted">The diff workspace and walkthrough land in the next Guided Review slices. Opening this page has already created or resumed your actor-private SHA-pinned draft.</p>
+      ${input.canStart ? `<form method="post" action="/guided/github/${encodeURIComponent(input.repoFullName.split("/")[0])}/${encodeURIComponent(input.repoFullName.split("/")[1])}/${input.prNumber}/open">${csrfInput(input.options.csrfToken)}<button class="if-button if-button--primary" type="submit">Start guided draft</button></form>` : ""}
+      <p class="muted">The diff workspace and walkthrough land in the next Guided Review slices. Starting creates your actor-private SHA-pinned draft; returning to the same SHAs resumes it.</p>
     </section>`;
   return layout(`Guided Review #${input.prNumber}`, body, { ...input.options, nav: "guided" });
 }
