@@ -17,6 +17,7 @@ import { resolveChannelUrl } from "../telemetry/settings.js";
 import { ReviewConfigStore } from "../config-revisions.js";
 import { PromptRevisionStore } from "../prompt-revisions.js";
 import { GuidedReviewStore } from "../guided/store.js";
+import { GuidedAttentionStore } from "../guided/attention.js";
 
 /** Every job type the queue can hold — the single source of truth for the
  * union. Runtime validation and queue-family definitions derive from this
@@ -512,6 +513,8 @@ export class JobStore {
   readonly prompts: PromptRevisionStore;
   /** Actor-private Guided Review drafts over the same database. */
   readonly guidedReview: GuidedReviewStore;
+  /** Exact-SHA human attention/delegation decisions for Guided Review. */
+  readonly guidedAttention: GuidedAttentionStore;
 
   constructor(
     private readonly db: SqliteDb,
@@ -527,6 +530,7 @@ export class JobStore {
     this.configs = new ReviewConfigStore(db, modelCatalog);
     this.prompts = new PromptRevisionStore(db);
     this.guidedReview = new GuidedReviewStore(db);
+    this.guidedAttention = new GuidedAttentionStore(db);
   }
 
   enqueue(input: NewJobInput & { profileRevisionId?: number }): EnqueueResult {
@@ -2448,14 +2452,17 @@ export class JobStore {
     return (result as { changes?: number }).changes ?? 0;
   }
 
-  findLatestJobForPull(repoFullName: string, prNumber: number, headSha?: string, scope?: Partial<ForgeScope>): JobRow | undefined {
+  findLatestJobForPull(repoFullName: string, prNumber: number, headSha?: string, scope?: Partial<ForgeScope>, jobType?: string): JobRow | undefined {
     const resolved = normalizeScope(scope);
     if (headSha) {
+      const typeClause = jobType ? "AND job_type = ?" : "";
+      const values: unknown[] = [resolved.provider, resolved.instance, repoFullName, prNumber, headSha];
+      if (jobType) values.push(jobType);
       return this.db
         .prepare(
-          `SELECT * FROM jobs WHERE provider = ? AND provider_instance = ? AND repo_full_name = ? AND pr_number = ? AND head_sha = ?`,
+          `SELECT * FROM jobs WHERE provider = ? AND provider_instance = ? AND repo_full_name = ? AND pr_number = ? AND head_sha = ? ${typeClause} ORDER BY id DESC LIMIT 1`,
         )
-        .get(resolved.provider, resolved.instance, repoFullName, prNumber, headSha) as JobRow | undefined;
+        .get(...values) as JobRow | undefined;
     }
     return this.db
       .prepare(

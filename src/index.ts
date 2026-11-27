@@ -106,6 +106,9 @@ const pipeline = createPipeline({
   getInstallationToken,
   trustedCheckSettings,
 });
+void pipeline.recoverGuidedAttention().catch((error) => {
+  console.warn(`guided attention recovery failed: ${error instanceof Error ? error.message : String(error)}`);
+});
 const queue = new JobQueue(
   store,
   config.jobConcurrency,
@@ -159,6 +162,7 @@ const app = createApp({
   chat,
   guidedWalkthrough,
   guidedHumanPublish: new GuidedHumanPublishStore(db, config.uiSessionSecret),
+  guidedAttentionReevaluate: (jobId) => pipeline.republishGuidedAttention(jobId),
   modelDiscovery,
   telemetrySettings,
   trustedCheckSettings,

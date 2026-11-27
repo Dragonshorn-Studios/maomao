@@ -656,6 +656,101 @@ describe("Guided Review session API", () => {
   });
 
 
+  it("records poison-alert attention decisions only for permitted collaborators, the exact head, and first writer", async () => {
+    const reevaluated: number[] = [];
+    let permission = "write";
+    const permissionChecks: string[] = [];
+    const github = {
+      async getRepoInstallation() { return { installationId: 1, accountId: 1001 }; },
+      async getRepository() { return { id: 2002, private: false }; },
+      async getPull(installationId: number, owner: string, repo: string, prNumber: number) {
+        return {
+          installationId,
+          accountId: 1001,
+          repositoryId: 2002,
+          repoOwner: owner,
+          repoName: repo,
+          repoFullName: `${owner}/${repo}`,
+          prNumber,
+          prTitle: "risk",
+          prBody: "",
+          prHtmlUrl: `https://github.com/${owner}/${repo}/pull/${prNumber}`,
+          prAuthor: "dev",
+          baseSha,
+          headSha,
+          baseRef: "main",
+          headRef: "feature",
+          draft: false,
+          state: "open",
+        };
+      },
+      getCollaboratorPermission: async (_installationId: number, _owner: string, _repo: string, login: string) => {
+        permissionChecks.push(login);
+        return permission;
+      },
+    } as ManualTriggerPort;
+    const { app, store } = guidedTestApp(github, { guidedAttentionReevaluate: async (jobId) => { reevaluated.push(jobId); } });
+    const auth = operator(1001);
+    const stranger = operator(2002);
+    const openedResponse = await postJson(app, "/api/guided-review/sessions/open", auth.cookies, openBody(auth.csrfToken));
+    const opened = (await openedResponse.json()) as { session: { id: number } };
+    const job = store.enqueue({
+      repoFullName: "acme/widgets",
+      repoOwner: "acme",
+      repoName: "widgets",
+      installationId: 1,
+      prNumber: 12,
+      prTitle: "risk",
+      prBody: "",
+      prHtmlUrl: "",
+      prAuthor: "dev",
+      baseSha,
+      headSha,
+      baseRef: "main",
+      headRef: "feature",
+      reviewers: [],
+    }).job;
+    store.patchJob(job.id, { routing_profile: "poison-alert" });
+
+    const form = new URLSearchParams({ action: "delegate_to_maomao", reasonTag: "risk-review", reasonDetail: "security-sensitive", csrf_token: auth.csrfToken });
+    const postDecision = () => app.request(`/guided/sessions/${opened.session.id}/attention`, {
+      method: "POST",
+      headers: { cookie: auth.cookies, "content-type": "application/x-www-form-urlencoded" },
+      body: form.toString(),
+    });
+    permission = "read";
+    const denied = await postDecision();
+    expect(denied.status).toBe(403);
+    expect(await denied.text()).toContain("cannot release a poison-alert human-attention gate");
+    expect(store.guidedAttention.decisionFor({ provider: "github", instance: "github.com", repoFullName: "acme/widgets", prNumber: 12, headSha })).toBeUndefined();
+
+    permission = "write";
+    const response = await postDecision();
+    expect(response.status).toBe(303);
+    expect(reevaluated).toEqual([job.id]);
+    expect(store.guidedAttention.decisionFor({ provider: "github", instance: "github.com", repoFullName: "acme/widgets", prNumber: 12, headSha })).toMatchObject({ actor_id: "1001", action: "delegate_to_maomao", head_sha: headSha });
+
+    const strangerOpenedResponse = await postJson(app, "/api/guided-review/sessions/open", stranger.cookies, openBody(stranger.csrfToken));
+    const strangerOpened = (await strangerOpenedResponse.json()) as { session: { id: number } };
+    const conflictForm = new URLSearchParams({ action: "review_myself", reasonTag: "policy", csrf_token: stranger.csrfToken });
+    const conflict = await app.request(`/guided/sessions/${strangerOpened.session.id}/attention`, {
+      method: "POST",
+      headers: { cookie: stranger.cookies, "content-type": "application/x-www-form-urlencoded" },
+      body: conflictForm.toString(),
+    });
+    expect(conflict.status).toBe(409);
+    expect(await conflict.text()).toContain("Another exact-SHA human-attention decision already exists");
+    const stolen = await app.request(`/guided/sessions/${opened.session.id}/attention`, {
+      method: "POST",
+      headers: { cookie: stranger.cookies, "content-type": "application/x-www-form-urlencoded" },
+      body: conflictForm.toString(),
+    });
+    expect(stolen.status).toBe(404);
+    expect(store.guidedAttention.decisionFor({ provider: "github", instance: "github.com", repoFullName: "acme/widgets", prNumber: 12, headSha: nextHeadSha })).toBeUndefined();
+    expect(permissionChecks).toContain("operator-1001");
+  });
+
+
   it("blocks concurrent retries of a failed publication behind one pending reservation", async () => {
     const posts: string[] = [];
     const githubFetch = async (url: string | URL, init?: RequestInit) => {

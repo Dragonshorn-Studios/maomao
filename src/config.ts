@@ -110,6 +110,8 @@ export interface Config {
   requestReviewerOnEnqueue: boolean;
   pullRequestActions: PullRequestAction[];
   maxInlineComments: number;
+  /** Bounded grace period for active Guided Review work on diagnosis-profile jobs. */
+  guidedReviewDiagnosisGraceMs: number;
   reconcileMinConfidence: number;
   uiPassword: string;
   uiSessionSecret: string;
@@ -342,6 +344,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     requestReviewerOnEnqueue: parseBoolean(env.GITHUB_REQUEST_REVIEWER_ON_ENQUEUE, false),
     pullRequestActions,
     maxInlineComments: Math.max(0, parseInteger(env.MAX_INLINE_COMMENTS, 12)),
+    guidedReviewDiagnosisGraceMs: Math.min(15 * 60_000, Math.max(0, parseInteger(env.GUIDED_REVIEW_DIAGNOSIS_GRACE_MS, 120_000))),
     reconcileMinConfidence: clamp01(env.RECONCILE_MIN_CONFIDENCE, 0.7),
     uiPassword: env.UI_PASSWORD?.trim() || env.MAOMAO_UI_PASSWORD?.trim() || "",
     uiSessionSecret: env.UI_SESSION_SECRET?.trim() || env.MAOMAO_UI_SESSION_SECRET?.trim() || "",

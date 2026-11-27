@@ -50,3 +50,20 @@ describe("mergeReadinessDecision", () => {
     }).conclusion).toBe("failure");
   });
 });
+
+describe("guided human attention input", () => {
+  const base = { reviewConclusion: "success", requireReview: false, requiredChecks: [], results: [] };
+
+  it("makes a missing poison-alert decision action_required without weakening review or check failures", () => {
+    expect(mergeReadinessDecision({ ...base, humanAttention: { state: "waiting", detail: "decision required" } })).toMatchObject({
+      conclusion: "action_required",
+      detail: "unavailable: guided human attention decision missing",
+    });
+    expect(mergeReadinessDecision({ ...base, reviewConclusion: "failure", humanAttention: { state: "waiting", detail: "decision required" } }).conclusion).toBe("failure");
+  });
+
+  it("keeps satisfied and auto-continued attention auditable in successful readiness", () => {
+    expect(mergeReadinessDecision({ ...base, humanAttention: { state: "satisfied", detail: "delegated by github:1001" } }).detail).toContain("guided human attention: delegated by github:1001");
+    expect(mergeReadinessDecision({ ...base, humanAttention: { state: "auto_continue", detail: "grace expired" } }).detail).toContain("grace expired");
+  });
+});
