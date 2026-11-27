@@ -352,7 +352,7 @@ export function renderGuidedComparisonPanel(input: { comparison?: GuidedComparis
 
 
 export interface GuidedPublishPanelView {
-  state: "unsupported" | "password" | "missing" | "expired" | "revoked" | "ready" | "published" | "pending" | "failed" | "uncertain";
+  state: "unsupported" | "password" | "missing" | "expired" | "revoked" | "ready" | "published" | "pending" | "stale_pending" | "failed" | "uncertain";
   message: string;
   scope?: string;
   login?: string;
@@ -367,7 +367,7 @@ export function renderGuidedPublishPanel(input: { publish?: GuidedPublishPanelVi
   const canWrite = input.sessionVersion && input.csrfToken;
   const connect = publish.canConnect && publish.connectHref ? `<p><a class="if-button if-button--sm" href="${escapeHtml(publish.connectHref)}">Connect human GitHub publication</a></p>` : "";
   const disconnect = publish.state === "ready" && canWrite ? `<form method="post" action="/guided/publish/github/disconnect" class="gd-compare-actions">${csrfInput(input.csrfToken)}<button class="if-button if-button--sm" type="submit">Disconnect publication token</button></form>` : "";
-  const retryable = publish.state === "ready" || publish.state === "failed" || publish.state === "uncertain";
+  const retryable = publish.state === "ready" || publish.state === "stale_pending" || publish.state === "failed" || publish.state === "uncertain";
   const action = publish.state === "ready" ? "Publish human review" : "Retry human review publication";
   const confirm = retryable && canWrite ? `<form method="post" action="/guided/sessions/${input.sessionId}/publish" class="gd-human-publish">
     ${csrfInput(input.csrfToken)}<input type="hidden" name="version" value="${input.sessionVersion}"/>

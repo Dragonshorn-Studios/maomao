@@ -619,7 +619,11 @@ function guidedPublishPanelForSession(input: {
     return { state: "published", message: "Published as the connected human GitHub account. Re-submitting this same guided draft is blocked to avoid duplicate reviews.", publicationUrl: publication.html_url ?? undefined, canConnect: false, login: input.login };
   }
   if (publication?.status === "pending") {
-    return { state: "pending", message: "A publication attempt is already in progress; duplicate submission is blocked.", canConnect: false, login: input.login };
+    const pendingLeaseExpired = Date.parse(publication.updated_at) <= Date.now() - HUMAN_PUBLISH_PENDING_LEASE_MS;
+    if (!pendingLeaseExpired) {
+      return { state: "pending", message: "A publication attempt is already in progress; duplicate submission is blocked.", canConnect: false, login: input.login };
+    }
+    return { state: "stale_pending", message: "The prior publication attempt did not complete before its lease expired. Retry first checks GitHub for the exact idempotency payload before any new write.", canConnect: false, login: input.login };
   }
   if (publication?.status === "uncertain") {
     return { state: "uncertain", message: `The prior submission outcome was uncertain (${publication.error_code ?? "network"}). Retrying first checks GitHub for the exact idempotency marker.`, canConnect: false, login: input.login };
