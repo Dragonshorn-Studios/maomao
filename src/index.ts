@@ -15,6 +15,7 @@ import { ChatService } from "./chat/service.js";
 import { ChatStore } from "./chat/store.js";
 import { GuidedWalkthroughStore } from "./guided/walkthrough-store.js";
 import { GuidedWalkthroughService } from "./guided/walkthrough.js";
+import { GuidedHumanPublishStore } from "./guided/human-publish.js";
 import { oauthCallbackUrl, oauthEnabled } from "./oauth.js";
 import { ForgeConnectionStore, countConnections } from "./forge/connections.js";
 import { ensureEnvGitLabConnection } from "./forge/bootstrap.js";
@@ -157,6 +158,7 @@ const app = createApp({
   forgeConnections,
   chat,
   guidedWalkthrough,
+  guidedHumanPublish: new GuidedHumanPublishStore(db, config.uiSessionSecret),
   modelDiscovery,
   telemetrySettings,
   trustedCheckSettings,

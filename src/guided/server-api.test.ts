@@ -8,6 +8,7 @@ import { createApp } from "../server.js";
 import type { ManualTriggerPort } from "../github/client.js";
 import { GuidedWalkthroughStore } from "./walkthrough-store.js";
 import { fingerprintFinding } from "../findings/identity.js";
+import { GuidedHumanPublishStore, guidedHumanPublishMarker } from "./human-publish.js";
 
 const secret = "guided-review-test-secret";
 const baseSha = "a".repeat(40);
@@ -46,7 +47,8 @@ function guidedTestApp(github?: ManualTriggerPort, contextExtras: Partial<Parame
       cancel(row: import("./walkthrough-store.js").GuidedWalkthroughRow) { return walkthroughStore.requestCancel(row.id); },
     } as never,
   };
-  return { app: createApp({ config, store, queue, github, startedAt: Date.now(), env: {}, guidedWalkthrough, ...contextExtras }), store, walkthroughStore };
+  const guidedHumanPublish = contextExtras.guidedHumanPublish ?? new GuidedHumanPublishStore(db, secret);
+  return { app: createApp({ config, store, queue, github, startedAt: Date.now(), env: {}, guidedWalkthrough, guidedHumanPublish, ...contextExtras }), store, walkthroughStore, db, guidedHumanPublish };
 }
 
 function operator(id: number, login = `operator-${id}`) {
@@ -595,6 +597,61 @@ describe("Guided Review session API", () => {
     const body = (await comparison.json()) as { comparison: { jobId: number; maomaoOnly: Array<{ summary: string }> } };
     expect(body.comparison.jobId).toBe(newJob.job.id);
     expect(body.comparison.maomaoOnly.map((item) => item.summary)).toEqual(["Replacement exact-head artifact"]);
+  });
+
+
+  it("publishes a confirmed preview through the encrypted human credential without exposing the token", async () => {
+    const posts: string[] = [];
+    let reviewVisible = false;
+    const githubFetch = async (url: string | URL, init?: RequestInit) => {
+      const text = String(url);
+      if (text.endsWith("/user")) return Response.json({ id: 1001, login: "operator-1001" });
+      if (text.includes("/pulls/12/reviews") && (init?.method ?? "GET") === "GET") {
+        return Response.json(reviewVisible ? [{ id: 123, html_url: "https://github.com/acme/widgets/pull/12#pullrequestreview-123", body: guidedHumanPublishMarker(1), user: { id: 1001 } }] : []);
+      }
+      if (text.includes("/pulls/12") && (init?.method ?? "GET") === "GET") return Response.json({ state: "open", head: { sha: headSha } });
+      if (text.includes("/pulls/12/reviews") && init?.method === "POST") {
+        posts.push(typeof init.body === "string" ? init.body : "");
+        reviewVisible = true;
+        return Response.json({ id: 123, html_url: "https://github.com/acme/widgets/pull/12#pullrequestreview-123" }, { status: 201 });
+      }
+      return Response.json({}, { status: 404 });
+    };
+    const { app, db, guidedHumanPublish: humanPublish } = guidedTestApp(undefined, { oauthFetch: githubFetch as typeof fetch });
+    const auth = operator(1001);
+    humanPublish.saveCredential({ actorProvider: "github", actorId: "1001" }, "human-token", "public_repo");
+
+    const openedResponse = await postJson(app, "/api/guided-review/sessions/open", auth.cookies, openBody(auth.csrfToken));
+    const opened = (await openedResponse.json()) as { session: { id: number; version: number } };
+    const updated = await postJson(app, `/api/guided-review/sessions/${opened.session.id}`, auth.cookies, {
+      version: opened.session.version,
+      draftSummary: "Publish this human summary",
+      draftVerdict: "COMMENT",
+      csrf_token: auth.csrfToken,
+    });
+    const version = ((await updated.json()) as { session: { version: number } }).session.version;
+    const form = new URLSearchParams({ version: String(version), confirm: "yes", csrf_token: auth.csrfToken });
+    const response = await app.request(`/guided/sessions/${opened.session.id}/publish`, {
+      method: "POST",
+      headers: { cookie: auth.cookies, "content-type": "application/x-www-form-urlencoded" },
+      body: form.toString(),
+    });
+    expect(response.status).toBe(303);
+    expect(posts).toHaveLength(1);
+    const payload = JSON.parse(posts[0]) as { commit_id?: string; event?: string; body?: string };
+    expect(payload).toMatchObject({ commit_id: headSha, event: "COMMENT" });
+    expect(payload.body).toContain("Publish this human summary");
+    expect(payload.body).toContain(`maomao-guided-human-publish:${opened.session.id}`);
+    const stored = db.prepare(`SELECT token_encrypted FROM guided_human_credentials`).get() as { token_encrypted: string };
+    expect(stored.token_encrypted).not.toContain("human-token");
+    expect(humanPublish.publicationForSession(opened.session.id)).toMatchObject({ status: "published", review_id: 123 });
+    const replay = await app.request(`/guided/sessions/${opened.session.id}/publish`, {
+      method: "POST",
+      headers: { cookie: auth.cookies, "content-type": "application/x-www-form-urlencoded" },
+      body: form.toString(),
+    });
+    expect(replay.status).toBe(303);
+    expect(posts).toHaveLength(1);
   });
 
 });
