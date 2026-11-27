@@ -2546,9 +2546,15 @@ body.operator main th {
 .gd-comment-trigger { float: right; opacity: 0; border: 0; background: transparent; color: inherit; cursor: pointer; }
 .gd-comment-trigger--pierre { opacity: 1; position: relative; z-index: 2; min-width: 1.25rem; min-height: 1.25rem; padding: 0 .15rem; border-radius: .25rem; background: var(--surface); color: var(--ink); }
 .if-banner[hidden] { display: none; }
+.if-button[hidden] { display: none; }
 .gd-line:hover .gd-comment-trigger, .gd-line:focus-within .gd-comment-trigger { opacity: .85; }
 .gd-preview-controls { display: flex; gap: .5rem; margin-top: 1rem; }
 .gd-preview-payload { max-height: 28rem; overflow: auto; white-space: pre-wrap; }
+.gd-walkthrough { margin-block: var(--if-space-4, 1rem); }
+.gd-walkthrough-content h3 { margin-bottom: .2rem; }
+.gd-walkthrough-controls { display: flex; gap: .5rem; margin-top: .75rem; }
+.gd-spinner { display: inline-block; width: .8em; height: .8em; border: 2px solid currentColor; border-right-color: transparent; border-radius: 50%; animation: gd-spin .9s linear infinite; vertical-align: -.1em; }
+@keyframes gd-spin { to { transform: rotate(360deg); } }
 @media (max-width: 760px) { .gd-draft-grid { grid-template-columns: 1fr; } }
 `.trim();
 

@@ -1,5 +1,6 @@
 import type { GuidedCommentView, GuidedSessionView } from "../guided/store.js";
 import type { GuidedPublishPreview } from "../guided/publish-preview.js";
+import type { GuidedWalkthroughPayload, GuidedWalkthroughView } from "../guided/walkthrough-store.js";
 
 type SaveState = "saved" | "unsaved" | "saving" | "error" | "conflict";
 
@@ -396,6 +397,209 @@ function enhanceDraft(root: HTMLElement): void {
   });
 }
 
+
+function appendText(parent: HTMLElement, tag: string, value: string, className?: string): HTMLElement {
+  const el = document.createElement(tag);
+  if (className) el.className = className;
+  el.textContent = value;
+  parent.append(el);
+  return el;
+}
+
+function fileAnchors(): Map<string, string> {
+  const anchors = new Map<string, string>();
+  document.querySelectorAll<HTMLElement>("[data-guided-file]").forEach((file, index) => {
+    const path = file.dataset.path;
+    if (path) anchors.set(path, `#guided-file-${index}`);
+  });
+  return anchors;
+}
+
+function appendPathLink(parent: HTMLElement, path: string | undefined, label: string, line?: number): void {
+  let href = path ? fileAnchors().get(path) : undefined;
+  if (path && line) {
+    const row = document.querySelector(`[data-anchor-path="${CSS.escape(path)}"][data-anchor-line="${line}"]`);
+    if (row?.id) href = `#${row.id}`;
+  }
+  if (href) {
+    const link = document.createElement("a");
+    link.href = href;
+    link.textContent = label;
+    parent.append(link);
+  } else {
+    appendText(parent, "span", label);
+  }
+}
+
+function renderWalkthroughPayload(container: HTMLElement, payload: GuidedWalkthroughPayload): void {
+  container.textContent = "";
+  appendText(container, "h3", "Intent as expressed");
+  appendText(container, "p", payload.intent.text);
+  appendText(container, "p", `Uncertainty: ${payload.intent.uncertainty}`, "muted");
+  appendText(container, "h3", "Change map");
+  const changes = document.createElement("ul");
+  for (const change of payload.changeMap) {
+    const item = document.createElement("li");
+    appendPathLink(item, change.path, change.path);
+    item.append(document.createTextNode(` — ${change.summary} `));
+    appendText(item, "span", change.evidence, "muted");
+    changes.append(item);
+  }
+  container.append(changes);
+  appendText(container, "h3", "Execution and data flow");
+  appendText(container, "p", payload.flow);
+  appendText(container, "h3", "Decisions and invariants");
+  const decisions = document.createElement("ul");
+  for (const decision of payload.decisions) {
+    const item = document.createElement("li");
+    appendText(item, "strong", decision.title);
+    item.append(document.createTextNode(` — ${decision.details} `));
+    appendText(item, "span", decision.evidence, "muted");
+    decisions.append(item);
+  }
+  container.append(decisions);
+  appendText(container, "h3", "Tests");
+  appendText(container, "p", payload.tests);
+  appendText(container, "h3", "Reviewer questions");
+  const risks = document.createElement("ul");
+  for (const risk of payload.risks) {
+    const item = document.createElement("li");
+    item.append(document.createTextNode(`${risk.question} `));
+    if (risk.path) appendPathLink(item, risk.path, risk.line ? `${risk.path}:${risk.line}` : risk.path, risk.line);
+    item.append(document.createTextNode(" "));
+    appendText(item, "span", risk.evidence, "muted");
+    risks.append(item);
+  }
+  container.append(risks);
+}
+
+function walkthroughStatusText(status: string): string {
+  if (status === "pending") return "Queued";
+  if (status === "running") return "Generating";
+  if (status === "ready") return "Ready";
+  if (status === "failed") return "Failed";
+  if (status === "cancelled") return "Cancelled";
+  return "Stale";
+}
+
+function enhanceWalkthrough(root: HTMLElement): void {
+  const sessionId = Number(root.dataset.sessionId);
+  const csrf = root.dataset.csrf || "";
+  if (!sessionId) return;
+  const state = root.querySelector<HTMLElement>("[data-walkthrough-state]");
+  const detail = root.querySelector<HTMLElement>("[data-walkthrough-detail]");
+  const body = root.querySelector<HTMLElement>("[data-walkthrough-body]");
+  const cancelButton = root.querySelector<HTMLButtonElement>("[data-walkthrough-cancel]");
+  const retryButton = root.querySelector<HTMLButtonElement>("[data-walkthrough-retry]");
+  let timer = 0;
+
+  async function read(): Promise<GuidedWalkthroughView | undefined> {
+    const response = await fetch(`/api/guided-review/sessions/${sessionId}/walkthrough`);
+    if (!response.ok) throw new Error(`walkthrough status failed (${response.status})`);
+    return ((await response.json()) as { walkthrough?: GuidedWalkthroughView }).walkthrough;
+  }
+
+  function render(view: GuidedWalkthroughView): void {
+    root.dataset.status = view.status;
+    if (state) state.textContent = walkthroughStatusText(view.status);
+    if (detail) {
+      detail.textContent = "";
+      const active = view.status === "pending" || view.status === "running";
+      if (active) {
+        const notice = document.createElement("p");
+        notice.className = "notice if-banner";
+        notice.setAttribute("role", "status");
+        const spinner = document.createElement("span");
+        spinner.className = "gd-spinner";
+        spinner.setAttribute("aria-hidden", "true");
+        notice.append(spinner, document.createTextNode(` ${walkthroughStatusText(view.status)} walkthrough in the background. You can inspect the diff immediately; this panel updates without blocking the page.`));
+        detail.append(notice);
+      }
+      detail.hidden = !active;
+    }
+    if (cancelButton) cancelButton.hidden = view.status !== "pending" && view.status !== "running";
+    if (retryButton) retryButton.hidden = view.status !== "failed" && view.status !== "cancelled";
+    if (body) {
+      if ((view.status === "ready" || view.status === "stale") && view.payload) renderWalkthroughPayload(body, view.payload);
+      else if (view.status === "failed") body.textContent = `Generation failed${view.error ? `: ${view.error}` : "."} Manual review remains available.`;
+      else if (view.status === "cancelled") body.textContent = "Generation was cancelled.";
+      else if (view.status === "stale") body.textContent = "This walkthrough belongs to an older head SHA.";
+      else body.textContent = "Generation is running in the background. You can inspect the diff immediately.";
+    }
+    window.clearTimeout(timer);
+    if (view.status === "pending" || view.status === "running") {
+      timer = window.setTimeout(() => void refresh(), 2000);
+    }
+  }
+
+  async function refresh(): Promise<void> {
+    try {
+      const view = await read();
+      if (view) render(view);
+    } catch {
+      if (state) state.textContent = "Status unavailable";
+    }
+  }
+
+  async function mutate(action: "retry" | "cancel"): Promise<void> {
+    const response = await fetch(`/api/guided-review/sessions/${sessionId}/walkthrough/${action}`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ csrf_token: csrf }),
+    });
+    if (!response.ok) throw new Error(`${action} failed (${response.status})`);
+    const view = ((await response.json()) as { walkthrough?: GuidedWalkthroughView }).walkthrough;
+    if (view) render(view);
+    if (action === "retry") timer = window.setTimeout(() => void refresh(), 500);
+  }
+
+  root.addEventListener("click", (event) => {
+    const anchor = event.target instanceof Element ? event.target.closest<HTMLAnchorElement>('a[href^="#f"]') : null;
+    const hash = anchor?.getAttribute("href") ?? "";
+    const match = hash.match(/^#f(.+)-h(\d+)-L([on])(\d+)$/);
+    if (!anchor || !match) return;
+    let path = "";
+    try {
+      path = decodeURIComponent(match[1]);
+    } catch {
+      return;
+    }
+    const handled = globalThis.__maomaoPierre?.scrollToGuidedLine(path, Number(match[4]), match[3] === "o" ? "LEFT" : "RIGHT") === true;
+    if (!handled) return;
+    event.preventDefault();
+    history.pushState(null, "", hash);
+  });
+
+  root.querySelector("[data-walkthrough-refresh]")?.addEventListener("click", (event) => {
+    event.preventDefault();
+    void refresh();
+  });
+  root.querySelector("[data-walkthrough-retry]")?.addEventListener("click", (event) => {
+    event.preventDefault();
+    void mutate("retry").catch(() => { if (state) state.textContent = "Retry failed"; });
+  });
+  root.querySelector("[data-walkthrough-cancel]")?.addEventListener("click", (event) => {
+    event.preventDefault();
+    void mutate("cancel").catch(() => { if (state) state.textContent = "Cancel failed"; });
+  });
+  if (root.dataset.status === "pending" || root.dataset.status === "running") {
+    timer = window.setTimeout(() => void refresh(), 1000);
+  }
+}
+
+function enhanceGuidedWalkthroughs(): void {
+  for (const root of document.querySelectorAll<HTMLElement>("[data-guided-walkthrough]")) {
+    if (root.dataset.enhanced === "1") continue;
+    root.dataset.enhanced = "1";
+    enhanceWalkthrough(root);
+  }
+}
+
+function enhanceGuidedPage(): void {
+  enhanceGuidedDrafts();
+  enhanceGuidedWalkthroughs();
+}
+
 export function enhanceGuidedDrafts(): void {
   for (const root of document.querySelectorAll<HTMLElement>("[data-guided-draft]")) {
     if (root.dataset.enhanced === "1") continue;
@@ -405,6 +609,6 @@ export function enhanceGuidedDrafts(): void {
 }
 
 if (typeof document !== "undefined") {
-  if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", enhanceGuidedDrafts);
-  else enhanceGuidedDrafts();
+  if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", enhanceGuidedPage);
+  else enhanceGuidedPage();
 }
