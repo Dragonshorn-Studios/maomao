@@ -614,15 +614,14 @@ export function renderGuidedSessionPage(input: {
     <h1>${escapeHtml(input.title)}</h1>
     <p class="lede"><strong>${escapeHtml(input.repoFullName)}#${input.prNumber}</strong> by ${escapeHtml(input.author || "unknown author")} · <a href="${escapeHtml(input.url)}" target="_blank" rel="noopener noreferrer">open on GitHub</a></p>
     ${readonly}${stale}
-    <section class="config-section">
+    <section class="config-section guided-session-meta">
       <h2>SHA-pinned workspace</h2>
       <dl class="facts">
         <div><dt>Base</dt><dd><code>${escapeHtml(input.baseSha)}</code></dd></div>
         <div><dt>Head</dt><dd><code>${escapeHtml(input.headSha)}</code></dd></div>
         ${input.sessionId ? `<div><dt>Draft session</dt><dd>#${input.sessionId} · version ${input.sessionVersion ?? 1} · ${input.commentCount ?? 0} comments</dd></div>` : ""}
       </dl>
-      ${input.canStart ? `<form method="post" action="/guided/github/${encodeURIComponent(input.repoFullName.split("/")[0])}/${encodeURIComponent(input.repoFullName.split("/")[1])}/${input.prNumber}/open">${csrfInput(input.options.csrfToken)}<button class="if-button if-button--primary" type="submit">Start guided draft</button></form>` : ""}
-      <p class="muted">Starting creates your actor-private SHA-pinned draft; returning to the same SHAs resumes it. Publication remains a later deliberate step.</p>
+      ${input.canStart ? `<form method="post" action="/guided/github/${encodeURIComponent(input.repoFullName.split("/")[0])}/${encodeURIComponent(input.repoFullName.split("/")[1])}/${input.prNumber}/open">${csrfInput(input.options.csrfToken)}<button class="if-button if-button--primary" type="submit">Start guided draft</button></form><p class="muted">Starting creates your actor-private SHA-pinned draft; returning to the same SHAs resumes it. Publication remains a later deliberate step.</p>` : ""}
     </section>
     ${input.diffWorkspace ?? ""}
     <script src="${diskAssetUrl(GUIDED_BUNDLE_HREF)}" defer onerror="document.querySelectorAll('[data-guided-bundle-error]').forEach(function(el){el.hidden=false})"></script>`;
