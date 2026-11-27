@@ -16,6 +16,7 @@ import type { TelemetrySettingsStore, TelemetrySharedConfig } from "../telemetry
 import { resolveChannelUrl } from "../telemetry/settings.js";
 import { ReviewConfigStore } from "../config-revisions.js";
 import { PromptRevisionStore } from "../prompt-revisions.js";
+import { GuidedReviewStore } from "../guided/store.js";
 
 /** Every job type the queue can hold — the single source of truth for the
  * union. Runtime validation and queue-family definitions derive from this
@@ -509,6 +510,8 @@ export class JobStore {
   readonly configs: ReviewConfigStore;
   /** Versioned specialist prompts, fixtures, and evaluations over the same database. */
   readonly prompts: PromptRevisionStore;
+  /** Actor-private Guided Review drafts over the same database. */
+  readonly guidedReview: GuidedReviewStore;
 
   constructor(
     private readonly db: SqliteDb,
@@ -523,6 +526,7 @@ export class JobStore {
   ) {
     this.configs = new ReviewConfigStore(db, modelCatalog);
     this.prompts = new PromptRevisionStore(db);
+    this.guidedReview = new GuidedReviewStore(db);
   }
 
   enqueue(input: NewJobInput & { profileRevisionId?: number }): EnqueueResult {

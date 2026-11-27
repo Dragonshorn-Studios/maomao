@@ -145,6 +145,16 @@ import {
   type OAuthSession,
 } from "./auth.js";
 import { exchangeOAuthCode, fetchGithubUser, oauthAuthorizeUrl, oauthEnabled } from "./oauth.js";
+import {
+  GuidedInputError,
+  guidedCommentView,
+  guidedSessionView,
+  type GuidedActor,
+  type GuidedCommentInput,
+  type GuidedSessionKey,
+  type GuidedSessionPatch,
+  type GuidedWriteOutcome,
+} from "./guided/store.js";
 
 export interface ServerContext {
   config: Config;
@@ -376,6 +386,164 @@ function recentJobsFor(c: Context<AppEnv>, ctx: ServerContext): Array<{ id: numb
   return jobs;
 }
 
+function guidedActor(c: Context<AppEnv>): GuidedActor | undefined {
+  const identity = c.get("identity");
+  return identity ? { actorProvider: "github", actorId: String(identity.id) } : undefined;
+}
+
+function guidedIdentityRequired(c: Context<AppEnv>): Response {
+  return c.json(
+    {
+      error: "guided_review_identity_required",
+      message:
+        "Guided Review drafts are private and attributed to a stable GitHub OAuth identity. Password-only sessions can review manually, but cannot create or edit attributable drafts.",
+    },
+    403,
+  );
+}
+
+async function guidedBody(c: Context<AppEnv>): Promise<Record<string, unknown>> {
+  if ((c.req.header("content-type") ?? "").includes("application/json")) {
+    let parsed: unknown;
+    try {
+      parsed = (await c.req.json()) as unknown;
+    } catch {
+      throw new GuidedInputError("JSON body is malformed");
+    }
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new GuidedInputError("JSON body must be an object");
+    return parsed as Record<string, unknown>;
+  }
+  return (await c.req.parseBody()) as Record<string, unknown>;
+}
+
+function structuredBodyValue(value: unknown, name: string): unknown {
+  if (typeof value !== "string") return value;
+  try {
+    return JSON.parse(value) as unknown;
+  } catch {
+    throw new GuidedInputError(`${name} must be valid JSON when sent as a form field`);
+  }
+}
+
+function optionalBoolean(value: unknown): boolean | undefined {
+  if (value == null) return undefined;
+  if (typeof value === "boolean") return value;
+  if (typeof value === "string") return value === "true" || value === "1" || value === "on";
+  return Boolean(value);
+}
+
+function numericBodyValue(value: unknown): unknown {
+  return typeof value === "string" && /^\d+$/.test(value) ? Number(value) : value;
+}
+
+function guidedId(raw: string): number {
+  const id = Number(raw);
+  if (!Number.isInteger(id) || id <= 0) throw new GuidedInputError("session id must be a positive integer");
+  return id;
+}
+
+function guidedWriteResponse(c: Context<AppEnv>, outcome: GuidedWriteOutcome): Response {
+  if (outcome.status === "not_found") return c.json({ error: "guided_review_session_not_found" }, 404);
+  if (outcome.status === "conflict") {
+    return c.json(
+      {
+        error: "guided_review_version_conflict",
+        message: "The draft changed in another tab or request. Reload the returned version before overwriting it.",
+        session: guidedSessionView(outcome.session),
+      },
+      409,
+    );
+  }
+  if (outcome.status === "historical") {
+    return c.json(
+      {
+        error: "guided_review_session_historical",
+        message: "This draft is pinned to a superseded SHA and is read-only. Copy it explicitly to the current SHA before re-anchoring notes.",
+        session: guidedSessionView(outcome.session),
+      },
+      409,
+    );
+  }
+  return c.json({
+    session: guidedSessionView(outcome.session),
+    ...(outcome.comment ? { comment: guidedCommentView(outcome.comment) } : {}),
+    ...(outcome.copied != null ? { copied: outcome.copied } : {}),
+  });
+}
+
+async function guidedRoute(c: Context<AppEnv>, run: () => Promise<Response> | Response): Promise<Response> {
+  try {
+    return await run();
+  } catch (error) {
+    if (error instanceof GuidedInputError) return c.json({ error: "invalid_input", message: error.message }, 400);
+    throw error;
+  }
+}
+
+type GuidedLiveMetadata =
+  | { ok: true; baseSha: string; headSha: string }
+  | { ok: false; status: 400 | 403 | 502; error: string; message: string };
+
+/**
+ * Opening a workspace binds to the provider's current PR metadata whenever the
+ * configured GitHub connection can resolve it. Explicit SHAs remain the test /
+ * unavailable-provider fallback; later forge inbox adapters supply their own
+ * live binding before calling the store.
+ */
+async function resolveGuidedLiveMetadata(
+  ctx: ServerContext,
+  input: Pick<GuidedSessionKey, "provider" | "instance" | "repoFullName" | "prNumber">,
+): Promise<GuidedLiveMetadata | undefined> {
+  const provider = typeof input.provider === "string" ? input.provider.trim().toLowerCase() : "";
+  const instance = typeof input.instance === "string" ? input.instance.trim().toLowerCase() : "";
+  if (provider !== "github" || instance !== "github.com" || !ctx.github) return undefined;
+  const parts = typeof input.repoFullName === "string" ? input.repoFullName.split("/") : [];
+  const [owner, repo] = parts;
+  if (parts.length !== 2 || !owner || !repo) {
+    return { ok: false, status: 400, error: "invalid_input", message: "repoFullName must be owner/repository" };
+  }
+  if (!Number.isInteger(input.prNumber) || input.prNumber <= 0) {
+    return { ok: false, status: 400, error: "invalid_input", message: "prNumber must be a positive integer" };
+  }
+  try {
+    const installation = await ctx.github.getRepoInstallation(owner, repo);
+    const accountAuth = authorizeGithubAccount(ctx.config, {
+      installationId: installation.installationId,
+      accountId: installation.accountId,
+    });
+    if (!accountAuth.ok) {
+      logAuthorizationRejection({ installationId: installation.installationId, reason: accountAuth.reason });
+      return { ok: false, status: 403, error: "forbidden", message: "Not authorized to review this installation or repository." };
+    }
+    let repositoryId: number | undefined;
+    if (ctx.config.allowedGithubRepositoryIds.length > 0) {
+      repositoryId = (await ctx.github.getRepository(owner, repo, installation.installationId)).id;
+    }
+    const pull = await ctx.github.getPull(installation.installationId, owner, repo, input.prNumber);
+    const auth = rejectUnauthorized(ctx.config, {
+      installationId: pull.installationId,
+      accountId: pull.accountId || installation.accountId,
+      repositoryId: pull.repositoryId || repositoryId,
+    });
+    if (!auth.ok) {
+      return { ok: false, status: 403, error: "forbidden", message: "Not authorized to review this installation or repository." };
+    }
+    return { ok: true, baseSha: pull.baseSha, headSha: pull.headSha };
+  } catch (error) {
+    if (isPermissionDenied(error)) {
+      return { ok: false, status: 403, error: "forbidden", message: "Not authorized to review this installation or repository." };
+    }
+    const detail = truncate(redactSecrets(error instanceof Error ? error.message : String(error), githubSecrets(ctx.config)), 300);
+    console.warn(`guided review metadata lookup failed for pr=${input.prNumber}: ${detail}`);
+    return {
+      ok: false,
+      status: 502,
+      error: "guided_review_metadata_unavailable",
+      message: "Could not resolve current pull request metadata from GitHub; no draft was opened or changed.",
+    };
+  }
+}
+
 export function createApp(ctx: ServerContext): Hono<AppEnv> {
   const mergeCapabilities = ctx.forge ? new MergeCapabilityService(ctx.forge, undefined, ctx.mergeModeSettings) : undefined;
   const app = new Hono<AppEnv>();
@@ -466,11 +634,24 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
     const cookieToken = getCookie(c, CSRF_COOKIE);
     let fieldToken: string | undefined;
     let bodyNext: string | undefined;
+    const guidedJsonApi =
+      c.req.path.startsWith("/api/guided-review/") && (c.req.header("content-type") ?? "").includes("application/json");
     try {
-      // parseBody caches the parsed form on the request, so route handlers can parse it again.
-      const body = await c.req.parseBody();
-      if (typeof body[CSRF_FIELD] === "string") fieldToken = body[CSRF_FIELD];
-      if (typeof body.next === "string") bodyNext = body.next;
+      if (guidedJsonApi) {
+        // Guided Review is a JSON autosave API. Read a clone for CSRF so the
+        // route can still consume the original JSON body; other POST surfaces
+        // remain form-only by design.
+        const body = (await c.req.raw.clone().json()) as unknown;
+        if (body && typeof body === "object" && !Array.isArray(body)) {
+          const record = body as Record<string, unknown>;
+          if (typeof record[CSRF_FIELD] === "string") fieldToken = record[CSRF_FIELD];
+        }
+      } else {
+        // parseBody caches the parsed form on the request, so route handlers can parse it again.
+        const body = await c.req.parseBody();
+        if (typeof body[CSRF_FIELD] === "string") fieldToken = body[CSRF_FIELD];
+        if (typeof body.next === "string") bodyNext = body.next;
+      }
     } catch (error) {
       console.warn(
         `csrf: could not parse body for ${c.req.path}:`,
@@ -967,6 +1148,135 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
       return home({ error: message });
     }
   });
+
+  app.post("/api/guided-review/sessions/open", async (c) =>
+    guidedRoute(c, async () => {
+      const actor = guidedActor(c);
+      if (!actor) return guidedIdentityRequired(c);
+      const body = await guidedBody(c);
+      const input: GuidedSessionKey = {
+        ...actor,
+        provider: body.provider as string,
+        instance: (body.instance ?? body.providerInstance) as string,
+        repoFullName: body.repoFullName as string,
+        prNumber: numericBodyValue(body.prNumber) as number,
+        baseSha: body.baseSha as string,
+        headSha: body.headSha as string,
+      };
+      const live = await resolveGuidedLiveMetadata(ctx, input);
+      if (live && !live.ok) return c.json({ error: live.error, message: live.message }, live.status);
+      if (live?.ok) {
+        input.baseSha = live.baseSha;
+        input.headSha = live.headSha;
+      }
+      const opened = ctx.store.guidedReview.open(input);
+      return c.json({
+        session: guidedSessionView(opened.session),
+        comments: opened.comments.map(guidedCommentView),
+        staleFrom: opened.staleFrom ? guidedSessionView(opened.staleFrom) : null,
+      });
+    }),
+  );
+
+  app.get("/api/guided-review/sessions/:id", (c) =>
+    guidedRoute(c, () => {
+      const actor = guidedActor(c);
+      if (!actor) return guidedIdentityRequired(c);
+      const session = ctx.store.guidedReview.getOwned(guidedId(c.req.param("id")), actor);
+      if (!session) return c.json({ error: "guided_review_session_not_found" }, 404);
+      return c.json({
+        session: guidedSessionView(session),
+        comments: ctx.store.guidedReview.listComments(session.id).map(guidedCommentView),
+      });
+    }),
+  );
+
+  app.post("/api/guided-review/sessions/:id", async (c) =>
+    guidedRoute(c, async () => {
+      const actor = guidedActor(c);
+      if (!actor) return guidedIdentityRequired(c);
+      const body = await guidedBody(c);
+      const patch: GuidedSessionPatch = {};
+      if (Object.hasOwn(body, "status")) patch.status = body.status as GuidedSessionPatch["status"];
+      if (Object.hasOwn(body, "currentPath")) patch.currentPath = body.currentPath as string | null;
+      if (Object.hasOwn(body, "currentHunk")) patch.currentHunk = body.currentHunk as string | null;
+      if (Object.hasOwn(body, "position")) patch.position = structuredBodyValue(body.position, "position");
+      if (Object.hasOwn(body, "viewedFiles")) patch.viewedFiles = structuredBodyValue(body.viewedFiles, "viewedFiles") as string[];
+      if (Object.hasOwn(body, "draftSummary")) patch.draftSummary = body.draftSummary as string;
+      if (Object.hasOwn(body, "draftVerdict")) patch.draftVerdict = body.draftVerdict as GuidedSessionPatch["draftVerdict"];
+      if (Object.hasOwn(body, "walkthroughRef")) patch.walkthroughRef = body.walkthroughRef as string | null;
+      if (Object.hasOwn(body, "comparisonState")) {
+        patch.comparisonState = structuredBodyValue(body.comparisonState, "comparisonState");
+      }
+      const outcome = ctx.store.guidedReview.updateSession(
+        guidedId(c.req.param("id")),
+        actor,
+        numericBodyValue(body.version) as number,
+        patch,
+        typeof body.mutationId === "string" ? body.mutationId : undefined,
+      );
+      return guidedWriteResponse(c, outcome);
+    }),
+  );
+
+  app.post("/api/guided-review/sessions/:id/comments", async (c) =>
+    guidedRoute(c, async () => {
+      const actor = guidedActor(c);
+      if (!actor) return guidedIdentityRequired(c);
+      const body = await guidedBody(c);
+      const input: GuidedCommentInput = {
+        clientId: body.clientId as string,
+        kind: body.kind as GuidedCommentInput["kind"],
+        body: body.body as string,
+        path: body.path as string | null | undefined,
+        side: body.side as GuidedCommentInput["side"],
+        line: numericBodyValue(body.line) as number | null | undefined,
+        hunkAnchor: body.hunkAnchor as string | null | undefined,
+        severity: body.severity as GuidedCommentInput["severity"],
+        category: body.category as string | null | undefined,
+        publishable: optionalBoolean(body.publishable),
+        mutationId: typeof body.mutationId === "string" ? body.mutationId : undefined,
+      };
+      const outcome = ctx.store.guidedReview.upsertComment(
+        guidedId(c.req.param("id")),
+        actor,
+        numericBodyValue(body.version) as number,
+        input,
+      );
+      return guidedWriteResponse(c, outcome);
+    }),
+  );
+
+  app.post("/api/guided-review/sessions/:id/comments/delete", async (c) =>
+    guidedRoute(c, async () => {
+      const actor = guidedActor(c);
+      if (!actor) return guidedIdentityRequired(c);
+      const body = await guidedBody(c);
+      const outcome = ctx.store.guidedReview.deleteComment(
+        guidedId(c.req.param("id")),
+        actor,
+        numericBodyValue(body.version) as number,
+        body.clientId as string,
+        typeof body.mutationId === "string" ? body.mutationId : undefined,
+      );
+      return guidedWriteResponse(c, outcome);
+    }),
+  );
+
+  app.post("/api/guided-review/sessions/:id/copy", async (c) =>
+    guidedRoute(c, async () => {
+      const actor = guidedActor(c);
+      if (!actor) return guidedIdentityRequired(c);
+      const body = await guidedBody(c);
+      const outcome = ctx.store.guidedReview.copyToSha(
+        guidedId(c.req.param("id")),
+        actor,
+        body.targetBaseSha as string,
+        body.targetHeadSha as string,
+      );
+      return guidedWriteResponse(c, outcome);
+    }),
+  );
 
   app.get("/", (c) => {
     const cursor = jobsPageCursor(c.req.query("before"), c.req.query("after"));
