@@ -164,6 +164,65 @@ describe("Guided Review session API", () => {
     expect(readBody.comments).toHaveLength(1);
   });
 
+  it("lists only same-pull unresolved discussions and resolves them after write-permission validation", async () => {
+    const resolved: string[] = [];
+    const discussions = [
+      {
+        id: "thread-open",
+        path: "src/index.ts",
+        line: 20,
+        isResolved: false,
+        comments: [
+          { authorLogin: "maomao[bot]", body: "Maomao finding", path: "src/index.ts", line: 20 },
+          { authorLogin: "operator-1001", body: "handled", path: "src/index.ts", line: 20 },
+        ],
+      },
+      { id: "thread-resolved", path: "src/other.ts", line: 3, isResolved: true, comments: [] },
+    ];
+    const port = {
+      listDiscussions: async () => discussions,
+      resolveDiscussion: async (_target: unknown, discussionId: string) => { resolved.push(discussionId); },
+    };
+    const forge = { forJob: () => port };
+    const github = {
+      async getRepoInstallation() { return { installationId: 1, accountId: 1001 }; },
+      getCollaboratorPermission: async () => "write",
+    } as ManualTriggerPort;
+    const { app, store } = guidedTestApp(github, { forge: forge as never }, { GITHUB_APP_SLUG: "maomao" });
+    const auth = operator(1001);
+    const opened = store.guidedReview.open({
+      actorProvider: "github",
+      actorId: "1001",
+      provider: "github",
+      instance: "github.com",
+      repoFullName: "acme/widgets",
+      prNumber: 12,
+      baseSha,
+      headSha,
+    }).session;
+
+    const listed = await app.request(`/api/guided-review/sessions/${opened.id}/discussions`, { headers: { cookie: auth.cookies } });
+    expect(listed.status).toBe(200);
+    const listedBody = (await listed.json()) as { discussions: Array<{ id: string; maomaoAuthored: boolean; comments: unknown[] }> };
+    expect(listedBody.discussions).toHaveLength(1);
+    expect(listedBody.discussions[0]).toMatchObject({ id: "thread-open", maomaoAuthored: true });
+    expect(listedBody.discussions[0].comments).toHaveLength(2);
+
+    const missing = await postJson(app, `/api/guided-review/sessions/${opened.id}/discussions/resolve`, auth.cookies, {
+      discussionId: "thread-resolved",
+      csrf_token: auth.csrfToken,
+    });
+    expect(missing.status).toBe(404);
+    expect(resolved).toEqual([]);
+
+    const resolvedResponse = await postJson(app, `/api/guided-review/sessions/${opened.id}/discussions/resolve`, auth.cookies, {
+      discussionId: "thread-open",
+      csrf_token: auth.csrfToken,
+    });
+    expect(resolvedResponse.status).toBe(200);
+    expect(resolved).toEqual(["thread-open"]);
+  });
+
   it("rejects password-only attribution and isolates drafts between operators", async () => {
     const { app } = guidedTestApp();
     const first = operator(1001);

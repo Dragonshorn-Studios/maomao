@@ -263,13 +263,23 @@ function renderGuidedFile(container: HTMLElement): void {
         if (!response.ok || typeof payload.content !== "string") throw new Error(payload.error || `Could not load ${side} file contents`);
         return { name: filePath, contents: payload.content };
       };
-      const [oldFile, newFile] = await Promise.all([
-        load("base", oldPath || fileDiffMetadata.prevName || fileDiffMetadata.name),
-        load("head", fileDiffMetadata.name || path),
-      ]);
-      if (oldFile && newFile) return { oldFile, newFile };
-      if (newFile) return { oldFile: null, newFile };
-      throw new Error("Both sides of this file are unavailable for context expansion");
+      try {
+        const [oldFile, newFile] = await Promise.all([
+          load("base", oldPath || fileDiffMetadata.prevName || fileDiffMetadata.name),
+          load("head", fileDiffMetadata.name || path),
+        ]);
+        container.querySelector(".gd-expansion-error")?.remove();
+        if (oldFile && newFile) return { oldFile, newFile };
+        if (newFile) return { oldFile: null, newFile };
+        throw new Error("Both sides of this file are unavailable for context expansion");
+      } catch (error) {
+        const notice = document.createElement("p");
+        notice.className = "gd-expansion-error error if-banner if-banner--danger";
+        notice.textContent = `Could not expand unchanged context: ${error instanceof Error ? error.message : String(error)}`;
+        container.querySelector(".gd-expansion-error")?.remove();
+        container.prepend(notice);
+        throw error;
+      }
     },
     renderAnnotation: renderGuidedAnnotation,
     onLineEnter: commentable ? (props) => {
