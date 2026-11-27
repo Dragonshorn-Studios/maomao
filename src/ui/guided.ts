@@ -118,13 +118,13 @@ function jsJson(value: unknown): string {
   return JSON.stringify(value).replace(/</g, "\\u003c");
 }
 
-function guidedDiffLineHtml(file: GuidedDiffFile, hunkIndex: number, line: GuidedDiffFile["hunks"][number]["lines"][number]): string {
+function guidedDiffLineHtml(file: GuidedDiffFile, hunkIndex: number, line: GuidedDiffFile["hunks"][number]["lines"][number], baseSha = "", headSha = ""): string {
   const side = line.kind === "del" ? "LEFT" : "RIGHT";
   const lineNumber = line.kind === "del" ? line.oldLine : line.newLine;
   const anchor = lineNumber ? `L${side === "LEFT" ? "o" : "n"}${lineNumber}` : "";
   const oldText = line.oldLine ?? "";
   const newText = line.newLine ?? "";
-  return `<tr class="gd-line gd-${line.kind}"${anchor ? ` id="f${encodeURIComponent(file.path)}-h${hunkIndex}-${anchor}" data-anchor-path="${escapeHtml(file.path)}" data-anchor-side="${side}" data-anchor-line="${lineNumber}"` : ""}>
+  return `<tr class="gd-line gd-${line.kind}"${anchor ? ` id="f${encodeURIComponent(file.path)}-h${hunkIndex}-${anchor}" data-anchor-path="${escapeHtml(file.path)}" data-anchor-side="${side}" data-anchor-line="${lineNumber}" data-anchor-sha="${escapeHtml(side === "LEFT" ? baseSha : headSha)}"` : ""}>
     <td class="gd-no gd-old">${oldText}</td><td class="gd-no gd-new">${newText}</td><td class="gd-code"><span>${escapeHtml(line.text)}</span></td>
   </tr>`;
 }
@@ -135,6 +135,8 @@ export function renderGuidedDiffWorkspace(input: {
   fileFilter?: string;
   diffError?: string;
   diffTruncated?: boolean;
+  baseSha?: string;
+  headSha?: string;
   sessionId?: number;
   sessionVersion?: number;
   viewedFiles?: string[];
@@ -154,7 +156,7 @@ export function renderGuidedDiffWorkspace(input: {
   const rendered = filtered.map((file, index) => {
     const hunks = file.hunks.map((hunk, hunkIndex) => `<details class="gd-hunk" open>
       <summary>${escapeHtml(hunk.header)}</summary>
-      <table class="gd-table"><tbody>${hunk.lines.map((line) => guidedDiffLineHtml(file, hunkIndex, line)).join("\n")}</tbody></table>
+      <table class="gd-table"><tbody>${hunk.lines.map((line) => guidedDiffLineHtml(file, hunkIndex, line, input.baseSha, input.headSha)).join("\n")}</tbody></table>
     </details>`).join("\n");
     const empty = file.binary ? `<p class="muted">Binary file changed; inline diff is unavailable.</p>` : file.hunks.length === 0 ? `<p class="muted">No textual hunks are available for this file.</p>` : "";
     return `<article class="gd-file${viewed.has(file.path) ? " gd-viewed" : ""}" id="guided-file-${index}" data-guided-file data-path="${escapeHtml(file.path)}" data-status="${escapeHtml(file.status)}">
