@@ -449,6 +449,26 @@ function migrate(db: SqliteDb): void {
       UNIQUE (actor_provider, actor_id, provider, provider_instance)
     );
 
+    CREATE TABLE IF NOT EXISTS guided_attention_decision_history (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      decision_id INTEGER NOT NULL,
+      provider TEXT NOT NULL,
+      provider_instance TEXT NOT NULL,
+      repo_full_name TEXT NOT NULL,
+      pr_number INTEGER NOT NULL,
+      head_sha TEXT NOT NULL,
+      actor_provider TEXT NOT NULL,
+      actor_id TEXT NOT NULL,
+      action TEXT NOT NULL,
+      reason_tag TEXT NOT NULL,
+      reason_detail TEXT,
+      created_at TEXT NOT NULL,
+      superseded_at TEXT NOT NULL,
+      superseded_by_actor_provider TEXT NOT NULL,
+      superseded_by_actor_id TEXT NOT NULL,
+      replacement_action TEXT NOT NULL
+    );
+
     CREATE TABLE IF NOT EXISTS guided_human_publications (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       session_id INTEGER NOT NULL UNIQUE REFERENCES guided_review_sessions(id) ON DELETE CASCADE,

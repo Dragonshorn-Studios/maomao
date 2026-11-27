@@ -154,7 +154,13 @@ const guidedWalkthrough = {
     forge,
     opencode,
     briefCache: store,
-    resolveOptions: (repoFullName) => store.configs.resolveProfileForRepo(repoFullName)?.definition.guidedReview,
+    resolveOptions: (repoFullName, session) => {
+      const job = session
+        ? store.reviewJobForComparison(repoFullName, session.pr_number, session.head_sha, { provider: session.provider, instance: session.provider_instance })
+        : undefined;
+      if (job?.profile_revision_id) return store.configs.getRevision(job.profile_revision_id)?.definition.guidedReview;
+      return store.configs.resolveProfileForRepo(repoFullName)?.definition.guidedReview;
+    },
   }),
 };
 

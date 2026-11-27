@@ -31,8 +31,8 @@ export interface GuidedWalkthroughServiceDeps {
   briefCache?: {
     getRepoBriefCache(provider: string, providerInstance: string, repoFullName: string, sha: string): { payload: string; created_at: string } | undefined;
   };
-  /** Active-profile Guided Review overrides for the repository, snapshotted when a walkthrough is enqueued. */
-  resolveOptions?: (repoFullName: string) => GuidedReviewRunOptions | undefined;
+  /** Guided Review overrides for the repository or exact-head review profile revision, snapshotted when a walkthrough is enqueued. */
+  resolveOptions?: (repoFullName: string, session?: GuidedReviewSessionRow) => GuidedReviewRunOptions | undefined;
 }
 
 function walkthroughWorkspaceRoot(workspaceRoot: string): string {
@@ -122,8 +122,8 @@ export class GuidedWalkthroughService {
     this.deps.store.recoverInterrupted();
   }
 
-  private options(repoFullName: string): GuidedReviewRunOptions {
-    const profile = this.deps.resolveOptions?.(repoFullName) ?? {};
+  private options(repoFullName: string, session?: GuidedReviewSessionRow): GuidedReviewRunOptions {
+    const profile = this.deps.resolveOptions?.(repoFullName, session) ?? {};
     return {
       model: profile.model || this.deps.config.chat.model || undefined,
       timeoutMs: profile.timeoutMs || this.deps.config.chat.timeoutMs || undefined,
@@ -145,7 +145,7 @@ export class GuidedWalkthroughService {
         baseSha: session.base_sha,
         headSha: session.head_sha,
       },
-      this.options(session.repo_full_name),
+      this.options(session.repo_full_name, session),
     );
     for (const stale of this.deps.store.listStaleCancellations(
       {
@@ -182,12 +182,18 @@ export class GuidedWalkthroughService {
     const run = this.generate(row, installationId, controller.signal)
       .catch((error) => {
         const secrets = [...githubSecrets(this.deps.config), ...opencodeEnvSecrets(process.env), ...providerAuthSecrets(process.env)];
-        const cancelled = controller.signal.aborted || this.deps.store.cancelRequested(row.id);
-        this.deps.store.markFailed(row.id, redactSecrets(error instanceof Error ? error.message : String(error), secrets), cancelled);
+        const latest = this.deps.store.get(row.id);
+        const rearmed = controller.signal.aborted && latest?.status === "pending" && latest.cancel_requested === 0;
+        if (!rearmed) {
+          const cancelled = controller.signal.aborted || this.deps.store.cancelRequested(row.id);
+          this.deps.store.markFailed(row.id, redactSecrets(error instanceof Error ? error.message : String(error), secrets), cancelled);
+        }
       })
       .finally(() => {
         this.controllers.delete(row.fingerprint);
         this.runs.delete(row.fingerprint);
+        const latest = this.deps.store.get(row.id);
+        if (latest?.status === "pending" && latest.cancel_requested === 0) this.start(latest, installationId);
       });
     this.runs.set(row.fingerprint, run);
   }

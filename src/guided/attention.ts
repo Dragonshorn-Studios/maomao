@@ -3,6 +3,10 @@ import { nowIso } from "../util.js";
 import type { GuidedActor } from "./store.js";
 
 export type GuidedAttentionAction = "review_myself" | "delegate_to_maomao" | "skip_guided_review";
+
+export function guidedPoisonAttentionOptional(definition: { guidedReview?: { poisonAlertAttention?: string } } | null | undefined): boolean {
+  return definition?.guidedReview?.poisonAlertAttention === "optional";
+}
 export const GUIDED_ATTENTION_REASON_TAGS = ["risk-review", "author-context", "time-sensitive", "policy", "other"] as const;
 export type GuidedAttentionReasonTag = (typeof GUIDED_ATTENTION_REASON_TAGS)[number];
 
@@ -69,12 +73,41 @@ export class GuidedAttentionStore {
       // exact-head gate must remain recoverable instead of being deadlocked
       // behind the immutable first-writer conflict rule.
       if (existing.action === "skip_guided_review" && action !== "skip_guided_review") {
-        const superseded = this.db
-          .prepare(`UPDATE guided_attention_decisions
-            SET actor_provider = ?, actor_id = ?, action = ?, reason_tag = ?, reason_detail = ?, created_at = ?
-            WHERE id = ? AND action = 'skip_guided_review'`)
-          .run(actor.actorProvider, actor.actorId, action, reasonTag, detail, nowIso(), existing.id);
-        if (superseded.changes > 0) {
+        const supersede = this.db.transaction(() => {
+          const replacedAt = nowIso();
+          const updated = this.db
+            .prepare(`UPDATE guided_attention_decisions
+              SET actor_provider = ?, actor_id = ?, action = ?, reason_tag = ?, reason_detail = ?, created_at = ?
+              WHERE id = ? AND action = 'skip_guided_review'`)
+            .run(actor.actorProvider, actor.actorId, action, reasonTag, detail, replacedAt, existing.id);
+          if (updated.changes === 0) return 0;
+          this.db
+            .prepare(`INSERT INTO guided_attention_decision_history (
+              decision_id, provider, provider_instance, repo_full_name, pr_number, head_sha,
+              actor_provider, actor_id, action, reason_tag, reason_detail, created_at,
+              superseded_at, superseded_by_actor_provider, superseded_by_actor_id, replacement_action
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+            .run(
+              existing.id,
+              existing.provider,
+              existing.provider_instance,
+              existing.repo_full_name,
+              existing.pr_number,
+              existing.head_sha,
+              existing.actor_provider,
+              existing.actor_id,
+              existing.action,
+              existing.reason_tag,
+              existing.reason_detail,
+              existing.created_at,
+              replacedAt,
+              actor.actorProvider,
+              actor.actorId,
+              action,
+            );
+          return updated.changes;
+        });
+        if (supersede() > 0) {
           const row = this.decisionFor(key);
           if (row) return { status: "ok", row };
         }

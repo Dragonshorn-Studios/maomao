@@ -60,6 +60,7 @@ interface GuidedBrowserComment {
   severity?: string;
   category?: string;
   publishable?: boolean;
+  anchorStatus?: string;
   body: string;
 }
 
@@ -332,7 +333,7 @@ function renderGuidedFile(container: HTMLElement): void {
 function commentsToGuidedAnnotations(comments: GuidedBrowserComment[]): Map<string, GuidedAnnotation[]> {
   const annotations = new Map<string, GuidedAnnotation[]>();
   for (const comment of comments) {
-    if (comment.deletedAt || comment.kind !== "inline" || !comment.path || !comment.line || !comment.side) continue;
+    if (comment.deletedAt || comment.kind !== "inline" || comment.anchorStatus === "unplaced" || !comment.path || !comment.line || !comment.side) continue;
     const entry: GuidedAnnotation = {
       side: comment.side === "LEFT" ? "deletions" : "additions",
       lineNumber: comment.line,

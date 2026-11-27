@@ -100,6 +100,7 @@ import { renderGuidedDiffWorkspace, renderGuidedInboxPage, renderGuidedOpenError
 import { parseUnifiedDiff } from "./guided/diff.js";
 import { buildGuidedPublishPreview } from "./guided/publish-preview.js";
 import { buildGuidedComparison, comparisonOverrides } from "./guided/comparison.js";
+import { guidedPoisonAttentionOptional } from "./guided/attention.js";
 import { GuidedHumanPublishStore, HUMAN_PUBLISH_PENDING_LEASE_MS, guidedHumanPayloadHash, submitHumanGitHubReview } from "./guided/human-publish.js";
 import { guidedWalkthroughView, type GuidedWalkthroughStore } from "./guided/walkthrough-store.js";
 import type { GuidedWalkthroughService } from "./guided/walkthrough.js";
@@ -666,7 +667,7 @@ function guidedAttentionPanelForSession(ctx: ServerContext, session: GuidedRevie
   const profile = job?.routing_profile;
   if (!job || (profile !== "poison-alert" && profile !== "diagnosis")) return undefined;
   const key = { provider: session.provider, instance: session.provider_instance, repoFullName: session.repo_full_name, prNumber: session.pr_number, headSha: session.head_sha };
-  const optional = (job.profile_revision_id ? ctx.store.configs.getRevision(job.profile_revision_id)?.definition.guidedReview?.poisonAlertAttention : undefined) === "optional";
+  const optional = guidedPoisonAttentionOptional(job.profile_revision_id ? ctx.store.configs.getRevision(job.profile_revision_id)?.definition : undefined);
   const decision = ctx.store.guidedAttention.decisionFor(key);
   if (decision && !(decision.action === "skip_guided_review" && !optional)) {
     return {
@@ -1682,7 +1683,7 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
       if (!job || job.routing_profile !== "poison-alert") {
         return c.html(renderGuidedOpenError({ options: guidedPageOpts(c), error: "This exact head has no poison-alert human-attention gate waiting for a decision." }), 400);
       }
-      const attentionOptional = (job.profile_revision_id ? ctx.store.configs.getRevision(job.profile_revision_id)?.definition.guidedReview?.poisonAlertAttention : undefined) === "optional";
+      const attentionOptional = guidedPoisonAttentionOptional(job.profile_revision_id ? ctx.store.configs.getRevision(job.profile_revision_id)?.definition : undefined);
       if (action === "skip_guided_review" && !attentionOptional) {
         return c.html(renderGuidedOpenError({ options: guidedPageOpts(c), error: "This profile requires Guided Review for poison-alert pulls; the optional skip action is not available." }), 400);
       }

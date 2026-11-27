@@ -184,9 +184,10 @@ describe("Guided Review session API", () => {
       resolveDiscussion: async (_target: unknown, discussionId: string) => { resolved.push(discussionId); },
     };
     const forge = { forJob: () => port };
+    let permission = "read";
     const github = {
       async getRepoInstallation() { return { installationId: 1, accountId: 1001 }; },
-      getCollaboratorPermission: async () => "write",
+      getCollaboratorPermission: async () => permission,
     } as unknown as ManualTriggerPort;
     const { app, store } = guidedTestApp(github, { forge: forge as never }, { GITHUB_APP_SLUG: "maomao" });
     const auth = operator(1001);
@@ -201,6 +202,16 @@ describe("Guided Review session API", () => {
       headSha,
     }).session;
 
+    const deniedList = await app.request(`/api/guided-review/sessions/${opened.id}/discussions`, { headers: { cookie: auth.cookies } });
+    expect(deniedList.status).toBe(403);
+    const deniedResolve = await postJson(app, `/api/guided-review/sessions/${opened.id}/discussions/resolve`, auth.cookies, {
+      discussionId: "thread-open",
+      csrf_token: auth.csrfToken,
+    });
+    expect(deniedResolve.status).toBe(403);
+    expect(resolved).toEqual([]);
+
+    permission = "write";
     const listed = await app.request(`/api/guided-review/sessions/${opened.id}/discussions`, { headers: { cookie: auth.cookies } });
     expect(listed.status).toBe(200);
     const listedBody = (await listed.json()) as { discussions: Array<{ id: string; maomaoAuthored: boolean; comments: unknown[] }> };
@@ -221,6 +232,24 @@ describe("Guided Review session API", () => {
     });
     expect(resolvedResponse.status).toBe(200);
     expect(resolved).toEqual(["thread-open"]);
+  });
+
+  it("reports discussion resolution as unsupported without a forge port", async () => {
+    const { app, store } = guidedTestApp();
+    const auth = operator(1001);
+    const opened = store.guidedReview.open({
+      actorProvider: "github",
+      actorId: "1001",
+      provider: "github",
+      instance: "github.com",
+      repoFullName: "acme/widgets",
+      prNumber: 12,
+      baseSha,
+      headSha,
+    }).session;
+    const listed = await app.request(`/api/guided-review/sessions/${opened.id}/discussions`, { headers: { cookie: auth.cookies } });
+    expect(listed.status).toBe(200);
+    expect(await listed.json()).toEqual({ discussions: [], unsupported: true });
   });
 
   it("rejects password-only attribution and isolates drafts between operators", async () => {

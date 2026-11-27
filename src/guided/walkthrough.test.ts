@@ -108,8 +108,10 @@ describe("Guided Review walkthrough cache", () => {
 
 
   it("uses repository-scoped profile guided-review model, timeout, and cost ceiling", async () => {
-    const f = fixture(undefined, undefined, () => ({ model: "profile/guided", timeoutMs: 45_000, maxCostUsd: 0.02 }));
+    const resolveOptions = vi.fn(() => ({ model: "profile/guided", timeoutMs: 45_000, maxCostUsd: 0.02 }));
+    const f = fixture(undefined, undefined, resolveOptions);
     const row = f.service.ensure(f.session, 42);
+    expect(resolveOptions).toHaveBeenCalledWith("acme/widgets", f.session);
     expect(row.model).toBe("profile/guided");
     await waitForStatus(f.walkthroughs, row.id, ["ready"]);
     expect(f.opencode.run).toHaveBeenCalledWith(expect.objectContaining({ model: "profile/guided", timeoutMs: 45_000 }));
@@ -142,6 +144,7 @@ describe("Guided Review walkthrough cache", () => {
     const newRow = f.walkthroughs.open({ provider: "github", instance: "github.com", repoFullName: "acme/widgets", prNumber: 12, baseSha, headSha: nextHeadSha }, "m");
     expect(newRow.id).not.toBe(oldRow.id);
     expect(f.walkthroughs.get(oldRow.id)?.status).toBe("stale");
+    expect(f.walkthroughs.getCurrentForIdentity({ provider: "github", instance: "github.com", repoFullName: "acme/widgets", prNumber: 12, baseSha, headSha })?.status).toBe("stale");
     expect(f.walkthroughs.get(newRow.id)?.status).toBe("pending");
   });
 
@@ -221,6 +224,46 @@ describe("Guided Review walkthrough cache", () => {
     expect(finishedStale.error).toContain("aborted");
   });
 
+
+  it("restarts a revived same-model walkthrough after its superseded abort settles", async () => {
+    let options = { model: "model/a", timeoutMs: 45_000, maxCostUsd: 1 };
+    const f = fixture(undefined, undefined, () => options);
+    let calls = 0;
+    vi.mocked(f.opencode.run).mockImplementation(async ({ signal }) => {
+      calls += 1;
+      if (calls === 1) {
+        return await new Promise((_, reject) => {
+          if (signal?.aborted) reject(new Error("aborted"));
+          else signal?.addEventListener("abort", () => reject(new Error("aborted")), { once: true });
+        });
+      }
+      return {
+        stdout: "",
+        stderr: "",
+        exitCode: 0,
+        text: JSON.stringify({
+          intent: { text: "Intent", uncertainty: "Uncertainty" },
+          changeMap: [{ path: "src/a.ts", summary: "Summary", evidence: "Evidence" }],
+          flow: "Flow",
+          decisions: [],
+          tests: "Tests",
+          risks: [],
+        }),
+        usage: { cost: 0.01 },
+      };
+    });
+    const first = f.service.ensure(f.session, 42);
+    await waitForStatus(f.walkthroughs, first.id, ["running"]);
+    options = { ...options, model: "model/b" };
+    const replacement = f.service.ensure(f.session, 42);
+    expect(replacement.id).not.toBe(first.id);
+    options = { ...options, model: "model/a" };
+    const revived = f.service.ensure(f.session, 42);
+    expect(revived.id).toBe(first.id);
+    const done = await waitForStatus(f.walkthroughs, first.id, ["ready"]);
+    expect(done.error).toBeNull();
+    expect(calls).toBeGreaterThanOrEqual(3);
+  });
 
   it("enforces the configured generation cost and output bounds", async () => {
     const costly = fixture();

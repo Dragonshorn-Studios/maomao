@@ -155,8 +155,8 @@ export class GuidedWalkthroughStore {
       .prepare(
         `SELECT * FROM guided_walkthroughs
          WHERE provider = ? AND provider_instance = ? AND repo_full_name = ? AND pr_number = ?
-           AND base_sha = ? AND head_sha = ? AND status != 'stale'
-         ORDER BY updated_at DESC, id DESC LIMIT 1`,
+           AND base_sha = ? AND head_sha = ?
+         ORDER BY CASE WHEN status = 'stale' THEN 1 ELSE 0 END, updated_at DESC, id DESC LIMIT 1`,
       )
       .get(identity.provider, identity.instance, identity.repoFullName, identity.prNumber, identity.baseSha, identity.headSha) as GuidedWalkthroughRow | undefined;
   }

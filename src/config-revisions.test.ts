@@ -386,6 +386,22 @@ describe("profile validation and caps", () => {
     expect(validateModelCatalog(withGuided, ["openai/gpt-4.1", "openai/gpt-guided"])).toHaveLength(0);
   });
 
+  it("rejects malformed guided-review schema fields through draft validation", () => {
+    const configs = store();
+    for (const guidedReview of [
+      { model: "test/guided", unexpected: true },
+      { model: "not a valid model" },
+      { timeoutMs: 1_800_001 },
+      { maxCostUsd: 10_001 },
+    ]) {
+      const bad = configs.createDraft({
+        definition: { ...definition, guidedReview },
+        createdBy: "octocat",
+      });
+      expect("error" in bad && bad.error === "invalid").toBe(true);
+    }
+  });
+
   it("rejects an invalid severity", () => {
     const configs = store();
     const bad = configs.createDraft({

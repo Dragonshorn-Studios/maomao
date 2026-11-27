@@ -33,6 +33,7 @@ import {
 import { applyProfileToSpecs, enqueuePullJob, reviewerSpecs } from "./enqueue.js";
 import { jobSpend } from "./summary.js";
 import type { ProfileDefinition } from "../config-revisions.js";
+import { guidedPoisonAttentionOptional } from "../guided/attention.js";
 import { PROFILE_MAX_TIMEOUT_MS } from "../config-revisions.js";
 import {
   fallbackAggregator,
@@ -238,7 +239,7 @@ export function createPipeline(deps: PipelineDeps) {
   }
 
   function guidedAttentionOptional(job: JobRow): boolean {
-    return profileDefinitionForJob(deps.store, job)?.guidedReview?.poisonAlertAttention === "optional";
+    return guidedPoisonAttentionOptional(profileDefinitionForJob(deps.store, job));
   }
 
   /** Bounded pre-review grace for exact-head Guided Review work on diagnosis jobs. */

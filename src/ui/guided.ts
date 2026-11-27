@@ -158,7 +158,7 @@ interface GuidedInlineAnnotation {
 function guidedAnnotationsFor(file: GuidedDiffFile, comments: GuidedCommentView[] | undefined, comparison: GuidedComparisonView | undefined): GuidedInlineAnnotation[] {
   const annotations: GuidedInlineAnnotation[] = [];
   for (const comment of comments ?? []) {
-    if (comment.deletedAt || comment.kind !== "inline" || comment.path !== file.path || !comment.line || !comment.side) continue;
+    if (comment.deletedAt || comment.kind !== "inline" || comment.anchorStatus === "unplaced" || comment.path !== file.path || !comment.line || !comment.side) continue;
     annotations.push({
       side: comment.side === "LEFT" ? "deletions" : "additions",
       lineNumber: comment.line,
