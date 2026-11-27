@@ -15,6 +15,7 @@ import { ChatService } from "./chat/service.js";
 import { ChatStore } from "./chat/store.js";
 import { GuidedWalkthroughStore } from "./guided/walkthrough-store.js";
 import { GuidedWalkthroughService } from "./guided/walkthrough.js";
+import { guidedReviewOptionsForSession } from "./guided/profile-options.js";
 import { GuidedHumanPublishStore } from "./guided/human-publish.js";
 import { oauthCallbackUrl, oauthEnabled } from "./oauth.js";
 import { ForgeConnectionStore, countConnections } from "./forge/connections.js";
@@ -154,13 +155,7 @@ const guidedWalkthrough = {
     forge,
     opencode,
     briefCache: store,
-    resolveOptions: (repoFullName, session) => {
-      const job = session
-        ? store.reviewJobForComparison(repoFullName, session.pr_number, session.head_sha, { provider: session.provider, instance: session.provider_instance })
-        : undefined;
-      if (job?.profile_revision_id) return store.configs.getRevision(job.profile_revision_id)?.definition.guidedReview;
-      return store.configs.resolveProfileForRepo(repoFullName)?.definition.guidedReview;
-    },
+    resolveOptions: (repoFullName, session) => guidedReviewOptionsForSession(store, repoFullName, session),
   }),
 };
 

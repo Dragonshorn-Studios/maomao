@@ -250,6 +250,12 @@ describe("Guided Review session API", () => {
     const listed = await app.request(`/api/guided-review/sessions/${opened.id}/discussions`, { headers: { cookie: auth.cookies } });
     expect(listed.status).toBe(200);
     expect(await listed.json()).toEqual({ discussions: [], unsupported: true });
+    const resolved = await postJson(app, `/api/guided-review/sessions/${opened.id}/discussions/resolve`, auth.cookies, {
+      discussionId: "thread-open",
+      csrf_token: auth.csrfToken,
+    });
+    expect(resolved.status).toBe(422);
+    expect(await resolved.json()).toEqual({ error: "unsupported" });
   });
 
   it("rejects password-only attribution and isolates drafts between operators", async () => {

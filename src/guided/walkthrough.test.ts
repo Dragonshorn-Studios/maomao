@@ -265,6 +265,40 @@ describe("Guided Review walkthrough cache", () => {
     expect(calls).toBeGreaterThanOrEqual(3);
   });
 
+  it("does not let a superseded retry overwrite a revived cached-ready walkthrough", async () => {
+    let options = { model: "model/a", timeoutMs: 45_000, maxCostUsd: 1 };
+    const f = fixture(undefined, undefined, () => options);
+    const first = f.service.ensure(f.session, 42);
+    await waitForStatus(f.walkthroughs, first.id, ["ready"]);
+
+    f.walkthroughs.markFailed(first.id, "transient retry failure");
+    let abortObserved!: () => void;
+    const retryAborted = new Promise<void>((resolve) => { abortObserved = resolve; });
+    vi.mocked(f.opencode.run).mockImplementationOnce(({ signal }) => new Promise((_, reject) => {
+      const fail = () => {
+        abortObserved();
+        reject(new Error("aborted"));
+      };
+      if (signal?.aborted) fail();
+      else signal?.addEventListener("abort", fail, { once: true });
+    }));
+    expect(f.service.retry(f.walkthroughs.get(first.id)!, 42)?.status).toBe("pending");
+    await waitForStatus(f.walkthroughs, first.id, ["running"]);
+
+    options = { ...options, model: "model/b" };
+    const replacement = f.service.ensure(f.session, 42);
+    expect(replacement.id).not.toBe(first.id);
+    options = { ...options, model: "model/a" };
+    const revived = f.service.ensure(f.session, 42);
+    expect(revived.id).toBe(first.id);
+    expect(revived.status).toBe("ready");
+
+    await retryAborted;
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(f.walkthroughs.get(first.id)?.status).toBe("ready");
+    expect(f.walkthroughs.get(first.id)?.error).toBeNull();
+  });
+
   it("enforces the configured generation cost and output bounds", async () => {
     const costly = fixture();
     vi.mocked(costly.opencode.run).mockImplementationOnce(async () => ({

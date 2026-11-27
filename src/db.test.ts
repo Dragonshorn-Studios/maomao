@@ -193,6 +193,35 @@ describe("usage schema migration", () => {
     }
   });
 
+  it("fails closed when the guided attention schema does not match the legacy rebuild contract", () => {
+    const dir = mkdtempSync(join(tmpdir(), "maomao-db-"));
+    const path = join(dir, "guided-attention-unknown.sqlite");
+    try {
+      const legacy = new Database(path);
+      legacy.exec(`
+        CREATE TABLE guided_attention_decisions (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          provider TEXT NOT NULL,
+          provider_instance TEXT NOT NULL,
+          repo_full_name TEXT NOT NULL,
+          pr_number INTEGER NOT NULL,
+          head_sha TEXT NOT NULL,
+          actor_provider TEXT NOT NULL,
+          actor_id TEXT NOT NULL,
+          action TEXT NOT NULL CHECK (action IN ('review_myself')),
+          reason_tag TEXT NOT NULL,
+          reason_detail TEXT,
+          created_at TEXT NOT NULL,
+          UNIQUE (provider, provider_instance, repo_full_name, pr_number, head_sha)
+        );
+      `);
+      legacy.close();
+      expect(() => openDb(path)).toThrow("Cannot migrate guided_attention_decisions");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it("adds exact head SHAs to legacy merged-pull markers without losing rows", () => {
     const dir = mkdtempSync(join(tmpdir(), "maomao-db-"));
     const path = join(dir, "merged-legacy.sqlite");
@@ -844,33 +873,5 @@ describe("repo pauses and stack state (issue #99)", () => {
     }
   });
 
-  it("fails closed when the guided attention schema does not match the legacy rebuild contract", () => {
-    const dir = mkdtempSync(join(tmpdir(), "maomao-db-"));
-    const path = join(dir, "guided-attention-unknown.sqlite");
-    try {
-      const legacy = new Database(path);
-      legacy.exec(`
-        CREATE TABLE guided_attention_decisions (
-          id INTEGER PRIMARY KEY AUTOINCREMENT,
-          provider TEXT NOT NULL,
-          provider_instance TEXT NOT NULL,
-          repo_full_name TEXT NOT NULL,
-          pr_number INTEGER NOT NULL,
-          head_sha TEXT NOT NULL,
-          actor_provider TEXT NOT NULL,
-          actor_id TEXT NOT NULL,
-          action TEXT NOT NULL CHECK (action IN ('review_myself')),
-          reason_tag TEXT NOT NULL,
-          reason_detail TEXT,
-          created_at TEXT NOT NULL,
-          UNIQUE (provider, provider_instance, repo_full_name, pr_number, head_sha)
-        );
-      `);
-      legacy.close();
-      expect(() => openDb(path)).toThrow("Cannot migrate guided_attention_decisions");
-    } finally {
-      rmSync(dir, { recursive: true, force: true });
-    }
-  });
 
 });

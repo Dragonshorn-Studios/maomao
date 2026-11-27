@@ -459,14 +459,14 @@ function migrate(db: SqliteDb): void {
       head_sha TEXT NOT NULL,
       actor_provider TEXT NOT NULL,
       actor_id TEXT NOT NULL,
-      action TEXT NOT NULL,
+      action TEXT NOT NULL CHECK (action IN ('review_myself', 'delegate_to_maomao', 'skip_guided_review')),
       reason_tag TEXT NOT NULL,
       reason_detail TEXT,
       created_at TEXT NOT NULL,
       superseded_at TEXT NOT NULL,
       superseded_by_actor_provider TEXT NOT NULL,
       superseded_by_actor_id TEXT NOT NULL,
-      replacement_action TEXT NOT NULL
+      replacement_action TEXT NOT NULL CHECK (replacement_action IN ('review_myself', 'delegate_to_maomao', 'skip_guided_review'))
     );
 
     CREATE TABLE IF NOT EXISTS guided_human_publications (

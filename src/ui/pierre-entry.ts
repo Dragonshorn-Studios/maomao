@@ -60,7 +60,7 @@ interface GuidedBrowserComment {
   severity?: string;
   category?: string;
   publishable?: boolean;
-  anchorStatus?: string;
+  anchorStatus?: "anchored" | "unplaced";
   body: string;
 }
 

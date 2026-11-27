@@ -4,7 +4,7 @@ import type { GuidedActor } from "./store.js";
 
 export type GuidedAttentionAction = "review_myself" | "delegate_to_maomao" | "skip_guided_review";
 
-export function guidedPoisonAttentionOptional(definition: { guidedReview?: { poisonAlertAttention?: string } } | null | undefined): boolean {
+export function guidedPoisonAttentionOptional(definition: { guidedReview?: { poisonAlertAttention?: "required" | "optional" } } | null | undefined): boolean {
   return definition?.guidedReview?.poisonAlertAttention === "optional";
 }
 export const GUIDED_ATTENTION_REASON_TAGS = ["risk-review", "author-context", "time-sensitive", "policy", "other"] as const;

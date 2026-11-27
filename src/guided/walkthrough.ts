@@ -183,8 +183,10 @@ export class GuidedWalkthroughService {
       .catch((error) => {
         const secrets = [...githubSecrets(this.deps.config), ...opencodeEnvSecrets(process.env), ...providerAuthSecrets(process.env)];
         const latest = this.deps.store.get(row.id);
-        const rearmed = controller.signal.aborted && latest?.status === "pending" && latest.cancel_requested === 0;
-        if (!rearmed) {
+        // A superseded generation can settle after its fingerprint is revived;
+        // the old abort must not overwrite the row's new pending/ready lifecycle.
+        const revived = controller.signal.aborted && latest !== undefined && (latest.status === "pending" || latest.status === "ready");
+        if (!revived) {
           const cancelled = controller.signal.aborted || this.deps.store.cancelRequested(row.id);
           this.deps.store.markFailed(row.id, redactSecrets(error instanceof Error ? error.message : String(error), secrets), cancelled);
         }
