@@ -367,10 +367,12 @@ export function renderGuidedPublishPanel(input: { publish?: GuidedPublishPanelVi
   const canWrite = input.sessionVersion && input.csrfToken;
   const connect = publish.canConnect && publish.connectHref ? `<p><a class="if-button if-button--sm" href="${escapeHtml(publish.connectHref)}">Connect human GitHub publication</a></p>` : "";
   const disconnect = publish.state === "ready" && canWrite ? `<form method="post" action="/guided/publish/github/disconnect" class="gd-compare-actions">${csrfInput(input.csrfToken)}<button class="if-button if-button--sm" type="submit">Disconnect publication token</button></form>` : "";
-  const confirm = publish.state === "ready" && canWrite ? `<form method="post" action="/guided/sessions/${input.sessionId}/publish" class="gd-human-publish">
+  const retryable = publish.state === "ready" || publish.state === "failed" || publish.state === "uncertain";
+  const action = publish.state === "ready" ? "Publish human review" : "Retry human review publication";
+  const confirm = retryable && canWrite ? `<form method="post" action="/guided/sessions/${input.sessionId}/publish" class="gd-human-publish">
     ${csrfInput(input.csrfToken)}<input type="hidden" name="version" value="${input.sessionVersion}"/>
     <label class="gd-check"><input type="checkbox" name="confirm" value="yes" required/> I confirm the exact previewed event, body and selected inline comments may be published as ${escapeHtml(publish.login ?? "my GitHub account")}.</label>
-    <button class="if-button if-button--primary" type="submit">Publish human review as ${escapeHtml(publish.login ?? "GitHub user")}</button>
+    <button class="if-button if-button--primary" type="submit">${action} as ${escapeHtml(publish.login ?? "GitHub user")}</button>
   </form>` : "";
   const published = publish.publicationUrl ? `<p><a href="${escapeHtml(publish.publicationUrl)}">Open published human review</a></p>` : "";
   return `<section id="publish" class="config-section gd-human-publish-panel">

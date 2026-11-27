@@ -5,6 +5,7 @@ import type { GuidedPublishPreview } from "./publish-preview.js";
 import type { GuidedActor } from "./store.js";
 
 const HUMAN_PUBLISH_TIMEOUT_MS = 10_000;
+export const HUMAN_PUBLISH_PENDING_LEASE_MS = 120_000;
 
 interface CredentialRow {
   id: number;
@@ -139,9 +140,11 @@ export class GuidedHumanPublishStore {
     return { row, created: true };
   }
 
-  reopenPublication(id: number, event: string, payloadHash: string): void {
-    this.db.prepare(`UPDATE guided_human_publications SET event = ?, payload_hash = ?, status = 'pending', error_code = NULL, updated_at = ? WHERE id = ? AND status IN ('failed', 'uncertain')`)
-      .run(event, payloadHash, nowIso(), id);
+  reopenPublication(id: number, event: string, payloadHash: string, options: { stalePendingBefore?: string } = {}): boolean {
+    const changed = this.db.prepare(`UPDATE guided_human_publications SET event = ?, payload_hash = ?, status = 'pending', error_code = NULL, updated_at = ?
+      WHERE id = ? AND (status IN ('failed', 'uncertain') OR (status = 'pending' AND updated_at < ?))`)
+      .run(event, payloadHash, nowIso(), id, options.stalePendingBefore ?? "");
+    return changed.changes > 0;
   }
 
   finishPublication(id: number, status: HumanPublicationRow["status"], patch: { reviewId?: number | null; htmlUrl?: string | null; errorCode?: string | null }): void {
