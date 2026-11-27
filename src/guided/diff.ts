@@ -16,7 +16,7 @@ export interface GuidedDiffFile {
   oldPath?: string;
   newPath?: string;
   path: string;
-  status: "added" | "modified" | "deleted" | "renamed" | "binary";
+  status: "added" | "modified" | "deleted" | "renamed";
   additions: number;
   deletions: number;
   hunks: GuidedDiffHunk[];
@@ -89,7 +89,6 @@ export function parseUnifiedDiff(diff: string, opts: { maxFiles?: number; maxLin
     if (!file.truncated) file.patch += `${raw}\n`;
     if (raw.startsWith("Binary files") || raw.startsWith("GIT binary patch")) {
       file.binary = true;
-      file.status = "binary";
       finishHunk();
       continue;
     }
