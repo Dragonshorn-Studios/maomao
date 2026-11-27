@@ -92,10 +92,13 @@ import {
   roleFormValuesFromRole,
 } from "./ui/index.js";
 import { renderProvidersPage } from "./ui/providers.js";
-import { renderGuidedDiffWorkspace, renderGuidedInboxPage, renderGuidedOpenError, renderGuidedSessionPage } from "./ui/guided.js";
+import { renderGuidedDiffWorkspace, renderGuidedInboxPage, renderGuidedOpenError, renderGuidedSessionPage ,
+  type GuidedPublishPanelView,
+} from "./ui/guided.js";
 import { parseUnifiedDiff } from "./guided/diff.js";
 import { buildGuidedPublishPreview } from "./guided/publish-preview.js";
 import { buildGuidedComparison, comparisonOverrides } from "./guided/comparison.js";
+import { GuidedHumanPublishStore, HUMAN_PUBLISH_PENDING_LEASE_MS, guidedHumanPayloadHash, submitHumanGitHubReview } from "./guided/human-publish.js";
 import { guidedWalkthroughFingerprint, guidedWalkthroughView, type GuidedWalkthroughStore } from "./guided/walkthrough-store.js";
 import type { GuidedWalkthroughService } from "./guided/walkthrough.js";
 import { listGuidedInbox } from "./guided/inbox.js";
@@ -153,7 +156,7 @@ import {
   verifySession,
   type OAuthSession,
 } from "./auth.js";
-import { exchangeOAuthCode, fetchGithubUser, oauthAuthorizeUrl, oauthEnabled } from "./oauth.js";
+import { exchangeOAuthCodeDetails, fetchGithubUser, oauthAuthorizeUrl, oauthEnabled } from "./oauth.js";
 import {
   GuidedInputError,
   guidedCommentView,
@@ -192,6 +195,8 @@ export interface ServerContext {
   chat?: { service: ChatService; store: ChatStore };
   /** SHA-fingerprinted Guided Review walkthrough generation. */
   guidedWalkthrough?: { service: GuidedWalkthroughService; store: GuidedWalkthroughStore };
+  /** Encrypted actor-owned credentials and audit rows for deliberate human publication. */
+  guidedHumanPublish?: GuidedHumanPublishStore;
   /** Operator-managed OpenObserve settings for /config/telemetry; defaults to the XDG path. */
   telemetrySettings?: TelemetrySettingsStore;
   /** Operator-managed trusted-check pinning for /config/trusted-checks. */
@@ -586,6 +591,61 @@ function guidedComparisonForSession(ctx: ServerContext, session: GuidedReviewSes
   });
 }
 
+function guidedPublishPanelForSession(input: {
+  ctx: ServerContext;
+  store?: GuidedHumanPublishStore;
+  session: GuidedReviewSessionRow;
+  actor?: GuidedActor;
+  login?: string;
+  oauthConfigured: boolean;
+  workspacePath: string;
+}): GuidedPublishPanelView {
+  const { session, actor, store } = input;
+  const connectHref = `/guided/publish/github/connect?next=${encodeURIComponent(input.workspacePath)}`;
+  if (session.provider !== "github" || session.provider_instance !== "github.com") {
+    return { state: "unsupported", message: "Human publication is currently available only for GitHub.com guided reviews; the private draft and comparison remain available.", canConnect: false };
+  }
+  if (!actor) {
+    return { state: "password", message: "Password-only sessions cannot publish attributable human reviews. Sign in with GitHub OAuth; the private draft and comparison remain available.", canConnect: false };
+  }
+  if (!input.oauthConfigured || !store) {
+    return { state: "unsupported", message: "This instance has no GitHub OAuth human-publication capability configured.", canConnect: false };
+  }
+  const publication = store.publicationForSession(session.id);
+  if (publication?.status === "published") {
+    return { state: "published", message: "Published as the connected human GitHub account. Re-submitting this same guided draft is blocked to avoid duplicate reviews.", publicationUrl: publication.html_url ?? undefined, canConnect: false, login: input.login };
+  }
+  if (publication?.status === "pending") {
+    const pendingLeaseExpired = Date.parse(publication.updated_at) <= Date.now() - HUMAN_PUBLISH_PENDING_LEASE_MS;
+    if (!pendingLeaseExpired) {
+      return { state: "pending", message: "A publication attempt is already in progress; duplicate submission is blocked.", canConnect: false, login: input.login };
+    }
+    return { state: "stale_pending", message: "The prior publication attempt did not complete before its lease expired. Retry first checks GitHub for the exact idempotency payload before any new write.", canConnect: false, login: input.login };
+  }
+  if (publication?.status === "uncertain") {
+    return { state: "uncertain", message: `The prior submission outcome was uncertain (${publication.error_code ?? "network"}). Retrying first checks GitHub for the exact idempotency marker.`, canConnect: false, login: input.login };
+  }
+  const credential = store.credentialStatus(actor);
+  if (credential.state !== "ready") {
+    const message = credential.state === "missing"
+      ? "No human GitHub publication token is connected. Connect explicitly before any GitHub write can occur."
+      : credential.state === "expired"
+        ? "The human GitHub publication token expired. Reconnect it deliberately; the private draft remains available."
+        : "The human GitHub publication token was revoked locally. Reconnect it deliberately to publish.";
+    return { state: credential.state, message, canConnect: true, connectHref, scope: credential.scope, login: input.login };
+  }
+  return {
+    state: publication?.status === "failed" ? "failed" : "ready",
+    message: publication?.status === "failed"
+      ? `The prior deliberate publication was rejected (${publication.error_code ?? "github_error"}). Fix the cause or re-check the preview before retrying.`
+      : "Human publication is connected. No GitHub write occurs until you preview and confirm this exact payload.",
+    scope: credential.scope,
+    canConnect: true,
+    connectHref,
+    login: input.login,
+  };
+}
+
 export function createApp(ctx: ServerContext): Hono<AppEnv> {
   const mergeCapabilities = ctx.forge ? new MergeCapabilityService(ctx.forge, undefined, ctx.mergeModeSettings) : undefined;
   const app = new Hono<AppEnv>();
@@ -620,6 +680,7 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
   let providerTestInFlight = false;
   let telemetryTestInFlight = false;
   const oauthStates = new OAuthStateStore();
+  const humanPublish = ctx.guidedHumanPublish;
 
   // Security headers land after next() so they also cover responses that
   // middleware issues directly (auth redirects, 401/403 JSON). The dev
@@ -789,7 +850,8 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
       return c.text("Too many failed sign-ins; try again later.", 429);
     }
     const url = new URL(c.req.url);
-    const next = oauthStates.consume(url.searchParams.get("state") ?? undefined);
+    const oauthState = oauthStates.consumeEntry(url.searchParams.get("state") ?? undefined);
+    const next = oauthState?.next;
     if (next === undefined) {
       authLimiter.record(`fail:${ip}`, OAUTH_FAIL_LIMIT, OAUTH_WINDOW_MS);
       authLimiter.record("fail:global", OAUTH_FAIL_LIMIT * OAUTH_GLOBAL_MULTIPLIER, OAUTH_WINDOW_MS);
@@ -804,7 +866,8 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
       return c.html(renderLogin({ ...loginPageOpts, error: "oauth-cancelled" }), 400);
     }
     const fetchImpl = ctx.oauthFetch ?? fetch;
-    const accessToken = await exchangeOAuthCode(ctx.config, url.searchParams.get("code") ?? "", fetchImpl);
+    const tokenDetails = await exchangeOAuthCodeDetails(ctx.config, url.searchParams.get("code") ?? "", fetchImpl);
+    const accessToken = tokenDetails?.accessToken;
     const user = accessToken ? await fetchGithubUser(accessToken, fetchImpl) : undefined;
     if (!user) {
       authLimiter.record(`fail:${ip}`, OAUTH_FAIL_LIMIT, OAUTH_WINDOW_MS);
@@ -818,14 +881,65 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
       console.warn(`auth: oauth login denied id=${user.id} login=${user.login} ip=${ip}`);
       return renderLoginDenied(c);
     }
+    if (oauthState?.purpose.startsWith("guided-human-publish:")) {
+      if (oauthState.purpose.slice("guided-human-publish:".length) !== String(user.id)) {
+        console.warn(`auth: guided human publish credential actor mismatch state-user=${user.id}`);
+        return c.html(renderLogin({ ...loginPageOpts, error: "oauth-state" }), 403);
+      }
+      if (!humanPublish || !tokenDetails) {
+        return c.html(renderLogin({ ...loginPageOpts, error: "oauth-failed" }), 502);
+      }
+      humanPublish.saveCredential({ actorProvider: "github", actorId: String(user.id) }, tokenDetails.accessToken, tokenDetails.scope || "repo", tokenDetails.expiresAt);
+      console.log(`auth: guided human publish credential connected id=${user.id} login=${user.login} scope=${tokenDetails.scope || "repo"}`);
+      return c.redirect(`${safeNextPath(next)}#publish`, 302);
+    }
     // Rotation: always issue a fresh session value at login; the human access token above is
-    // used once for identity and never stored.
+    // used once for identity and never stored. Guided publication uses the separate purpose-bound
+    // flow above and stores that credential encrypted instead.
     setSessionCookie(
       c,
       signOAuthSession(ctx.config.uiSessionSecret, { id: user.id, login: user.login, avatarUrl: user.avatarUrl }),
     );
     console.log(`auth: oauth login id=${user.id} login=${user.login}`);
     return c.redirect(safeNextPath(next), 302);
+  });
+
+  app.get("/guided/publish/github/connect", async (c) => {
+    const actor = guidedActor(c);
+    if (!actor) return guidedIdentityRequired(c);
+    if (!oauthOn || !humanPublish) {
+      return c.html(renderGuidedOpenError({ options: guidedPageOpts(c), error: "GitHub OAuth human publication is not configured on this instance." }), 503);
+    }
+    const next = safeNextPath(c.req.query("next") ?? "/guided");
+    let scope = "repo";
+    const match = next.match(/^\/guided\/github\/([^/]+)\/([^/]+)\/(\d+)/);
+    if (match && ctx.github) {
+      try {
+        const installation = await ctx.github.getRepoInstallation(decodeURIComponent(match[1]), decodeURIComponent(match[2]));
+        const repository = await ctx.github.getRepository(decodeURIComponent(match[1]), decodeURIComponent(match[2]), installation.installationId);
+        // Classic OAuth cannot request pull_requests:write directly. public_repo is the
+        // narrowest equivalent for public repositories; private repositories require repo.
+        scope = repository.private === false ? "public_repo" : "repo";
+      } catch {
+        scope = "repo";
+      }
+    }
+    const state = oauthStates.issue(Date.now(), OAUTH_STATE_TTL_MS, next, `guided-human-publish:${actor.actorId}`);
+    return c.redirect(oauthAuthorizeUrl(ctx.config, state, scope), 302);
+  });
+
+  app.post("/guided/publish/github/disconnect", (c) => {
+    const actor = guidedActor(c);
+    if (!actor) return guidedIdentityRequired(c);
+    humanPublish?.revokeCredential(actor);
+    let next = "/guided";
+    try {
+      const referer = c.req.header("referer");
+      if (referer) next = safeNextPath(new URL(referer).pathname);
+    } catch {
+      next = "/guided";
+    }
+    return c.redirect(`${next}#publish`, 303);
   });
 
   app.post("/logout", (c) => {
@@ -1337,6 +1451,7 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
             walkthrough,
             comments: session ? ctx.store.guidedReview.listComments(session.id).map(guidedCommentView) : [],
             comparison: session ? guidedComparisonForSession(ctx, session) : undefined,
+            publish: session ? guidedPublishPanelForSession({ ctx, store: humanPublish, session, actor, login: c.get("identity")?.login, oauthConfigured: oauthOn, workspacePath: `/guided/github/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/${prNumber}` }) : undefined,
             pullUrl: pull.prHtmlUrl,
             readOnly: !actor,
           });
@@ -1507,6 +1622,81 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
   );
 
 
+
+  app.post("/guided/sessions/:id/publish", async (c) =>
+    guidedRoute(c, async () => {
+      const actor = guidedActor(c);
+      if (!actor) return guidedIdentityRequired(c);
+      const session = ctx.store.guidedReview.getOwned(guidedId(c.req.param("id")), actor);
+      if (!session) return c.json({ error: "guided_review_session_not_found" }, 404);
+      if (!humanPublish) return c.html(renderGuidedOpenError({ options: guidedPageOpts(c), error: "Human publication is not configured on this instance." }), 503);
+      const body = await c.req.parseBody();
+      const version = Number(body.version);
+      if (!Number.isInteger(version) || version <= 0 || body.confirm !== "yes") {
+        return c.html(renderGuidedOpenError({ options: guidedPageOpts(c), error: "Malformed or unconfirmed human publication request." }), 400);
+      }
+      if (session.historical_at) return c.html(renderGuidedOpenError({ options: guidedPageOpts(c), error: "Historical SHA-pinned drafts cannot be published." }), 409);
+      if (session.version !== version) return c.html(renderGuidedOpenError({ options: guidedPageOpts(c), error: "The guided draft changed after this confirmation. Refresh, preview the exact payload again, then confirm." }), 409);
+      if (session.provider !== "github" || session.provider_instance !== "github.com") {
+        return c.html(renderGuidedOpenError({ options: guidedPageOpts(c), error: "Human publication is available only for GitHub.com guided reviews." }), 400);
+      }
+      const token = humanPublish.accessToken(actor);
+      if (!token) {
+        return c.html(renderGuidedOpenError({ options: guidedPageOpts(c), error: "Human publication authorization is missing, expired, or revoked. Reconnect it deliberately before publishing." }), 403);
+      }
+      const sessionView = guidedSessionView(session);
+      const preview = buildGuidedPublishPreview(sessionView, ctx.store.guidedReview.listComments(session.id).map(guidedCommentView));
+      const payloadHash = guidedHumanPayloadHash(preview);
+      let reservation;
+      try {
+        reservation = humanPublish.reservePublication({
+          sessionId: session.id,
+          actor,
+          repoFullName: session.repo_full_name,
+          prNumber: session.pr_number,
+          headSha: session.head_sha,
+          event: preview.event,
+          payloadHash,
+        });
+      } catch {
+        return c.html(renderGuidedOpenError({ options: guidedPageOpts(c), error: "A publication attempt for this guided draft already exists; duplicate submission is blocked." }), 409);
+      }
+      const existing = reservation.row;
+      const workspace = `/guided/github/${encodeURIComponent(session.repo_full_name.split("/")[0])}/${encodeURIComponent(session.repo_full_name.split("/")[1])}/${session.pr_number}#publish`;
+      if (existing.status === "published") return c.redirect(workspace, 303);
+      if (!reservation.created) {
+        // Failed/uncertain rows must be atomically reclaimed before the async GitHub
+        // submission; otherwise concurrent retries can both pass the guard. A pending
+        // row is reclaimable only after the submission lease has expired, which is
+        // the recovery path for a process crash between reservation and completion.
+        const stalePendingBefore = new Date(Date.now() - HUMAN_PUBLISH_PENDING_LEASE_MS).toISOString();
+        if (!humanPublish.reopenPublication(existing.id, preview.event, payloadHash, { stalePendingBefore })) {
+          const message = existing.status === "pending"
+            ? "A publication attempt is already in progress; duplicate submission is blocked."
+            : "This guided draft already has a different publication state. Refresh before retrying.";
+          return c.html(renderGuidedOpenError({ options: guidedPageOpts(c), error: message }), 409);
+        }
+      }
+      humanPublish.audit(actor, session.id, "publish_attempt", `event=${preview.event}`);
+      const result = await submitHumanGitHubReview({
+        fetchImpl: ctx.oauthFetch ?? fetch,
+        token,
+        actorId: actor.actorId,
+        sessionId: session.id,
+        repoFullName: session.repo_full_name,
+        prNumber: session.pr_number,
+        preview,
+      });
+      if (result.status === "published" || result.status === "duplicate") {
+        humanPublish.finishPublication(existing.id, "published", { reviewId: result.reviewId, htmlUrl: result.htmlUrl ?? null, errorCode: null });
+        humanPublish.audit(actor, session.id, result.status === "duplicate" ? "publish_recovered_existing" : "published", `review=${result.reviewId}`);
+        return c.redirect(workspace, 303);
+      }
+      humanPublish.finishPublication(existing.id, result.status, { errorCode: result.errorCode });
+      humanPublish.audit(actor, session.id, `publish_${result.status}`, result.errorCode);
+      return c.html(renderGuidedOpenError({ options: guidedPageOpts(c), error: result.message }), result.status === "failed" ? 400 : 502);
+    }),
+  );
 
   app.get("/api/guided-review/sessions/:id/comparison", (c) =>
     guidedRoute(c, () => {

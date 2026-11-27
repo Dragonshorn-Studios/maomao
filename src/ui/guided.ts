@@ -350,6 +350,38 @@ export function renderGuidedComparisonPanel(input: { comparison?: GuidedComparis
 }
 
 
+
+export interface GuidedPublishPanelView {
+  state: "unsupported" | "password" | "missing" | "expired" | "revoked" | "ready" | "published" | "pending" | "stale_pending" | "failed" | "uncertain";
+  message: string;
+  scope?: string;
+  login?: string;
+  publicationUrl?: string;
+  canConnect: boolean;
+  connectHref?: string;
+}
+
+export function renderGuidedPublishPanel(input: { publish?: GuidedPublishPanelView; sessionId?: number; sessionVersion?: number; csrfToken?: string }): string {
+  if (!input.publish || !input.sessionId) return "";
+  const publish = input.publish;
+  const canWrite = input.sessionVersion && input.csrfToken;
+  const connect = publish.canConnect && publish.connectHref ? `<p><a class="if-button if-button--sm" href="${escapeHtml(publish.connectHref)}">Connect human GitHub publication</a></p>` : "";
+  const disconnect = publish.state === "ready" && canWrite ? `<form method="post" action="/guided/publish/github/disconnect" class="gd-compare-actions">${csrfInput(input.csrfToken)}<button class="if-button if-button--sm" type="submit">Disconnect publication token</button></form>` : "";
+  const retryable = publish.state === "ready" || publish.state === "stale_pending" || publish.state === "failed" || publish.state === "uncertain";
+  const action = publish.state === "ready" ? "Publish human review" : "Retry human review publication";
+  const confirm = retryable && canWrite ? `<form method="post" action="/guided/sessions/${input.sessionId}/publish" class="gd-human-publish">
+    ${csrfInput(input.csrfToken)}<input type="hidden" name="version" value="${input.sessionVersion}"/>
+    <label class="gd-check"><input type="checkbox" name="confirm" value="yes" required/> I confirm the exact previewed event, body and selected inline comments may be published as ${escapeHtml(publish.login ?? "my GitHub account")}.</label>
+    <button class="if-button if-button--primary" type="submit">${action} as ${escapeHtml(publish.login ?? "GitHub user")}</button>
+  </form>` : "";
+  const published = publish.publicationUrl ? `<p><a href="${escapeHtml(publish.publicationUrl)}">Open published human review</a></p>` : "";
+  return `<section id="publish" class="config-section gd-human-publish-panel">
+    <div class="gd-head"><h2>Publish as human</h2><span class="job-chip">${escapeHtml(publish.state)}</span></div>
+    <p class="muted">${escapeHtml(publish.message)}${publish.scope ? ` Granted scope: ${escapeHtml(publish.scope)}.` : ""} Bot publication semantics are unchanged.</p>
+    ${published}${connect}${confirm}${disconnect}
+  </section>`;
+}
+
 export function renderGuidedDiffWorkspace(input: {
   files: GuidedDiffFile[];
   statusFilter?: string;
@@ -366,6 +398,7 @@ export function renderGuidedDiffWorkspace(input: {
   sessionView?: GuidedSessionView;
   walkthrough?: GuidedWalkthroughView;
   comparison?: GuidedComparisonView;
+  publish?: GuidedPublishPanelView;
   pullUrl?: string;
   readOnly?: boolean;
 }): string {
@@ -398,6 +431,7 @@ export function renderGuidedDiffWorkspace(input: {
   }).join("\n");
   const draftPanel = input.sessionView ? renderGuidedDraftPanel({ session: input.sessionView, comments: input.comments ?? [], csrfToken: input.csrfToken, readOnly: input.readOnly }) : "";
   const walkthroughPanel = renderGuidedWalkthroughPanel({ walkthrough: input.walkthrough, files: filtered, sessionId: input.sessionId, csrfToken: input.csrfToken });
+  const publishPanel = renderGuidedPublishPanel({ publish: input.publish, sessionId: input.sessionId, sessionVersion: input.sessionVersion, csrfToken: input.csrfToken });
   const comparisonPanel = renderGuidedComparisonPanel({ comparison: input.comparison, files: filtered, sessionId: input.sessionId, sessionVersion: input.sessionVersion, csrfToken: input.csrfToken, pullUrl: input.pullUrl });
   return `${walkthroughPanel}${draftPanel}<section class="config-section guided-diff-workspace" data-guided-diff-workspace>
     <div class="gd-head"><h2>Diff workspace</h2><button type="button" class="if-button if-button--sm guided-layout-toggle">Switch diff layout</button></div>
@@ -412,6 +446,7 @@ export function renderGuidedDiffWorkspace(input: {
     <div class="gd-layout"><nav class="gd-tree" aria-label="Changed files"><ol>${tree}</ol></nav><div class="gd-files">${rendered || `<div class="empty">No files match this diff filter.</div>`}</div></div>
   </section>
   ${comparisonPanel}
+  ${publishPanel}
   <script>
   (function(){
     var guidedSessionId=${jsJson(input.sessionId ?? null)},guidedViewed=${jsJson(input.viewedFiles ?? [])};

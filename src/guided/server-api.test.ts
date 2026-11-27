@@ -8,13 +8,14 @@ import { createApp } from "../server.js";
 import type { ManualTriggerPort } from "../github/client.js";
 import { GuidedWalkthroughStore } from "./walkthrough-store.js";
 import { fingerprintFinding } from "../findings/identity.js";
+import { GuidedHumanPublishStore, guidedHumanPublishMarker } from "./human-publish.js";
 
 const secret = "guided-review-test-secret";
 const baseSha = "a".repeat(40);
 const headSha = "b".repeat(40);
 const nextHeadSha = "c".repeat(40);
 
-function guidedTestApp(github?: ManualTriggerPort, contextExtras: Partial<Parameters<typeof createApp>[0]> = {}) {
+function guidedTestApp(github?: ManualTriggerPort, contextExtras: Partial<Parameters<typeof createApp>[0]> = {}, env: Record<string, string> = {}) {
   const config = loadConfig({
     GITHUB_WEBHOOK_SECRET: "webhook-secret",
     GITHUB_APP_ID: "1",
@@ -23,6 +24,7 @@ function guidedTestApp(github?: ManualTriggerPort, contextExtras: Partial<Parame
     UI_PASSWORD: "hunter2",
     UI_SESSION_SECRET: secret,
     MAOMAO_ADMIN_GITHUB_IDS: "1001,2002",
+    ...env,
   });
   const db = openDb(":memory:");
   const store = new JobStore(db);
@@ -46,7 +48,8 @@ function guidedTestApp(github?: ManualTriggerPort, contextExtras: Partial<Parame
       cancel(row: import("./walkthrough-store.js").GuidedWalkthroughRow) { return walkthroughStore.requestCancel(row.id); },
     } as never,
   };
-  return { app: createApp({ config, store, queue, github, startedAt: Date.now(), env: {}, guidedWalkthrough, ...contextExtras }), store, walkthroughStore };
+  const guidedHumanPublish = contextExtras.guidedHumanPublish ?? new GuidedHumanPublishStore(db, secret);
+  return { app: createApp({ config, store, queue, github, startedAt: Date.now(), env: {}, guidedWalkthrough, guidedHumanPublish, ...contextExtras }), store, walkthroughStore, db, guidedHumanPublish };
 }
 
 function operator(id: number, login = `operator-${id}`) {
@@ -595,6 +598,296 @@ describe("Guided Review session API", () => {
     const body = (await comparison.json()) as { comparison: { jobId: number; maomaoOnly: Array<{ summary: string }> } };
     expect(body.comparison.jobId).toBe(newJob.job.id);
     expect(body.comparison.maomaoOnly.map((item) => item.summary)).toEqual(["Replacement exact-head artifact"]);
+  });
+
+
+  it("publishes a confirmed preview through the encrypted human credential without exposing the token", async () => {
+    const posts: string[] = [];
+    let reviewVisible = false;
+    const githubFetch = async (url: string | URL, init?: RequestInit) => {
+      const text = String(url);
+      if (text.endsWith("/user")) return Response.json({ id: 1001, login: "operator-1001" });
+      if (text.includes("/pulls/12/reviews") && (init?.method ?? "GET") === "GET") {
+        return Response.json(reviewVisible ? [{ id: 123, html_url: "https://github.com/acme/widgets/pull/12#pullrequestreview-123", body: guidedHumanPublishMarker(1), user: { id: 1001 } }] : []);
+      }
+      if (text.includes("/pulls/12") && (init?.method ?? "GET") === "GET") return Response.json({ state: "open", head: { sha: headSha } });
+      if (text.includes("/pulls/12/reviews") && init?.method === "POST") {
+        posts.push(typeof init.body === "string" ? init.body : "");
+        reviewVisible = true;
+        return Response.json({ id: 123, html_url: "https://github.com/acme/widgets/pull/12#pullrequestreview-123" }, { status: 201 });
+      }
+      return Response.json({}, { status: 404 });
+    };
+    const { app, db, guidedHumanPublish: humanPublish } = guidedTestApp(undefined, { oauthFetch: githubFetch as typeof fetch });
+    const auth = operator(1001);
+    humanPublish.saveCredential({ actorProvider: "github", actorId: "1001" }, "human-token", "public_repo");
+
+    const openedResponse = await postJson(app, "/api/guided-review/sessions/open", auth.cookies, openBody(auth.csrfToken));
+    const opened = (await openedResponse.json()) as { session: { id: number; version: number } };
+    const updated = await postJson(app, `/api/guided-review/sessions/${opened.session.id}`, auth.cookies, {
+      version: opened.session.version,
+      draftSummary: "Publish this human summary",
+      draftVerdict: "COMMENT",
+      csrf_token: auth.csrfToken,
+    });
+    const version = ((await updated.json()) as { session: { version: number } }).session.version;
+    const form = new URLSearchParams({ version: String(version), confirm: "yes", csrf_token: auth.csrfToken });
+    const response = await app.request(`/guided/sessions/${opened.session.id}/publish`, {
+      method: "POST",
+      headers: { cookie: auth.cookies, "content-type": "application/x-www-form-urlencoded" },
+      body: form.toString(),
+    });
+    expect(response.status).toBe(303);
+    expect(posts).toHaveLength(1);
+    const payload = JSON.parse(posts[0]) as { commit_id?: string; event?: string; body?: string };
+    expect(payload).toMatchObject({ commit_id: headSha, event: "COMMENT" });
+    expect(payload.body).toContain("Publish this human summary");
+    expect(payload.body).toContain(`maomao-guided-human-publish:${opened.session.id}`);
+    const stored = db.prepare(`SELECT token_encrypted FROM guided_human_credentials`).get() as { token_encrypted: string };
+    expect(stored.token_encrypted).not.toContain("human-token");
+    expect(humanPublish.publicationForSession(opened.session.id)).toMatchObject({ status: "published", review_id: 123 });
+    const replay = await app.request(`/guided/sessions/${opened.session.id}/publish`, {
+      method: "POST",
+      headers: { cookie: auth.cookies, "content-type": "application/x-www-form-urlencoded" },
+      body: form.toString(),
+    });
+    expect(replay.status).toBe(303);
+    expect(posts).toHaveLength(1);
+  });
+
+
+  it("blocks concurrent retries of a failed publication behind one pending reservation", async () => {
+    const posts: string[] = [];
+    const githubFetch = async (url: string | URL, init?: RequestInit) => {
+      const text = String(url);
+      if (text.endsWith("/user")) return Response.json({ id: 1001, login: "operator-1001" });
+      if (text.includes("/pulls/12/reviews") && (init?.method ?? "GET") === "GET") return Response.json([]);
+      if (text.includes("/pulls/12") && (init?.method ?? "GET") === "GET") return Response.json({ state: "open", head: { sha: headSha } });
+      if (text.includes("/pulls/12/reviews") && init?.method === "POST") {
+        posts.push(typeof init.body === "string" ? init.body : "");
+        await new Promise((resolve) => setTimeout(resolve, 30));
+        return Response.json({ id: 123, html_url: "https://github.com/acme/widgets/pull/12#pullrequestreview-123" }, { status: 201 });
+      }
+      return Response.json({}, { status: 404 });
+    };
+    const { app, guidedHumanPublish: humanPublish } = guidedTestApp(undefined, { oauthFetch: githubFetch as typeof fetch });
+    const auth = operator(1001);
+    humanPublish.saveCredential({ actorProvider: "github", actorId: "1001" }, "human-token", "public_repo");
+    const openedResponse = await postJson(app, "/api/guided-review/sessions/open", auth.cookies, openBody(auth.csrfToken));
+    const opened = (await openedResponse.json()) as { session: { id: number; version: number } };
+    const updated = await postJson(app, `/api/guided-review/sessions/${opened.session.id}`, auth.cookies, {
+      version: opened.session.version,
+      draftSummary: "Retry this publication",
+      draftVerdict: "COMMENT",
+      csrf_token: auth.csrfToken,
+    });
+    const version = ((await updated.json()) as { session: { version: number } }).session.version;
+    const reserved = humanPublish.reservePublication({
+      sessionId: opened.session.id,
+      actor: { actorProvider: "github", actorId: "1001" },
+      repoFullName: "acme/widgets",
+      prNumber: 12,
+      headSha,
+      event: "COMMENT",
+      payloadHash: "prior-payload",
+    });
+    humanPublish.finishPublication(reserved.row.id, "failed", { errorCode: "inline_coordinates_rejected" });
+
+    const form = new URLSearchParams({ version: String(version), confirm: "yes", csrf_token: auth.csrfToken }).toString();
+    const request = () => app.request(`/guided/sessions/${opened.session.id}/publish`, {
+      method: "POST",
+      headers: { cookie: auth.cookies, "content-type": "application/x-www-form-urlencoded" },
+      body: form,
+    });
+    const [first, second] = await Promise.all([request(), request()]);
+    expect([first.status, second.status].sort()).toEqual([303, 409]);
+    expect(posts).toHaveLength(1);
+    expect(humanPublish.publicationForSession(opened.session.id)?.status).toBe("published");
+  });
+
+  it("reclaims only lease-expired pending publications after a crash while fresh pending rows stay blocked", async () => {
+    const posts: string[] = [];
+    const githubFetch = async (url: string | URL, init?: RequestInit) => {
+      const text = String(url);
+      if (text.endsWith("/user")) return Response.json({ id: 1001, login: "operator-1001" });
+      if (text.includes("/pulls/12/reviews") && (init?.method ?? "GET") === "GET") return Response.json([]);
+      if (text.includes("/pulls/12") && (init?.method ?? "GET") === "GET") return Response.json({ state: "open", head: { sha: headSha } });
+      if (text.includes("/pulls/12/reviews") && init?.method === "POST") {
+        posts.push("");
+        return Response.json({ id: 124, html_url: "https://github.com/acme/widgets/pull/12#pullrequestreview-124" }, { status: 201 });
+      }
+      return Response.json({}, { status: 404 });
+    };
+    const { app, db, guidedHumanPublish: humanPublish } = guidedTestApp(undefined, { oauthFetch: githubFetch as typeof fetch });
+    const auth = operator(1001);
+    humanPublish.saveCredential({ actorProvider: "github", actorId: "1001" }, "human-token", "public_repo");
+    const openedResponse = await postJson(app, "/api/guided-review/sessions/open", auth.cookies, openBody(auth.csrfToken));
+    const opened = (await openedResponse.json()) as { session: { id: number; version: number } };
+    const updated = await postJson(app, `/api/guided-review/sessions/${opened.session.id}`, auth.cookies, {
+      version: opened.session.version,
+      draftSummary: "Recover publication",
+      draftVerdict: "COMMENT",
+      csrf_token: auth.csrfToken,
+    });
+    const version = ((await updated.json()) as { session: { version: number } }).session.version;
+    const reserved = humanPublish.reservePublication({
+      sessionId: opened.session.id,
+      actor: { actorProvider: "github", actorId: "1001" },
+      repoFullName: "acme/widgets",
+      prNumber: 12,
+      headSha,
+      event: "COMMENT",
+      payloadHash: "crash-payload",
+    });
+    const form = new URLSearchParams({ version: String(version), confirm: "yes", csrf_token: auth.csrfToken }).toString();
+    const request = () => app.request(`/guided/sessions/${opened.session.id}/publish`, {
+      method: "POST",
+      headers: { cookie: auth.cookies, "content-type": "application/x-www-form-urlencoded" },
+      body: form,
+    });
+
+    const fresh = await request();
+    expect(fresh.status).toBe(409);
+    expect(posts).toHaveLength(0);
+
+    db.prepare("UPDATE guided_human_publications SET updated_at = ? WHERE id = ?").run(new Date(Date.now() - 121_000).toISOString(), reserved.row.id);
+    const recovered = await request();
+    expect(recovered.status).toBe(303);
+    expect(posts).toHaveLength(1);
+    expect(humanPublish.publicationForSession(opened.session.id)?.status).toBe("published");
+  });
+
+  it("connects a purpose-bound human publication credential with narrow scope, rejects actor mismatch, and revokes on disconnect", async () => {
+    const github: ManualTriggerPort = {
+      async getRepoInstallation() { return { installationId: 10, accountId: 100 }; },
+      async getRepository() { return { id: 200, private: false }; },
+      async getPull(installationId: number, owner: string, repo: string, prNumber: number) {
+        return {
+          installationId,
+          accountId: 100,
+          repositoryId: 200,
+          repoOwner: owner,
+          repoName: repo,
+          repoFullName: `${owner}/${repo}`,
+          prNumber,
+          prTitle: "Test pull request",
+          prBody: "",
+          prHtmlUrl: `https://github.com/${owner}/${repo}/pull/${prNumber}`,
+          prAuthor: "author",
+          baseSha,
+          headSha,
+          baseRef: "main",
+          headRef: "feature",
+          draft: false,
+          state: "open",
+        };
+      },
+    };
+    let callbackUserId = 1001;
+    const oauthFetch = async (url: string | URL, init?: RequestInit) => {
+      const text = String(url);
+      if (text === "https://github.com/login/oauth/access_token") {
+        return Response.json({ access_token: "human-token", scope: "public_repo", expires_in: 3600 });
+      }
+      if (text === "https://api.github.com/user") return Response.json({ id: callbackUserId, login: `operator-${callbackUserId}`, avatar_url: null });
+      return Response.json({}, { status: 404 });
+    };
+    const oauthEnv = {
+      GITHUB_OAUTH_CLIENT_ID: "client-id",
+      GITHUB_OAUTH_CLIENT_SECRET: "client-secret",
+      MAOMAO_PUBLIC_URL: "https://maomao.example.test",
+    };
+    const { app, db, guidedHumanPublish: humanPublish } = guidedTestApp(github, { oauthFetch: oauthFetch as typeof fetch }, oauthEnv);
+    const auth = operator(1001);
+    const connect = await app.request(`/guided/publish/github/connect?next=${encodeURIComponent("/guided/github/acme/widgets/12")}`, { headers: { cookie: auth.cookies } });
+    expect(connect.status).toBe(302);
+    const authorize = new URL(connect.headers.get("location") ?? "");
+    expect(authorize.searchParams.get("scope")).toBe("public_repo");
+    const state = authorize.searchParams.get("state") ?? "";
+    expect(state).toBeTruthy();
+
+    const callback = await app.request(`/login/github/callback?code=code&state=${encodeURIComponent(state)}`, { headers: { cookie: auth.cookies } });
+    expect(callback.status).toBe(302);
+    expect(callback.headers.get("location")).toBe("/guided/github/acme/widgets/12#publish");
+    expect(humanPublish.credentialStatus({ actorProvider: "github", actorId: "1001" }).state).toBe("ready");
+    const stored = db.prepare("SELECT token_encrypted, scope FROM guided_human_credentials").get() as { token_encrypted: string; scope: string };
+    expect(stored.scope).toBe("public_repo");
+    expect(stored.token_encrypted).not.toContain("human-token");
+
+    callbackUserId = 2002;
+    const mismatchConnect = await app.request(`/guided/publish/github/connect?next=${encodeURIComponent("/guided/github/acme/widgets/12")}`, { headers: { cookie: auth.cookies } });
+    const mismatchState = new URL(mismatchConnect.headers.get("location") ?? "").searchParams.get("state") ?? "";
+    const mismatch = await app.request(`/login/github/callback?code=code&state=${encodeURIComponent(mismatchState)}`, { headers: { cookie: auth.cookies } });
+    expect(mismatch.status).toBe(403);
+    expect((db.prepare("SELECT COUNT(*) AS count FROM guided_human_credentials").get() as { count: number }).count).toBe(1);
+
+    const disconnect = await app.request("/guided/publish/github/disconnect", {
+      method: "POST",
+      headers: { cookie: auth.cookies, "content-type": "application/x-www-form-urlencoded", referer: "https://maomao.example.test/guided" },
+      body: new URLSearchParams({ csrf_token: auth.csrfToken }).toString(),
+    });
+    expect(disconnect.status).toBe(303);
+    expect(humanPublish.credentialStatus({ actorProvider: "github", actorId: "1001" }).state).toBe("revoked");
+
+    const openedResponse = await postJson(app, "/api/guided-review/sessions/open", auth.cookies, openBody(auth.csrfToken));
+    const opened = (await openedResponse.json()) as { session: { id: number; version: number } };
+    const updated = await postJson(app, `/api/guided-review/sessions/${opened.session.id}`, auth.cookies, {
+      version: opened.session.version,
+      draftSummary: "Disconnected credential cannot publish",
+      draftVerdict: "COMMENT",
+      csrf_token: auth.csrfToken,
+    });
+    const version = ((await updated.json()) as { session: { version: number } }).session.version;
+    const publish = await app.request(`/guided/sessions/${opened.session.id}/publish`, {
+      method: "POST",
+      headers: { cookie: auth.cookies, "content-type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({ version: String(version), confirm: "yes", csrf_token: auth.csrfToken }).toString(),
+    });
+    expect(publish.status).toBe(403);
+  });
+
+
+  it("rejects unconfirmed, stale-version, and historical publish attempts before any GitHub review write", async () => {
+    const posts: string[] = [];
+    const githubFetch = async (url: string | URL, init?: RequestInit) => {
+      const text = String(url);
+      if (text.endsWith("/user")) return Response.json({ id: 1001, login: "operator-1001" });
+      if (text.includes("/pulls/12/reviews") && (init?.method ?? "GET") === "GET") return Response.json([]);
+      if (text.includes("/pulls/12") && (init?.method ?? "GET") === "GET") return Response.json({ state: "open", head: { sha: headSha } });
+      if (text.includes("/pulls/12/reviews") && init?.method === "POST") {
+        posts.push(typeof init.body === "string" ? init.body : "");
+        return Response.json({ id: 125, html_url: "https://github.com/acme/widgets/pull/12#pullrequestreview-125" }, { status: 201 });
+      }
+      return Response.json({}, { status: 404 });
+    };
+    const { app, guidedHumanPublish: humanPublish } = guidedTestApp(undefined, { oauthFetch: githubFetch as typeof fetch });
+    const auth = operator(1001);
+    humanPublish.saveCredential({ actorProvider: "github", actorId: "1001" }, "human-token", "public_repo");
+    const openedResponse = await postJson(app, "/api/guided-review/sessions/open", auth.cookies, openBody(auth.csrfToken));
+    const opened = (await openedResponse.json()) as { session: { id: number; version: number } };
+    const updated = await postJson(app, `/api/guided-review/sessions/${opened.session.id}`, auth.cookies, {
+      version: opened.session.version,
+      draftSummary: "Guarded publication",
+      draftVerdict: "COMMENT",
+      csrf_token: auth.csrfToken,
+    });
+    const version = ((await updated.json()) as { session: { version: number } }).session.version;
+    const publish = (fields: Record<string, string>) => app.request(`/guided/sessions/${opened.session.id}/publish`, {
+      method: "POST",
+      headers: { cookie: auth.cookies, "content-type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams(fields).toString(),
+    });
+
+    const unconfirmed = await publish({ version: String(version), csrf_token: auth.csrfToken });
+    expect(unconfirmed.status).toBe(400);
+    const staleVersion = await publish({ version: String(version - 1), confirm: "yes", csrf_token: auth.csrfToken });
+    expect(staleVersion.status).toBe(409);
+
+    const movedResponse = await postJson(app, "/api/guided-review/sessions/open", auth.cookies, openBody(auth.csrfToken, { headSha: nextHeadSha }));
+    expect(movedResponse.status).toBe(200);
+    const historical = await publish({ version: String(version), confirm: "yes", csrf_token: auth.csrfToken });
+    expect(historical.status).toBe(409);
+    expect(posts).toHaveLength(0);
   });
 
 });

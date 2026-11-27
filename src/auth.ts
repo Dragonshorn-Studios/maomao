@@ -206,23 +206,27 @@ export function verifyOAuthSession(
  * leftovers, so abandoned flows do not accumulate.
  */
 export class OAuthStateStore {
-  private readonly entries = new Map<string, { expiresAt: number; next: string }>();
+  private readonly entries = new Map<string, { expiresAt: number; next: string; purpose: string }>();
 
-  issue(now: number, ttlMs: number, next = "/"): string {
+  issue(now: number, ttlMs: number, next = "/", purpose = "login"): string {
     for (const [nonce, entry] of this.entries) {
       if (entry.expiresAt <= now) this.entries.delete(nonce);
     }
     const nonce = randomBytes(16).toString("base64url");
-    this.entries.set(nonce, { expiresAt: now + ttlMs, next });
+    this.entries.set(nonce, { expiresAt: now + ttlMs, next, purpose });
     return nonce;
   }
 
-  consume(nonce: string | undefined, now = Date.now()): string | undefined {
+  consumeEntry(nonce: string | undefined, now = Date.now()): { next: string; purpose: string } | undefined {
     if (!nonce) return undefined;
     const entry = this.entries.get(nonce);
     if (!entry) return undefined;
     this.entries.delete(nonce);
     if (entry.expiresAt <= now) return undefined;
-    return entry.next;
+    return { next: entry.next, purpose: entry.purpose };
+  }
+
+  consume(nonce: string | undefined, now = Date.now()): string | undefined {
+    return this.consumeEntry(nonce, now)?.next;
   }
 }
