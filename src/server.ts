@@ -1229,8 +1229,10 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
         try {
           const rawDiff = await ctx.github.getCompareDiff(installation.installationId, owner, repo, pull.baseSha, pull.headSha, ctx.config.maxDiffBytes);
           const files = parseUnifiedDiff(rawDiff, { maxFiles: 300, maxLinesPerFile: 2000 });
+          const rawFileCount = rawDiff.split("\n").filter((line) => line.startsWith("diff --git ")).length;
           diffWorkspace = renderGuidedDiffWorkspace({
             files,
+            diffTruncated: rawFileCount > files.length,
             fileFilter: c.req.query("file") || undefined,
             statusFilter: c.req.query("status") || undefined,
             baseSha: pull.baseSha,
