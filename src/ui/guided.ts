@@ -4,6 +4,7 @@ import type { GuidedInboxItem, GuidedInboxPage } from "../guided/inbox.js";
 import type { GuidedDiffFile } from "../guided/diff.js";
 import type { GuidedCommentView, GuidedSessionView } from "../guided/store.js";
 import type { GuidedWalkthroughPayload, GuidedWalkthroughView } from "../guided/walkthrough-store.js";
+import type { GuidedComparisonPair, GuidedComparisonSide, GuidedComparisonView } from "../guided/comparison.js";
 import { csrfInput, layout, type PageOptions } from "./layout.js";
 
 function qs(filters: Record<string, string | number | undefined>): string {
@@ -271,6 +272,88 @@ function renderGuidedWalkthroughPanel(input: { walkthrough?: GuidedWalkthroughVi
   </section>`;
 }
 
+function comparisonHref(path: string | undefined, line: number | undefined, anchors: Map<string, number>, files: GuidedDiffFile[]): string | undefined {
+  if (!path) return undefined;
+  const index = anchors.get(path);
+  if (index === undefined) return undefined;
+  const file = files[index];
+  if (line !== undefined && file) {
+    for (const [hunkIndex, hunk] of file.hunks.entries()) {
+      const row = hunk.lines.find((candidate) => candidate.newLine === line || candidate.oldLine === line);
+      if (row) {
+        const lineNumber = row.kind === "del" ? row.oldLine : row.newLine;
+        if (lineNumber) return `#f${encodeURIComponent(path)}-h${hunkIndex}-L${row.kind === "del" ? "o" : "n"}${lineNumber}`;
+      }
+    }
+  }
+  return `#guided-file-${index}`;
+}
+
+function comparisonLink(path: string | undefined, line: number | undefined, label: string, anchors: Map<string, number>, files: GuidedDiffFile[]): string {
+  const href = comparisonHref(path, line, anchors, files);
+  return href ? `<a href="${href}">${escapeHtml(label)}</a>` : `<span>${escapeHtml(label)}</span>`;
+}
+
+function comparisonSide(side: GuidedComparisonSide, anchors: Map<string, number>, files: GuidedDiffFile[]): string {
+  const where = side.path ? comparisonLink(side.path, side.line, side.line ? `${side.path}:${side.line}` : side.path, anchors, files) : `<span class="muted">no location</span>`;
+  return `<div class="gd-compare-side"><strong>${side.source === "human" ? "Human" : "Maomao"}</strong> ${where}${side.severity ? ` <span class="job-chip">${escapeHtml(side.severity)}</span>` : ""}${side.status ? ` <span class="job-chip">${escapeHtml(side.status)}</span>` : ""}<p>${escapeHtml(side.summary)}</p>${side.body && side.body !== side.summary ? `<p class="muted">${escapeHtml(side.body)}</p>` : ""}${side.rationale ? `<p class="muted">${escapeHtml(side.rationale)}</p>` : ""}</div>`;
+}
+
+function comparisonPair(pair: GuidedComparisonPair, anchors: Map<string, number>, files: GuidedDiffFile[], sessionId: number | undefined, version: number | undefined, csrfToken: string | undefined): string {
+  const decisionForm = (decision: "confirm" | "reject", label: string) => `<form method="post" action="/guided/sessions/${sessionId}/comparison/pair" class="gd-compare-actions">
+    ${csrfInput(csrfToken)}<input type="hidden" name="version" value="${version}"/><input type="hidden" name="humanClientId" value="${escapeHtml(pair.human.key)}"/><input type="hidden" name="fingerprint" value="${escapeHtml(pair.maomao.fingerprint)}"/><input type="hidden" name="decision" value="${decision}"/>
+    <button class="if-button if-button--sm" type="submit">${label}</button>
+  </form>`;
+  const controls = sessionId && version ? `<div class="gd-compare-actions">
+    ${pair.match === "uncertain" ? decisionForm("confirm", "Confirm same issue") : ""}
+    ${decisionForm("reject", "Mark unrelated")}
+  </div>` : "";
+  return `<li class="gd-compare-pair">${comparisonSide(pair.human, anchors, files)}${comparisonSide(pair.maomao, anchors, files)}<p class="muted">${escapeHtml(pair.signals.join(", ") || "manual pairing")} · confidence ${pair.confidence.toFixed(2)}${pair.confirmed ? " · confirmed by human" : ""}</p>${pair.severityDifference ? `<p class="notice if-banner if-banner--warning">Severity differs: ${escapeHtml(pair.severityDifference)}</p>` : ""}${controls}</li>`;
+}
+
+export function renderGuidedComparisonPanel(input: { comparison?: GuidedComparisonView; files: GuidedDiffFile[]; sessionId?: number; sessionVersion?: number; csrfToken?: string; pullUrl?: string }): string {
+  if (!input.comparison || !input.sessionId) return "";
+  const comparison = input.comparison;
+  const anchors = new Map(input.files.map((file, index) => [file.path, index]));
+  const list = (items: GuidedComparisonSide[], emptyText: string) => items.length
+    ? `<ul>${items.map((item) => `<li>${comparisonSide(item, anchors, input.files)}</li>`).join("\n")}</ul>`
+    : `<p class="muted">${emptyText}</p>`;
+  const pairs = (items: GuidedComparisonPair[], emptyText: string) => items.length
+    ? `<ul>${items.map((item) => comparisonPair(item, anchors, input.files, input.sessionId, input.sessionVersion, input.csrfToken)).join("\n")}</ul>`
+    : `<p class="muted">${emptyText}</p>`;
+  const enqueue = comparison.state === "missing" && input.pullUrl ? `<form method="post" action="/reviews" class="gd-compare-actions">${csrfInput(input.csrfToken)}<input type="hidden" name="url" value="${escapeHtml(input.pullUrl)}"/><button class="if-button if-button--sm" type="submit">Deliberately enqueue Maomao review for the current pull head</button></form>` : "";
+  const manual = (comparison.state === "ready" || comparison.state === "stale") && comparison.humanOnly.length && comparison.maomaoOnly.length && input.sessionVersion
+    ? `<form method="post" action="/guided/sessions/${input.sessionId}/comparison/pair" class="gd-compare-actions">
+      ${csrfInput(input.csrfToken)}<input type="hidden" name="version" value="${input.sessionVersion}"/><input type="hidden" name="decision" value="confirm"/>
+      <label>Human note <select name="humanClientId">${comparison.humanOnly.map((item) => `<option value="${escapeHtml(item.key)}">${escapeHtml(item.summary.slice(0, 80))}</option>`).join("")}</select></label>
+      <label>Maomao finding <select name="fingerprint">${comparison.maomaoOnly.map((item) => `<option value="${escapeHtml(item.fingerprint)}">${escapeHtml(item.summary.slice(0, 80))}</option>`).join("")}</select></label>
+      <button class="if-button if-button--sm" type="submit">Pair selected findings</button>
+    </form>`
+    : "";
+  const overrideEntries = Object.entries(comparison.overrides);
+  const overrides = overrideEntries.length && input.sessionVersion
+    ? `<div class="gd-compare-overrides"><h3>Manual pairing decisions</h3>${overrideEntries.map(([clientId, override]) => `<form method="post" action="/guided/sessions/${input.sessionId}/comparison/pair" class="gd-compare-actions">
+      ${csrfInput(input.csrfToken)}<input type="hidden" name="version" value="${input.sessionVersion}"/><input type="hidden" name="humanClientId" value="${escapeHtml(clientId)}"/><input type="hidden" name="decision" value="clear"/>
+      <span class="muted">${escapeHtml(clientId)}: ${escapeHtml(override.decision)}</span><button class="if-button if-button--sm" type="submit">Clear decision</button>
+    </form>`).join("\n")}</div>`
+    : "";
+  return `<section id="compare" class="config-section gd-comparison" data-guided-comparison data-session-id="${input.sessionId}" data-state="${escapeHtml(comparison.state)}">
+    <div class="gd-head"><h2>Compare with Maomao</h2><span class="job-chip">${escapeHtml(comparison.state)}</span></div>
+    <p class="muted">${escapeHtml(comparison.message)} Exact head <code>${escapeHtml(comparison.headSha)}</code>${comparison.jobId ? ` · <a href="/jobs/${comparison.jobId}">Maomao job #${comparison.jobId}</a>` : ""}</p>
+    ${enqueue}
+    ${manual}
+    ${overrides}
+    ${comparison.verdictDifference ? `<p class="notice if-banner if-banner--warning">Verdict differs: ${escapeHtml(comparison.verdictDifference)}</p>` : ""}
+    <p class="muted">Coverage: ${comparison.summary.agreement} agreement · ${comparison.summary.humanOnly} human-only · ${comparison.summary.maomaoOnly} Maomao-only · ${comparison.summary.uncertain} uncertain · ${comparison.summary.verdictDifference} severity/verdict differences · ${comparison.summary.inactive} suppressed/resolved. This is coverage, not a score for agreeing with AI.</p>
+    <details open><summary>Agreements (${comparison.summary.agreement})</summary>${pairs(comparison.agreements, "No confirmed agreements.")}</details>
+    <details open><summary>Uncertain or partial matches (${comparison.summary.uncertain})</summary>${pairs(comparison.uncertain, "No uncertain pairings.")}</details>
+    <details open><summary>Human-only findings (${comparison.summary.humanOnly})</summary>${list(comparison.humanOnly, "No human-only findings.")}</details>
+    <details open><summary>Maomao-only findings (${comparison.summary.maomaoOnly})</summary>${list(comparison.maomaoOnly, "No Maomao-only findings.")}</details>
+    <details><summary>Suppressed or resolved Maomao findings (${comparison.summary.inactive})</summary>${list(comparison.inactiveMaomao, "No suppressed or resolved findings.")}</details>
+  </section>`;
+}
+
+
 export function renderGuidedDiffWorkspace(input: {
   files: GuidedDiffFile[];
   statusFilter?: string;
@@ -286,6 +369,8 @@ export function renderGuidedDiffWorkspace(input: {
   comments?: GuidedCommentView[];
   sessionView?: GuidedSessionView;
   walkthrough?: GuidedWalkthroughView;
+  comparison?: GuidedComparisonView;
+  pullUrl?: string;
   readOnly?: boolean;
 }): string {
   if (input.diffError) {
@@ -317,6 +402,7 @@ export function renderGuidedDiffWorkspace(input: {
   }).join("\n");
   const draftPanel = input.sessionView ? renderGuidedDraftPanel({ session: input.sessionView, comments: input.comments ?? [], csrfToken: input.csrfToken, readOnly: input.readOnly }) : "";
   const walkthroughPanel = renderGuidedWalkthroughPanel({ walkthrough: input.walkthrough, files: filtered, sessionId: input.sessionId, csrfToken: input.csrfToken });
+  const comparisonPanel = renderGuidedComparisonPanel({ comparison: input.comparison, files: filtered, sessionId: input.sessionId, sessionVersion: input.sessionVersion, csrfToken: input.csrfToken, pullUrl: input.pullUrl });
   return `${walkthroughPanel}${draftPanel}<section class="config-section guided-diff-workspace" data-guided-diff-workspace>
     <div class="gd-head"><h2>Diff workspace</h2><button type="button" class="if-button if-button--sm guided-layout-toggle">Switch diff layout</button></div>
     <p class="muted">${input.files.length} files · ${total} changed lines${input.diffTruncated ? " · diff input truncated by configured byte bound" : ""}</p>
@@ -329,6 +415,7 @@ export function renderGuidedDiffWorkspace(input: {
     </form>
     <div class="gd-layout"><nav class="gd-tree" aria-label="Changed files"><ol>${tree}</ol></nav><div class="gd-files">${rendered || `<div class="empty">No files match this diff filter.</div>`}</div></div>
   </section>
+  ${comparisonPanel}
   <script>
   (function(){
     var guidedSessionId=${jsJson(input.sessionId ?? null)},guidedViewed=${jsJson(input.viewedFiles ?? [])};
@@ -377,7 +464,7 @@ export function renderGuidedSessionPage(input: {
         ${input.sessionId ? `<div><dt>Draft session</dt><dd>#${input.sessionId} · version ${input.sessionVersion ?? 1} · ${input.commentCount ?? 0} comments</dd></div>` : ""}
       </dl>
       ${input.canStart ? `<form method="post" action="/guided/github/${encodeURIComponent(input.repoFullName.split("/")[0])}/${encodeURIComponent(input.repoFullName.split("/")[1])}/${input.prNumber}/open">${csrfInput(input.options.csrfToken)}<button class="if-button if-button--primary" type="submit">Start guided draft</button></form>` : ""}
-      <p class="muted">The comparison and publication steps land in the next Guided Review slices. Starting creates your actor-private SHA-pinned draft; returning to the same SHAs resumes it.</p>
+      <p class="muted">Starting creates your actor-private SHA-pinned draft; returning to the same SHAs resumes it. Publication remains a later deliberate step.</p>
     </section>
     ${input.diffWorkspace ?? ""}
     <script src="${diskAssetUrl(GUIDED_BUNDLE_HREF)}" defer onerror="document.querySelectorAll('[data-guided-bundle-error]').forEach(function(el){el.hidden=false})"></script>`;

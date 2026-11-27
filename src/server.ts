@@ -95,6 +95,7 @@ import { renderProvidersPage } from "./ui/providers.js";
 import { renderGuidedDiffWorkspace, renderGuidedInboxPage, renderGuidedOpenError, renderGuidedSessionPage } from "./ui/guided.js";
 import { parseUnifiedDiff } from "./guided/diff.js";
 import { buildGuidedPublishPreview } from "./guided/publish-preview.js";
+import { buildGuidedComparison, comparisonOverrides } from "./guided/comparison.js";
 import { guidedWalkthroughFingerprint, guidedWalkthroughView, type GuidedWalkthroughStore } from "./guided/walkthrough-store.js";
 import type { GuidedWalkthroughService } from "./guided/walkthrough.js";
 import { listGuidedInbox } from "./guided/inbox.js";
@@ -162,6 +163,7 @@ import {
   type GuidedSessionKey,
   type GuidedSessionPatch,
   type GuidedWriteOutcome,
+  type GuidedReviewSessionRow,
   validateGuidedRepoPath,
 } from "./guided/store.js";
 
@@ -571,6 +573,17 @@ async function guidedInstallationId(ctx: ServerContext, session: { provider: str
   });
   if (!auth.ok) return undefined;
   return installation.installationId;
+}
+
+function guidedComparisonForSession(ctx: ServerContext, session: GuidedReviewSessionRow) {
+  const job = ctx.store.reviewJobForComparison(session.repo_full_name, session.pr_number, session.head_sha, { provider: session.provider, instance: session.provider_instance });
+  return buildGuidedComparison({
+    session,
+    comments: ctx.store.guidedReview.listComments(session.id).map(guidedCommentView),
+    job,
+    comparisonState: guidedSessionView(session).comparisonState,
+    reviewerRuns: job ? ctx.store.listReviewerRuns(job.id) : [],
+  });
 }
 
 export function createApp(ctx: ServerContext): Hono<AppEnv> {
@@ -1323,6 +1336,8 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
             sessionView: session ? guidedSessionView(session) : undefined,
             walkthrough,
             comments: session ? ctx.store.guidedReview.listComments(session.id).map(guidedCommentView) : [],
+            comparison: session ? guidedComparisonForSession(ctx, session) : undefined,
+            pullUrl: pull.prHtmlUrl,
             readOnly: !actor,
           });
         } catch (error) {
@@ -1488,6 +1503,62 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
       if (!row) return c.json({ error: "guided_walkthrough_not_found" }, 404);
       ctx.guidedWalkthrough.service.cancel(row);
       return c.json({ walkthrough: guidedWalkthroughView(ctx.guidedWalkthrough.store.get(row.id) ?? row) });
+    }),
+  );
+
+
+
+  app.get("/api/guided-review/sessions/:id/comparison", (c) =>
+    guidedRoute(c, () => {
+      const actor = guidedActor(c);
+      if (!actor) return guidedIdentityRequired(c);
+      const session = ctx.store.guidedReview.getOwned(guidedId(c.req.param("id")), actor);
+      if (!session) return c.json({ error: "guided_review_session_not_found" }, 404);
+      return c.json({ comparison: guidedComparisonForSession(ctx, session) });
+    }),
+  );
+
+  app.post("/guided/sessions/:id/comparison/pair", async (c) =>
+    guidedRoute(c, async () => {
+      const actor = guidedActor(c);
+      if (!actor) return guidedIdentityRequired(c);
+      const session = ctx.store.guidedReview.getOwned(guidedId(c.req.param("id")), actor);
+      if (!session) return c.json({ error: "guided_review_session_not_found" }, 404);
+      const body = await c.req.parseBody();
+      const version = Number(body.version);
+      const humanClientId = typeof body.humanClientId === "string" ? body.humanClientId : "";
+      const fingerprint = typeof body.fingerprint === "string" ? body.fingerprint : "";
+      const decision = body.decision === "confirm" || body.decision === "reject" || body.decision === "clear" ? body.decision : undefined;
+      if (!Number.isInteger(version) || version <= 0 || !decision || !humanClientId || (decision !== "clear" && !fingerprint)) {
+        return c.html(renderGuidedOpenError({ options: guidedPageOpts(c), error: "Malformed comparison pairing request." }), 400);
+      }
+      const comparison = guidedComparisonForSession(ctx, session);
+      const humanKeys = new Set([
+        ...comparison.humanOnly.map((item) => item.key),
+        ...comparison.agreements.map((item) => item.human.key),
+        ...comparison.uncertain.map((item) => item.human.key),
+      ]);
+      const maomaoFingerprints = new Set([
+        ...comparison.maomaoOnly.map((item) => item.fingerprint),
+        ...comparison.agreements.map((item) => item.maomao.fingerprint),
+        ...comparison.uncertain.map((item) => item.maomao.fingerprint),
+      ]);
+      if (decision !== "clear" && (!humanKeys.has(humanClientId) || !maomaoFingerprints.has(fingerprint))) {
+        return c.html(renderGuidedOpenError({ options: guidedPageOpts(c), error: "Comparison pairing does not belong to this pinned review evidence." }), 400);
+      }
+      const current = guidedSessionView(session).comparisonState;
+      const base = current && typeof current === "object" && !Array.isArray(current) ? { ...(current as Record<string, unknown>) } : {};
+      const pairs = { ...comparisonOverrides(current) };
+      if (decision === "clear") delete pairs[humanClientId];
+      else pairs[humanClientId] = { fingerprint, decision };
+      base.pairs = pairs;
+      const outcome = ctx.store.guidedReview.updateSession(session.id, actor, version, { comparisonState: base });
+      if (outcome.status === "conflict") {
+        return c.html(renderGuidedOpenError({ options: guidedPageOpts(c), error: "The guided session changed while you compared findings. Reload and repeat the pairing decision." }), 409);
+      }
+      if (outcome.status !== "ok") return c.json({ error: outcome.status }, outcome.status === "not_found" ? 404 : 400);
+      const [owner, repo] = session.repo_full_name.split("/");
+      return c.redirect(`/guided/github/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/${session.pr_number}#compare`, 303);
     }),
   );
 
