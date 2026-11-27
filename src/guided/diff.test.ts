@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { parseUnifiedDiff } from "./diff.js";
+import { renderGuidedDiffWorkspace } from "../ui/guided.js";
 
 describe("parseUnifiedDiff", () => {
   it("tracks both-side line numbers, statuses, and renames", () => {
@@ -23,6 +24,22 @@ rename to new.ts
       ["add", undefined, 11],
       ["add", undefined, 12],
     ]);
+  });
+
+  it("renders exact anchors and escapes untrusted diff content", () => {
+    const [file] = parseUnifiedDiff(`diff --git a/x.ts b/x.ts
+--- a/x.ts
++++ b/x.ts
+@@ -4,2 +4,2 @@
+-old('<img>')
++new('</script>')
+`);
+    const html = renderGuidedDiffWorkspace({ files: [file] });
+    expect(html).toContain('data-anchor-path="x.ts" data-anchor-side="LEFT" data-anchor-line="4"');
+    expect(html).toContain('data-anchor-path="x.ts" data-anchor-side="RIGHT" data-anchor-line="4"');
+    expect(html).toContain("old(&#39;&lt;img&gt;&#39;)");
+    expect(html).toContain("new(&#39;&lt;/script&gt;&#39;)");
+    expect(html).toContain("+new('<\\/script>')");
   });
 
   it("marks binary and oversized file content explicitly", () => {

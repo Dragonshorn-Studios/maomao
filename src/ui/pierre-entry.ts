@@ -110,20 +110,22 @@ function renderGuidedFile(container: HTMLElement): void {
 
 function applyLayout(layout: DiffLayout): void {
   localStorage.setItem(LAYOUT_STORAGE_KEY, layout);
-  for (const container of Array.from(document.querySelectorAll<HTMLElement>(".pierre-diff[data-enhanced]"))) {
+  for (const container of Array.from(document.querySelectorAll<HTMLElement>(".pierre-diff[data-enhanced], .guided-pierre-file[data-enhanced]"))) {
+    const guided = container.classList.contains("guided-pierre-file");
     const previous = instances.get(container);
     previous?.cleanUp();
     instances.delete(container);
     container.removeAttribute("data-enhanced");
     for (const child of Array.from(container.children)) {
-      if (child.classList.contains("diff-raw")) continue;
-      if (child.classList.contains("diff-panel")) {
+      if (child.classList.contains("diff-raw") || child.classList.contains("guided-patch-raw")) continue;
+      if (child.classList.contains("diff-panel") || child.classList.contains("gd-fallback")) {
         (child as HTMLElement).hidden = false;
         continue;
       }
       child.remove();
     }
-    renderInto(container);
+    if (guided) renderGuidedFile(container);
+    else renderInto(container);
   }
 }
 

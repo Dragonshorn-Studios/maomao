@@ -113,6 +113,15 @@ export interface GithubPort {
     headSha: string,
     maxBytes?: number,
   ): Promise<string>;
+  /** Read one UTF-8 text file at an exact commit. Optional because only interactive review surfaces need it. */
+  getFileContent?(
+    installationId: number,
+    owner: string,
+    repo: string,
+    path: string,
+    ref: string,
+    maxBytes?: number,
+  ): Promise<string>;
   /** Create or update one stable-named Check Run for an exact commit. */
   upsertCheckRun?(input: GithubCheckRunUpsertInput): Promise<{ id: string; url?: string }>;
   listReviews(
@@ -495,6 +504,24 @@ export class GithubClient implements GithubPort, ManualTriggerPort {
       if (tooLarge) throw tooLarge;
       throw error;
     }
+  }
+
+  async getFileContent(
+    installationId: number,
+    owner: string,
+    repo: string,
+    path: string,
+    ref: string,
+    maxBytes = 200_000,
+  ): Promise<string> {
+    const octokit = this.installationOctokit(installationId);
+    const response = await octokit.rest.repos.getContent({ owner, repo, path, ref });
+    const data = response.data;
+    if (Array.isArray(data) || data.type !== "file") throw new Error("path is not a file");
+    const size = Number(data.size ?? 0);
+    if (maxBytes > 0 && size > maxBytes) throw new Error(`file exceeds the surrounding-context limit (${size} > ${maxBytes} bytes)`);
+    if (typeof data.content !== "string") throw new Error("file content is unavailable");
+    return Buffer.from(data.content.replace(/\n/g, ""), "base64").toString("utf8");
   }
 
   async listReviews(
