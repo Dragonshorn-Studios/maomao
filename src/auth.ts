@@ -1,6 +1,6 @@
 import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import { INFERNAL_HREF } from "./ui/infernal.js";
-import { CHAT_BUNDLE_HREF, PIERRE_DIFFS_HREF } from "./ui/paths.js";
+import { CHAT_BUNDLE_HREF, GUIDED_BUNDLE_HREF, PIERRE_DIFFS_HREF } from "./ui/paths.js";
 
 export const SESSION_COOKIE = "maomao_session";
 export const SESSION_TTL_MS = 7 * 24 * 60 * 60 * 1000;
@@ -71,6 +71,7 @@ export function isPublicPath(path: string): boolean {
     path === INFERNAL_HREF ||
     path === PIERRE_DIFFS_HREF ||
     path === CHAT_BUNDLE_HREF ||
+    path === GUIDED_BUNDLE_HREF ||
     path === "/assets/typeahead.js" ||
     path === "/assets/model-picker.js" ||
     path === "/assets/favicon.svg" ||

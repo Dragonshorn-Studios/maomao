@@ -24,6 +24,7 @@
   ],
   "exclude": [
     "src/ui/pierre-entry.ts",
-    "src/ui/chat-entry.tsx"
+    "src/ui/chat-entry.tsx",
+    "src/ui/guided-client.ts"
   ]
 }

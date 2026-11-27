@@ -308,4 +308,55 @@ describe("Guided Review session API", () => {
     expect(moved.staleFrom?.id).toBe(first.session.id);
     expect(pullCalls).toBe(2);
   });
+
+  it("returns an exact publication preview without writes and keeps private/unplaced feedback out", async () => {
+    const { app } = guidedTestApp();
+    const auth = operator(1001);
+    const openedResponse = await postJson(app, "/api/guided-review/sessions/open", auth.cookies, openBody(auth.csrfToken));
+    const opened = (await openedResponse.json()) as { session: { id: number; version: number } };
+    const write = await postJson(app, `/api/guided-review/sessions/${opened.session.id}`, auth.cookies, {
+      version: 1,
+      draftSummary: "Publish this summary",
+      draftVerdict: "APPROVE",
+      csrf_token: auth.csrfToken,
+    });
+    expect(write.status).toBe(200);
+    const comment = await postJson(app, `/api/guided-review/sessions/${opened.session.id}/comments`, auth.cookies, {
+      version: 2,
+      clientId: "inline-1",
+      kind: "inline",
+      body: "Inline approval rationale",
+      path: "src/index.ts",
+      side: "RIGHT",
+      line: 7,
+      publishable: true,
+      csrf_token: auth.csrfToken,
+    });
+    expect(comment.status).toBe(200);
+    const privateNote = await postJson(app, `/api/guided-review/sessions/${opened.session.id}/comments`, auth.cookies, {
+      version: 3,
+      clientId: "private-1",
+      kind: "general",
+      body: "Private only",
+      publishable: false,
+      csrf_token: auth.csrfToken,
+    });
+    expect(privateNote.status).toBe(200);
+
+    const before = await app.request(`/api/guided-review/sessions/${opened.session.id}`, { headers: { cookie: auth.cookies } });
+    const beforeJson = (await before.json()) as { session: { version: number } };
+    const previewResponse = await app.request(`/api/guided-review/sessions/${opened.session.id}/preview`, { headers: { cookie: auth.cookies } });
+    expect(previewResponse.status).toBe(200);
+    const preview = (await previewResponse.json()) as {
+      preview: { event: string; body: string; comments: unknown[]; omittedInlineCount: number; target: { headSha: string } };
+    };
+    expect(preview.preview).toMatchObject({ event: "APPROVE", comments: [], omittedInlineCount: 1 });
+    expect(preview.preview.target.headSha).toBe(headSha);
+    expect(preview.preview.body).toContain("Publish this summary");
+    expect(preview.preview.body).toContain("Inline approval rationale");
+    expect(preview.preview.body).not.toContain("Private only");
+    const after = await app.request(`/api/guided-review/sessions/${opened.session.id}`, { headers: { cookie: auth.cookies } });
+    expect(((await after.json()) as { session: { version: number } }).session.version).toBe(beforeJson.session.version);
+  });
+
 });
