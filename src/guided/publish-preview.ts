@@ -1,3 +1,4 @@
+import { guidedHumanPublishMarker } from "./human-publish.js";
 import type { GuidedCommentView, GuidedSessionView } from "./store.js";
 
 export interface GuidedPublishPreview {
@@ -49,7 +50,7 @@ export function buildGuidedPublishPreview(session: GuidedSessionView, comments: 
       headSha: session.headSha,
     },
     event,
-    body: bodyParts.join("\n\n").trim(),
+    body: `${bodyParts.join("\n\n").trim()}\n\n${guidedHumanPublishMarker(session.id)}`,
     comments: includeInline ? inline.map((comment) => ({ path: comment.path, side: comment.side, line: comment.line, body: comment.body })) : [],
     omittedInlineCount: includeInline ? 0 : inline.length,
     unresolvedThreadWarning: includeInline && inline.length > 0,
