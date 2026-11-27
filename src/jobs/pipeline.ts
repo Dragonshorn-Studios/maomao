@@ -295,7 +295,7 @@ export function createPipeline(deps: PipelineDeps) {
         continue;
       }
       if (participantJob.routing_profile === "poison-alert") waiting.push(`PR #${participant.number} at exact participant head ${participant.headSha.slice(0, 12)}`);
-      else if (!participantJob.routing_profile && participantJob.state !== "completed") waiting.push(`PR #${participant.number} at exact participant head ${participant.headSha.slice(0, 12)} has unresolved review routing`);
+      else if (!participantJob.routing_profile && participantJob.state !== "completed" && participantJob.review_mode === "full") waiting.push(`PR #${participant.number} at exact participant head ${participant.headSha.slice(0, 12)} has unresolved review routing`);
     }
     if (waiting.length > 0) {
       return {
@@ -360,6 +360,13 @@ export function createPipeline(deps: PipelineDeps) {
     });
     trustedPolicyMemory.delete(job.id);
     guidedDiagnosisGraceMemory.delete(job.id);
+    if (job.job_type === "pr_review") {
+      try {
+        await republishMergeGroupsForParticipant(job, false);
+      } catch (error) {
+        deps.store.log(job.id, `Guided attention merge-group re-evaluation failed: ${formatError(error)}`, "warn");
+      }
+    }
   }
 
   async function publishTrustedTerminal(job: JobRow, conclusion: "cancelled" | "action_required", reason: string): Promise<void> {
@@ -491,6 +498,47 @@ export function createPipeline(deps: PipelineDeps) {
     return undefined;
   }
 
+  function mergeReadinessPublication(job: JobRow) {
+    return deps.store.getCheckPublication({
+      provider: job.provider,
+      providerInstance: job.provider_instance,
+      repoFullName: job.repo_full_name,
+      prNumber: job.pr_number,
+      headSha: job.head_sha,
+      name: MERGE_READINESS_CHECK_NAME,
+    });
+  }
+
+  function mergeReadinessNeedsRepublish(job: JobRow): boolean {
+    const publication = mergeReadinessPublication(job);
+    return !publication || publication.status !== "completed" || !publication.conclusion || publication.conclusion === "action_required" || Boolean(publication.publish_error);
+  }
+
+  async function republishMergeGroupGuidedAttention(job: JobRow): Promise<void> {
+    await publishMergeReadiness(job, mergeGroupReviewConclusion(job));
+    const publication = mergeReadinessPublication(job);
+    if (publication?.publish_error) throw new Error(`merge-group readiness publication failed: ${publication.publish_error}`);
+  }
+
+  async function republishMergeGroupsForParticipant(job: JobRow, strict: boolean): Promise<void> {
+    if (job.job_type !== "pr_review" || job.pr_number <= 0) return;
+    for (const groupJobId of deps.store.guidedAttention.mergeGroupIdsForParticipant(attentionKey(job))) {
+      const groupJob = deps.store.getJob(groupJobId);
+      if (
+        !groupJob
+        || groupJob.state !== "completed"
+        || !mergeReadinessNeedsRepublish(groupJob)
+        || resolveMergeGroupGuidedAttention(groupJob).state === "waiting"
+      ) continue;
+      try {
+        await republishMergeGroupGuidedAttention(groupJob);
+      } catch (error) {
+        if (strict) throw error;
+        deps.store.log(job.id, `Guided attention could not republish merge-group readiness for job ${groupJobId}: ${formatError(error)}`, "warn");
+      }
+    }
+  }
+
   async function runMergeGroupJob(jobId: number, signal: AbortSignal): Promise<void> {
     const job = deps.store.getJob(jobId);
     if (!job) return;
@@ -547,9 +595,20 @@ export function createPipeline(deps: PipelineDeps) {
       // synthetic combined tree. GitHub does not portably enumerate participants,
       // so a policy requiring review fails closed rather than treating queue
       // admission as proof that Maomao's own review check passed.
+      const attentionAtPublish = resolveMergeGroupGuidedAttention(current);
       await publishMergeReadiness(current, mergeGroupReviewConclusion(current));
       throwIfStale(deps.store, jobId, signal);
       deps.store.setJobState(jobId, "completed", { aggregator_state: "done", finished_at: nowIso() });
+      const completedJob = deps.store.getJob(jobId) ?? current;
+      // Attention can resolve while the readiness publication is in flight;
+      // re-resolve once this group row is terminal so that race cannot strand it.
+      if (attentionAtPublish.state === "waiting" && mergeReadinessNeedsRepublish(completedJob) && resolveMergeGroupGuidedAttention(completedJob).state !== "waiting") {
+        try {
+          await republishMergeGroupGuidedAttention(completedJob);
+        } catch (error) {
+          deps.store.log(jobId, `Guided attention could not settle merge-group readiness at completion: ${formatError(error)}`, "warn");
+        }
+      }
       deps.store.log(jobId, `Merge-group checks completed for synthetic head ${job.head_sha}`);
     } catch (error) {
       const latest = deps.store.getJob(jobId) ?? job;
@@ -607,7 +666,12 @@ export function createPipeline(deps: PipelineDeps) {
         await sleep(100);
         job = deps.store.getJob(jobId);
       }
-      if (!job || job.job_type !== "pr_review" || job.state !== "completed") return;
+      if (!job || job.state !== "completed") return;
+      if (job.job_type === "merge_group_check") {
+        if (mergeReadinessNeedsRepublish(job) && resolveMergeGroupGuidedAttention(job).state !== "waiting") await republishMergeGroupGuidedAttention(job);
+        return;
+      }
+      if (job.job_type !== "pr_review") return;
       const reviewPublication = deps.store.getCheckPublication({
         provider: job.provider,
         providerInstance: job.provider_instance,
@@ -617,19 +681,17 @@ export function createPipeline(deps: PipelineDeps) {
         name: "maomao/review",
       });
       await publishMergeReadiness(job, reviewPublication?.conclusion ?? reviewConclusionForJob(job));
-      const readinessPublication = deps.store.getCheckPublication({
-        provider: job.provider,
-        providerInstance: job.provider_instance,
-        repoFullName: job.repo_full_name,
-        prNumber: job.pr_number,
-        headSha: job.head_sha,
-        name: MERGE_READINESS_CHECK_NAME,
-      });
+      await republishMergeGroupsForParticipant(job, true);
+      const readinessPublication = mergeReadinessPublication(job);
       if (readinessPublication?.publish_error) throw new Error(`merge-readiness publication failed: ${readinessPublication.publish_error}`);
     },
-    /** Restart recovery: decisions are durable, so re-evaluate any completed exact-head gate left action_required by a crash. */
+    /** Restart recovery: decisions are durable, so re-evaluate completed pull and merge-group gates left action_required by a crash. */
     async recoverGuidedAttention(): Promise<void> {
-      for (const jobId of deps.store.guidedAttention.completedJobsMissingDecidedReadiness()) {
+      const jobIds = new Set([
+        ...deps.store.guidedAttention.completedJobsMissingDecidedReadiness(),
+        ...deps.store.guidedAttention.completedMergeGroupsMissingReadiness(),
+      ]);
+      for (const jobId of jobIds) {
         try {
           await this.republishGuidedAttention(jobId);
         } catch (error) {

@@ -8218,6 +8218,24 @@ describe("merge-group checks", () => {
         commitDiffs.push(sha);
         return "diff --git a/example.ts b/example.ts\n";
       },
+      getPull: async () => ({
+        installationId: 42,
+        accountId: 1,
+        repositoryId: 2,
+        repoOwner: "acme",
+        repoName: "widgets",
+        repoFullName: "acme/widgets",
+        prNumber: 7,
+        prTitle: "Participant pull",
+        prBody: "",
+        prHtmlUrl: "",
+        prAuthor: "dev",
+        baseSha: "base111",
+        headSha: "2".repeat(40),
+        baseRef: "main",
+        headRef: "feature",
+        draft: false,
+      }),
       upsertCheckRun: async (input: { headSha?: string; name?: string; status?: string; conclusion?: string; summary?: string }) => {
         checkRuns.push(input);
         return { id: `check-${checkRuns.length}`, url: "" };
@@ -8242,11 +8260,12 @@ describe("merge-group checks", () => {
         };
       },
     };
+    const checkout = await fixtureCheckout();
     const pipeline = createPipeline({
       config,
       store,
       github,
-      checkout: await fixtureCheckout(),
+      checkout,
       opencode: {} as OpenCodePort,
       trustedCheckRunner: trustedCheckRunner as never,
     });
@@ -8267,6 +8286,8 @@ describe("merge-group checks", () => {
     expect(store.getJob(job.id)?.state).toBe("completed");
 
     store.setJobState(participantJob.id, "completed");
+    await pipeline.republishGuidedAttention(participantJob.id);
+    expect(checkRuns.some((run) => run.headSha === "synthetic888" && run.name === "maomao/merge-readiness" && run.conclusion === "success")).toBe(true);
     const completedNullRouting = store.enqueue({
       repoFullName: "acme/widgets",
       repoOwner: "acme",
@@ -8334,6 +8355,35 @@ describe("merge-group checks", () => {
       reviewers: [],
       jobType: "stack_review",
     });
+
+    await pipeline.republishGuidedAttention(participantJob.id);
+    expect(checkRuns.some((run) => run.headSha === "synthetic1001" && run.name === "maomao/merge-readiness" && run.conclusion === "success")).toBe(true);
+
+    store.beginCheckPublication({
+      provider: "github",
+      providerInstance: "github.com",
+      repoFullName: "acme/widgets",
+      prNumber: 7,
+      headSha: "synthetic1001",
+      name: "maomao/merge-readiness",
+      externalId: "interrupted-group-readiness",
+      jobId: undecided.id,
+      status: "in_progress",
+      title: "interrupted readiness",
+      summary: "interrupted before crash",
+    });
+    expect(store.guidedAttention.completedMergeGroupsMissingReadiness()).toContain(undecided.id);
+    const recovered = createPipeline({
+      config,
+      store,
+      github,
+      checkout,
+      opencode: {} as OpenCodePort,
+      trustedCheckRunner: trustedCheckRunner as never,
+    });
+    await recovered.recoverGuidedAttention();
+    expect(checkRuns.filter((run) => run.headSha === "synthetic1001" && run.name === "maomao/merge-readiness").at(-1)?.conclusion).toBe("success");
+
     const unblocked = store.enqueue({
       repoFullName: "acme/widgets",
       repoOwner: "acme",

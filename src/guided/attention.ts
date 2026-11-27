@@ -33,6 +33,18 @@ function validKey(key: GuidedAttentionKey): boolean {
   return Boolean(key.provider && key.instance && /^[^\s/]+\/[^\s/]+$/.test(key.repoFullName) && Number.isInteger(key.prNumber) && key.prNumber > 0 && /^[0-9a-f]{7,64}$/i.test(key.headSha));
 }
 
+function mergeGroupHasParticipant(json: string | null, prNumber: number, headSha: string): boolean {
+  if (!json) return false;
+  try {
+    const parsed = JSON.parse(json) as { pullRequests?: Array<{ number?: unknown; headSha?: unknown }> };
+    return (parsed.pullRequests ?? []).some((participant) =>
+      participant.number === prNumber && typeof participant.headSha === "string" && participant.headSha.toLowerCase() === headSha.toLowerCase(),
+    );
+  } catch {
+    return false;
+  }
+}
+
 export class GuidedAttentionStore {
   constructor(private readonly db: SqliteDb) {}
 
@@ -68,6 +80,29 @@ export class GuidedAttentionStore {
     return { status: "ok", row };
   }
 
+  /** Completed merge-group jobs that contain this exact participant pull head. */
+  mergeGroupIdsForParticipant(key: GuidedAttentionKey): number[] {
+    if (!validKey(key)) return [];
+    const rows = this.db.prepare(`SELECT id, merge_group_json FROM jobs
+      WHERE provider = ? AND provider_instance = ? AND repo_full_name = ?
+        AND job_type = 'merge_group_check' AND state = 'completed'
+        AND merge_group_json LIKE ?
+      ORDER BY id`)
+      .all(key.provider, key.instance, key.repoFullName, `%${key.headSha.toLowerCase()}%`) as Array<{ id: number; merge_group_json: string | null }>;
+    return rows.filter((row) => mergeGroupHasParticipant(row.merge_group_json, key.prNumber, key.headSha)).map((row) => row.id);
+  }
+
+  /** Completed merge-group gates left non-green or without a successful readiness publication. */
+  completedMergeGroupsMissingReadiness(): number[] {
+    return (this.db.prepare(`SELECT j.id
+      FROM jobs j
+      LEFT JOIN check_publications cp ON cp.provider = j.provider AND cp.provider_instance = j.provider_instance
+        AND cp.repo_full_name = j.repo_full_name AND cp.pr_number = j.pr_number AND cp.head_sha = j.head_sha
+        AND cp.name = 'maomao/merge-readiness'
+      WHERE j.job_type = 'merge_group_check' AND j.state = 'completed'
+        AND (cp.id IS NULL OR cp.status != 'completed' OR cp.conclusion IS NULL OR cp.conclusion = 'action_required' OR cp.publish_error IS NOT NULL)
+      ORDER BY j.id`).all() as Array<{ id: number }>).map((row) => row.id);
+  }
 
   /** Completed exact-head review jobs whose attention decision still needs a terminal, successfully published readiness gate. */
   completedJobsMissingDecidedReadiness(): number[] {
