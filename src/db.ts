@@ -415,6 +415,52 @@ function migrate(db: SqliteDb): void {
       finished_at TEXT
     );
 
+    CREATE TABLE IF NOT EXISTS guided_human_credentials (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      actor_provider TEXT NOT NULL,
+      actor_id TEXT NOT NULL,
+      provider TEXT NOT NULL,
+      provider_instance TEXT NOT NULL,
+      token_encrypted TEXT NOT NULL,
+      scope TEXT NOT NULL,
+      expires_at TEXT,
+      revoked_at TEXT,
+      last_used_at TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      UNIQUE (actor_provider, actor_id, provider, provider_instance)
+    );
+
+    CREATE TABLE IF NOT EXISTS guided_human_publications (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      session_id INTEGER NOT NULL UNIQUE REFERENCES guided_review_sessions(id) ON DELETE CASCADE,
+      actor_provider TEXT NOT NULL,
+      actor_id TEXT NOT NULL,
+      provider TEXT NOT NULL,
+      provider_instance TEXT NOT NULL,
+      repo_full_name TEXT NOT NULL,
+      pr_number INTEGER NOT NULL,
+      head_sha TEXT NOT NULL,
+      event TEXT NOT NULL,
+      payload_hash TEXT NOT NULL,
+      review_id INTEGER,
+      html_url TEXT,
+      status TEXT NOT NULL CHECK (status IN ('pending', 'published', 'failed', 'uncertain')),
+      error_code TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS guided_human_publish_events (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      actor_provider TEXT NOT NULL,
+      actor_id TEXT NOT NULL,
+      session_id INTEGER,
+      action TEXT NOT NULL,
+      detail TEXT,
+      created_at TEXT NOT NULL
+    );
+
     CREATE TABLE IF NOT EXISTS guided_review_comments (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       session_id INTEGER NOT NULL REFERENCES guided_review_sessions(id) ON DELETE CASCADE,
@@ -458,6 +504,11 @@ function migrate(db: SqliteDb): void {
     CREATE INDEX IF NOT EXISTS idx_guided_review_comments_session ON guided_review_comments(session_id, id);
     CREATE INDEX IF NOT EXISTS idx_guided_walkthroughs_pull
       ON guided_walkthroughs(provider, provider_instance, repo_full_name, pr_number, updated_at DESC);
+
+    CREATE INDEX IF NOT EXISTS idx_guided_human_publications_actor
+      ON guided_human_publications(actor_provider, actor_id, updated_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_guided_human_publish_events_actor
+      ON guided_human_publish_events(actor_provider, actor_id, id DESC);
 
 
     CREATE TABLE IF NOT EXISTS profile_routes (
