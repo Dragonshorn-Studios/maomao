@@ -133,6 +133,9 @@ export interface ForgeRepoTarget extends ForgeScope {
    * because not every caller needs API addressing.
    */
   nativeProjectId?: number;
+  /** Exact SHAs for read-only human review workspaces. Pipeline callers omit these and follow the live head. */
+  baseSha?: string;
+  headSha?: string;
 }
 
 /**
