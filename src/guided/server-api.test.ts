@@ -475,6 +475,14 @@ describe("Guided Review session API", () => {
       body: "The rollback branch can continue past the intended retry boundary.",
     };
     const aiOnlyFingerprint = fingerprintFinding({ file: aiOnlyFinding.file, category: aiOnlyFinding.category, summary: aiOnlyFinding.summary, body: aiOnlyFinding.body });
+    const aiFileOnlyFinding = {
+      severity: "low",
+      category: "maintainability",
+      file: "package.json",
+      summary: "Package metadata should name the guided review workflow",
+      body: "The package metadata does not describe the new operator workflow.",
+    };
+    const aiFileOnlyFingerprint = fingerprintFinding({ file: aiFileOnlyFinding.file, category: aiFileOnlyFinding.category, summary: aiFileOnlyFinding.summary, body: aiFileOnlyFinding.body });
     const enqueued = store.enqueue({
       repoFullName: "acme/widgets",
       repoOwner: "acme",
@@ -494,7 +502,7 @@ describe("Guided Review session API", () => {
       reviewers: [],
     });
     store.setJobState(enqueued.job.id, "completed", {
-      aggregator_normalized: JSON.stringify({ schema_version: 1, verdict: "comment", summary: "summary", findings: [aiFinding, aiOnlyFinding] }),
+      aggregator_normalized: JSON.stringify({ schema_version: 1, verdict: "comment", summary: "summary", findings: [aiFinding, aiOnlyFinding, aiFileOnlyFinding] }),
     });
     const openedResponse = await postJson(app, "/api/guided-review/sessions/open", auth.cookies, openBody(auth.csrfToken));
     const opened = (await openedResponse.json()) as { session: { id: number; version: number } };
@@ -528,6 +536,13 @@ describe("Guided Review session API", () => {
     expect(row?.comparison_state_json).toContain('"decision":"confirm"');
     expect(row?.version).toBe(commented.session.version + 1);
 
+    const adoptPaired = await app.request(`/guided/sessions/${opened.session.id}/comparison/pair`, {
+      method: "POST",
+      headers: { cookie: auth.cookies, "content-type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({ version: String(row!.version), fingerprint: aiFingerprint, decision: "adopt", csrf_token: auth.csrfToken }).toString(),
+    });
+    expect(adoptPaired.status).toBe(400);
+
     const excluded = await app.request(`/guided/sessions/${opened.session.id}/comparison/pair`, {
       method: "POST",
       headers: { cookie: auth.cookies, "content-type": "application/x-www-form-urlencoded" },
@@ -551,6 +566,23 @@ describe("Guided Review session API", () => {
     expect(adopt.status).toBe(303);
     const adoptedComment = store.guidedReview.listComments(opened.session.id).find((comment) => comment.client_id === `maomao-${aiOnlyFingerprint}`);
     expect(adoptedComment).toMatchObject({ kind: "inline", path: "src/index.ts", line: 24, publishable: 1 });
+
+    const afterInlineAdopt = store.guidedReview.getOwned(opened.session.id, { actorProvider: "github", actorId: "1001" });
+    const staleAdopt = await app.request(`/guided/sessions/${opened.session.id}/comparison/pair`, {
+      method: "POST",
+      headers: { cookie: auth.cookies, "content-type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({ version: String(restored!.version), fingerprint: aiFileOnlyFingerprint, decision: "adopt", csrf_token: auth.csrfToken }).toString(),
+    });
+    expect(staleAdopt.status).toBe(409);
+    const adoptFileOnly = await app.request(`/guided/sessions/${opened.session.id}/comparison/pair`, {
+      method: "POST",
+      headers: { cookie: auth.cookies, "content-type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({ version: String(afterInlineAdopt!.version), fingerprint: aiFileOnlyFingerprint, decision: "adopt", csrf_token: auth.csrfToken }).toString(),
+    });
+    expect(adoptFileOnly.status).toBe(303);
+    const adoptedGeneral = store.guidedReview.listComments(opened.session.id).find((comment) => comment.client_id === `maomao-${aiFileOnlyFingerprint}`);
+    expect(adoptedGeneral).toMatchObject({ kind: "general", path: null, side: null, line: null, publishable: 1 });
+    expect(adoptedGeneral?.body).toBe(`package.json: ${aiFileOnlyFinding.summary}`);
 
     const stranger = operator(2002);
     const strangerResponse = await app.request(`/guided/sessions/${opened.session.id}/comparison/pair`, {

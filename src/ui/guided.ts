@@ -124,8 +124,9 @@ function guidedDiffLineHtml(file: GuidedDiffFile, hunkIndex: number, line: Guide
   const anchor = lineNumber ? `L${side === "LEFT" ? "o" : "n"}${lineNumber}` : "";
   const oldText = line.oldLine ?? "";
   const newText = line.newLine ?? "";
+  const marker = line.kind === "add" ? "+" : line.kind === "del" ? "−" : line.kind === "meta" ? "…" : "";
   return `<tr class="gd-line gd-${line.kind}"${anchor ? ` id="f${encodeURIComponent(file.path)}-h${hunkIndex}-${anchor}" data-anchor-path="${escapeHtml(file.path)}" data-anchor-side="${side}" data-anchor-line="${lineNumber}" data-anchor-sha="${escapeHtml(side === "LEFT" ? baseSha : headSha)}"` : ""}>
-    <td class="gd-no gd-old">${oldText}</td><td class="gd-no gd-new">${newText}</td><td class="gd-code"><span>${escapeHtml(line.text)}</span>${commentable && lineNumber ? `<button type="button" class="gd-comment-trigger" data-guided-comment-anchor data-path="${escapeHtml(file.path)}" data-side="${side}" data-line="${lineNumber}" data-sha="${escapeHtml(side === "LEFT" ? baseSha : headSha)}" aria-label="Add inline draft note">+</button>` : ""}</td>
+    <td class="gd-no gd-old">${oldText}</td><td class="gd-no gd-new">${newText}</td><td class="gd-sign" aria-hidden="true">${marker}</td><td class="gd-code"><span>${escapeHtml(line.text)}</span>${commentable && lineNumber ? `<button type="button" class="gd-comment-trigger" data-guided-comment-anchor data-path="${escapeHtml(file.path)}" data-side="${side}" data-line="${lineNumber}" data-sha="${escapeHtml(side === "LEFT" ? baseSha : headSha)}" aria-label="Add inline draft note">+</button>` : ""}</td>
   </tr>`;
 }
 
@@ -395,9 +396,9 @@ export function renderGuidedComparisonPanel(input: { comparison?: GuidedComparis
     : `<p class="muted">${emptyText}</p>`;
   const outsideCount = outside.pairs.length + outside.humans.length + outside.maomaos.length;
   const outsideSection = outsideCount ? `<details class="gd-compare-outside"><summary>Unanchored or outside the pinned source diff (${outsideCount})</summary>
-    ${outside.pairs.length ? `<h3>Paired items</h3>${outside.pairs.map((item) => `<div class="gd-compare-lanes"><section class="gd-lane">${compactComparisonSide(item.human, anchors, input.files)}</section><section class="gd-lane">${compactComparisonSide(item.maomao, anchors, input.files)}</section></div>`).join("")}` : ""}
+    ${outside.pairs.length ? `<h3>Paired items</h3>${outside.pairs.map((item) => `<div class="gd-compare-lanes"><section class="gd-lane">${compactComparisonSide(item.human, anchors, input.files)}</section><section class="gd-lane">${compactComparisonSide(item.maomao, anchors, input.files, { controls: input.sessionVersion ? pairControls(item) : "" })}</section></div>`).join("")}` : ""}
     ${outside.humans.length ? `<h3>Human-only</h3>${verboseList(outside.humans, "")}` : ""}
-    ${outside.maomaos.length ? `<h3>Maomao-only</h3>${verboseList(outside.maomaos, "")}` : ""}
+    ${outside.maomaos.length ? `<h3>Maomao-only</h3>${outside.maomaos.map((item) => compactComparisonSide(item, anchors, input.files, { controls: input.sessionVersion ? `<div class="gd-card-actions">${maomaoAction(item, "adopt", "Add to my review")}${maomaoAction(item, "exclude", "Remove from merge")}</div>` : "" })).join("\n")}` : ""}
   </details>` : "";
   const enqueue = comparison.state === "missing" && input.pullUrl ? `<form method="post" action="/reviews" class="gd-compare-actions">${csrfInput(input.csrfToken)}<input type="hidden" name="url" value="${escapeHtml(input.pullUrl)}"/><button class="if-button if-button--sm" type="submit">Deliberately enqueue Maomao review for the current pull head</button></form>` : "";
   const manual = (comparison.state === "ready" || comparison.state === "stale") && comparison.humanOnly.length && comparison.maomaoOnly.length && input.sessionVersion
@@ -525,11 +526,11 @@ export function renderGuidedDiffWorkspace(input: {
     return `<article class="gd-file${viewed.has(file.path) ? " gd-viewed" : ""}" id="guided-file-${index}" data-guided-file data-path="${escapeHtml(file.path)}" data-status="${escapeHtml(file.status)}">
       <h3>${escapeHtml(file.path)} <span class="muted">${escapeHtml(file.status)} +${file.additions} −${file.deletions}</span></h3>
       ${file.truncated ? `<p class="notice if-banner if-banner--warning">This file exceeded the per-file rendering bound and is partially shown.</p>` : ""}
-      ${input.sessionId ? `<details class="gd-context"><summary>Read-only surrounding code at the pinned SHA</summary><button type="button" class="if-button if-button--sm" data-load-context="${escapeHtml(file.path)}">Load head-side file</button><pre class="gd-context-panel" hidden></pre><p class="muted">Path-boundary validated; oversized or unavailable files fail explicitly.</p></details>` : ""}
       <div class="guided-pierre-file" data-guided-pierre data-path="${escapeHtml(file.path)}" data-commentable="${input.sessionView && !input.readOnly ? "1" : ""}">
         <div class="gd-fallback">${hunks}${empty}</div>
         <script type="application/json" class="guided-patch-raw">${jsJson(file.patch)}</script>
       </div>
+      ${input.sessionId ? `<details class="gd-context"><summary>Read-only surrounding code at the pinned SHA</summary><button type="button" class="if-button if-button--sm" data-load-context="${escapeHtml(file.path)}">Load head-side file</button><pre class="gd-context-panel" hidden></pre><p class="muted">Path-boundary validated; oversized or unavailable files fail explicitly.</p></details>` : ""}
     </article>`;
   }).join("\n");
   const draftPanel = input.sessionView ? renderGuidedDraftPanel({ session: input.sessionView, comments: input.comments ?? [], csrfToken: input.csrfToken, readOnly: input.readOnly }) : "";

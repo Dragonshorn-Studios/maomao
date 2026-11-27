@@ -43,6 +43,7 @@ describe("theme tokens", () => {
     expect(THEME_CSS).toContain("details.finding-diff > summary");
     expect(THEME_CSS).toContain(".trigger .typeahead-wrap");
     expect(THEME_CSS).toContain(".pierre-diff diffs-container");
+    expect(THEME_CSS).toContain(".guided-pierre-file diffs-container");
     expect(THEME_CSS).toContain("--diffs-bg: var(--code-bg)");
     expect(THEME_CSS).toContain("--diffs-fg: var(--ink)");
     expect(THEME_CSS).toContain("--diffs-addition-color-override: var(--jade)");

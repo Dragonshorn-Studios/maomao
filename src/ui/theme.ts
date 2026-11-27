@@ -62,6 +62,15 @@ export const THEME_CSS = `
   --space-5: 1.5rem;
   --space-6: 2.25rem;
   --measure: 72rem;
+  --diff-line-height: 1.5;
+  --diff-context-bg: var(--code-bg);
+  --diff-gutter-bg: color-mix(in srgb, var(--code-bg) 78%, var(--ink) 5%);
+  --diff-add-bg: var(--jade-soft);
+  --diff-add-strong-bg: color-mix(in srgb, var(--jade) 28%, var(--jade-soft));
+  --diff-add-ink: var(--jade);
+  --diff-del-bg: var(--cinnabar-soft);
+  --diff-del-strong-bg: color-mix(in srgb, var(--cinnabar) 27%, var(--cinnabar-soft));
+  --diff-del-ink: var(--cinnabar);
 
 }
 
@@ -943,22 +952,31 @@ button, summary {
 .gd-tree li { padding: .28rem .35rem; border-radius: .45rem; }
 .gd-tree li:hover { background: color-mix(in srgb, var(--focus) 8%, transparent); }
 .gd-tree a { overflow-wrap: anywhere; }
-.gd-file { margin-bottom: 1rem; border: 1px solid var(--line); border-radius: .8rem; background: var(--surface); padding: 0; min-width: 0; overflow: clip; box-shadow: 0 10px 28px color-mix(in srgb, var(--ink) 6%, transparent); }
-.gd-file h3 { position: sticky; top: 0; z-index: 2; margin: 0; padding: .65rem .8rem; overflow-wrap: anywhere; border-bottom: 1px solid var(--line); background: color-mix(in srgb, var(--surface) 94%, var(--focus) 6%); font-family: var(--font-mono); font-size: .86rem; }
+.gd-file { margin-bottom: var(--space-4); border: 1px solid var(--line); border-radius: var(--if-radius); background: var(--surface); padding: 0; min-width: 0; overflow: clip; box-shadow: var(--if-shadow); }
+.gd-file h3 { position: sticky; top: 0; z-index: 2; margin: 0; padding: .65rem .8rem; overflow-wrap: anywhere; border-bottom: 1px solid var(--line); background: var(--surface-2); font-family: var(--font-mono); font-size: .86rem; }
 .gd-file h3 .muted { font-family: var(--font-sans, inherit); font-size: .78rem; }
-.gd-file .gd-context, .gd-file .guided-pierre-file { margin: .65rem .8rem .8rem; }
-.gd-file .guided-pierre-file { margin-inline: 0; }
-.gd-hunk { border-top: 1px solid var(--line); }
+.gd-file .gd-context { margin: .65rem .8rem .8rem; }
+.gd-context-panel[hidden] { display: none; }
+.gd-context-panel { margin-block: .55rem 0; padding: .65rem .8rem; border: 1px solid var(--line); border-radius: var(--if-radius-sm); background: var(--code-bg); color: var(--code-fg); font-family: var(--font-mono); font-size: .78rem; line-height: var(--diff-line-height); overflow-x: auto; }
+.gd-file .guided-pierre-file { margin: 0; border-top: 1px solid var(--line); background: var(--diff-context-bg); }
+.gd-fallback { background: var(--diff-context-bg); color: var(--code-fg); }
+.gd-fallback[hidden] { display: none; }
+.gd-hunk { border-top: 1px solid var(--line); overflow-x: auto; }
 .gd-hunk:first-child { border-top: 0; }
-.gd-hunk summary { padding: .45rem .8rem; background: color-mix(in srgb, var(--surface) 90%, var(--ink) 4%); }
-.gd-table { margin-block: 0; }
-.gd-hunk summary { cursor: pointer; color: var(--ink-muted); font-family: var(--font-mono); font-size: 0.78rem; }
-.gd-table { width: 100%; border-collapse: collapse; table-layout: fixed; font-family: var(--font-mono); font-size: 0.78rem; }
-.gd-no { width: 3.4rem; text-align: right; color: var(--ink-muted); user-select: none; padding: 0 0.35rem; border-right: 1px solid var(--line); }
-.gd-code { white-space: pre-wrap; overflow-wrap: anywhere; padding-left: 0.55rem; }
-.gd-add { background: color-mix(in srgb, var(--jade) 13%, transparent); }
-.gd-del { background: color-mix(in srgb, var(--cinnabar) 13%, transparent); }
+.gd-hunk summary { cursor: pointer; padding: .45rem .8rem; background: color-mix(in srgb, var(--diff-context-bg) 82%, var(--ink) 4%); color: var(--ink-muted); font-family: var(--font-mono); font-size: .78rem; line-height: var(--diff-line-height); user-select: none; }
+.gd-table { width: 100%; min-width: 44rem; margin-block: 0; border-collapse: collapse; table-layout: fixed; font-family: var(--font-mono); font-size: .78rem; line-height: var(--diff-line-height); }
+.gd-no { width: 3.5rem; text-align: right; color: var(--ink-muted); user-select: none; padding: 0 .45rem; border-right: 1px solid var(--line); background: var(--diff-gutter-bg); font-variant-numeric: tabular-nums; vertical-align: top; }
+.gd-sign { width: 1.7rem; text-align: center; color: var(--ink-muted); user-select: none; border-right: 1px solid var(--line); background: var(--diff-gutter-bg); vertical-align: top; }
+.gd-code { white-space: pre-wrap; overflow-wrap: anywhere; padding: 0 .55rem; color: var(--code-fg); vertical-align: top; position: relative; }
+.gd-add { background: var(--diff-add-bg); }
+.gd-del { background: var(--diff-del-bg); }
+.gd-add .gd-no, .gd-add .gd-sign { color: var(--diff-add-ink); background: color-mix(in srgb, var(--diff-add-bg) 78%, var(--diff-gutter-bg)); }
+.gd-del .gd-no, .gd-del .gd-sign { color: var(--diff-del-ink); background: color-mix(in srgb, var(--diff-del-bg) 78%, var(--diff-gutter-bg)); }
+.gd-add .gd-sign, .gd-del .gd-sign { font-weight: 700; }
+.gd-meta { color: var(--ink-muted); background: color-mix(in srgb, var(--diff-context-bg) 86%, var(--ink) 4%); font-style: italic; }
+.gd-line:hover .gd-code { background: color-mix(in srgb, var(--focus) 5%, transparent); }
 .gd-line:focus { outline: 2px solid var(--focus); outline-offset: -2px; }
+.gd-fallback .gd-comment-trigger { position: absolute; top: 0; right: .25rem; padding: 0 .2rem; border-radius: var(--if-radius-sm); background: var(--surface); }
 
 .gd-merge-stats { display: flex; flex-wrap: wrap; gap: .45rem; margin-block: .8rem; }
 .gd-merge-stats span { border: 1px solid var(--line); border-radius: 999px; padding: .28rem .6rem; background: color-mix(in srgb, var(--surface) 90%, transparent); font-size: .82rem; color: var(--ink-muted); }
@@ -1742,9 +1760,12 @@ a.cancel-review { text-decoration: none; display: inline-block; }
    bundled pierre-light/dark Shiki themes. */
 .pierre-diff,
 .pierre-diff diffs-container,
+.guided-pierre-file,
+.guided-pierre-file diffs-container,
 details.finding-diff {
   --diffs-font-family: var(--font-mono);
   --diffs-font-size: 0.78rem;
+  --diffs-line-height: 1.15rem;
   --diffs-header-font-family: var(--font-ui);
   --diffs-bg: var(--code-bg);
   --diffs-fg: var(--ink);
@@ -1752,10 +1773,24 @@ details.finding-diff {
   --diffs-dark-bg: var(--code-bg);
   --diffs-light: var(--ink);
   --diffs-dark: var(--ink);
+  --diffs-bg-buffer-override: color-mix(in srgb, var(--code-bg) 84%, var(--ink) 5%);
+  --diffs-bg-context-override: var(--diff-context-bg);
+  --diffs-bg-context-gutter-override: var(--diff-gutter-bg);
+  --diffs-bg-separator-override: var(--line);
+  --diffs-bg-addition-override: var(--diff-add-bg);
+  --diffs-bg-addition-emphasis-override: var(--diff-add-strong-bg);
+  --diffs-bg-deletion-override: var(--diff-del-bg);
+  --diffs-bg-deletion-emphasis-override: var(--diff-del-strong-bg);
+  --diffs-bg-hover-override: color-mix(in srgb, var(--focus) 7%, var(--diff-context-bg));
+  --diffs-bg-selection-override: color-mix(in srgb, var(--focus) 16%, var(--diff-context-bg));
+  --diffs-bg-selection-number-override: color-mix(in srgb, var(--focus) 24%, var(--diff-gutter-bg));
   --diffs-fg-number-override: var(--ink-muted);
+  --diffs-fg-number-addition-override: var(--diff-add-ink);
+  --diffs-fg-number-deletion-override: var(--diff-del-ink);
   --diffs-addition-color-override: var(--jade);
   --diffs-deletion-color-override: var(--cinnabar);
   --diffs-modified-color-override: var(--herb);
+  --diffs-selection-color-override: var(--focus);
   --diffs-added-light: var(--jade);
   --diffs-added-dark: var(--jade);
   --diffs-deleted-light: var(--cinnabar);
@@ -1764,6 +1799,10 @@ details.finding-diff {
   --diffs-modified-dark: var(--herb);
   --diffs-warning-light: var(--amber);
   --diffs-warning-dark: var(--amber);
+  --diffs-widget-bg: var(--surface);
+  --diffs-widget-border: var(--line-strong);
+  --diffs-widget-fg: var(--ink);
+  --diffs-widget-shadow: var(--if-shadow);
 }
 .pierre-annotation {
   border-left: 3px solid var(--amber);
@@ -1794,7 +1833,8 @@ details.finding-diff > summary {
   border: 1px solid var(--line-strong);
   border-radius: 6px;
 }
-.pierre-diff diffs-container {
+.pierre-diff diffs-container,
+.guided-pierre-file diffs-container {
   display: block;
   min-height: 4rem;
   border: 1px solid var(--line-strong);
@@ -1802,6 +1842,11 @@ details.finding-diff > summary {
   overflow: hidden;
   background: var(--code-bg);
   color: var(--ink);
+}
+.guided-pierre-file diffs-container {
+  min-height: 0;
+  border-width: 0;
+  border-radius: 0;
 }
 /* Scan-page repository typeahead (progressively enhanced by /assets/typeahead.js) */
 .typeahead-wrap { position: relative; display: block; }

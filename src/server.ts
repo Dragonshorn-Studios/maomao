@@ -1825,13 +1825,14 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
         if (!item) {
           return c.html(renderGuidedOpenError({ options: guidedPageOpts(c), error: "Only unpaired Maomao-only findings can be adopted into the human draft." }), 400);
         }
+        const inline = Boolean(item.path && item.line);
         const adopted = ctx.store.guidedReview.upsertComment(session.id, actor, version, {
           clientId: `maomao-${item.fingerprint}`,
-          kind: item.path && item.line ? "inline" : "general",
-          body: item.summary,
-          path: item.path,
-          side: item.path && item.line ? "RIGHT" : undefined,
-          line: item.line,
+          kind: inline ? "inline" : "general",
+          body: item.path && !item.line ? `${item.path}: ${item.summary}` : item.summary,
+          path: inline ? item.path : undefined,
+          side: inline ? "RIGHT" : undefined,
+          line: inline ? item.line : undefined,
           severity: item.severity === "low" || item.severity === "medium" || item.severity === "high" || item.severity === "critical" ? item.severity : null,
           category: item.category,
           publishable: true,
