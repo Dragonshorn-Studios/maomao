@@ -816,7 +816,27 @@ describe("Guided Review session API", () => {
     const github: ManualTriggerPort = {
       async getRepoInstallation() { return { installationId: 10, accountId: 100 }; },
       async getRepository() { return { id: 200, private: false }; },
-      async getPull() { throw new Error("not needed"); },
+      async getPull(installationId: number, owner: string, repo: string, prNumber: number) {
+        return {
+          installationId,
+          accountId: 100,
+          repositoryId: 200,
+          repoOwner: owner,
+          repoName: repo,
+          repoFullName: `${owner}/${repo}`,
+          prNumber,
+          prTitle: "Test pull request",
+          prBody: "",
+          prHtmlUrl: `https://github.com/${owner}/${repo}/pull/${prNumber}`,
+          prAuthor: "author",
+          baseSha,
+          headSha,
+          baseRef: "main",
+          headRef: "feature",
+          draft: false,
+          state: "open",
+        };
+      },
     };
     let callbackUserId = 1001;
     const oauthFetch = async (url: string | URL, init?: RequestInit) => {
@@ -863,6 +883,22 @@ describe("Guided Review session API", () => {
     });
     expect(disconnect.status).toBe(303);
     expect(humanPublish.credentialStatus({ actorProvider: "github", actorId: "1001" }).state).toBe("revoked");
+
+    const openedResponse = await postJson(app, "/api/guided-review/sessions/open", auth.cookies, openBody(auth.csrfToken));
+    const opened = (await openedResponse.json()) as { session: { id: number; version: number } };
+    const updated = await postJson(app, `/api/guided-review/sessions/${opened.session.id}`, auth.cookies, {
+      version: opened.session.version,
+      draftSummary: "Disconnected credential cannot publish",
+      draftVerdict: "COMMENT",
+      csrf_token: auth.csrfToken,
+    });
+    const version = ((await updated.json()) as { session: { version: number } }).session.version;
+    const publish = await app.request(`/guided/sessions/${opened.session.id}/publish`, {
+      method: "POST",
+      headers: { cookie: auth.cookies, "content-type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({ version: String(version), confirm: "yes", csrf_token: auth.csrfToken }).toString(),
+    });
+    expect(publish.status).toBe(403);
   });
 
 });
