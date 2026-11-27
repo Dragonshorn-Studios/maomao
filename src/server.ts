@@ -1166,7 +1166,7 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
   });
   const renderGuidedInbox = async (c: Context<AppEnv>, directError?: string, directUrl?: string, status = 200) => {
     const filters = guidedFiltersFrom(c);
-    const page = await listGuidedInbox({ config: ctx.config, store: ctx.store, github: ctx.github, actor: guidedActor(c), filters });
+    const page = await listGuidedInbox({ config: ctx.config, store: ctx.store, github: ctx.github, forgeConnections: ctx.forgeConnections, actor: guidedActor(c), filters });
     return c.html(renderGuidedInboxPage({ options: guidedPageOpts(c), page, filters, directError, directUrl }), status as 200);
   };
 
@@ -1177,17 +1177,21 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
     const rawUrl = typeof body.url === "string" ? body.url : "";
     try {
       const parsed = parseGithubPullUrl(rawUrl);
-      return c.redirect(`/guided/github/${encodeURIComponent(parsed.owner)}/${encodeURIComponent(parsed.repo)}/${parsed.number}`, 302);
+      return guidedTargetResponse(c, parsed.owner, parsed.repo, parsed.number, true, true);
     } catch (error) {
       const message = error instanceof PullUrlError ? error.message : "Could not parse that pull request URL.";
       return renderGuidedInbox(c, message, rawUrl, 400);
     }
   });
 
-  app.get("/guided/github/:owner/:repo/:number", async (c) => {
-    const owner = c.req.param("owner");
-    const repo = c.req.param("repo");
-    const prNumber = Number(c.req.param("number"));
+  const guidedTargetResponse = async (
+    c: Context<AppEnv>,
+    owner: string,
+    repo: string,
+    prNumber: number,
+    createSession: boolean,
+    redirectAfterOpen = false,
+  ): Promise<Response> => {
     const failure = async (message: string, status: 400 | 403 | 404 | 502 = 400) =>
       c.html(renderGuidedOpenError({ options: guidedPageOpts(c), error: message }), status);
     if (!ctx.github) return failure("GitHub App client is not configured on this process.", 502);
@@ -1203,18 +1207,21 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
       if (!auth.ok) return failure("Not authorized to review this installation or repository.", 403);
       if (pull.state && pull.state !== "open") return failure("Only open pull requests can enter Guided Review.", 400);
       const actor = guidedActor(c);
-      let opened: ReturnType<typeof ctx.store.guidedReview.open> | undefined;
-      if (actor) {
-        opened = ctx.store.guidedReview.open({
-          ...actor,
-          provider: "github",
-          instance: "github.com",
-          repoFullName: `${owner}/${repo}`,
-          prNumber,
-          baseSha: pull.baseSha,
-          headSha: pull.headSha,
-        });
-      }
+      const key = actor
+        ? {
+            ...actor,
+            provider: "github",
+            instance: "github.com",
+            repoFullName: `${owner}/${repo}`,
+            prNumber,
+            baseSha: pull.baseSha,
+            headSha: pull.headSha,
+          }
+        : undefined;
+      const opened = actor && key && createSession ? ctx.store.guidedReview.open(key) : undefined;
+      const existing = !opened && actor && key ? ctx.store.guidedReview.findExact(actor, key) : undefined;
+      const session = opened?.session ?? existing;
+      if (redirectAfterOpen) return c.redirect(`/guided/github/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/${prNumber}`, 302);
       return c.html(renderGuidedSessionPage({
         options: guidedPageOpts(c),
         repoFullName: `${owner}/${repo}`,
@@ -1224,10 +1231,11 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
         url: pull.prHtmlUrl,
         baseSha: pull.baseSha,
         headSha: pull.headSha,
-        sessionId: opened?.session.id,
-        sessionVersion: opened?.session.version,
-        commentCount: opened ? ctx.store.guidedReview.activeCommentCount(opened.session.id) : undefined,
+        sessionId: session?.id,
+        sessionVersion: session?.version,
+        commentCount: session ? ctx.store.guidedReview.activeCommentCount(session.id) : undefined,
         readOnly: !actor,
+        canStart: Boolean(actor && !session),
         staleFrom: opened?.staleFrom ? { id: opened.staleFrom.id, baseSha: opened.staleFrom.base_sha, headSha: opened.staleFrom.head_sha } : undefined,
       }));
     } catch (error) {
@@ -1235,7 +1243,15 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
       console.warn(`guided inbox open failed for ${owner}/${repo}#${prNumber}: ${truncate(redactSecrets(error instanceof Error ? error.message : String(error), githubSecrets(ctx.config)), 300)}`);
       return failure("Could not resolve current pull request metadata from GitHub.", 502);
     }
-  });
+  };
+
+  app.get("/guided/github/:owner/:repo/:number", async (c) =>
+    guidedTargetResponse(c, c.req.param("owner"), c.req.param("repo"), Number(c.req.param("number")), false),
+  );
+
+  app.post("/guided/github/:owner/:repo/:number/open", async (c) =>
+    guidedTargetResponse(c, c.req.param("owner"), c.req.param("repo"), Number(c.req.param("number")), true, true),
+  );
 
   app.post("/api/guided-review/sessions/open", async (c) =>
     guidedRoute(c, async () => {
