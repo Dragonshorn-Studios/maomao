@@ -91,7 +91,8 @@ import {
   roleFormValuesFromRole,
 } from "./ui/index.js";
 import { renderProvidersPage } from "./ui/providers.js";
-import { renderGuidedInboxPage, renderGuidedOpenError, renderGuidedSessionPage } from "./ui/guided.js";
+import { renderGuidedDiffWorkspace, renderGuidedInboxPage, renderGuidedOpenError, renderGuidedSessionPage } from "./ui/guided.js";
+import { parseUnifiedDiff } from "./guided/diff.js";
 import { listGuidedInbox } from "./guided/inbox.js";
 import { renderTelemetryPage, TELEMETRY_PAGE_HREF, TELEMETRY_PAGE_JS, type TelemetryProbeRow } from "./ui/telemetry.js";
 import {
@@ -1222,6 +1223,25 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
       const existing = !opened && actor && key ? ctx.store.guidedReview.findExact(actor, key) : undefined;
       const session = opened?.session ?? existing;
       if (redirectAfterOpen) return c.redirect(`/guided/github/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/${prNumber}`, 302);
+      let diffWorkspace = "";
+      if (ctx.github.getCompareDiff) {
+        try {
+          const rawDiff = await ctx.github.getCompareDiff(installation.installationId, owner, repo, pull.baseSha, pull.headSha, ctx.config.maxDiffBytes);
+          const files = parseUnifiedDiff(rawDiff, { maxFiles: 300, maxLinesPerFile: 2000 });
+          diffWorkspace = renderGuidedDiffWorkspace({
+            files,
+            fileFilter: c.req.query("file") || undefined,
+            statusFilter: c.req.query("status") || undefined,
+          });
+        } catch (error) {
+          diffWorkspace = renderGuidedDiffWorkspace({
+            files: [],
+            diffError: `Could not load the authoritative pull request diff: ${error instanceof Error ? error.message : String(error)}`,
+          });
+        }
+      } else {
+        diffWorkspace = renderGuidedDiffWorkspace({ files: [], diffError: "The configured GitHub client cannot load SHA-pinned comparison diffs." });
+      }
       return c.html(renderGuidedSessionPage({
         options: guidedPageOpts(c),
         repoFullName: `${owner}/${repo}`,
@@ -1237,6 +1257,7 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
         readOnly: !actor,
         canStart: Boolean(actor && !session),
         staleFrom: opened?.staleFrom ? { id: opened.staleFrom.id, baseSha: opened.staleFrom.base_sha, headSha: opened.staleFrom.head_sha } : undefined,
+        diffWorkspace,
       }));
     } catch (error) {
       if (isPermissionDenied(error)) return failure("Not authorized to review this installation or repository.", 403);

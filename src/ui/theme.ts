@@ -910,9 +910,25 @@ button, summary {
   gap: 1rem;
   margin-top: 1rem;
 }
+.gd-head { display: flex; justify-content: space-between; gap: 1rem; align-items: center; flex-wrap: wrap; }
+.gd-layout { display: grid; grid-template-columns: minmax(12rem, 18rem) minmax(0, 1fr); gap: 1rem; align-items: start; }
+.gd-tree { position: sticky; top: 1rem; max-height: 80vh; overflow: auto; border-right: 1px solid var(--line); padding-right: 0.75rem; }
+.gd-tree ol { list-style: none; margin: 0; padding: 0; display: grid; gap: 0.35rem; font-size: 0.85rem; }
+.gd-tree a { overflow-wrap: anywhere; }
+.gd-file { margin-bottom: 1rem; border: 1px solid var(--line); border-radius: var(--if-radius, 4px); background: var(--surface); padding: 0.8rem; min-width: 0; }
+.gd-file h3 { margin-top: 0; overflow-wrap: anywhere; }
+.gd-hunk summary { cursor: pointer; color: var(--ink-muted); font-family: var(--font-mono); font-size: 0.78rem; }
+.gd-table { width: 100%; border-collapse: collapse; table-layout: fixed; font-family: var(--font-mono); font-size: 0.78rem; }
+.gd-no { width: 3.4rem; text-align: right; color: var(--ink-muted); user-select: none; padding: 0 0.35rem; border-right: 1px solid var(--line); }
+.gd-code { white-space: pre-wrap; overflow-wrap: anywhere; padding-left: 0.55rem; }
+.gd-add { background: color-mix(in srgb, var(--jade) 13%, transparent); }
+.gd-del { background: color-mix(in srgb, var(--cinnabar) 13%, transparent); }
+.gd-line:focus { outline: 2px solid var(--focus); outline-offset: -2px; }
 @media (max-width: 620px) {
   .trigger label { min-width: 100%; }
   .guided-inbox-row { padding: 0.75rem; }
+  .gd-layout { grid-template-columns: 1fr; }
+  .gd-tree { position: static; max-height: 16rem; border-right: 0; border-bottom: 1px solid var(--line); padding-bottom: 0.7rem; }
 }
 
 .specimen {
