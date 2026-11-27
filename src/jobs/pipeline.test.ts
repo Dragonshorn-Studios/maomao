@@ -8266,8 +8266,8 @@ describe("merge-group checks", () => {
     expect(checkRuns.some((run) => run.name === "maomao/review")).toBe(false);
     expect(store.getJob(job.id)?.state).toBe("completed");
 
-    store.patchJob(participantJob.id, { routing_profile: "poison-alert" });
-    const undecided = store.enqueue({
+    store.setJobState(participantJob.id, "completed");
+    const completedNullRouting = store.enqueue({
       repoFullName: "acme/widgets",
       repoOwner: "acme",
       repoName: "widgets",
@@ -8280,14 +8280,36 @@ describe("merge-group checks", () => {
       baseSha: "base999",
       headSha: "synthetic999",
       baseRef: "main",
+      headRef: "refs/heads/gh-readonly-queue/main/pr-7-null-complete",
+      reviewers: [],
+      jobType: "merge_group_check",
+      mergeGroupJson: JSON.stringify({ pullRequests: [{ number: 7, headSha: "2".repeat(40) }] }),
+    }).job;
+    await pipeline.run(completedNullRouting.id);
+    expect(checkRuns.some((run) => run.headSha === "synthetic999" && run.name === "maomao/merge-readiness" && run.conclusion === "success")).toBe(true);
+
+    store.patchJob(participantJob.id, { routing_profile: "poison-alert" });
+    const undecided = store.enqueue({
+      repoFullName: "acme/widgets",
+      repoOwner: "acme",
+      repoName: "widgets",
+      installationId: 42,
+      prNumber: 7,
+      prTitle: "GitHub merge group for main",
+      prBody: "",
+      prHtmlUrl: "",
+      prAuthor: "github-merge-queue",
+      baseSha: "base999",
+      headSha: "synthetic1001",
+      baseRef: "main",
       headRef: "refs/heads/gh-readonly-queue/main/pr-7-y",
       reviewers: [],
       jobType: "merge_group_check",
       mergeGroupJson: JSON.stringify({ pullRequests: [{ number: 7, headSha: "2".repeat(40) }] }),
     }).job;
     await pipeline.run(undecided.id);
-    expect(checkRuns.some((run) => run.headSha === "synthetic999" && run.name === "maomao/merge-readiness" && run.conclusion === "action_required")).toBe(true);
-    expect(checkRuns.some((run) => run.headSha === "synthetic999" && run.name === "maomao/merge-readiness" && run.conclusion === "success")).toBe(false);
+    expect(checkRuns.some((run) => run.headSha === "synthetic1001" && run.name === "maomao/merge-readiness" && run.conclusion === "action_required")).toBe(true);
+    expect(checkRuns.some((run) => run.headSha === "synthetic1001" && run.name === "maomao/merge-readiness" && run.conclusion === "success")).toBe(false);
 
     store.guidedAttention.recordDecision(
       { actorProvider: "github", actorId: "1001" },

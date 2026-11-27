@@ -283,10 +283,6 @@ export function createPipeline(deps: PipelineDeps) {
         "pr_review",
       );
       if (!participantJob) continue;
-      if (participantJob.routing_profile !== "poison-alert") {
-        if (!participantJob.routing_profile) waiting.push(`PR #${participant.number} at exact participant head ${participant.headSha.slice(0, 12)} has unresolved review routing`);
-        continue;
-      }
       const decision = deps.store.guidedAttention.decisionFor({
         provider: job.provider,
         instance: job.provider_instance,
@@ -294,8 +290,12 @@ export function createPipeline(deps: PipelineDeps) {
         prNumber: participant.number,
         headSha: participant.headSha,
       });
-      if (decision) satisfied.push(`PR #${participant.number}: ${attentionDecisionDetail(decision)}`);
-      else waiting.push(`PR #${participant.number} at exact participant head ${participant.headSha.slice(0, 12)}`);
+      if (decision) {
+        satisfied.push(`PR #${participant.number}: ${attentionDecisionDetail(decision)}`);
+        continue;
+      }
+      if (participantJob.routing_profile === "poison-alert") waiting.push(`PR #${participant.number} at exact participant head ${participant.headSha.slice(0, 12)}`);
+      else if (!participantJob.routing_profile && participantJob.state !== "completed") waiting.push(`PR #${participant.number} at exact participant head ${participant.headSha.slice(0, 12)} has unresolved review routing`);
     }
     if (waiting.length > 0) {
       return {
