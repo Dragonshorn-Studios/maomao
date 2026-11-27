@@ -1225,9 +1225,27 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
       const session = opened?.session ?? existing;
       if (redirectAfterOpen) return c.redirect(`/guided/github/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/${prNumber}`, 302);
       let diffWorkspace = "";
-      if (ctx.github.getCompareDiff) {
+      if (ctx.forge || ctx.github.getCompareDiff) {
         try {
-          const rawDiff = await ctx.github.getCompareDiff(installation.installationId, owner, repo, pull.baseSha, pull.headSha, ctx.config.maxDiffBytes);
+          const forgePort = ctx.forge?.forJob({
+            provider: "github",
+            provider_instance: "github.com",
+            installation_id: installation.installationId,
+          });
+          const target = {
+            provider: "github",
+            instance: "github.com",
+            repoOwner: owner,
+            repoName: repo,
+            repoFullName: `${owner}/${repo}`,
+            changeNumber: prNumber,
+            baseSha: pull.baseSha,
+            headSha: pull.headSha,
+          };
+          if (!forgePort && !ctx.github.getCompareDiff) throw new Error("SHA-pinned Guided Review requires GitHub compare-diff support");
+          const rawDiff = forgePort
+            ? await forgePort.getChangeDiff(target, ctx.config.maxDiffBytes)
+            : await ctx.github.getCompareDiff!(installation.installationId, owner, repo, pull.baseSha, pull.headSha, ctx.config.maxDiffBytes);
           const files = parseUnifiedDiff(rawDiff, { maxFiles: 300, maxLinesPerFile: 2000 });
           const rawFileCount = rawDiff.split("\n").filter((line) => line.startsWith("diff --git ")).length;
           diffWorkspace = renderGuidedDiffWorkspace({
