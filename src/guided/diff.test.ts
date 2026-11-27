@@ -201,13 +201,16 @@ Binary files a/a.png and b/a.png differ
         humanOnly: [human],
         maomaoOnly: [maomao],
         inactiveMaomao: [],
+        excludedMaomao: [],
         overrides: {},
       },
     });
-    expect(html).toContain("Compare with Maomao");
-    expect(html).toContain("not a score for agreeing with AI");
+    expect(html).toContain("Merge review");
+    expect(html).toContain("Maomao's already-published review is never mutated");
     expect(html).toContain("Confirm same issue");
     expect(html).toContain("Mark unrelated");
+    expect(html).toContain("Add to my review");
+    expect(html).toContain("Remove from merge");
     expect(html).toContain("Pair selected findings");
     expect(html).toContain("Severity differs: human medium vs Maomao high");
     expect(html).toContain("Verdict differs: human APPROVE vs Maomao REQUEST_CHANGES");
@@ -230,6 +233,7 @@ Binary files a/a.png and b/a.png differ
         humanOnly: [human],
         maomaoOnly: [],
         inactiveMaomao: [],
+        excludedMaomao: [],
         overrides: {},
       },
     });

@@ -1799,8 +1799,8 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
       const version = Number(body.version);
       const humanClientId = typeof body.humanClientId === "string" ? body.humanClientId : "";
       const fingerprint = typeof body.fingerprint === "string" ? body.fingerprint : "";
-      const decision = body.decision === "confirm" || body.decision === "reject" || body.decision === "clear" ? body.decision : undefined;
-      if (!Number.isInteger(version) || version <= 0 || !decision || !humanClientId || (decision !== "clear" && !fingerprint)) {
+      const decision = body.decision === "confirm" || body.decision === "reject" || body.decision === "exclude" || body.decision === "adopt" || body.decision === "clear" ? body.decision : undefined;
+      if (!Number.isInteger(version) || version <= 0 || !decision || (!["exclude", "adopt"].includes(decision) && !humanClientId) || (decision !== "clear" && !fingerprint)) {
         return c.html(renderGuidedOpenError({ options: guidedPageOpts(c), error: "Malformed comparison pairing request." }), 400);
       }
       const comparison = guidedComparisonForSession(ctx, session);
@@ -1814,13 +1814,40 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
         ...comparison.agreements.map((item) => item.maomao.fingerprint),
         ...comparison.uncertain.map((item) => item.maomao.fingerprint),
       ]);
-      if (decision !== "clear" && (!humanKeys.has(humanClientId) || !maomaoFingerprints.has(fingerprint))) {
+      if (decision !== "clear" && decision !== "exclude" && decision !== "adopt" && (!humanKeys.has(humanClientId) || !maomaoFingerprints.has(fingerprint))) {
         return c.html(renderGuidedOpenError({ options: guidedPageOpts(c), error: "Comparison pairing does not belong to this pinned review evidence." }), 400);
+      }
+      if ((decision === "exclude" || decision === "adopt") && !maomaoFingerprints.has(fingerprint)) {
+        return c.html(renderGuidedOpenError({ options: guidedPageOpts(c), error: "Maomao finding does not belong to this pinned review evidence." }), 400);
+      }
+      if (decision === "adopt") {
+        const item = comparison.maomaoOnly.find((candidate) => candidate.fingerprint === fingerprint);
+        if (!item) {
+          return c.html(renderGuidedOpenError({ options: guidedPageOpts(c), error: "Only unpaired Maomao-only findings can be adopted into the human draft." }), 400);
+        }
+        const adopted = ctx.store.guidedReview.upsertComment(session.id, actor, version, {
+          clientId: `maomao-${item.fingerprint}`,
+          kind: item.path && item.line ? "inline" : "general",
+          body: item.summary,
+          path: item.path,
+          side: item.path && item.line ? "RIGHT" : undefined,
+          line: item.line,
+          severity: item.severity === "low" || item.severity === "medium" || item.severity === "high" || item.severity === "critical" ? item.severity : null,
+          category: item.category,
+          publishable: true,
+        });
+        if (adopted.status === "conflict") {
+          return c.html(renderGuidedOpenError({ options: guidedPageOpts(c), error: "The guided session changed while you compared findings. Reload and repeat the adoption." }), 409);
+        }
+        if (adopted.status !== "ok") return c.json({ error: adopted.status }, adopted.status === "not_found" ? 404 : 400);
+        const [owner, repo] = session.repo_full_name.split("/");
+        return c.redirect(`/guided/github/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/${session.pr_number}#compare`, 303);
       }
       const current = guidedSessionView(session).comparisonState;
       const base = current && typeof current === "object" && !Array.isArray(current) ? { ...(current as Record<string, unknown>) } : {};
       const pairs = { ...comparisonOverrides(current) };
       if (decision === "clear") delete pairs[humanClientId];
+      else if (decision === "exclude") pairs[`maomao-exclude-${fingerprint}`] = { fingerprint, decision };
       else pairs[humanClientId] = { fingerprint, decision };
       base.pairs = pairs;
       const outcome = ctx.store.guidedReview.updateSession(session.id, actor, version, { comparisonState: base });

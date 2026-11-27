@@ -307,49 +307,123 @@ function comparisonPair(pair: GuidedComparisonPair, anchors: Map<string, number>
   return `<li class="gd-compare-pair">${comparisonSide(pair.human, anchors, files)}${comparisonSide(pair.maomao, anchors, files)}<p class="muted">${escapeHtml(pair.signals.join(", ") || "manual pairing")} · confidence ${pair.confidence.toFixed(2)}${pair.confirmed ? " · confirmed by human" : ""}</p>${pair.severityDifference ? `<p class="notice if-banner if-banner--warning">Severity differs: ${escapeHtml(pair.severityDifference)}</p>` : ""}${controls}</li>`;
 }
 
+function compactComparisonSide(side: GuidedComparisonSide, anchors: Map<string, number>, files: GuidedDiffFile[], options: { matched?: string; controls?: string } = {}): string {
+  const where = side.path ? comparisonLink(side.path, side.line, side.line ? `${side.path}:${side.line}` : side.path, anchors, files) : `<span class="muted">unanchored</span>`;
+  const detail = side.body && side.body !== side.summary ? `<details class="gd-evidence"><summary>Detail</summary><p>${escapeHtml(side.body)}</p></details>` : "";
+  const rationale = side.rationale ? `<details class="gd-evidence"><summary>Evidence</summary><p>${escapeHtml(side.rationale)}</p></details>` : "";
+  return `<article class="gd-review-card gd-review-card--${side.source}">
+    <div class="gd-review-card-head"><span class="gd-author">${side.source === "human" ? "You" : "Maomao"}</span>${where}${side.severity ? ` <span class="job-chip">${escapeHtml(side.severity)}</span>` : ""}${side.status ? ` <span class="job-chip">${escapeHtml(side.status)}</span>` : ""}${options.matched ? ` <span class="job-chip gd-match-chip">${escapeHtml(options.matched)}</span>` : ""}</div>
+    <p class="gd-review-summary">${escapeHtml(side.summary)}</p>
+    ${detail}${rationale}${options.controls ?? ""}
+  </article>`;
+}
+
 export function renderGuidedComparisonPanel(input: { comparison?: GuidedComparisonView; files: GuidedDiffFile[]; sessionId?: number; sessionVersion?: number; csrfToken?: string; pullUrl?: string }): string {
   if (!input.comparison || !input.sessionId) return "";
   const comparison = input.comparison;
-  const anchors = new Map(input.files.map((file, index) => [file.path, index]));
-  const list = (items: GuidedComparisonSide[], emptyText: string) => items.length
-    ? `<ul>${items.map((item) => `<li>${comparisonSide(item, anchors, input.files)}</li>`).join("\n")}</ul>`
+  const sourceFile = (path: string) => /\.(c|cc|cpp|cs|css|go|h|hpp|java|js|jsx|kt|mjs|mts|php|py|rb|rs|scala|sh|sql|swift|ts|tsx|vue)$/i.test(path);
+  const sourceFiles = input.files.filter((file) => sourceFile(file.path));
+  const anchors = new Map(sourceFiles.map((file) => [file.path, input.files.indexOf(file)]));
+  const pairByHuman = new Map<string, GuidedComparisonPair>();
+  const pairByMaomao = new Map<string, GuidedComparisonPair>();
+  for (const item of [...comparison.agreements, ...comparison.uncertain]) {
+    pairByHuman.set(item.human.key, item);
+    pairByMaomao.set(item.maomao.fingerprint, item);
+  }
+  const decisionForm = (pair: GuidedComparisonPair, decision: "confirm" | "reject", label: string) => `<form method="post" action="/guided/sessions/${input.sessionId}/comparison/pair" class="gd-inline-action">
+    ${csrfInput(input.csrfToken)}<input type="hidden" name="version" value="${input.sessionVersion}"/><input type="hidden" name="humanClientId" value="${escapeHtml(pair.human.key)}"/><input type="hidden" name="fingerprint" value="${escapeHtml(pair.maomao.fingerprint)}"/><input type="hidden" name="decision" value="${decision}"/>
+    <button class="if-button if-button--sm" type="submit">${label}</button>
+  </form>`;
+  const maomaoAction = (item: GuidedComparisonSide, decision: "adopt" | "exclude", label: string) => `<form method="post" action="/guided/sessions/${input.sessionId}/comparison/pair" class="gd-inline-action">
+    ${csrfInput(input.csrfToken)}<input type="hidden" name="version" value="${input.sessionVersion}"/><input type="hidden" name="fingerprint" value="${escapeHtml(item.fingerprint)}"/><input type="hidden" name="decision" value="${decision}"/>
+    <button class="if-button if-button--sm" type="submit">${label}</button>
+  </form>`;
+  const restoreExclusion = (item: GuidedComparisonSide) => `<form method="post" action="/guided/sessions/${input.sessionId}/comparison/pair" class="gd-inline-action">
+    ${csrfInput(input.csrfToken)}<input type="hidden" name="version" value="${input.sessionVersion}"/><input type="hidden" name="humanClientId" value="maomao-exclude-${escapeHtml(item.fingerprint)}"/><input type="hidden" name="decision" value="clear"/>
+    <button class="if-button if-button--sm" type="submit">Restore to merge review</button>
+  </form>`;
+
+  type FileGroup = { pairs: GuidedComparisonPair[]; humans: GuidedComparisonSide[]; maomaos: GuidedComparisonSide[] };
+  const groups = new Map<string, FileGroup>();
+  const outside = { pairs: [] as GuidedComparisonPair[], humans: [] as GuidedComparisonSide[], maomaos: [] as GuidedComparisonSide[] };
+  const groupFor = (path: string): FileGroup => {
+    const existing = groups.get(path);
+    if (existing) return existing;
+    const created = { pairs: [], humans: [], maomaos: [] } as FileGroup;
+    groups.set(path, created);
+    return created;
+  };
+  const inDiff = (side: GuidedComparisonSide) => Boolean(side.path && anchors.has(side.path));
+  for (const item of [...comparison.agreements, ...comparison.uncertain]) {
+    const path = inDiff(item.human) ? item.human.path! : inDiff(item.maomao) ? item.maomao.path! : undefined;
+    if (path) groupFor(path).pairs.push(item);
+    else outside.pairs.push(item);
+  }
+  for (const item of comparison.humanOnly) (inDiff(item) ? groupFor(item.path!).humans : outside.humans).push(item);
+  for (const item of comparison.maomaoOnly) (inDiff(item) ? groupFor(item.path!).maomaos : outside.maomaos).push(item);
+
+  const pairControls = (pair: GuidedComparisonPair) => `${pair.severityDifference ? `<p class="notice if-banner if-banner--warning">Severity differs: ${escapeHtml(pair.severityDifference)}</p>` : ""}<div class="gd-card-actions">
+    ${pair.match === "uncertain" ? decisionForm(pair, "confirm", "Confirm same issue") : ""}
+    ${decisionForm(pair, "reject", "Mark unrelated")}
+  </div>`;
+  const humanCards = (group: FileGroup) => [
+    ...group.pairs.map((item) => compactComparisonSide(item.human, anchors, input.files, { matched: item.match === "agreement" ? "matched" : "possible match" })),
+    ...group.humans.map((item) => compactComparisonSide(item, anchors, input.files, { matched: "your only note" })),
+  ].join("") || `<p class="muted">No human notes on this file yet.</p>`;
+  const maomaoCards = (group: FileGroup) => [
+    ...group.pairs.map((item) => compactComparisonSide(item.maomao, anchors, input.files, {
+      matched: `${item.match} · ${item.confidence.toFixed(2)}`,
+      controls: input.sessionVersion ? pairControls(item) : "",
+    })),
+    ...group.maomaos.map((item) => compactComparisonSide(item, anchors, input.files, {
+      matched: "Maomao only",
+      controls: input.sessionVersion ? `<div class="gd-card-actions">${maomaoAction(item, "adopt", "Add to my review")}${maomaoAction(item, "exclude", "Remove from merge")}</div>` : "",
+    })),
+  ].join("") || `<p class="muted">No Maomao findings on this file.</p>`;
+  const fileSections = [...groups.entries()].map(([path, group], index) => {
+    const count = group.pairs.length * 2 + group.humans.length + group.maomaos.length;
+    return `<details class="gd-compare-file"${index === 0 ? " open" : ""}><summary><span>${escapeHtml(path)}</span><span class="muted">${count} review item${count === 1 ? "" : "s"}</span></summary>
+      <div class="gd-compare-lanes">
+        <section class="gd-lane"><h3>Your review</h3>${humanCards(group)}</section>
+        <section class="gd-lane"><h3>Maomao review</h3>${maomaoCards(group)}</section>
+      </div>
+    </details>`;
+  }).join("\n");
+
+  const verboseList = (items: GuidedComparisonSide[], emptyText: string) => items.length
+    ? `<ul>${items.map((item) => `<li>${compactComparisonSide(item, anchors, input.files)}</li>`).join("\n")}</ul>`
     : `<p class="muted">${emptyText}</p>`;
-  const pairs = (items: GuidedComparisonPair[], emptyText: string) => items.length
-    ? `<ul>${items.map((item) => comparisonPair(item, anchors, input.files, input.sessionId, input.sessionVersion, input.csrfToken)).join("\n")}</ul>`
-    : `<p class="muted">${emptyText}</p>`;
+  const outsideCount = outside.pairs.length + outside.humans.length + outside.maomaos.length;
+  const outsideSection = outsideCount ? `<details class="gd-compare-outside"><summary>Unanchored or outside the pinned source diff (${outsideCount})</summary>
+    ${outside.pairs.length ? `<h3>Paired items</h3>${outside.pairs.map((item) => `<div class="gd-compare-lanes"><section class="gd-lane">${compactComparisonSide(item.human, anchors, input.files)}</section><section class="gd-lane">${compactComparisonSide(item.maomao, anchors, input.files)}</section></div>`).join("")}` : ""}
+    ${outside.humans.length ? `<h3>Human-only</h3>${verboseList(outside.humans, "")}` : ""}
+    ${outside.maomaos.length ? `<h3>Maomao-only</h3>${verboseList(outside.maomaos, "")}` : ""}
+  </details>` : "";
   const enqueue = comparison.state === "missing" && input.pullUrl ? `<form method="post" action="/reviews" class="gd-compare-actions">${csrfInput(input.csrfToken)}<input type="hidden" name="url" value="${escapeHtml(input.pullUrl)}"/><button class="if-button if-button--sm" type="submit">Deliberately enqueue Maomao review for the current pull head</button></form>` : "";
   const manual = (comparison.state === "ready" || comparison.state === "stale") && comparison.humanOnly.length && comparison.maomaoOnly.length && input.sessionVersion
-    ? `<form method="post" action="/guided/sessions/${input.sessionId}/comparison/pair" class="gd-compare-actions">
+    ? `<details class="gd-manual-pair"><summary>Advanced: pair a human note with a Maomao finding manually</summary><form method="post" action="/guided/sessions/${input.sessionId}/comparison/pair" class="gd-compare-actions">
       ${csrfInput(input.csrfToken)}<input type="hidden" name="version" value="${input.sessionVersion}"/><input type="hidden" name="decision" value="confirm"/>
       <label>Human note <select name="humanClientId">${comparison.humanOnly.map((item) => `<option value="${escapeHtml(item.key)}">${escapeHtml(item.summary.slice(0, 80))}</option>`).join("")}</select></label>
       <label>Maomao finding <select name="fingerprint">${comparison.maomaoOnly.map((item) => `<option value="${escapeHtml(item.fingerprint)}">${escapeHtml(item.summary.slice(0, 80))}</option>`).join("")}</select></label>
       <button class="if-button if-button--sm" type="submit">Pair selected findings</button>
-    </form>`
+    </form></details>`
     : "";
-  const overrideEntries = Object.entries(comparison.overrides);
-  const overrides = overrideEntries.length && input.sessionVersion
-    ? `<div class="gd-compare-overrides"><h3>Manual pairing decisions</h3>${overrideEntries.map(([clientId, override]) => `<form method="post" action="/guided/sessions/${input.sessionId}/comparison/pair" class="gd-compare-actions">
-      ${csrfInput(input.csrfToken)}<input type="hidden" name="version" value="${input.sessionVersion}"/><input type="hidden" name="humanClientId" value="${escapeHtml(clientId)}"/><input type="hidden" name="decision" value="clear"/>
-      <span class="muted">${escapeHtml(clientId)}: ${escapeHtml(override.decision)}</span><button class="if-button if-button--sm" type="submit">Clear decision</button>
-    </form>`).join("\n")}</div>`
+  const excluded = comparison.excludedMaomao.length && input.sessionVersion
+    ? `<details class="gd-excluded"><summary>Removed Maomao findings (${comparison.excludedMaomao.length})</summary>${comparison.excludedMaomao.map((item) => compactComparisonSide(item, anchors, input.files, { controls: restoreExclusion(item) })).join("")}</details>`
     : "";
   return `<section id="compare" class="config-section gd-comparison" data-guided-comparison data-session-id="${input.sessionId}" data-state="${escapeHtml(comparison.state)}">
-    <div class="gd-head"><h2>Compare with Maomao</h2><span class="job-chip">${escapeHtml(comparison.state)}</span></div>
+    <div class="gd-head"><div><h2>Merge review</h2><p class="muted">Compare file-by-file, adopt useful Maomao findings into your draft, and remove noise before publishing. Maomao's already-published review is never mutated.</p></div><span class="job-chip">${escapeHtml(comparison.state)}</span></div>
     <p class="muted">${escapeHtml(comparison.message)} Exact head <code>${escapeHtml(comparison.headSha)}</code>${comparison.jobId ? ` · <a href="/jobs/${comparison.jobId}">Maomao job #${comparison.jobId}</a>` : ""}</p>
     ${enqueue}
     ${manual}
-    ${overrides}
     ${comparison.verdictDifference ? `<p class="notice if-banner if-banner--warning">Verdict differs: ${escapeHtml(comparison.verdictDifference)}</p>` : ""}
-    <p class="muted">Coverage: ${comparison.summary.agreement} agreement · ${comparison.summary.humanOnly} human-only · ${comparison.summary.maomaoOnly} Maomao-only · ${comparison.summary.uncertain} uncertain · ${comparison.summary.verdictDifference} severity/verdict differences · ${comparison.summary.inactive} suppressed/resolved. This is coverage, not a score for agreeing with AI.</p>
-    <details open><summary>Agreements (${comparison.summary.agreement})</summary>${pairs(comparison.agreements, "No confirmed agreements.")}</details>
-    <details open><summary>Uncertain or partial matches (${comparison.summary.uncertain})</summary>${pairs(comparison.uncertain, "No uncertain pairings.")}</details>
-    <details open><summary>Human-only findings (${comparison.summary.humanOnly})</summary>${list(comparison.humanOnly, "No human-only findings.")}</details>
-    <details open><summary>Maomao-only findings (${comparison.summary.maomaoOnly})</summary>${list(comparison.maomaoOnly, "No Maomao-only findings.")}</details>
-    <details><summary>Suppressed or resolved Maomao findings (${comparison.summary.inactive})</summary>${list(comparison.inactiveMaomao, "No suppressed or resolved findings.")}</details>
+    <div class="gd-merge-stats" aria-label="Comparison coverage"><span>${comparison.summary.agreement} matched</span><span>${comparison.summary.humanOnly} yours only</span><span>${comparison.summary.maomaoOnly} Maomao only</span><span>${comparison.summary.uncertain} uncertain</span><span>${comparison.excludedMaomao.length} removed</span></div>
+    ${fileSections || `<p class="muted">No file-anchored review findings in the pinned source diff yet.</p>`}
+    ${outsideSection}
+    ${excluded}
+    <details class="gd-inactive"><summary>Suppressed or resolved Maomao findings (${comparison.summary.inactive})</summary>${verboseList(comparison.inactiveMaomao, "No suppressed or resolved findings.")}</details>
   </section>`;
 }
-
-
 
 export interface GuidedPublishPanelView {
   state: "unsupported" | "password" | "missing" | "expired" | "revoked" | "ready" | "published" | "pending" | "stale_pending" | "failed" | "uncertain";
@@ -463,8 +537,8 @@ export function renderGuidedDiffWorkspace(input: {
   const attentionPanel = renderGuidedAttentionPanel({ attention: input.attention, sessionId: input.sessionId, csrfToken: input.csrfToken, readOnly: input.readOnly });
   const publishPanel = renderGuidedPublishPanel({ publish: input.publish, sessionId: input.sessionId, sessionVersion: input.sessionVersion, csrfToken: input.csrfToken });
   const comparisonPanel = renderGuidedComparisonPanel({ comparison: input.comparison, files: filtered, sessionId: input.sessionId, sessionVersion: input.sessionVersion, csrfToken: input.csrfToken, pullUrl: input.pullUrl });
-  const reviewStep = `${walkthroughPanel}${draftPanel}<section class="config-section guided-diff-workspace" data-guided-diff-workspace>
-    <div class="gd-head"><h2>Diff workspace</h2><button type="button" class="if-button if-button--sm guided-layout-toggle">Switch diff layout</button></div>
+  const diffSection = `<section class="config-section guided-diff-workspace" data-guided-diff-workspace>
+    <div class="gd-head gd-diff-toolbar"><div><h2>Files changed</h2><p class="muted">Review the pinned diff; press <kbd>j</kbd>/<kbd>k</kbd> to move line-by-line and click a line number to comment.</p></div><button type="button" class="if-button if-button--sm guided-layout-toggle">Switch diff layout</button></div>
     <p class="muted">${input.files.length} files · ${total} changed lines${input.diffTruncated ? " · diff input truncated by configured byte bound" : ""}</p>
     <p class="error if-banner if-banner--danger" role="alert" data-guided-write-error hidden>Could not save viewed-file progress.</p>
     ${input.diffTruncated ? `<p class="notice if-banner if-banner--warning">The forge diff reached the configured byte bound. Hidden changes are not implied to be reviewed.</p>` : ""}
@@ -473,8 +547,9 @@ export function renderGuidedDiffWorkspace(input: {
       <label>Status <select name="status"><option value="all">All statuses</option>${statuses.map((status) => `<option value="${status}"${input.statusFilter === status ? " selected" : ""}>${status}</option>`).join("")}</select></label>
       <button class="if-button if-button--sm" type="submit">Filter diff</button>
     </form>
-    <div class="gd-layout"><nav class="gd-tree" aria-label="Changed files"><ol>${tree}</ol></nav><div class="gd-files">${rendered || `<div class="empty">No files match this diff filter.</div>`}</div></div>
+    <div class="gd-layout"><nav class="gd-tree" aria-label="Changed files"><div class="gd-tree-head">Changed files</div><ol>${tree}</ol></nav><div class="gd-files">${rendered || `<div class="empty">No files match this diff filter.</div>`}</div></div>
   </section>`;
+  const reviewStep = `${diffSection}<div class="gd-review-secondary">${draftPanel}${walkthroughPanel}</div>`;
   return `<div class="gd-wizard" data-guided-wizard>
     <input class="gd-wizard-radio" type="radio" name="gd-wizard-step" id="gd-step-review" checked/>
     <input class="gd-wizard-radio" type="radio" name="gd-wizard-step" id="gd-step-compare"/>

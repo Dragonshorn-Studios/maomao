@@ -466,6 +466,15 @@ describe("Guided Review session API", () => {
       body: "The retry branch can emit the same event twice.",
     };
     const aiFingerprint = fingerprintFinding({ file: aiFinding.file, category: aiFinding.category, summary: aiFinding.summary, body: aiFinding.body });
+    const aiOnlyFinding = {
+      severity: "medium",
+      category: "correctness",
+      file: "src/index.ts",
+      line: 24,
+      summary: "Rollback path is not bounded",
+      body: "The rollback branch can continue past the intended retry boundary.",
+    };
+    const aiOnlyFingerprint = fingerprintFinding({ file: aiOnlyFinding.file, category: aiOnlyFinding.category, summary: aiOnlyFinding.summary, body: aiOnlyFinding.body });
     const enqueued = store.enqueue({
       repoFullName: "acme/widgets",
       repoOwner: "acme",
@@ -485,7 +494,7 @@ describe("Guided Review session API", () => {
       reviewers: [],
     });
     store.setJobState(enqueued.job.id, "completed", {
-      aggregator_normalized: JSON.stringify({ schema_version: 1, verdict: "comment", summary: "summary", findings: [aiFinding] }),
+      aggregator_normalized: JSON.stringify({ schema_version: 1, verdict: "comment", summary: "summary", findings: [aiFinding, aiOnlyFinding] }),
     });
     const openedResponse = await postJson(app, "/api/guided-review/sessions/open", auth.cookies, openBody(auth.csrfToken));
     const opened = (await openedResponse.json()) as { session: { id: number; version: number } };
@@ -518,6 +527,30 @@ describe("Guided Review session API", () => {
     const row = store.guidedReview.getOwned(opened.session.id, { actorProvider: "github", actorId: "1001" });
     expect(row?.comparison_state_json).toContain('"decision":"confirm"');
     expect(row?.version).toBe(commented.session.version + 1);
+
+    const excluded = await app.request(`/guided/sessions/${opened.session.id}/comparison/pair`, {
+      method: "POST",
+      headers: { cookie: auth.cookies, "content-type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({ version: String(row!.version), fingerprint: aiOnlyFingerprint, decision: "exclude", csrf_token: auth.csrfToken }).toString(),
+    });
+    expect(excluded.status).toBe(303);
+    const excludedRow = store.guidedReview.getOwned(opened.session.id, { actorProvider: "github", actorId: "1001" });
+    expect(excludedRow?.comparison_state_json).toContain('"decision":"exclude"');
+    const restore = await app.request(`/guided/sessions/${opened.session.id}/comparison/pair`, {
+      method: "POST",
+      headers: { cookie: auth.cookies, "content-type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({ version: String(excludedRow!.version), humanClientId: `maomao-exclude-${aiOnlyFingerprint}`, decision: "clear", csrf_token: auth.csrfToken }).toString(),
+    });
+    expect(restore.status).toBe(303);
+    const restored = store.guidedReview.getOwned(opened.session.id, { actorProvider: "github", actorId: "1001" });
+    const adopt = await app.request(`/guided/sessions/${opened.session.id}/comparison/pair`, {
+      method: "POST",
+      headers: { cookie: auth.cookies, "content-type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({ version: String(restored!.version), fingerprint: aiOnlyFingerprint, decision: "adopt", csrf_token: auth.csrfToken }).toString(),
+    });
+    expect(adopt.status).toBe(303);
+    const adoptedComment = store.guidedReview.listComments(opened.session.id).find((comment) => comment.client_id === `maomao-${aiOnlyFingerprint}`);
+    expect(adoptedComment).toMatchObject({ kind: "inline", path: "src/index.ts", line: 24, publishable: 1 });
 
     const stranger = operator(2002);
     const strangerResponse = await app.request(`/guided/sessions/${opened.session.id}/comparison/pair`, {

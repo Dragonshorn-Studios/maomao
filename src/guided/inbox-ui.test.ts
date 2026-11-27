@@ -208,7 +208,7 @@ describe("Guided Review inbox", () => {
     const html = await detail.text();
     expect(html).toContain("SHA-pinned workspace");
     expect(html).toContain(baseSha);
-    expect(html).toContain("Diff workspace");
+    expect(html).toContain("Files changed");
     expect(html).toContain("SHA-pinned walkthrough");
     expect(html).toContain("background");
     expect(html).toContain("new.ts");

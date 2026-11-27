@@ -6,7 +6,7 @@ import type { FindingStatus } from "../findings/types.js";
 import type { GuidedCommentView, GuidedReviewSessionRow } from "./store.js";
 
 export type GuidedComparisonState = "missing" | "pending" | "failed" | "stale" | "ready";
-export type GuidedPairDecision = "confirm" | "reject";
+export type GuidedPairDecision = "confirm" | "reject" | "exclude";
 
 export interface GuidedComparisonSide {
   key: string;
@@ -45,6 +45,7 @@ export interface GuidedComparisonView {
   humanOnly: GuidedComparisonSide[];
   maomaoOnly: GuidedComparisonSide[];
   inactiveMaomao: GuidedComparisonSide[];
+  excludedMaomao: GuidedComparisonSide[];
   overrides: Record<string, { fingerprint: string; decision: GuidedPairDecision }>;
 }
 
@@ -240,7 +241,7 @@ export function comparisonOverrides(value: unknown): Record<string, { fingerprin
   if (!pairs || typeof pairs !== "object") return {};
   const out: Record<string, { fingerprint: string; decision: GuidedPairDecision }> = {};
   for (const [key, entry] of Object.entries(pairs)) {
-    if ((entry.decision === "confirm" || entry.decision === "reject") && typeof entry.fingerprint === "string" && entry.fingerprint.length > 0) {
+    if ((entry.decision === "confirm" || entry.decision === "reject" || entry.decision === "exclude") && typeof entry.fingerprint === "string" && entry.fingerprint.length > 0) {
       out[key] = { fingerprint: entry.fingerprint, decision: entry.decision };
     }
   }
@@ -267,6 +268,7 @@ export function buildGuidedComparison(input: {
     humanOnly: visibleComments.map(humanSide),
     maomaoOnly: [],
     inactiveMaomao: [],
+    excludedMaomao: [],
     overrides: comparisonOverrides(input.comparisonState),
   });
   const job = input.job;
@@ -282,9 +284,11 @@ export function buildGuidedComparison(input: {
   if (maomaoResult.malformedReconciliation) return empty("failed", "Maomao's reconciliation artifact is malformed, so resolved or suppressed statuses cannot be trusted.", job);
   const maomao = maomaoResult.findings;
   const inactiveMaomao = maomao.filter((item) => item.status === "resolved" || item.status === "dismissed");
-  const activeMaomao = maomao.filter((item) => item.status !== "resolved" && item.status !== "dismissed");
   const verdictDifference = input.session.draft_verdict && job.review_event && input.session.draft_verdict !== job.review_event ? `human ${input.session.draft_verdict} vs Maomao ${job.review_event}` : undefined;
   const overrides = comparisonOverrides(input.comparisonState);
+  const excludedFingerprints = new Set(Object.values(overrides).filter((override) => override.decision === "exclude").map((override) => override.fingerprint));
+  const excludedMaomao = maomao.filter((item) => item.status !== "resolved" && item.status !== "dismissed" && excludedFingerprints.has(item.fingerprint));
+  const activeMaomao = maomao.filter((item) => item.status !== "resolved" && item.status !== "dismissed" && !excludedFingerprints.has(item.fingerprint));
   const candidates: Array<{ human: GuidedComparisonSide; maomao: GuidedComparisonSide; score: number; signals: string[]; confirmed: boolean }> = [];
   for (const human of humans) {
     for (const item of activeMaomao) {
@@ -333,6 +337,7 @@ export function buildGuidedComparison(input: {
     humanOnly,
     maomaoOnly,
     inactiveMaomao,
+    excludedMaomao,
     overrides,
   };
 }

@@ -203,6 +203,20 @@ describe("Guided Review comparison", () => {
     expect(view.maomaoOnly[0]?.rationale).toContain("correctness: A missing retry identifier check");
   });
 
+  it("hides deliberately excluded Maomao findings from the active merge view", () => {
+    const finding = { severity: "medium", category: "correctness", file: "src/a.ts", line: 20, summary: "Retry can duplicate delivery", body: "The retry branch can emit twice." };
+    const initial = buildGuidedComparison({ session: session(), comments: [], job: job([finding]) });
+    const fingerprint = initial.maomaoOnly[0]!.fingerprint;
+    const excluded = buildGuidedComparison({
+      session: session(),
+      comments: [],
+      job: job([finding]),
+      comparisonState: { pairs: { [`maomao-exclude-${fingerprint}`]: { fingerprint, decision: "exclude" } } },
+    });
+    expect(excluded.maomaoOnly).toHaveLength(0);
+    expect(excluded.excludedMaomao.map((item) => item.fingerprint)).toEqual([fingerprint]);
+  });
+
   it("parses only bounded manual pairing override state", () => {
     expect(comparisonOverrides({ pairs: { h1: { fingerprint: "f", decision: "confirm" }, bad: { fingerprint: "f", decision: "force" } } })).toEqual({ h1: { fingerprint: "f", decision: "confirm" } });
     expect(comparisonOverrides([])).toEqual({});
