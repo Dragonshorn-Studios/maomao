@@ -26,6 +26,19 @@ rename to new.ts
     ]);
   });
 
+  it("parses quoted paths containing spaces", () => {
+    const [file] = parseUnifiedDiff(`diff --git "a/dir one/old file.ts" "b/dir one/new file.ts"
+rename from dir one/old file.ts
+rename to dir one/new file.ts
+--- "a/dir one/old file.ts"
++++ "b/dir one/new file.ts"
+@@ -1 +1 @@
+-a
++b
+`);
+    expect(file.path).toBe("dir one/new file.ts");
+  });
+
   it("renders exact anchors and escapes untrusted diff content", () => {
     const [file] = parseUnifiedDiff(`diff --git a/x.ts b/x.ts
 --- a/x.ts
