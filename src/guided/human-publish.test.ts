@@ -89,7 +89,7 @@ describe("submitHumanGitHubReview", () => {
   });
 
   it("recovers a timed-out submission through the idempotency marker instead of duplicating it", async () => {
-    const existing = [{ id: 77, html_url: "review-url", body: `x ${guidedHumanPublishMarker(7)}`, user: { id: 1001 } }];
+    const existing = [{ id: 77, html_url: "review-url", body: preview().body, user: { id: 1001 } }];
     let visible = false;
     const base = githubFetch({ failPost: true });
     const mock = { calls: base.calls, fetch: async (url: string | URL, init?: RequestInit) => {
@@ -103,4 +103,29 @@ describe("submitHumanGitHubReview", () => {
     const result = await submitHumanGitHubReview({ fetchImpl: mock.fetch as typeof fetch, token: "token", actorId: "1001", sessionId: 7, repoFullName: "acme/widgets", prNumber: 12, preview: preview() });
     expect(result).toMatchObject({ status: "published", reviewId: 77 });
   });
+  it("does not treat a stale pre-edit marker review as publication of an edited retry payload", async () => {
+    const edited = preview({ body: `Edited human summary\n\n${guidedHumanPublishMarker(7)}` });
+    const existing = [{ id: 77, html_url: "old-review-url", body: preview().body, user: { id: 1001 } }];
+    const mock = githubFetch({ reviews: existing });
+    const result = await submitHumanGitHubReview({ fetchImpl: mock.fetch as typeof fetch, token: "token", actorId: "1001", sessionId: 7, repoFullName: "acme/widgets", prNumber: 12, preview: edited });
+    expect(result).toMatchObject({ status: "published", reviewId: 99 });
+    expect(mock.calls.some((call) => call.method === "POST")).toBe(true);
+  });
+
+  it("paginates review marker lookup beyond the first hundred reviews", async () => {
+    const pageless = githubFetch({});
+    const mock = { calls: pageless.calls, fetch: async (url: string | URL, init?: RequestInit) => {
+      const text = String(url);
+      if (text.includes("/pulls/12/reviews") && (init?.method ?? "GET") === "GET") {
+        const page = Number(new URL(text).searchParams.get("page") ?? "1");
+        if (page === 1) return Response.json(Array.from({ length: 100 }, (_, id) => ({ id, body: "other", user: { id: 1001 } })));
+        return Response.json([{ id: 101, html_url: "late-review", body: preview().body, user: { id: 1001 } }]);
+      }
+      return pageless.fetch(url, init);
+    } };
+    const result = await submitHumanGitHubReview({ fetchImpl: mock.fetch as typeof fetch, token: "token", actorId: "1001", sessionId: 7, repoFullName: "acme/widgets", prNumber: 12, preview: preview() });
+    expect(result).toMatchObject({ status: "duplicate", reviewId: 101 });
+    expect(mock.calls.some((call) => call.method === "POST")).toBe(false);
+  });
+
 });
