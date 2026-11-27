@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { parseUnifiedDiff } from "./diff.js";
-import { renderGuidedDiffWorkspace } from "../ui/guided.js";
+import { renderGuidedDiffWorkspace, renderGuidedPublishPanel } from "../ui/guided.js";
 
 describe("parseUnifiedDiff", () => {
   it("tracks both-side line numbers, statuses, and renames", () => {
@@ -238,4 +238,27 @@ Binary files a/a.png and b/a.png differ
   });
 
 
+});
+
+
+describe("renderGuidedPublishPanel", () => {
+  it("offers deliberate retry forms for failed and uncertain publications", () => {
+    for (const state of ["failed", "uncertain"] as const) {
+      const html = renderGuidedPublishPanel({
+        publish: { state, message: "retry needed", canConnect: false, login: "operator" },
+        sessionId: 7,
+        sessionVersion: 3,
+        csrfToken: "csrf",
+      });
+      expect(html).toContain('action="/guided/sessions/7/publish"');
+      expect(html).toContain("Retry human review publication as operator");
+    }
+    const pending = renderGuidedPublishPanel({
+      publish: { state: "pending", message: "in progress", canConnect: false, login: "operator" },
+      sessionId: 7,
+      sessionVersion: 3,
+      csrfToken: "csrf",
+    });
+    expect(pending).not.toContain('action="/guided/sessions/7/publish"');
+  });
 });
