@@ -7,6 +7,7 @@ import { createHash } from "node:crypto";
  */
 export const PIERRE_DIFFS_HREF = "/assets/vendor/pierre-diffs.js";
 export const CHAT_BUNDLE_HREF = "/assets/chat.js";
+export const GUIDED_BUNDLE_HREF = "/assets/guided.js";
 
 /** Short content fingerprint for cache-busting asset URLs. Assets are served
  * at stable paths with the fingerprint in the query string — a deploy that

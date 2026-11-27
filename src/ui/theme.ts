@@ -2529,6 +2529,27 @@ body.operator main th {
   padding: 0.45rem 0.85rem;
   text-decoration: none;
 }
+
+/* Guided Review human draft. */
+.gd-human-draft { margin-block: var(--if-space-4, 1rem); }
+.gd-human-draft textarea { width: 100%; box-sizing: border-box; }
+.gd-draft-grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(12rem, 18rem); gap: .75rem; align-items: start; }
+.gd-save-state { font-size: .875rem; color: var(--if-color-success, #17803d); }
+.gd-save-state[data-state="unsaved"], .gd-save-state[data-state="saving"] { color: var(--if-color-warning, #a16207); }
+.gd-save-state[data-state="error"], .gd-save-state[data-state="conflict"] { color: var(--if-color-danger, #b91c1c); }
+.gd-comment { border: 1px solid color-mix(in srgb, currentColor 18%, transparent); border-radius: .5rem; padding: .65rem; margin-block: .55rem; }
+.gd-comment-head { display: flex; gap: .5rem; align-items: center; justify-content: space-between; flex-wrap: wrap; }
+.gd-comment-body { white-space: pre-wrap; margin-block: .45rem; }
+.gd-inline-editor, .gd-general-form { border-top: 1px solid color-mix(in srgb, currentColor 16%, transparent); margin-top: .8rem; padding-top: .8rem; }
+.gd-inline-fields { display: flex; flex-wrap: wrap; gap: .75rem; align-items: end; margin-block: .6rem; }
+.gd-check { display: flex; gap: .35rem; align-items: center; }
+.gd-comment-trigger { float: right; opacity: 0; border: 0; background: transparent; color: inherit; cursor: pointer; }
+.gd-comment-trigger--pierre { opacity: 1; position: relative; z-index: 2; min-width: 1.25rem; min-height: 1.25rem; padding: 0 .15rem; border-radius: .25rem; background: var(--surface); color: var(--ink); }
+.if-banner[hidden] { display: none; }
+.gd-line:hover .gd-comment-trigger, .gd-line:focus-within .gd-comment-trigger { opacity: .85; }
+.gd-preview-controls { display: flex; gap: .5rem; margin-top: 1rem; }
+.gd-preview-payload { max-height: 28rem; overflow: auto; white-space: pre-wrap; }
+@media (max-width: 760px) { .gd-draft-grid { grid-template-columns: 1fr; } }
 `.trim();
 
 /** Embedding URL with the content fingerprint — see paths.ts. */
