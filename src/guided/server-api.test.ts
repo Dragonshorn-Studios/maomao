@@ -846,4 +846,48 @@ describe("Guided Review session API", () => {
     expect(publish.status).toBe(403);
   });
 
+
+  it("rejects unconfirmed, stale-version, and historical publish attempts before any GitHub review write", async () => {
+    const posts: string[] = [];
+    const githubFetch = async (url: string | URL, init?: RequestInit) => {
+      const text = String(url);
+      if (text.endsWith("/user")) return Response.json({ id: 1001, login: "operator-1001" });
+      if (text.includes("/pulls/12/reviews") && (init?.method ?? "GET") === "GET") return Response.json([]);
+      if (text.includes("/pulls/12") && (init?.method ?? "GET") === "GET") return Response.json({ state: "open", head: { sha: headSha } });
+      if (text.includes("/pulls/12/reviews") && init?.method === "POST") {
+        posts.push(typeof init.body === "string" ? init.body : "");
+        return Response.json({ id: 125, html_url: "https://github.com/acme/widgets/pull/12#pullrequestreview-125" }, { status: 201 });
+      }
+      return Response.json({}, { status: 404 });
+    };
+    const { app, guidedHumanPublish: humanPublish } = guidedTestApp(undefined, { oauthFetch: githubFetch as typeof fetch });
+    const auth = operator(1001);
+    humanPublish.saveCredential({ actorProvider: "github", actorId: "1001" }, "human-token", "public_repo");
+    const openedResponse = await postJson(app, "/api/guided-review/sessions/open", auth.cookies, openBody(auth.csrfToken));
+    const opened = (await openedResponse.json()) as { session: { id: number; version: number } };
+    const updated = await postJson(app, `/api/guided-review/sessions/${opened.session.id}`, auth.cookies, {
+      version: opened.session.version,
+      draftSummary: "Guarded publication",
+      draftVerdict: "COMMENT",
+      csrf_token: auth.csrfToken,
+    });
+    const version = ((await updated.json()) as { session: { version: number } }).session.version;
+    const publish = (fields: Record<string, string>) => app.request(`/guided/sessions/${opened.session.id}/publish`, {
+      method: "POST",
+      headers: { cookie: auth.cookies, "content-type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams(fields).toString(),
+    });
+
+    const unconfirmed = await publish({ version: String(version), csrf_token: auth.csrfToken });
+    expect(unconfirmed.status).toBe(400);
+    const staleVersion = await publish({ version: String(version - 1), confirm: "yes", csrf_token: auth.csrfToken });
+    expect(staleVersion.status).toBe(409);
+
+    const movedResponse = await postJson(app, "/api/guided-review/sessions/open", auth.cookies, openBody(auth.csrfToken, { headSha: nextHeadSha }));
+    expect(movedResponse.status).toBe(200);
+    const historical = await publish({ version: String(version), confirm: "yes", csrf_token: auth.csrfToken });
+    expect(historical.status).toBe(409);
+    expect(posts).toHaveLength(0);
+  });
+
 });
