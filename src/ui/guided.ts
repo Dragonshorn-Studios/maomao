@@ -148,6 +148,7 @@ interface GuidedInlineAnnotation {
     clientId?: string;
     publishable?: boolean;
     category?: string;
+    anchorStatus?: "anchored" | "unplaced";
     path?: string;
     side?: "LEFT" | "RIGHT";
     line?: number;
@@ -162,7 +163,7 @@ function guidedAnnotationsFor(file: GuidedDiffFile, comments: GuidedCommentView[
     annotations.push({
       side: comment.side === "LEFT" ? "deletions" : "additions",
       lineNumber: comment.line,
-      metadata: { source: "human", summary: comment.body, body: comment.body, severity: comment.severity ?? undefined, clientId: comment.clientId, publishable: comment.publishable, category: comment.category ?? undefined, path: comment.path, side: comment.side, line: comment.line },
+      metadata: { source: "human", summary: comment.body, body: comment.body, severity: comment.severity ?? undefined, clientId: comment.clientId, publishable: comment.publishable, category: comment.category ?? undefined, anchorStatus: comment.anchorStatus, path: comment.path, side: comment.side, line: comment.line },
     });
   }
   if (!comparison || comparison.state !== "ready" && comparison.state !== "stale") return annotations;

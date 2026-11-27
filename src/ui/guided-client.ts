@@ -301,7 +301,7 @@ function enhanceDraft(root: HTMLElement): void {
     openAnchor((event as CustomEvent<{ path: string; side: string; line: string }>).detail);
   });
   document.addEventListener("guided:edit-inline-comment", (event) => {
-    const detail = (event as CustomEvent<{ clientId?: string; path?: string; side?: string; line?: number; body?: string; severity?: string; category?: string; publishable?: boolean }>).detail;
+    const detail = (event as CustomEvent<{ clientId?: string; path?: string; side?: string; line?: number; body?: string; severity?: string; category?: string; publishable?: boolean; anchorStatus?: "anchored" | "unplaced" }>).detail;
     if (!detail?.clientId || !inlineEditor) return;
     const comment = document.createElement("article");
     comment.dataset.clientId = detail.clientId;
@@ -311,6 +311,7 @@ function enhanceDraft(root: HTMLElement): void {
     comment.dataset.severity = detail.severity ?? "";
     comment.dataset.category = detail.category ?? "";
     comment.dataset.publishable = detail.publishable ? "1" : "";
+    comment.dataset.anchorStatus = detail.anchorStatus ?? "";
     const body = document.createElement("p");
     body.className = "gd-comment-body";
     body.textContent = detail.body ?? currentComments.find((candidate) => candidate.clientId === detail.clientId)?.body ?? "";

@@ -138,6 +138,17 @@ describe("Guided Review walkthrough cache", () => {
     expect(f.walkthroughs.getCurrentForIdentity(identity)?.id).toBe(newRow.id);
   });
 
+  it("supersedes a same-head walkthrough when profile execution bounds change", () => {
+    const f = fixture();
+    const identity = { provider: "github", instance: "github.com", repoFullName: "acme/widgets", prNumber: 12, baseSha, headSha };
+    const oldRow = f.walkthroughs.open(identity, { model: "same/model", timeoutMs: 45_000, maxCostUsd: 0.5 });
+    const timeoutRow = f.walkthroughs.open(identity, { model: "same/model", timeoutMs: 90_000, maxCostUsd: 0.5 });
+    const costRow = f.walkthroughs.open(identity, { model: "same/model", timeoutMs: 90_000, maxCostUsd: 1 });
+    expect(new Set([oldRow.id, timeoutRow.id, costRow.id])).toHaveLength(3);
+    expect(f.walkthroughs.get(oldRow.id)?.status).toBe("stale");
+    expect(f.walkthroughs.get(timeoutRow.id)?.status).toBe("stale");
+  });
+
   it("marks older head fingerprints stale when a new exact head opens", () => {
     const f = fixture();
     const oldRow = f.walkthroughs.open({ provider: "github", instance: "github.com", repoFullName: "acme/widgets", prNumber: 12, baseSha, headSha }, "m");
@@ -149,9 +160,10 @@ describe("Guided Review walkthrough cache", () => {
   });
 
   it("revives a stale exact-head fingerprint when that head becomes current again", async () => {
-    const f = fixture();
-    const first = f.walkthroughs.open({ provider: "github", instance: "github.com", repoFullName: "acme/widgets", prNumber: 12, baseSha, headSha }, f.service.model());
-    const moved = f.walkthroughs.open({ provider: "github", instance: "github.com", repoFullName: "acme/widgets", prNumber: 12, baseSha, headSha: nextHeadSha }, f.service.model());
+    const options = { model: "model/a", timeoutMs: 45_000, maxCostUsd: 1 };
+    const f = fixture(undefined, undefined, () => options);
+    const first = f.walkthroughs.open({ provider: "github", instance: "github.com", repoFullName: "acme/widgets", prNumber: 12, baseSha, headSha }, options);
+    const moved = f.walkthroughs.open({ provider: "github", instance: "github.com", repoFullName: "acme/widgets", prNumber: 12, baseSha, headSha: nextHeadSha }, options);
     expect(moved.id).not.toBe(first.id);
     expect(f.walkthroughs.get(first.id)?.status).toBe("stale");
 

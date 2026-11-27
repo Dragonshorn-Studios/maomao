@@ -58,7 +58,7 @@ export interface GuidedWalkthroughPayload {
   generatedAt: string;
 }
 
-export function guidedWalkthroughFingerprint(identity: GuidedWalkthroughIdentity, model: string): string {
+export function guidedWalkthroughFingerprint(identity: GuidedWalkthroughIdentity, model: string, timeoutMs?: number | null, maxCostUsd?: number | null): string {
   return createHash("sha256")
     .update(
       JSON.stringify({
@@ -70,6 +70,8 @@ export function guidedWalkthroughFingerprint(identity: GuidedWalkthroughIdentity
         headSha: identity.headSha,
         promptRevision: GUIDED_WALKTHROUGH_PROMPT_REVISION,
         model: model || "opencode-default",
+        timeoutMs: timeoutMs ?? null,
+        maxCostUsd: maxCostUsd ?? null,
       }),
     )
     .digest("hex");
@@ -166,7 +168,7 @@ export class GuidedWalkthroughStore {
     const model = runOptions.model || "opencode-default";
     const timeoutMs = runOptions.timeoutMs ?? null;
     const maxCostUsd = runOptions.maxCostUsd ?? null;
-    const fingerprint = guidedWalkthroughFingerprint(identity, model);
+    const fingerprint = guidedWalkthroughFingerprint(identity, model, timeoutMs, maxCostUsd);
     const existing = this.getByFingerprint(fingerprint);
     if (existing) {
       if (existing.status === "stale") {

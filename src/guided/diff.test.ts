@@ -187,6 +187,7 @@ Binary files a/a.png and b/a.png differ
     expect(html).toContain('<details class="gd-draft-details" open>');
     const annotationJson = html.match(/<script type="application\/json" class="guided-annotations-raw">([\s\S]*?)<\/script>/)?.[1] ?? "";
     expect(annotationJson).toContain("c-note");
+    expect(annotationJson).toContain('\"anchorStatus\":\"anchored\"');
     expect(annotationJson).not.toContain("c-stale");
     const detailsStart = html.indexOf('<details class="gd-draft-details"');
     const detailsEnd = html.indexOf("</details>", detailsStart);

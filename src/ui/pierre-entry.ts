@@ -43,6 +43,7 @@ interface GuidedAnnotationMetadata {
   clientId?: string;
   publishable?: boolean;
   category?: string;
+  anchorStatus?: "anchored" | "unplaced";
   path?: string;
   side?: "LEFT" | "RIGHT";
   line?: number;
@@ -337,7 +338,7 @@ function commentsToGuidedAnnotations(comments: GuidedBrowserComment[]): Map<stri
     const entry: GuidedAnnotation = {
       side: comment.side === "LEFT" ? "deletions" : "additions",
       lineNumber: comment.line,
-      metadata: { source: "human", summary: comment.body, body: comment.body, severity: comment.severity, clientId: comment.clientId, publishable: comment.publishable, category: comment.category, path: comment.path, side: comment.side, line: comment.line },
+      metadata: { source: "human", summary: comment.body, body: comment.body, severity: comment.severity, clientId: comment.clientId, publishable: comment.publishable, category: comment.category, anchorStatus: comment.anchorStatus, path: comment.path, side: comment.side, line: comment.line },
     };
     const list = annotations.get(comment.path) ?? [];
     list.push(entry);
