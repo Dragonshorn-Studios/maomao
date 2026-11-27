@@ -172,4 +172,70 @@ Binary files a/a.png and b/a.png differ
     expect(ready).not.toContain("Intent <unsafe>");
   });
 
+
+  it("renders comparison coverage, pairing controls, explicit uncertainty and escaped evidence", () => {
+    const [file] = parseUnifiedDiff(`diff --git a/x.ts b/x.ts
+--- a/x.ts
++++ b/x.ts
+@@ -1 +1 @@
+-old
++new
+`);
+    const human = { key: "note-1", fingerprint: "hfp", source: "human" as const, summary: "Human <note>", path: "x.ts", line: 1, severity: "medium" };
+    const maomao = { key: "maomao-afp", fingerprint: "afp", source: "maomao" as const, summary: "Maomao finding", path: "x.ts", line: 3, severity: "high", status: "open" as const, rationale: "Aggregator evidence" };
+    const html = renderGuidedDiffWorkspace({
+      files: [file],
+      sessionId: 7,
+      sessionVersion: 4,
+      csrfToken: "csrf",
+      comparison: {
+        state: "ready",
+        headSha: "b".repeat(40),
+        jobId: 9,
+        jobState: "completed",
+        message: "Comparison pinned",
+        verdictDifference: "human APPROVE vs Maomao REQUEST_CHANGES",
+        summary: { agreement: 0, humanOnly: 1, maomaoOnly: 1, uncertain: 1, verdictDifference: 1, inactive: 0 },
+        agreements: [],
+        uncertain: [{ human, maomao, match: "uncertain" as const, confidence: 0.5, signals: ["same path"], severityDifference: "human medium vs Maomao high", confirmed: false }],
+        humanOnly: [human],
+        maomaoOnly: [maomao],
+        inactiveMaomao: [],
+        overrides: {},
+      },
+    });
+    expect(html).toContain("Compare with Maomao");
+    expect(html).toContain("not a score for agreeing with AI");
+    expect(html).toContain("Confirm same issue");
+    expect(html).toContain("Mark unrelated");
+    expect(html).toContain("Pair selected findings");
+    expect(html).toContain("Severity differs: human medium vs Maomao high");
+    expect(html).toContain("Verdict differs: human APPROVE vs Maomao REQUEST_CHANGES");
+    expect(html).toContain("Human &lt;note&gt;");
+    expect(html).not.toContain("Human <note>");
+
+    const missing = renderGuidedDiffWorkspace({
+      files: [file],
+      sessionId: 7,
+      sessionVersion: 4,
+      csrfToken: "csrf",
+      pullUrl: "https://github.com/acme/widgets/pull/12",
+      comparison: {
+        state: "missing",
+        headSha: "b".repeat(40),
+        message: "No exact-head Maomao review exists",
+        summary: { agreement: 0, humanOnly: 1, maomaoOnly: 0, uncertain: 0, verdictDifference: 0, inactive: 0 },
+        agreements: [],
+        uncertain: [],
+        humanOnly: [human],
+        maomaoOnly: [],
+        inactiveMaomao: [],
+        overrides: {},
+      },
+    });
+    expect(missing).toContain("No exact-head Maomao review exists");
+    expect(missing).toContain("Deliberately enqueue Maomao review for the current pull head");
+  });
+
+
 });
