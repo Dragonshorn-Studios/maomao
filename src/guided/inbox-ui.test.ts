@@ -56,6 +56,9 @@ function githubFake(currentPull = pull()): ManualTriggerPort & Partial<GithubPor
     async listOpenPulls() {
       return [currentPull];
     },
+    async getCompareDiff() {
+      return `diff --git a/old.ts b/new.ts\nrename from old.ts\nrename to new.ts\n--- a/old.ts\n+++ b/new.ts\n@@ -1,2 +1,2 @@\n const safe = 1;\n-oldLine();\n+newLine();\n`;
+    },
   };
 }
 
@@ -174,6 +177,9 @@ describe("Guided Review inbox", () => {
     const html = await detail.text();
     expect(html).toContain("SHA-pinned workspace");
     expect(html).toContain(baseSha);
+    expect(html).toContain("Diff workspace");
+    expect(html).toContain("new.ts");
+    expect(html).toContain("data-anchor-side=\"LEFT\"");
     const session = store.guidedReview.latestForPull({ actorProvider: "github", actorId: "1001" }, "github", "github.com", "acme/widgets", 12);
     expect(session?.head_sha).toBe(headSha);
 

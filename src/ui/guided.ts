@@ -1,5 +1,6 @@
 import { escapeHtml } from "../util.js";
 import type { GuidedInboxItem, GuidedInboxPage } from "../guided/inbox.js";
+import type { GuidedDiffFile } from "../guided/diff.js";
 import { csrfInput, layout, type PageOptions } from "./layout.js";
 
 function qs(filters: Record<string, string | number | undefined>): string {
@@ -109,6 +110,68 @@ export function renderGuidedOpenError(input: { options: PageOptions; error: stri
   });
 }
 
+function guidedDiffLineHtml(file: GuidedDiffFile, hunkIndex: number, line: GuidedDiffFile["hunks"][number]["lines"][number]): string {
+  const side = line.kind === "del" ? "LEFT" : "RIGHT";
+  const lineNumber = line.kind === "del" ? line.oldLine : line.newLine;
+  const anchor = lineNumber ? `L${side === "LEFT" ? "o" : "n"}${lineNumber}` : "";
+  const oldText = line.oldLine ?? "";
+  const newText = line.newLine ?? "";
+  return `<tr class="gd-line gd-${line.kind}"${anchor ? ` id="f${encodeURIComponent(file.path)}-h${hunkIndex}-${anchor}" data-anchor-path="${escapeHtml(file.path)}" data-anchor-side="${side}" data-anchor-line="${lineNumber}"` : ""}>
+    <td class="gd-no gd-old">${oldText}</td><td class="gd-no gd-new">${newText}</td><td class="gd-code"><span>${escapeHtml(line.text)}</span></td>
+  </tr>`;
+}
+
+export function renderGuidedDiffWorkspace(input: {
+  files: GuidedDiffFile[];
+  statusFilter?: string;
+  fileFilter?: string;
+  diffError?: string;
+  diffTruncated?: boolean;
+}): string {
+  if (input.diffError) {
+    return `<section class="config-section guided-diff-workspace"><h2>Diff workspace</h2><p class="error if-banner if-banner--danger" role="alert">${escapeHtml(input.diffError)}</p><p class="muted">Maomao cannot imply unseen changes were reviewed. Retry after the forge recovers or raise the diff size limit.</p></section>`;
+  }
+  const statuses = [...new Set(input.files.map((file) => file.status))].sort();
+  const filtered = input.files.filter((file) =>
+    (!input.statusFilter || input.statusFilter === "all" || file.status === input.statusFilter) &&
+    (!input.fileFilter || file.path.toLowerCase().includes(input.fileFilter.toLowerCase())),
+  );
+  const total = input.files.reduce((sum, file) => sum + file.additions + file.deletions, 0);
+  const tree = filtered.map((file, index) => `<li><a href="#guided-file-${index}" data-guided-file-link>${escapeHtml(file.path)}</a> <span class="muted">${escapeHtml(file.status)} +${file.additions} −${file.deletions}</span></li>`).join("");
+  const rendered = filtered.map((file, index) => {
+    const hunks = file.hunks.map((hunk, hunkIndex) => `<details class="gd-hunk" open>
+      <summary>${escapeHtml(hunk.header)}</summary>
+      <table class="gd-table"><tbody>${hunk.lines.map((line) => guidedDiffLineHtml(file, hunkIndex, line)).join("\n")}</tbody></table>
+    </details>`).join("\n");
+    const empty = file.binary ? `<p class="muted">Binary file changed; inline diff is unavailable.</p>` : file.hunks.length === 0 ? `<p class="muted">No textual hunks are available for this file.</p>` : "";
+    return `<article class="gd-file" id="guided-file-${index}" data-guided-file data-path="${escapeHtml(file.path)}" data-status="${escapeHtml(file.status)}">
+      <h3>${escapeHtml(file.path)} <span class="muted">${escapeHtml(file.status)} +${file.additions} −${file.deletions}</span></h3>
+      ${file.truncated ? `<p class="notice if-banner if-banner--warning">This file exceeded the per-file rendering bound and is partially shown.</p>` : ""}
+      <div class="guided-pierre-file" data-guided-pierre data-path="${escapeHtml(file.path)}">
+        <div class="gd-fallback">${hunks}${empty}</div>
+        <script type="text/plain" class="guided-patch-raw">${escapeHtml(file.patch)}</script>
+      </div>
+    </article>`;
+  }).join("\n");
+  return `<section class="config-section guided-diff-workspace" data-guided-diff-workspace>
+    <div class="gd-head"><h2>Diff workspace</h2><button type="button" class="if-button if-button--sm guided-layout-toggle">Switch diff layout</button></div>
+    <p class="muted">${input.files.length} files · ${total} changed lines${input.diffTruncated ? " · diff input truncated by configured byte bound" : ""}</p>
+    ${input.diffTruncated ? `<p class="notice if-banner if-banner--warning">The forge diff reached the configured byte bound. Hidden changes are not implied to be reviewed.</p>` : ""}
+    <form class="trigger job-filters" method="get">
+      <label>File filter <input type="search" name="file" value="${escapeHtml(input.fileFilter ?? "")}" placeholder="path"/></label>
+      <label>Status <select name="status"><option value="all">All statuses</option>${statuses.map((status) => `<option value="${status}"${input.statusFilter === status ? " selected" : ""}>${status}</option>`).join("")}</select></label>
+      <button class="if-button if-button--sm" type="submit">Filter diff</button>
+    </form>
+    <div class="gd-layout"><nav class="gd-tree" aria-label="Changed files"><ol>${tree}</ol></nav><div class="gd-files">${rendered || `<div class="empty">No files match this diff filter.</div>`}</div></div>
+  </section>
+  <script>
+  (function(){
+    function move(delta){var rows=Array.from(document.querySelectorAll('[data-anchor-line]'));if(!rows.length)return;var current=document.activeElement&&rows.indexOf(document.activeElement);var next=rows[(current<0?0:current+delta+rows.length)%rows.length];next.tabIndex=-1;next.focus();next.scrollIntoView({block:'center'});}
+    document.addEventListener('keydown',function(event){if(event.target&&/INPUT|TEXTAREA|SELECT/.test(event.target.tagName))return;if(event.key==='j'){event.preventDefault();move(1);}if(event.key==='k'){event.preventDefault();move(-1);}});
+  })();
+  </script>`;
+}
+
 export function renderGuidedSessionPage(input: {
   options: PageOptions;
   repoFullName: string;
@@ -124,6 +187,7 @@ export function renderGuidedSessionPage(input: {
   readOnly?: boolean;
   canStart?: boolean;
   staleFrom?: { id: number; baseSha: string; headSha: string };
+  diffWorkspace?: string;
 }): string {
   const readonly = input.readOnly
     ? `<p class="notice if-banner if-banner--warning" role="status">Password-only sessions are read-only here because Guided Review drafts must belong to a stable GitHub OAuth identity.</p>`
@@ -145,6 +209,7 @@ export function renderGuidedSessionPage(input: {
       </dl>
       ${input.canStart ? `<form method="post" action="/guided/github/${encodeURIComponent(input.repoFullName.split("/")[0])}/${encodeURIComponent(input.repoFullName.split("/")[1])}/${input.prNumber}/open">${csrfInput(input.options.csrfToken)}<button class="if-button if-button--primary" type="submit">Start guided draft</button></form>` : ""}
       <p class="muted">The diff workspace and walkthrough land in the next Guided Review slices. Starting creates your actor-private SHA-pinned draft; returning to the same SHAs resumes it.</p>
-    </section>`;
+    </section>
+    ${input.diffWorkspace ?? ""}`;
   return layout(`Guided Review #${input.prNumber}`, body, { ...input.options, nav: "guided" });
 }

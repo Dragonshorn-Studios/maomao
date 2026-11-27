@@ -104,6 +104,15 @@ export interface GithubPort {
     pullNumber: number,
     maxBytes?: number,
   ): Promise<string>;
+  /** Unified diff for an exact base/head comparison, used when the review must remain SHA-pinned. */
+  getCompareDiff?(
+    installationId: number,
+    owner: string,
+    repo: string,
+    baseSha: string,
+    headSha: string,
+    maxBytes?: number,
+  ): Promise<string>;
   /** Create or update one stable-named Check Run for an exact commit. */
   upsertCheckRun?(input: GithubCheckRunUpsertInput): Promise<{ id: string; url?: string }>;
   listReviews(
@@ -452,6 +461,31 @@ export class GithubClient implements GithubPort, ManualTriggerPort {
         owner,
         repo,
         pull_number: pullNumber,
+        mediaType: { format: "diff" },
+        request: maxBytes > 0 ? { fetch: limitedGithubFetch(maxBytes) } : undefined,
+      });
+      return String(response.data);
+    } catch (error) {
+      const tooLarge = unwrapDiffTooLarge(error);
+      if (tooLarge) throw tooLarge;
+      throw error;
+    }
+  }
+
+  async getCompareDiff(
+    installationId: number,
+    owner: string,
+    repo: string,
+    baseSha: string,
+    headSha: string,
+    maxBytes = 0,
+  ): Promise<string> {
+    const octokit = this.installationOctokit(installationId);
+    try {
+      const response = await octokit.rest.repos.compareCommitsWithBasehead({
+        owner,
+        repo,
+        basehead: `${baseSha}...${headSha}`,
         mediaType: { format: "diff" },
         request: maxBytes > 0 ? { fetch: limitedGithubFetch(maxBytes) } : undefined,
       });

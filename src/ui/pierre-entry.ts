@@ -81,6 +81,33 @@ function renderInto(container: HTMLElement): void {
   instances.set(container, fileDiff);
 }
 
+function renderGuidedFile(container: HTMLElement): void {
+  if (container.getAttribute("data-enhanced") === "1") return;
+  const patch = container.querySelector(".guided-patch-raw")?.textContent ?? "";
+  if (!patch.trim()) return;
+  let metadata: FileDiffMetadata;
+  try {
+    metadata = getSingularPatch(patch);
+  } catch {
+    return;
+  }
+  const fileDiff = new FileDiff({ ...diffLayoutOptions(currentLayout(), themeType()), disableFileHeader: false });
+  try {
+    fileDiff.render({ fileDiff: metadata, containerWrapper: container });
+  } catch {
+    fileDiff.cleanUp();
+    return;
+  }
+  if (!container.querySelector("diffs-container")) {
+    fileDiff.cleanUp();
+    return;
+  }
+  const fallback = container.querySelector<HTMLElement>(".gd-fallback");
+  if (fallback) fallback.hidden = true;
+  container.setAttribute("data-enhanced", "1");
+  instances.set(container, fileDiff);
+}
+
 function applyLayout(layout: DiffLayout): void {
   localStorage.setItem(LAYOUT_STORAGE_KEY, layout);
   for (const container of Array.from(document.querySelectorAll<HTMLElement>(".pierre-diff[data-enhanced]"))) {
@@ -117,6 +144,14 @@ function enhanceAll(): void {
       },
       { once: true },
     );
+  }
+  for (const container of document.querySelectorAll<HTMLElement>(".guided-pierre-file[data-guided-pierre]")) {
+    renderGuidedFile(container);
+  }
+  for (const toggle of document.querySelectorAll<HTMLButtonElement>(".guided-layout-toggle")) {
+    if (toggle.hasAttribute("data-pierre-bound")) continue;
+    toggle.setAttribute("data-pierre-bound", "1");
+    toggle.addEventListener("click", () => applyLayout(nextLayout(currentLayout())));
   }
   for (const summary of document.querySelectorAll<HTMLElement>("details.finding-diff > summary")) {
     if (summary.querySelector(".diff-layout-toggle")) continue;
