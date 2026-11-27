@@ -69,6 +69,17 @@ export class GitHubProvider implements ForgePort {
   }
 
   async getChangeDiff(target: ForgeRepoTarget, maxBytes?: number): Promise<string> {
+    if (target.baseSha && target.headSha) {
+      if (!this.client.getCompareDiff) throw new Error("SHA-pinned Guided Review requires GitHub compare-diff support");
+      return this.client.getCompareDiff(
+        this.installationId,
+        target.repoOwner,
+        target.repoName,
+        target.baseSha,
+        target.headSha,
+        maxBytes,
+      );
+    }
     return this.client.getPullDiff(
       this.installationId,
       target.repoOwner,

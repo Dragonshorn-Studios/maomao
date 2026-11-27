@@ -91,7 +91,8 @@ import {
   roleFormValuesFromRole,
 } from "./ui/index.js";
 import { renderProvidersPage } from "./ui/providers.js";
-import { renderGuidedInboxPage, renderGuidedOpenError, renderGuidedSessionPage } from "./ui/guided.js";
+import { renderGuidedDiffWorkspace, renderGuidedInboxPage, renderGuidedOpenError, renderGuidedSessionPage } from "./ui/guided.js";
+import { parseUnifiedDiff } from "./guided/diff.js";
 import { listGuidedInbox } from "./guided/inbox.js";
 import { renderTelemetryPage, TELEMETRY_PAGE_HREF, TELEMETRY_PAGE_JS, type TelemetryProbeRow } from "./ui/telemetry.js";
 import {
@@ -157,6 +158,7 @@ import {
   type GuidedSessionKey,
   type GuidedSessionPatch,
   type GuidedWriteOutcome,
+  validateGuidedRepoPath,
 } from "./guided/store.js";
 
 export interface ServerContext {
@@ -1222,6 +1224,51 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
       const existing = !opened && actor && key ? ctx.store.guidedReview.findExact(actor, key) : undefined;
       const session = opened?.session ?? existing;
       if (redirectAfterOpen) return c.redirect(`/guided/github/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/${prNumber}`, 302);
+      let diffWorkspace = "";
+      if (ctx.forge || ctx.github.getCompareDiff) {
+        try {
+          const forgePort = ctx.forge?.forJob({
+            provider: "github",
+            provider_instance: "github.com",
+            installation_id: installation.installationId,
+          });
+          const target = {
+            provider: "github",
+            instance: "github.com",
+            repoOwner: owner,
+            repoName: repo,
+            repoFullName: `${owner}/${repo}`,
+            changeNumber: prNumber,
+            baseSha: pull.baseSha,
+            headSha: pull.headSha,
+          };
+          if (!forgePort && !ctx.github.getCompareDiff) throw new Error("SHA-pinned Guided Review requires GitHub compare-diff support");
+          const rawDiff = forgePort
+            ? await forgePort.getChangeDiff(target, ctx.config.maxDiffBytes)
+            : await ctx.github.getCompareDiff!(installation.installationId, owner, repo, pull.baseSha, pull.headSha, ctx.config.maxDiffBytes);
+          const files = parseUnifiedDiff(rawDiff, { maxFiles: 300, maxLinesPerFile: 2000 });
+          const rawFileCount = rawDiff.split("\n").filter((line) => line.startsWith("diff --git ")).length;
+          diffWorkspace = renderGuidedDiffWorkspace({
+            files,
+            diffTruncated: rawFileCount > files.length,
+            fileFilter: c.req.query("file") || undefined,
+            statusFilter: c.req.query("status") || undefined,
+            baseSha: pull.baseSha,
+            headSha: pull.headSha,
+            sessionId: session?.id,
+            sessionVersion: session?.version,
+            viewedFiles: session ? (JSON.parse(session.viewed_files_json) as string[]) : [],
+            csrfToken: gateOn ? ensureCsrfToken(c, ctx.config.uiSessionSecret) : undefined,
+          });
+        } catch (error) {
+          diffWorkspace = renderGuidedDiffWorkspace({
+            files: [],
+            diffError: `Could not load the authoritative pull request diff: ${error instanceof Error ? error.message : String(error)}`,
+          });
+        }
+      } else {
+        diffWorkspace = renderGuidedDiffWorkspace({ files: [], diffError: "The configured GitHub client cannot load SHA-pinned comparison diffs." });
+      }
       return c.html(renderGuidedSessionPage({
         options: guidedPageOpts(c),
         repoFullName: `${owner}/${repo}`,
@@ -1237,6 +1284,7 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
         readOnly: !actor,
         canStart: Boolean(actor && !session),
         staleFrom: opened?.staleFrom ? { id: opened.staleFrom.id, baseSha: opened.staleFrom.base_sha, headSha: opened.staleFrom.head_sha } : undefined,
+        diffWorkspace,
       }));
     } catch (error) {
       if (isPermissionDenied(error)) return failure("Not authorized to review this installation or repository.", 403);
@@ -1292,6 +1340,43 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
         session: guidedSessionView(session),
         comments: ctx.store.guidedReview.listComments(session.id).map(guidedCommentView),
       });
+    }),
+  );
+
+  app.get("/api/guided-review/sessions/:id/file", (c) =>
+    guidedRoute(c, async () => {
+      const actor = guidedActor(c);
+      if (!actor) return guidedIdentityRequired(c);
+      const session = ctx.store.guidedReview.getOwned(guidedId(c.req.param("id")), actor);
+      if (!session) return c.json({ error: "guided_review_session_not_found" }, 404);
+      if (session.provider !== "github" || session.provider_instance !== "github.com" || !ctx.github?.getFileContent) {
+        return c.json({ error: "guided_review_context_unavailable", message: "Exact-SHA surrounding code is unavailable for this forge connection." }, 503);
+      }
+      const path = validateGuidedRepoPath(c.req.query("path"));
+      const side = c.req.query("side") === "base" ? "base" : "head";
+      const ref = side === "base" ? session.base_sha : session.head_sha;
+      const parts = session.repo_full_name.split("/");
+      if (parts.length !== 2) return c.json({ error: "invalid_input", message: "session repository is malformed" }, 400);
+      const [owner, repo] = parts;
+      try {
+        const installation = await ctx.github.getRepoInstallation(owner, repo);
+        let repositoryId: number | undefined;
+        if (ctx.config.allowedGithubRepositoryIds.length > 0) {
+          repositoryId = (await ctx.github.getRepository(owner, repo, installation.installationId)).id;
+        }
+        const auth = rejectUnauthorized(ctx.config, {
+          installationId: installation.installationId,
+          accountId: installation.accountId,
+          repositoryId,
+        });
+        if (!auth.ok) return c.json({ error: "forbidden" }, 403);
+        const content = await ctx.github.getFileContent(installation.installationId, owner, repo, path, ref, 200_000);
+        return c.json({ path, side, sha: ref, content });
+      } catch (error) {
+        if (isPermissionDenied(error)) return c.json({ error: "forbidden" }, 403);
+        const detail = truncate(redactSecrets(error instanceof Error ? error.message : String(error), githubSecrets(ctx.config)), 240);
+        return c.json({ error: "guided_review_context_unavailable", message: detail }, 502);
+      }
     }),
   );
 
