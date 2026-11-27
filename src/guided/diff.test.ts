@@ -52,7 +52,10 @@ rename to dir one/new file.ts
     expect(html).toContain('data-anchor-path="x.ts" data-anchor-side="RIGHT" data-anchor-line="4"');
     expect(html).toContain("old(&#39;&lt;img&gt;&#39;)");
     expect(html).toContain("new(&#39;&lt;/script&gt;&#39;)");
-    expect(html).toContain("+new('<\\/script>')");
+    const match = html.match(/<script type="application\/json" class="guided-patch-raw">([\s\S]*?)<\/script>/);
+    expect(match).toBeTruthy();
+    expect(JSON.parse(match![1]) as string).toContain("+new('</script>')");
+    expect(html).not.toContain("+new('<\\/script>')");
   });
 
   it("marks binary and oversized file content explicitly", () => {
