@@ -8815,7 +8815,7 @@ describe("tree-equivalent review carry-forward", () => {
 });
 
 describe("guided human attention merge-readiness integration", () => {
-  async function fixture(diff: string, headSha: string, graceMs = "0") {
+  async function fixture(diff: string, headSha: string, graceMs = "0", guidedReview?: { poisonAlertAttention?: "optional" | "required" }) {
     const config = loadConfig({
       REVIEWER_ROUTING: "deterministic",
       REVIEWER_ROLES: "correctness,security",
@@ -8824,6 +8824,19 @@ describe("guided human attention merge-readiness integration", () => {
       GUIDED_REVIEW_DIAGNOSIS_GRACE_MS: graceMs,
     });
     const store = new JobStore(openDb(":memory:"));
+    if (guidedReview) {
+      const draft = store.configs.createDraft({
+        definition: {
+          name: "default",
+          reviewers: [{ role: "correctness" }, { role: "security" }],
+          minPublishableSeverity: "info",
+          guidedReview,
+        },
+        createdBy: "octocat",
+      });
+      if (!("revision" in draft)) throw new Error("draft failed");
+      store.configs.activateRevision(draft.revision.id, "octocat");
+    }
     const checks: Array<{ name?: string; status?: string; conclusion?: string; summary?: string }> = [];
     const control = { failReadinessSuccess: false };
     const github = githubPort({
@@ -8903,6 +8916,18 @@ describe("guided human attention merge-readiness integration", () => {
     const final = checks.filter((check) => check.name === "maomao/merge-readiness").at(-1);
     expect(final).toMatchObject({ status: "completed", conclusion: "success" });
     expect(final?.summary).toContain("delegated to Maomao by github:1001");
+  });
+
+
+  it("does not block poison-alert readiness when the snapshotted profile makes Guided Review optional", async () => {
+    const headSha = "9".repeat(40);
+    const { store, checks, created, pipeline } = await fixture(AUTH_DIFF, headSha, "0", { poisonAlertAttention: "optional" });
+    await pipeline.run(created.job.id);
+
+    expect(store.getJob(created.job.id)?.routing_profile).toBe("poison-alert");
+    const readiness = checks.filter((check) => check.name === "maomao/merge-readiness").at(-1);
+    expect(readiness?.conclusion).toBe("success");
+    expect(readiness?.summary).toContain("Guided Review optional");
   });
 
   it("lets diagnosis auto-continue after the configured grace with a visible reason", async () => {

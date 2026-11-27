@@ -2,7 +2,7 @@ import type { SqliteDb } from "../db.js";
 import { nowIso } from "../util.js";
 import type { GuidedActor } from "./store.js";
 
-export type GuidedAttentionAction = "review_myself" | "delegate_to_maomao";
+export type GuidedAttentionAction = "review_myself" | "delegate_to_maomao" | "skip_guided_review";
 export const GUIDED_ATTENTION_REASON_TAGS = ["risk-review", "author-context", "time-sensitive", "policy", "other"] as const;
 export type GuidedAttentionReasonTag = (typeof GUIDED_ATTENTION_REASON_TAGS)[number];
 
@@ -58,7 +58,7 @@ export class GuidedAttentionStore {
   recordDecision(actor: GuidedActor, key: GuidedAttentionKey, action: GuidedAttentionAction, reasonTag: string, reasonDetail?: string | null): { status: "ok" | "conflict"; row: GuidedAttentionDecisionRow } {
     if (!validKey(key)) throw new Error("guided attention key is malformed");
     if (!GUIDED_ATTENTION_REASON_TAGS.includes(reasonTag as GuidedAttentionReasonTag)) throw new Error("guided attention reason tag is malformed");
-    if (action !== "review_myself" && action !== "delegate_to_maomao") throw new Error("guided attention action is malformed");
+    if (action !== "review_myself" && action !== "delegate_to_maomao" && action !== "skip_guided_review") throw new Error("guided attention action is malformed");
     const detail = reasonDetail?.trim().slice(0, 300) || null;
     const existing = this.decisionFor(key);
     if (existing) {

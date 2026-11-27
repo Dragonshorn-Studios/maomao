@@ -1918,6 +1918,37 @@ ${modelPicker({
         ${err("verifier_timeout")}
       </fieldset>
       <fieldset>
+        <legend>Guided Review (optional)</legend>
+        <p class="hint">Controls the independent guided-review explainer for repositories using this profile. Blank fields fall back to the instance explainer settings.</p>
+        <label class="if-field"><span class="if-label">Guided Review model override (optional; provider/model)</span>
+${modelPicker({
+            name: "guided_model",
+            value: values.guidedModel,
+            models: options.modelCatalog,
+            emptyLabel: "— default —",
+            allowCustom: !options.catalogEnforced,
+            attrs: `${invalidAttr("guided_model")} ${describedBy("guided_model")}`.trim(),
+            buttonAttrs: invalidAttr("guided_model"),
+          })}
+        </label>
+        ${err("guided_model")}
+        <label class="if-field"><span class="if-label">Guided Review timeout in seconds (optional, decimals allowed)</span>
+<input type="number" step="any" min="0" name="guided_timeout" value="${escapeHtml(values.guidedTimeoutSeconds)}" ${invalidAttr("guided_timeout")} ${describedBy("guided_timeout")}/>
+        </label>
+        ${err("guided_timeout")}
+        <label class="if-field"><span class="if-label">Guided Review cost ceiling in USD (optional)</span>
+<input type="number" step="0.01" min="0" name="guided_max_cost_usd" value="${escapeHtml(values.guidedMaxCostUsd)}" ${invalidAttr("guided_max_cost_usd")} ${describedBy("guided_max_cost_usd")}/>
+        </label>
+        ${err("guided_max_cost_usd")}
+        <label class="if-field"><span class="if-label">Poison-alert human attention</span>
+<select name="guided_poison_attention">
+            <option value="required"${values.guidedPoisonAttention === "required" ? " selected" : ""}>Required — merge readiness waits for an exact-SHA human decision</option>
+            <option value="optional"${values.guidedPoisonAttention === "optional" ? " selected" : ""}>Optional — offer Guided Review, but do not block merge readiness</option>
+          </select>
+        </label>
+        ${err("guided_poison_attention")}
+      </fieldset>
+      <fieldset>
         <legend>Publishing</legend>
         <label class="if-field"><span class="if-label">Minimum publishable severity</span>
 <select name="min_severity">

@@ -120,6 +120,69 @@ Binary files a/a.png and b/a.png differ
     expect(readOnly).not.toContain("data-guided-comment-anchor");
   });
 
+
+  it("renders compact manual file state, no file filter, and inline note data", () => {
+    const [file] = parseUnifiedDiff(`diff --git a/src/x.ts b/src/x.ts
+--- a/src/x.ts
++++ b/src/x.ts
+@@ -1 +1 @@
+-old
++new
+`);
+    const sessionView = {
+      id: 7,
+      actorProvider: "github",
+      actorId: "1001",
+      provider: "github",
+      instance: "github.com",
+      repoFullName: "acme/widgets",
+      prNumber: 12,
+      baseSha: "a".repeat(40),
+      headSha: "b".repeat(40),
+      status: "active" as const,
+      currentPath: null,
+      currentHunk: null,
+      position: {},
+      viewedFiles: ["src/x.ts"],
+      draftSummary: "",
+      draftVerdict: null,
+      walkthroughRef: null,
+      comparisonState: {},
+      version: 3,
+      historicalAt: null,
+      createdAt: "now",
+      updatedAt: "now",
+      lastOpenedAt: "now",
+    };
+    const comment = {
+      id: 1,
+      sessionId: 7,
+      clientId: "c-note",
+      kind: "inline" as const,
+      body: "Inline <note>",
+      path: "src/x.ts",
+      side: "RIGHT" as const,
+      line: 1,
+      hunkAnchor: null,
+      anchorStatus: "anchored" as const,
+      severity: "medium" as const,
+      category: "correctness",
+      publishable: true,
+      sourceCommentId: null,
+      deletedAt: null,
+      createdAt: "now",
+      updatedAt: "now",
+    };
+    const html = renderGuidedDiffWorkspace({ files: [file], sessionId: 7, sessionView, viewedFiles: ["src/x.ts"], comments: [comment], csrfToken: "csrf" });
+    expect(html).toContain('data-guided-viewed-toggle data-path="src/x.ts" checked');
+    expect(html).toContain('class="gd-inline-note-row"');
+    expect(html).toContain("Inline &lt;note&gt;");
+    expect(html).toContain('class="guided-annotations-raw"');
+    expect(html).toContain('data-guided-tree-toggle');
+    expect(html).not.toContain('name="file"');
+    expect(html).not.toContain("IntersectionObserver");
+  });
+
   it("renders walkthrough progress states and deep-links structured evidence into the exact diff", () => {
     const [file] = parseUnifiedDiff(`diff --git a/x.ts b/x.ts
 --- a/x.ts

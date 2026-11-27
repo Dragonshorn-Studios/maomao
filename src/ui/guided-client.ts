@@ -30,6 +30,7 @@ function enhanceDraft(root: HTMLElement): void {
   let conflicted = false;
   let writeFailed = false;
   let summaryDirty = false;
+  let currentComments: GuidedCommentView[] = [];
   const statusEl = root.querySelector<HTMLElement>("[data-save-state]");
   const summaryEl = root.querySelector<HTMLTextAreaElement>("[data-draft-summary]");
   const verdictEl = root.querySelector<HTMLSelectElement>("[data-draft-verdict]");
@@ -60,11 +61,11 @@ function enhanceDraft(root: HTMLElement): void {
   function renderComments(comments: GuidedCommentView[]): void {
     if (!listEl) return;
     listEl.textContent = "";
-    const active = comments.filter((comment) => !comment.deletedAt);
+    const active = comments.filter((comment) => !comment.deletedAt && comment.kind === "general");
     if (active.length === 0) {
       const empty = document.createElement("p");
       empty.className = "muted";
-      empty.textContent = "No notes yet. Use a diff line for an inline note, or add a general note below.";
+      empty.textContent = "No general notes yet. Inline notes appear directly in the diff.";
       listEl.append(empty);
       return;
     }
@@ -117,7 +118,9 @@ function enhanceDraft(root: HTMLElement): void {
     root.dataset.version = String(version);
     conflicted = false;
     writeFailed = false;
+    currentComments = data.comments;
     renderComments(data.comments);
+    (window as unknown as { __maomaoPierre?: { updateGuidedComments?: (comments: GuidedCommentView[]) => void } }).__maomaoPierre?.updateGuidedComments?.(data.comments);
     if (summaryEl && document.activeElement !== summaryEl) summaryEl.value = data.session.draftSummary;
     if (verdictEl && document.activeElement !== verdictEl) verdictEl.value = data.session.draftVerdict ?? "";
     status("saved");
@@ -183,16 +186,21 @@ function enhanceDraft(root: HTMLElement): void {
     });
   }
 
-  function saveViewed(path: string): void {
+  function saveViewed(path: string, viewed = true): void {
     enqueue(async () => {
       const current = await readSession();
       version = current.session.version;
-      const viewedFiles = [...new Set([...current.session.viewedFiles, path])];
-      if (viewedFiles.length === current.session.viewedFiles.length) return;
+      const existing = new Set(current.session.viewedFiles);
+      if (viewed) existing.add(path);
+      else existing.delete(path);
+      const viewedFiles = [...existing];
+      if (viewedFiles.length === current.session.viewedFiles.length && viewed === current.session.viewedFiles.includes(path)) return;
       await write("", { viewedFiles });
     }, () => {
       const file = document.querySelector(`[data-guided-file][data-path="${CSS.escape(path)}"]`);
-      file?.classList.remove("gd-viewed");
+      file?.classList.toggle("gd-viewed", !viewed);
+      const toggle = file?.querySelector<HTMLInputElement>("[data-guided-viewed-toggle]");
+      if (toggle) toggle.checked = !viewed;
       const warning = document.querySelector<HTMLElement>("[data-guided-write-error]");
       if (warning) warning.hidden = false;
     });
@@ -206,6 +214,13 @@ function enhanceDraft(root: HTMLElement): void {
   const pending = (window as Window & { __guidedViewedPending?: string[] }).__guidedViewedPending ?? [];
   (window as Window & { __guidedViewedPending?: string[] }).__guidedViewedPending = [];
   for (const path of new Set(pending)) saveViewed(path);
+  document.addEventListener("change", (event) => {
+    const toggle = closest<HTMLInputElement>(event.target, "[data-guided-viewed-toggle]");
+    if (!toggle?.dataset.path) return;
+    const file = toggle.closest("[data-guided-file]");
+    file?.classList.toggle("gd-viewed", toggle.checked);
+    saveViewed(toggle.dataset.path, toggle.checked);
+  });
 
   function commentFormData(form: HTMLElement | HTMLFormElement): Record<string, unknown> {
     const clientId = form.querySelector<HTMLInputElement>("[data-comment-client-id]")?.value || `c-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 12)}`;
@@ -249,7 +264,6 @@ function enhanceDraft(root: HTMLElement): void {
     if (publishable) {
       publishable.checked = comment?.dataset.publishable === "1";
     }
-    inlineEditor.scrollIntoView({ block: "center" });
     body?.focus();
   }
 
@@ -275,6 +289,31 @@ function enhanceDraft(root: HTMLElement): void {
   });
   document.addEventListener("guided:line-anchor", (event) => {
     openAnchor((event as CustomEvent<{ path: string; side: string; line: string }>).detail);
+  });
+  document.addEventListener("guided:edit-inline-comment", (event) => {
+    const detail = (event as CustomEvent<{ clientId?: string; path?: string; side?: string; line?: number; body?: string; severity?: string; category?: string; publishable?: boolean }>).detail;
+    if (!detail?.clientId || !inlineEditor) return;
+    const comment = document.createElement("article");
+    comment.dataset.clientId = detail.clientId;
+    comment.dataset.path = detail.path ?? "";
+    comment.dataset.side = detail.side ?? "";
+    comment.dataset.line = detail.line ? String(detail.line) : "";
+    comment.dataset.severity = detail.severity ?? "";
+    comment.dataset.category = detail.category ?? "";
+    comment.dataset.publishable = detail.publishable ? "1" : "";
+    const body = document.createElement("p");
+    body.className = "gd-comment-body";
+    body.textContent = detail.body ?? currentComments.find((candidate) => candidate.clientId === detail.clientId)?.body ?? "";
+    comment.appendChild(body);
+    showInlineEditor(undefined, comment);
+  });
+  document.addEventListener("guided:delete-inline-comment", (event) => {
+    const clientId = (event as CustomEvent<{ clientId?: string }>).detail?.clientId;
+    if (!clientId) return;
+    enqueue(async () => {
+      await write("/comments/delete", { clientId });
+      await refresh();
+    });
   });
 
   for (const form of [inlineEditor, generalForm]) {
@@ -326,7 +365,7 @@ function enhanceDraft(root: HTMLElement): void {
     });
   });
 
-  listEl?.addEventListener("click", (event) => {
+  document.addEventListener("click", (event) => {
     const editButton = closest<HTMLElement>(event.target, "[data-edit-comment]");
     const deleteButton = closest<HTMLElement>(event.target, "[data-delete-comment]");
     const item = closest<HTMLElement>(event.target, "[data-client-id]");
@@ -376,25 +415,63 @@ function enhanceDraft(root: HTMLElement): void {
       const response = await fetch(`/api/guided-review/sessions/${sessionId}/preview`);
       if (!response.ok) throw new Error(`preview failed (${response.status})`);
       const { preview } = (await response.json()) as { preview: GuidedPublishPreview };
-      previewOutput.textContent = "";
-      const target = document.createElement("p");
-      target.className = "muted";
-      target.textContent = `${preview.target.provider}:${preview.target.instance} ${preview.target.repoFullName}#${preview.target.prNumber} · base ${preview.target.baseSha} · head ${preview.target.headSha} · event ${preview.event}`;
-      const warning = document.createElement("p");
-      warning.className = "notice if-banner if-banner--warning";
-      warning.textContent = preview.event === "APPROVE" && preview.omittedInlineCount > 0
-        ? `${preview.omittedInlineCount} publishable inline note(s) are folded into the review summary so approval creates no unresolved inline threads.`
-        : preview.unresolvedThreadWarning
-          ? "Inline comments may become unresolved threads that native merge gates can block on. They are included only because you marked them publishable."
-          : "";
-      const payload = document.createElement("pre");
-      payload.className = "gd-preview-payload";
-      payload.textContent = JSON.stringify(preview, null, 2);
-      previewOutput.append(target, warning, payload);
+      renderPublishPreview(previewOutput, preview);
     } catch (error) {
       previewOutput.textContent = `Could not load preview: ${error instanceof Error ? error.message : String(error)}`;
     }
   });
+}
+
+
+function renderPublishPreview(previewOutput: HTMLElement, preview: GuidedPublishPreview): void {
+previewOutput.textContent = "";
+const target = document.createElement("p");
+target.className = "muted";
+target.textContent = `${preview.target.provider}:${preview.target.instance} ${preview.target.repoFullName}#${preview.target.prNumber} · base ${preview.target.baseSha} · head ${preview.target.headSha} · event ${preview.event}`;
+const warning = document.createElement("p");
+warning.className = "notice if-banner if-banner--warning";
+warning.textContent = preview.event === "APPROVE" && preview.omittedInlineCount > 0
+  ? `${preview.omittedInlineCount} publishable inline note(s) are folded into the review summary so approval creates no unresolved inline threads.`
+  : preview.unresolvedThreadWarning
+    ? "Inline comments may become unresolved threads that native merge gates can block on. They are included only because you marked them publishable."
+    : "";
+const eventLine = document.createElement("p");
+eventLine.className = "gd-preview-event";
+eventLine.textContent = `${preview.event} · ${preview.comments.length} inline comment${preview.comments.length === 1 ? "" : "s"}`;
+const bodyLabel = document.createElement("h4");
+bodyLabel.textContent = "Review body that will be posted";
+const body = document.createElement("pre");
+body.className = "gd-preview-payload";
+body.textContent = preview.body;
+const pieces: HTMLElement[] = [target, warning, eventLine, bodyLabel, body];
+if (preview.comments.length) {
+  const list = document.createElement("div");
+  list.className = "gd-preview-comments";
+  for (const comment of preview.comments) {
+    const item = document.createElement("article");
+    item.className = "gd-comment";
+    const head = document.createElement("div");
+    head.className = "gd-comment-head";
+    const where = document.createElement("strong");
+    where.textContent = `${comment.path} ${comment.side}:${comment.line}`;
+    head.appendChild(where);
+    const textBody = document.createElement("p");
+    textBody.className = "gd-comment-body";
+    textBody.textContent = comment.body;
+    item.append(head, textBody);
+    list.appendChild(item);
+  }
+  pieces.push(list);
+}
+const raw = document.createElement("details");
+const summary = document.createElement("summary");
+summary.textContent = "Exact publication payload";
+const payload = document.createElement("pre");
+payload.className = "gd-preview-payload";
+payload.textContent = JSON.stringify(preview, null, 2);
+raw.append(summary, payload);
+pieces.push(raw);
+previewOutput.append(...pieces);
 }
 
 
@@ -694,10 +771,131 @@ function enhanceGuidedComparisons(): void {
 }
 
 
+
+
+async function loadPublishPreview(sessionId: number): Promise<GuidedPublishPreview> {
+  const response = await fetch(`/api/guided-review/sessions/${sessionId}/preview`);
+  if (!response.ok) throw new Error(`preview failed (${response.status})`);
+  return ((await response.json()) as { preview: GuidedPublishPreview }).preview;
+}
+
+function enhanceGuidedPublicationPreviews(): void {
+  for (const root of document.querySelectorAll<HTMLElement>("[data-guided-publish-preview]")) {
+    if (root.dataset.enhanced === "1") continue;
+    root.dataset.enhanced = "1";
+    const sessionId = Number(root.dataset.sessionId);
+    const output = root.querySelector<HTMLElement>("[data-publish-preview-output]");
+    if (!sessionId || !output) continue;
+    const load = async () => {
+      output.textContent = "Loading exact preview…";
+      try {
+        renderPublishPreview(output, await loadPublishPreview(sessionId));
+      } catch (error) {
+        output.textContent = `Could not load preview: ${error instanceof Error ? error.message : String(error)}`;
+      }
+    };
+    root.querySelector("[data-load-publish-preview]")?.addEventListener("click", (event) => {
+      event.preventDefault();
+      void load();
+    });
+    void load();
+  }
+}
+
+interface GuidedDiscussionComment {
+  authorLogin?: string;
+  body: string;
+  path?: string;
+  line?: number | null;
+}
+
+interface GuidedDiscussion {
+  id: string;
+  path?: string;
+  line?: number | null;
+  maomaoAuthored: boolean;
+  comments: GuidedDiscussionComment[];
+}
+
+function enhanceGuidedDiscussions(): void {
+  for (const root of document.querySelectorAll<HTMLElement>("[data-guided-discussions]")) {
+    if (root.dataset.enhanced === "1") continue;
+    root.dataset.enhanced = "1";
+    const sessionId = Number(root.dataset.sessionId);
+    const csrf = root.dataset.csrf || "";
+    const list = root.querySelector<HTMLElement>("[data-discussion-list]");
+    if (!sessionId || !list) continue;
+    const render = (discussions: GuidedDiscussion[], unsupported = false) => {
+      list.textContent = "";
+      if (unsupported) {
+        appendText(list, "p", "Thread resolution is currently available for GitHub.com guided reviews only.", "muted");
+        return;
+      }
+      const maomao = discussions.filter((discussion) => discussion.maomaoAuthored);
+      const others = discussions.filter((discussion) => !discussion.maomaoAuthored);
+      if (!discussions.length) {
+        appendText(list, "p", "No unresolved published threads remain.", "muted");
+        return;
+      }
+      if (maomao.length) appendText(list, "p", `${maomao.length} unresolved Maomao-authored thread${maomao.length === 1 ? "" : "s"}. Resolve only after you have handled or intentionally rejected the finding.`, "muted");
+      for (const discussion of [...maomao, ...others]) {
+        const item = document.createElement("article");
+        item.className = "gd-comment gd-discussion";
+        const head = document.createElement("div");
+        head.className = "gd-comment-head";
+        appendText(head, "strong", `${discussion.path ?? "unanchored thread"}${discussion.line ? `:${discussion.line}` : ""}`);
+        appendText(head, "span", discussion.maomaoAuthored ? "Maomao-authored" : "other author", "muted");
+        const button = document.createElement("button");
+        button.type = "button";
+        button.className = "if-button if-button--sm";
+        button.textContent = "Resolve thread";
+        button.addEventListener("click", () => {
+          button.disabled = true;
+          button.textContent = "Resolving…";
+          void fetch(`/api/guided-review/sessions/${sessionId}/discussions/resolve`, {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ discussionId: discussion.id, csrf_token: csrf }),
+          }).then((response) => {
+            if (!response.ok) throw new Error(`resolve failed (${response.status})`);
+            return load();
+          }).catch(() => {
+            button.disabled = false;
+            button.textContent = "Retry resolve";
+          });
+        });
+        head.appendChild(button);
+        item.appendChild(head);
+        for (const comment of discussion.comments) {
+          const body = document.createElement("p");
+          body.className = "gd-comment-body";
+          body.textContent = `${comment.authorLogin ?? "unknown"}: ${comment.body}`;
+          item.appendChild(body);
+        }
+        list.appendChild(item);
+      }
+    };
+    const load = async () => {
+      try {
+        const response = await fetch(`/api/guided-review/sessions/${sessionId}/discussions`);
+        if (!response.ok) throw new Error(`discussions failed (${response.status})`);
+        const body = (await response.json()) as { discussions?: GuidedDiscussion[]; unsupported?: boolean };
+        render(body.discussions ?? [], body.unsupported === true);
+      } catch (error) {
+        list.textContent = "";
+        appendText(list, "p", `Could not load published threads: ${error instanceof Error ? error.message : String(error)}`, "error");
+      }
+    };
+    void load();
+  }
+}
+
 function enhanceGuidedPage(): void {
   enhanceGuidedDrafts();
   enhanceGuidedWalkthroughs();
   enhanceGuidedComparisons();
+  enhanceGuidedDiscussions();
+  enhanceGuidedPublicationPreviews();
 }
 
 export function enhanceGuidedDrafts(): void {

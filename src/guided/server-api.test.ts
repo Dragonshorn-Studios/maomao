@@ -790,6 +790,16 @@ describe("Guided Review session API", () => {
     expect(store.guidedAttention.decisionFor({ provider: "github", instance: "github.com", repoFullName: "acme/widgets", prNumber: 12, headSha })).toBeUndefined();
 
     permission = "write";
+    const skipForm = new URLSearchParams({ action: "skip_guided_review", reasonTag: "risk-review", csrf_token: auth.csrfToken });
+    const skipDenied = await app.request(`/guided/sessions/${opened.session.id}/attention`, {
+      method: "POST",
+      headers: { cookie: auth.cookies, "content-type": "application/x-www-form-urlencoded" },
+      body: skipForm.toString(),
+    });
+    expect(skipDenied.status).toBe(400);
+    expect(await skipDenied.text()).toContain("optional skip action is not available");
+    expect(store.guidedAttention.decisionFor({ provider: "github", instance: "github.com", repoFullName: "acme/widgets", prNumber: 12, headSha })).toBeUndefined();
+
     const response = await postDecision();
     expect(response.status).toBe(303);
     expect(reevaluated).toEqual([job.id]);

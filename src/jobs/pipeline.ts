@@ -233,7 +233,12 @@ export function createPipeline(deps: PipelineDeps) {
   }
 
   function attentionDecisionDetail(row: NonNullable<ReturnType<typeof deps.store.guidedAttention.decisionFor>>): string {
-    return `${row.action === "delegate_to_maomao" ? "delegated to Maomao" : "human chose to review"} by ${row.actor_provider}:${row.actor_id} at ${row.created_at} (${row.reason_tag})`;
+    const action = row.action === "delegate_to_maomao" ? "delegated to Maomao" : row.action === "skip_guided_review" ? "explicitly continued without Guided Review" : "human chose to review";
+    return `${action} by ${row.actor_provider}:${row.actor_id} at ${row.created_at} (${row.reason_tag})`;
+  }
+
+  function guidedAttentionOptional(job: JobRow): boolean {
+    return profileDefinitionForJob(deps.store, job)?.guidedReview?.poisonAlertAttention === "optional";
   }
 
   /** Bounded pre-review grace for exact-head Guided Review work on diagnosis jobs. */
@@ -290,11 +295,11 @@ export function createPipeline(deps: PipelineDeps) {
         prNumber: participant.number,
         headSha: participant.headSha,
       });
-      if (decision) {
+      if (decision && !(decision.action === "skip_guided_review" && !guidedAttentionOptional(participantJob))) {
         satisfied.push(`PR #${participant.number}: ${attentionDecisionDetail(decision)}`);
         continue;
       }
-      if (participantJob.routing_profile === "poison-alert") waiting.push(`PR #${participant.number} at exact participant head ${participant.headSha.slice(0, 12)}`);
+      if (participantJob.routing_profile === "poison-alert" && !guidedAttentionOptional(participantJob)) waiting.push(`PR #${participant.number} at exact participant head ${participant.headSha.slice(0, 12)}`);
       else if (!participantJob.routing_profile && participantJob.state !== "completed" && participantJob.review_mode === "full") waiting.push(`PR #${participant.number} at exact participant head ${participant.headSha.slice(0, 12)} has unresolved review routing`);
     }
     if (waiting.length > 0) {
@@ -314,13 +319,16 @@ export function createPipeline(deps: PipelineDeps) {
     if (profile === "observation") return { state: "not_required", detail: "observation profile never waits for Guided Review" };
     const key = attentionKey(job);
     const existing = deps.store.guidedAttention.decisionFor(key);
-    if (existing) return { state: "satisfied", detail: attentionDecisionDetail(existing) };
+    if (existing && !(existing.action === "skip_guided_review" && !guidedAttentionOptional(job))) return { state: "satisfied", detail: attentionDecisionDetail(existing) };
     if (profile === "diagnosis") {
       const remembered = guidedDiagnosisGraceMemory.get(job.id);
       if (remembered) return { state: "auto_continue", detail: remembered };
       return { state: "auto_continue", detail: "diagnosis grace already elapsed; automatic review continued" };
     }
     if (profile !== "poison-alert") return { state: "not_required", detail: `routing profile ${profile} has no guided human-attention requirement` };
+    if (guidedAttentionOptional(job)) {
+      return { state: "auto_continue", detail: "profile makes poison-alert Guided Review optional; merge readiness does not wait for a human-attention decision" };
+    }
 
     return {
       state: "waiting",

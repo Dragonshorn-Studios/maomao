@@ -19,6 +19,12 @@ import {
   type GuidedWalkthroughRow,
 } from "./walkthrough-store.js";
 
+export interface GuidedReviewRunOptions {
+  model?: string;
+  timeoutMs?: number;
+  maxCostUsd?: number;
+}
+
 export interface GuidedWalkthroughServiceDeps {
   config: Config;
   store: GuidedWalkthroughStore;
@@ -29,6 +35,8 @@ export interface GuidedWalkthroughServiceDeps {
   briefCache?: {
     getRepoBriefCache(provider: string, providerInstance: string, repoFullName: string, sha: string): { payload: string; created_at: string } | undefined;
   };
+  /** Active-profile Guided Review overrides for the repository, resolved at enqueue/run time. */
+  resolveOptions?: (repoFullName: string) => GuidedReviewRunOptions | undefined;
 }
 
 function walkthroughWorkspaceRoot(workspaceRoot: string): string {
@@ -118,8 +126,17 @@ export class GuidedWalkthroughService {
     this.deps.store.recoverInterrupted();
   }
 
-  model(): string {
-    return this.deps.config.chat.model || "opencode-default";
+  private options(repoFullName: string): GuidedReviewRunOptions {
+    const profile = this.deps.resolveOptions?.(repoFullName) ?? {};
+    return {
+      model: profile.model || this.deps.config.chat.model || undefined,
+      timeoutMs: profile.timeoutMs || this.deps.config.chat.timeoutMs || undefined,
+      maxCostUsd: profile.maxCostUsd || this.deps.config.chat.maxCostUsd || undefined,
+    };
+  }
+
+  model(repoFullName?: string): string {
+    return (repoFullName ? this.options(repoFullName).model : this.deps.config.chat.model) || "opencode-default";
   }
 
   ensure(session: GuidedReviewSessionRow, installationId: number): GuidedWalkthroughRow {
@@ -132,7 +149,7 @@ export class GuidedWalkthroughService {
         baseSha: session.base_sha,
         headSha: session.head_sha,
       },
-      this.model(),
+      this.model(session.repo_full_name),
     );
     for (const stale of this.deps.store.listStaleCancellations(
       {
@@ -247,10 +264,10 @@ export class GuidedWalkthroughService {
     try {
       const result = await this.deps.opencode.run({
         cwd: workspace.repoDir,
-        model: this.deps.config.chat.model,
+        model: row.model === "opencode-default" ? this.deps.config.chat.model : row.model,
         prompt: buildPrompt({ target, model: row.model }),
         files,
-        timeoutMs: Math.min(this.deps.config.chat.timeoutMs || 180_000, 240_000),
+        timeoutMs: this.options(row.repo_full_name).timeoutMs || 180_000,
         signal,
       });
       const text = result.text || result.stdout;
@@ -259,8 +276,9 @@ export class GuidedWalkthroughService {
         throw new Error(`walkthrough run failed (exit ${result.exitCode}): ${truncate(result.stderr.trim() || "no output", 300)}`);
       }
       if (text.length > GUIDED_WALKTHROUGH_OUTPUT_CHARS) throw new Error("walkthrough output exceeded the output bound");
-      if (this.deps.config.chat.maxCostUsd > 0 && (result.usage.cost ?? 0) > this.deps.config.chat.maxCostUsd) {
-        throw new Error(`walkthrough exceeded the configured cost ceiling ($${this.deps.config.chat.maxCostUsd.toFixed(2)})`);
+      const maxCostUsd = this.options(row.repo_full_name).maxCostUsd ?? 0;
+      if (maxCostUsd > 0 && (result.usage.cost ?? 0) > maxCostUsd) {
+        throw new Error(`walkthrough exceeded the configured cost ceiling ($${maxCostUsd.toFixed(2)})`);
       }
       const payload = parsePayload(text);
       if (!payload) throw new Error("walkthrough output was not valid structured JSON");

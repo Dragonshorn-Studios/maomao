@@ -15,7 +15,7 @@ const baseSha = "a".repeat(40);
 const headSha = "b".repeat(40);
 const nextHeadSha = "c".repeat(40);
 
-function fixture(outputText?: string, briefCache?: { getRepoBriefCache(provider: string, providerInstance: string, repoFullName: string, sha: string): { payload: string; created_at: string } | undefined }) {
+function fixture(outputText?: string, briefCache?: { getRepoBriefCache(provider: string, providerInstance: string, repoFullName: string, sha: string): { payload: string; created_at: string } | undefined }, resolveOptions?: () => { model?: string; timeoutMs?: number; maxCostUsd?: number }) {
   const db = openDb(":memory:");
   const jobs = new JobStore(db);
   const walkthroughs = new GuidedWalkthroughStore(db);
@@ -62,7 +62,7 @@ function fixture(outputText?: string, briefCache?: { getRepoBriefCache(provider:
       usage: { cost: 0.01 },
     })),
   };
-  const service = new GuidedWalkthroughService({ config, store: walkthroughs, forge, opencode, checkout, briefCache });
+  const service = new GuidedWalkthroughService({ config, store: walkthroughs, forge, opencode, checkout, briefCache, resolveOptions });
   return { db, jobs, walkthroughs, config, session: opened.session, service, prepare, cleanup, cloneSpec, getChangeDiff, forge, opencode };
 }
 
@@ -104,6 +104,15 @@ describe("Guided Review walkthrough cache", () => {
     expect(f.getChangeDiff).toHaveBeenCalledWith(expect.objectContaining({ baseSha, headSha }), expect.any(Number));
     expect(f.opencode.run).toHaveBeenCalledTimes(1);
     expect(f.cleanup).toHaveBeenCalledWith(expect.stringContaining("work"));
+  });
+
+
+  it("uses repository-scoped profile guided-review model, timeout, and cost ceiling", async () => {
+    const f = fixture(undefined, undefined, () => ({ model: "profile/guided", timeoutMs: 45_000, maxCostUsd: 0.02 }));
+    const row = f.service.ensure(f.session, 42);
+    expect(row.model).toBe("profile/guided");
+    await waitForStatus(f.walkthroughs, row.id, ["ready"]);
+    expect(f.opencode.run).toHaveBeenCalledWith(expect.objectContaining({ model: "profile/guided", timeoutMs: 45_000 }));
   });
 
   it("marks older head fingerprints stale when a new exact head opens", () => {

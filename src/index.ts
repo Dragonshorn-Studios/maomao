@@ -148,7 +148,14 @@ const chat = chatStore
 const guidedWalkthroughStore = new GuidedWalkthroughStore(db);
 const guidedWalkthrough = {
   store: guidedWalkthroughStore,
-  service: new GuidedWalkthroughService({ config, store: guidedWalkthroughStore, forge, opencode, briefCache: store }),
+  service: new GuidedWalkthroughService({
+    config,
+    store: guidedWalkthroughStore,
+    forge,
+    opencode,
+    briefCache: store,
+    resolveOptions: (repoFullName) => store.configs.resolveProfileForRepo(repoFullName)?.definition.guidedReview,
+  }),
 };
 
 const app = createApp({

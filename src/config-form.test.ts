@@ -136,6 +136,32 @@ describe("profileFormToDefinition", () => {
     });
   });
 
+
+  it("encodes guided-review options and round-trips optional poison-alert attention", () => {
+    const values = decodeProfileForm(
+      formBody({
+        guided_model: "test/guided",
+        guided_timeout: "90",
+        guided_max_cost_usd: "0.75",
+        guided_poison_attention: "optional",
+      }),
+    );
+    const result = profileFormToDefinition(values);
+    expect(result).toMatchObject({ ok: true });
+    if (!result.ok) return;
+    expect((result.definition as { guidedReview?: unknown }).guidedReview).toEqual({
+      model: "test/guided",
+      timeoutMs: 90_000,
+      maxCostUsd: 0.75,
+      poisonAlertAttention: "optional",
+    });
+    const roundTrip = profileFormValuesFromDefinition(result.definition, null);
+    expect(roundTrip.guidedModel).toBe("test/guided");
+    expect(roundTrip.guidedTimeoutSeconds).toBe("90");
+    expect(roundTrip.guidedMaxCostUsd).toBe("0.75");
+    expect(roundTrip.guidedPoisonAttention).toBe("optional");
+  });
+
   it("encodes alert overrides and reports violations on the alert fields", () => {
     const ok = profileFormToDefinition(
       decodeProfileForm(
