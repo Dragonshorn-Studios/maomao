@@ -580,6 +580,7 @@ export function renderGuidedDiffWorkspace(input: {
     if(wizardRoot){
       wizardRoot.addEventListener('change',function(event){if(event.target&&event.target.matches('.gd-wizard-radio'))selectWizardStep(event.target.id.replace('gd-step-',''),true);});
       var syncWizard=function(){var hash=window.location.hash||'#review';var step=wizardStepForHash(hash);selectWizardStep(step,false);if(hash.length>1&&step==='review'){var target=document.getElementById(hash.slice(1));if(target)target.scrollIntoView({block:'start'});}};
+      document.addEventListener('click',function(event){var link=event.target&&event.target.closest?event.target.closest('a[href^="#f"],a[href^="#guided-file-"]'):null;if(!link)return;var hash=link.getAttribute('href')||'';selectWizardStep('review',false);setTimeout(function(){var target=document.getElementById(hash.slice(1));if(target)target.scrollIntoView({block:'center'});},0);});
       syncWizard();window.addEventListener('hashchange',syncWizard);
     }
   })();
