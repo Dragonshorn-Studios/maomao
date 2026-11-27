@@ -147,6 +147,8 @@ Binary files a/a.png and b/a.png differ
     expect(running).toContain("data-guided-walkthrough");
     expect(running).toContain("background");
     expect(running).toContain("data-walkthrough-cancel");
+    expect(running).toContain("data-guided-primer");
+    expect(running).toContain("without using Maomao review findings or verdicts");
     const ready = renderGuidedDiffWorkspace({
       files: [file],
       sessionId: 7,
@@ -170,6 +172,10 @@ Binary files a/a.png and b/a.png differ
     expect(ready).toContain('href="#guided-file-0"');
     expect(ready).toContain("Intent &lt;unsafe&gt;");
     expect(ready).not.toContain("Intent <unsafe>");
+    expect(ready).toContain("independent · no findings or verdicts");
+    expect(ready).toContain('data-file-primer data-path="x.ts"');
+    expect(ready).toContain("Changed behavior");
+    expect(ready).toContain("Full exploration evidence");
   });
 
 
@@ -183,6 +189,11 @@ Binary files a/a.png and b/a.png differ
 `);
     const human = { key: "note-1", fingerprint: "hfp", source: "human" as const, summary: "Human <note>", path: "x.ts", line: 1, severity: "medium" };
     const maomao = { key: "maomao-afp", fingerprint: "afp", source: "maomao" as const, summary: "Maomao finding", path: "x.ts", line: 3, severity: "high", status: "open" as const, rationale: "Aggregator evidence" };
+    const outsideHuman = { key: "note-doc", fingerprint: "hdoc", source: "human" as const, summary: "Document note", path: "README.md", line: 2, severity: "low" };
+    const outsideMaomao = { key: "maomao-doc", fingerprint: "adoc", source: "maomao" as const, summary: "Document finding", path: "README.md", line: 2, severity: "low", status: "open" as const };
+    const unanchoredHuman = { key: "note-general", fingerprint: "hgeneral", source: "human" as const, summary: "General human note", severity: "low" };
+    const fileOnlyMaomao = { key: "maomao-package", fingerprint: "apackage", source: "maomao" as const, summary: "Package finding", path: "package.json", severity: "low", status: "open" as const };
+    const excludedMaomao = { key: "maomao-excluded", fingerprint: "aexcluded", source: "maomao" as const, summary: "Excluded finding", path: "package.json", severity: "medium", status: "open" as const };
     const html = renderGuidedDiffWorkspace({
       files: [file],
       sessionId: 7,
@@ -195,24 +206,34 @@ Binary files a/a.png and b/a.png differ
         jobState: "completed",
         message: "Comparison pinned",
         verdictDifference: "human APPROVE vs Maomao REQUEST_CHANGES",
-        summary: { agreement: 0, humanOnly: 1, maomaoOnly: 1, uncertain: 1, verdictDifference: 1, inactive: 0 },
+        summary: { agreement: 0, humanOnly: 2, maomaoOnly: 2, uncertain: 2, verdictDifference: 1, inactive: 0 },
         agreements: [],
-        uncertain: [{ human, maomao, match: "uncertain" as const, confidence: 0.5, signals: ["same path"], severityDifference: "human medium vs Maomao high", confirmed: false }],
-        humanOnly: [human],
-        maomaoOnly: [maomao],
+        uncertain: [
+          { human, maomao, match: "uncertain" as const, confidence: 0.5, signals: ["same path"], severityDifference: "human medium vs Maomao high", confirmed: false },
+          { human: outsideHuman, maomao: outsideMaomao, match: "uncertain" as const, confidence: 0.5, signals: ["same path"], confirmed: false },
+        ],
+        humanOnly: [human, unanchoredHuman],
+        maomaoOnly: [maomao, fileOnlyMaomao],
         inactiveMaomao: [],
+        excludedMaomao: [excludedMaomao],
         overrides: {},
       },
     });
-    expect(html).toContain("Compare with Maomao");
-    expect(html).toContain("not a score for agreeing with AI");
+    expect(html).toContain("Merge review");
+    expect(html).toContain("Maomao's already-published review is never mutated");
     expect(html).toContain("Confirm same issue");
     expect(html).toContain("Mark unrelated");
+    expect(html).toContain("Add to my review");
+    expect(html).toContain("Remove from merge");
     expect(html).toContain("Pair selected findings");
     expect(html).toContain("Severity differs: human medium vs Maomao high");
     expect(html).toContain("Verdict differs: human APPROVE vs Maomao REQUEST_CHANGES");
     expect(html).toContain("Human &lt;note&gt;");
     expect(html).not.toContain("Human <note>");
+    expect(html).toContain("Unanchored or outside the pinned source diff (3)");
+    expect((html.match(/Add to my review/g) ?? [])).toHaveLength(2);
+    expect((html.match(/Mark unrelated/g) ?? [])).toHaveLength(2);
+    expect(html).toContain("Restore to merge review");
 
     const missing = renderGuidedDiffWorkspace({
       files: [file],
@@ -230,6 +251,7 @@ Binary files a/a.png and b/a.png differ
         humanOnly: [human],
         maomaoOnly: [],
         inactiveMaomao: [],
+        excludedMaomao: [],
         overrides: {},
       },
     });
@@ -237,6 +259,23 @@ Binary files a/a.png and b/a.png differ
     expect(missing).toContain("Deliberately enqueue Maomao review for the current pull head");
   });
 
+  it("organizes the workspace as review, comparison, then publish wizard steps", () => {
+    const [file] = parseUnifiedDiff(`diff --git a/x.ts b/x.ts
+--- a/x.ts
++++ b/x.ts
+@@ -1 +1 @@
+-old
++new
+`);
+    const html = renderGuidedDiffWorkspace({ files: [file] });
+    expect(html).toContain('data-guided-wizard');
+    expect(html.indexOf('for="gd-step-review"')).toBeLessThan(html.indexOf('for="gd-step-compare"'));
+    expect(html.indexOf('for="gd-step-compare"')).toBeLessThan(html.indexOf('for="gd-step-publish"'));
+    expect(html).toContain('data-wizard-panel="review"');
+    expect(html).toContain('data-wizard-panel="compare"');
+    expect(html).toContain('data-wizard-panel="publish"');
+    expect(html).toContain("inspect the exact pinned diff first");
+  });
 
 });
 

@@ -103,7 +103,6 @@ function renderGuidedFile(container: HTMLElement): void {
   const commentable = container.getAttribute("data-commentable") === "1";
   const fileDiff = new FileDiff({
     ...diffLayoutOptions(currentLayout(), themeType()),
-    disableFileHeader: false,
     enableGutterUtility: commentable,
     renderGutterUtility: commentable ? (getHoveredRow) => {
       const button = document.createElement("button");
