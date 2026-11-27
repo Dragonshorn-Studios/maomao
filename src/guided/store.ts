@@ -430,6 +430,30 @@ export class GuidedReviewStore {
       .get(id, validActor.actorProvider, validActor.actorId) as GuidedReviewSessionRow | undefined;
   }
 
+  /** Exact SHA-keyed lookup without the creation side effect of `open`. */
+  findExact(actor: GuidedActor, key: GuidedSessionKey): GuidedReviewSessionRow | undefined {
+    const validActor = validateActor(actor);
+    return this.db.prepare(`SELECT * FROM guided_review_sessions
+      WHERE actor_provider = ? AND actor_id = ? AND provider = ? AND provider_instance = ?
+        AND repo_full_name = ? AND pr_number = ? AND base_sha = ? AND head_sha = ?`)
+      .get(validActor.actorProvider, validActor.actorId, key.provider, key.instance, key.repoFullName, key.prNumber, key.baseSha, key.headSha) as GuidedReviewSessionRow | undefined;
+  }
+
+  /** Newest draft for this actor/forge/pull regardless of SHA, used for inbox state. */
+  latestForPull(actor: GuidedActor, provider: string, providerInstance: string, repoFullName: string, prNumber: number): GuidedReviewSessionRow | undefined {
+    const validActor = validateActor(actor);
+    return this.db.prepare(`SELECT * FROM guided_review_sessions
+      WHERE actor_provider = ? AND actor_id = ? AND provider = ? AND provider_instance = ? AND repo_full_name = ? AND pr_number = ?
+      ORDER BY updated_at DESC, id DESC LIMIT 1`)
+      .get(validActor.actorProvider, validActor.actorId, provider, providerInstance, repoFullName, prNumber) as GuidedReviewSessionRow | undefined;
+  }
+
+  /** Count non-deleted draft comments for one session. */
+  activeCommentCount(sessionId: number): number {
+    const row = this.db.prepare(`SELECT COUNT(*) AS count FROM guided_review_comments WHERE session_id = ? AND deleted_at IS NULL`).get(sessionId) as { count: number };
+    return row.count;
+  }
+
   listComments(sessionId: number, includeDeleted = false): GuidedReviewCommentRow[] {
     return this.db
       .prepare(

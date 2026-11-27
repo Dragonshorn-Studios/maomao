@@ -64,6 +64,12 @@ export interface ResolvedPull {
    *  undefined only when the field is absent from a partial payload. */
   headRepoFullName?: string | null;
   draft: boolean;
+  /** Pull state as reported by the forge when available (`open`, `closed`, ...). */
+  state?: string;
+  /** Forge-reported last-update timestamp when the list/detail payload carries it. */
+  updatedAt?: string;
+  /** Human reviewer logins explicitly requested on the pull, when exposed by the forge. */
+  requestedReviewers?: string[];
 }
 
 export interface ManualTriggerPort {
@@ -265,7 +271,10 @@ function toResolvedPull(
     body?: string | null;
     html_url?: string;
     draft?: boolean;
+    state?: string | null;
     user?: { login?: string } | null;
+    updated_at?: string | null;
+    requested_reviewers?: Array<{ login?: string }> | null;
     base: { sha?: string; ref?: string; repo?: { id?: number; owner?: { id?: number } | null } | null };
     head: { sha?: string; ref?: string; repo?: { full_name?: string } | null };
   },
@@ -302,6 +311,11 @@ function toResolvedPull(
     headRef: pr.head.ref ?? "",
     headRepoFullName: pr.head.repo === null ? null : (pr.head.repo?.full_name ?? undefined),
     draft: Boolean(pr.draft),
+    state: pr.state ?? undefined,
+    updatedAt: pr.updated_at ?? undefined,
+    requestedReviewers: Array.isArray(pr.requested_reviewers)
+      ? pr.requested_reviewers.flatMap((reviewer) => (reviewer.login ? [reviewer.login] : []))
+      : undefined,
   };
 }
 
