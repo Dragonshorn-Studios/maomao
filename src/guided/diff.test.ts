@@ -237,6 +237,23 @@ Binary files a/a.png and b/a.png differ
     expect(missing).toContain("Deliberately enqueue Maomao review for the current pull head");
   });
 
+  it("organizes the workspace as review, comparison, then publish wizard steps", () => {
+    const [file] = parseUnifiedDiff(`diff --git a/x.ts b/x.ts
+--- a/x.ts
++++ b/x.ts
+@@ -1 +1 @@
+-old
++new
+`);
+    const html = renderGuidedDiffWorkspace({ files: [file] });
+    expect(html).toContain('data-guided-wizard');
+    expect(html.indexOf('for="gd-step-review"')).toBeLessThan(html.indexOf('for="gd-step-compare"'));
+    expect(html.indexOf('for="gd-step-compare"')).toBeLessThan(html.indexOf('for="gd-step-publish"'));
+    expect(html).toContain('data-wizard-panel="review"');
+    expect(html).toContain('data-wizard-panel="compare"');
+    expect(html).toContain('data-wizard-panel="publish"');
+    expect(html).toContain("inspect the exact pinned diff first");
+  });
 
 });
 

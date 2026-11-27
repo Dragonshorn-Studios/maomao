@@ -911,6 +911,19 @@ button, summary {
   margin-top: 1rem;
 }
 .gd-head { display: flex; justify-content: space-between; gap: 1rem; align-items: center; flex-wrap: wrap; }
+.gd-wizard { margin-block: var(--if-space-4, 1rem); }
+.gd-wizard-radio { position: absolute; opacity: 0; pointer-events: none; }
+.gd-wizard-nav { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: .6rem; margin-bottom: .5rem; }
+.gd-wizard-nav label { display: grid; grid-template-columns: auto 1fr; column-gap: .55rem; align-items: center; border: 1px solid var(--line); border-radius: .65rem; padding: .65rem; cursor: pointer; background: color-mix(in srgb, var(--surface) 88%, transparent); }
+.gd-wizard-nav label span { grid-row: span 2; display: inline-grid; place-items: center; width: 1.7rem; height: 1.7rem; border-radius: 50%; border: 1px solid currentColor; font-weight: 700; }
+.gd-wizard-nav label small { color: var(--ink-muted); }
+#gd-step-review:checked ~ .gd-wizard-nav label[for="gd-step-review"], #gd-step-compare:checked ~ .gd-wizard-nav label[for="gd-step-compare"], #gd-step-publish:checked ~ .gd-wizard-nav label[for="gd-step-publish"] { border-color: var(--focus); box-shadow: 0 0 0 1px var(--focus); }
+#gd-step-review:focus-visible ~ .gd-wizard-nav label[for="gd-step-review"], #gd-step-compare:focus-visible ~ .gd-wizard-nav label[for="gd-step-compare"], #gd-step-publish:focus-visible ~ .gd-wizard-nav label[for="gd-step-publish"] { outline: 2px solid var(--focus); outline-offset: 2px; }
+#gd-step-review:checked ~ .gd-wizard-nav label[for="gd-step-review"] span, #gd-step-compare:checked ~ .gd-wizard-nav label[for="gd-step-compare"] span, #gd-step-publish:checked ~ .gd-wizard-nav label[for="gd-step-publish"] span { background: var(--focus); color: var(--surface); }
+.gd-wizard-help { margin-top: 0; }
+.gd-wizard-panel { display: none; }
+#gd-step-review:checked ~ .gd-wizard-panels .gd-panel-review, #gd-step-compare:checked ~ .gd-wizard-panels .gd-panel-compare, #gd-step-publish:checked ~ .gd-wizard-panels .gd-panel-publish { display: block; }
+@media (max-width: 760px) { .gd-wizard-nav { grid-template-columns: 1fr; } }
 .gd-layout { display: grid; grid-template-columns: minmax(12rem, 18rem) minmax(0, 1fr); gap: 1rem; align-items: start; }
 .gd-tree { position: sticky; top: 1rem; max-height: 80vh; overflow: auto; border-right: 1px solid var(--line); padding-right: 0.75rem; }
 .gd-tree ol { list-style: none; margin: 0; padding: 0; display: grid; gap: 0.35rem; font-size: 0.85rem; }

@@ -463,7 +463,7 @@ export function renderGuidedDiffWorkspace(input: {
   const attentionPanel = renderGuidedAttentionPanel({ attention: input.attention, sessionId: input.sessionId, csrfToken: input.csrfToken, readOnly: input.readOnly });
   const publishPanel = renderGuidedPublishPanel({ publish: input.publish, sessionId: input.sessionId, sessionVersion: input.sessionVersion, csrfToken: input.csrfToken });
   const comparisonPanel = renderGuidedComparisonPanel({ comparison: input.comparison, files: filtered, sessionId: input.sessionId, sessionVersion: input.sessionVersion, csrfToken: input.csrfToken, pullUrl: input.pullUrl });
-  return `${walkthroughPanel}${draftPanel}<section class="config-section guided-diff-workspace" data-guided-diff-workspace>
+  const reviewStep = `${walkthroughPanel}${draftPanel}<section class="config-section guided-diff-workspace" data-guided-diff-workspace>
     <div class="gd-head"><h2>Diff workspace</h2><button type="button" class="if-button if-button--sm guided-layout-toggle">Switch diff layout</button></div>
     <p class="muted">${input.files.length} files · ${total} changed lines${input.diffTruncated ? " · diff input truncated by configured byte bound" : ""}</p>
     <p class="error if-banner if-banner--danger" role="alert" data-guided-write-error hidden>Could not save viewed-file progress.</p>
@@ -474,10 +474,23 @@ export function renderGuidedDiffWorkspace(input: {
       <button class="if-button if-button--sm" type="submit">Filter diff</button>
     </form>
     <div class="gd-layout"><nav class="gd-tree" aria-label="Changed files"><ol>${tree}</ol></nav><div class="gd-files">${rendered || `<div class="empty">No files match this diff filter.</div>`}</div></div>
-  </section>
-  ${attentionPanel}
-  ${comparisonPanel}
-  ${publishPanel}
+  </section>`;
+  return `<div class="gd-wizard" data-guided-wizard>
+    <input class="gd-wizard-radio" type="radio" name="gd-wizard-step" id="gd-step-review" checked/>
+    <input class="gd-wizard-radio" type="radio" name="gd-wizard-step" id="gd-step-compare"/>
+    <input class="gd-wizard-radio" type="radio" name="gd-wizard-step" id="gd-step-publish"/>
+    <nav class="gd-wizard-nav" aria-label="Guided review steps">
+      <label for="gd-step-review"><span>1</span><strong>Explore &amp; review</strong><small>walkthrough, diff, private notes</small></label>
+      <label for="gd-step-compare"><span>2</span><strong>Compare &amp; decide</strong><small>Maomao evidence and attention decision</small></label>
+      <label for="gd-step-publish"><span>3</span><strong>Publish</strong><small>deliberate human review publication</small></label>
+    </nav>
+    <p class="muted gd-wizard-help">A guided flow, not a score or hard lock: inspect the exact pinned diff first, reconcile it with Maomao, then choose whether anything is published.</p>
+    <div class="gd-wizard-panels">
+      <div class="gd-wizard-panel gd-panel-review" data-wizard-panel="review">${reviewStep}</div>
+      <div class="gd-wizard-panel gd-panel-compare" data-wizard-panel="compare">${attentionPanel}${comparisonPanel}</div>
+      <div class="gd-wizard-panel gd-panel-publish" data-wizard-panel="publish">${publishPanel}</div>
+    </div>
+  </div>
   <script>
   (function(){
     var guidedSessionId=${jsJson(input.sessionId ?? null)},guidedViewed=${jsJson(input.viewedFiles ?? [])};
@@ -486,6 +499,14 @@ export function renderGuidedDiffWorkspace(input: {
     function markViewed(path){if(!path||guidedViewed.indexOf(path)>=0)return;guidedViewed.push(path);if(!window.__guidedDraftListenerReady){window.__guidedViewedPending=window.__guidedViewedPending||[];window.__guidedViewedPending.push(path);}document.dispatchEvent(new CustomEvent("guided:viewed",{detail:{path:path}}));var file=document.querySelector('[data-guided-file][data-path="'+CSS.escape(path)+'"]');if(file)file.classList.add("gd-viewed");}
     if('IntersectionObserver' in window){var seen=new WeakSet(),observer=new IntersectionObserver(function(entries){entries.forEach(function(entry){if(entry.isIntersecting&&!seen.has(entry.target)){seen.add(entry.target);setTimeout(function(){markViewed(entry.target.getAttribute('data-path')||'')},500);}})},{threshold:.35});document.querySelectorAll('[data-guided-file]').forEach(function(file){observer.observe(file)});}
     document.addEventListener('click',async function(event){var button=event.target.closest('[data-load-context]');if(!button||!guidedSessionId)return;var details=button.closest('details'),panel=details&&details.querySelector('.gd-context-panel');if(!panel)return;button.disabled=true;button.textContent='Loading…';try{var res=await fetch('/api/guided-review/sessions/'+guidedSessionId+'/file?path='+encodeURIComponent(button.getAttribute('data-load-context'))+'&side=head');var body=await res.json();if(!res.ok)throw new Error(body.message||body.error||'load failed');panel.textContent=body.content;panel.hidden=false;button.textContent='Reload head-side file';}catch(error){panel.textContent='Could not load surrounding code: '+(error&&error.message?error.message:error);panel.hidden=false;button.textContent='Retry';}finally{button.disabled=false;}});
+    var wizardRoot=document.querySelector('[data-guided-wizard]');
+    function wizardStepForHash(hash){if(hash==='#compare'||hash==='#attention')return 'compare';if(hash==='#publish')return 'publish';return 'review';}
+    function selectWizardStep(step,updateHash){var input=document.getElementById('gd-step-'+step);if(!input)return;input.checked=true;if(updateHash&&window.history&&history.replaceState)history.replaceState(null,'','#'+step);}
+    if(wizardRoot){
+      wizardRoot.addEventListener('change',function(event){if(event.target&&event.target.matches('.gd-wizard-radio'))selectWizardStep(event.target.id.replace('gd-step-',''),true);});
+      var syncWizard=function(){var hash=window.location.hash||'#review';var step=wizardStepForHash(hash);selectWizardStep(step,false);if(hash.length>1&&step==='review'){var target=document.getElementById(hash.slice(1));if(target)target.scrollIntoView({block:'start'});}};
+      syncWizard();window.addEventListener('hashchange',syncWizard);
+    }
   })();
   </script>`;
 }
