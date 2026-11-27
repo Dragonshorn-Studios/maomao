@@ -59,7 +59,8 @@ rename to dir one/new file.ts
     const binary = parseUnifiedDiff(`diff --git a/a.png b/a.png
 Binary files a/a.png and b/a.png differ
 `)[0];
-    expect(binary.status).toBe("binary");
+    expect(binary.binary).toBe(true);
+    expect(binary.status).toBe("modified");
     const long = parseUnifiedDiff(`diff --git a/x b/x
 --- a/x
 +++ b/x
