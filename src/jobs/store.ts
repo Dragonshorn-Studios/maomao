@@ -1275,6 +1275,28 @@ export class JobStore {
   }
 
   /**
+   * Newest exact-head review job for human comparison, across retired dedup
+   * keys. Deliberate same-SHA reruns supersede older artifacts, while a new
+   * commit can never enter this result because the head SHA is exact.
+   */
+  reviewJobForComparison(
+    repoFullName: string,
+    prNumber: number,
+    headSha: string,
+    scope?: Partial<ForgeScope>,
+  ): JobRow | undefined {
+    const resolved = normalizeScope(scope);
+    const rows = this.db
+      .prepare(
+        `SELECT * FROM jobs
+         WHERE provider = ? AND provider_instance = ? AND repo_full_name = ? AND pr_number = ? AND head_sha = ? AND job_type = 'pr_review'
+         ORDER BY id DESC`,
+      )
+      .all(resolved.provider, resolved.instance, repoFullName, prNumber, headSha) as JobRow[];
+    return rows[0];
+  }
+
+  /**
    * A member job that reached a terminal state resolves delegated coverage on
    * finished stack runs (issue #136): 'reviewing' member rows on a dead stack
    * can only be queued-coverage delegations — the member job's outcome is
