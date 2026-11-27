@@ -388,10 +388,13 @@ export class GuidedReviewStore {
     const key = validateSessionKey(input);
     return this.db.transaction(() => {
       const existing = this.byKey(key);
+      const now = nowIso();
       if (existing) {
-        this.db.prepare(`UPDATE guided_review_sessions SET last_opened_at = ? WHERE id = ?`).run(nowIso(), existing.id);
+        const previous = this.latestOtherSession(key, existing.id);
+        this.db.prepare(`UPDATE guided_review_sessions SET historical_at = NULL, last_opened_at = ? WHERE id = ?`).run(now, existing.id);
+        this.markOtherSessionsHistorical(key, existing.id, now);
         const session = this.byId(existing.id) ?? existing;
-        return { session, comments: this.listComments(session.id) };
+        return { session, comments: this.listComments(session.id), ...(previous && !previous.historical_at ? { staleFrom: previous } : {}) };
       }
 
       const previous = this.db
@@ -414,11 +417,7 @@ export class GuidedReviewStore {
           key.headSha,
         ) as GuidedReviewSessionRow | undefined;
       const session = this.insertSession(key);
-      if (previous) {
-        this.db
-          .prepare(`UPDATE guided_review_sessions SET historical_at = COALESCE(historical_at, ?) WHERE id = ?`)
-          .run(nowIso(), previous.id);
-      }
+      if (previous) this.markOtherSessionsHistorical(key, session.id, now);
       this.pruneHistorical(key);
       return { session, comments: [], staleFrom: previous };
     })();
@@ -660,13 +659,12 @@ export class GuidedReviewStore {
         baseSha,
         headSha,
       });
+      const now = nowIso();
       const target = this.byKey(key) ?? this.insertSession(key);
-      this.db
-        .prepare(`UPDATE guided_review_sessions SET historical_at = COALESCE(historical_at, ?) WHERE id = ?`)
-        .run(nowIso(), source.id);
+      this.db.prepare(`UPDATE guided_review_sessions SET historical_at = NULL WHERE id = ?`).run(target.id);
+      this.markOtherSessionsHistorical(key, target.id, now);
 
       let copied = 0;
-      const now = nowIso();
       for (const comment of this.listComments(source.id)) {
         const copyClientId = `copy-${createHash("sha256")
           .update(`${source.id}:${comment.client_id}`)
@@ -704,6 +702,31 @@ export class GuidedReviewStore {
       if (!session) throw new Error("guided review copy target disappeared");
       return { status: "ok", session, copied } satisfies GuidedWriteOutcome;
     })();
+  }
+
+  private latestOtherSession(key: GuidedSessionKey, excludeId: number): GuidedReviewSessionRow | undefined {
+    return this.db
+      .prepare(
+        `SELECT * FROM guided_review_sessions
+         WHERE actor_provider = ? AND actor_id = ?
+           AND provider = ? AND provider_instance = ?
+           AND repo_full_name = ? AND pr_number = ?
+           AND id <> ?
+         ORDER BY updated_at DESC, id DESC LIMIT 1`,
+      )
+      .get(key.actorProvider, key.actorId, key.provider, key.instance, key.repoFullName, key.prNumber, excludeId) as GuidedReviewSessionRow | undefined;
+  }
+
+  private markOtherSessionsHistorical(key: GuidedSessionKey, keepId: number, now: string): void {
+    this.db
+      .prepare(
+        `UPDATE guided_review_sessions SET historical_at = COALESCE(historical_at, ?)
+         WHERE actor_provider = ? AND actor_id = ?
+           AND provider = ? AND provider_instance = ?
+           AND repo_full_name = ? AND pr_number = ?
+           AND id <> ? AND historical_at IS NULL`,
+      )
+      .run(now, key.actorProvider, key.actorId, key.provider, key.instance, key.repoFullName, key.prNumber, keepId);
   }
 
   private insertSession(key: GuidedSessionKey): GuidedReviewSessionRow {
