@@ -115,6 +115,21 @@ describe("Guided Review walkthrough cache", () => {
     expect(f.walkthroughs.get(newRow.id)?.status).toBe("pending");
   });
 
+  it("revives a stale exact-head fingerprint when that head becomes current again", async () => {
+    const f = fixture();
+    const first = f.walkthroughs.open({ provider: "github", instance: "github.com", repoFullName: "acme/widgets", prNumber: 12, baseSha, headSha }, f.service.model());
+    const moved = f.walkthroughs.open({ provider: "github", instance: "github.com", repoFullName: "acme/widgets", prNumber: 12, baseSha, headSha: nextHeadSha }, f.service.model());
+    expect(moved.id).not.toBe(first.id);
+    expect(f.walkthroughs.get(first.id)?.status).toBe("stale");
+
+    const revived = f.service.ensure(f.session, 42);
+    expect(revived.id).toBe(first.id);
+    expect(["pending", "running", "ready"]).toContain(revived.status);
+    expect(f.walkthroughs.get(moved.id)?.status).toBe("stale");
+    const done = await waitForStatus(f.walkthroughs, first.id, ["ready"]);
+    expect(done.cancel_requested).toBe(0);
+  });
+
   it("fails closed instead of caching malformed output and supports a deliberate retry", async () => {
     const f = fixture();
     vi.mocked(f.opencode.run).mockImplementationOnce(async () => ({ stdout: "", stderr: "", exitCode: 0, text: "not json", usage: {} }));
