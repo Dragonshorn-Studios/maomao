@@ -144,7 +144,22 @@ export class GuidedWalkthroughStore {
   open(identity: GuidedWalkthroughIdentity, model: string): GuidedWalkthroughRow {
     const fingerprint = guidedWalkthroughFingerprint(identity, model);
     const existing = this.getByFingerprint(fingerprint);
-    if (existing) return existing;
+    if (existing) {
+      if (existing.status === "stale") {
+        const revivedStatus = parsePayload(existing.output_json) ? "ready" : "pending";
+        this.db
+          .prepare(
+            `UPDATE guided_walkthroughs SET status = ?, error = NULL, cancel_requested = 0,
+               started_at = CASE WHEN ? = 'pending' THEN NULL ELSE started_at END,
+               finished_at = CASE WHEN ? = 'pending' THEN NULL ELSE finished_at END,
+               updated_at = ?
+             WHERE id = ?`,
+          )
+          .run(revivedStatus, revivedStatus, revivedStatus, nowIso(), existing.id);
+      }
+      this.markStaleForPull(identity, fingerprint);
+      return this.getByFingerprint(fingerprint) ?? existing;
+    }
     const now = nowIso();
     const inserted = this.db
       .prepare(
