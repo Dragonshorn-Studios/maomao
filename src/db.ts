@@ -415,6 +415,22 @@ function migrate(db: SqliteDb): void {
       finished_at TEXT
     );
 
+    CREATE TABLE IF NOT EXISTS guided_attention_decisions (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      provider TEXT NOT NULL,
+      provider_instance TEXT NOT NULL,
+      repo_full_name TEXT NOT NULL,
+      pr_number INTEGER NOT NULL,
+      head_sha TEXT NOT NULL,
+      actor_provider TEXT NOT NULL,
+      actor_id TEXT NOT NULL,
+      action TEXT NOT NULL CHECK (action IN ('review_myself', 'delegate_to_maomao')),
+      reason_tag TEXT NOT NULL,
+      reason_detail TEXT,
+      created_at TEXT NOT NULL,
+      UNIQUE (provider, provider_instance, repo_full_name, pr_number, head_sha)
+    );
+
     CREATE TABLE IF NOT EXISTS guided_human_credentials (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       actor_provider TEXT NOT NULL,
@@ -505,6 +521,8 @@ function migrate(db: SqliteDb): void {
     CREATE INDEX IF NOT EXISTS idx_guided_walkthroughs_pull
       ON guided_walkthroughs(provider, provider_instance, repo_full_name, pr_number, updated_at DESC);
 
+    CREATE INDEX IF NOT EXISTS idx_guided_attention_decisions_pull
+      ON guided_attention_decisions(provider, provider_instance, repo_full_name, pr_number, head_sha);
     CREATE INDEX IF NOT EXISTS idx_guided_human_publications_actor
       ON guided_human_publications(actor_provider, actor_id, updated_at DESC);
     CREATE INDEX IF NOT EXISTS idx_guided_human_publish_events_actor

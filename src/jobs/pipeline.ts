@@ -85,7 +85,7 @@ import {
   sanitizePublicReason,
   targetKey,
 } from "../routing/escalation.js";
-import { ReviewCheckPublisher, reviewCheckInputForState } from "../checks/review-check.js";
+import { ReviewCheckPublisher, reviewCheckInputForState, reviewConclusionForJob } from "../checks/review-check.js";
 import { TRUSTED_CHECK_NAMES, TrustedCheckRunner, trustedCheckNativeName, type TrustedCheckResult } from "../checks/trusted.js";
 import { mergeReadinessDecision } from "../checks/readiness.js";
 import type { TrustedCheckSettingsStore } from "../checks/settings.js";
@@ -133,6 +133,7 @@ type TrustedPipelineHooks = {
   run: (job: JobRow, workspace: { repoDir: string; dir: string; diffPath: string }, signal: AbortSignal) => Promise<void>;
   finish: (job: JobRow, conclusion: "cancelled" | "action_required", reason: string) => Promise<void>;
   complete: (job: JobRow, reviewConclusion: string | undefined) => Promise<void>;
+  routed: (job: JobRow, signal: AbortSignal) => Promise<void>;
 };
 
 function trustedCheckPublicationInput(result: TrustedCheckResult): Parameters<ReviewCheckPublisher["publish"]>[1] {
@@ -175,6 +176,7 @@ export function createPipeline(deps: PipelineDeps) {
   const activeTrustedCheckNames = () => TRUSTED_CHECK_NAMES.filter((name) => trustedChecks.enabledFor(name));
   const trustedPublicationMemory = new Set<string>();
   const trustedPolicyMemory = new Map<number, Awaited<ReturnType<TrustedCheckRunner["policyForRepo"]>>>();
+  const guidedDiagnosisGraceMemory = new Map<number, string>();
   const trustedMemoryKey = (job: JobRow, name: (typeof TRUSTED_CHECK_NAMES)[number]) =>
     JSON.stringify([job.provider, job.provider_instance, job.repo_full_name, job.pr_number, job.head_sha, name]);
 
@@ -224,7 +226,68 @@ export function createPipeline(deps: PipelineDeps) {
     });
   }
 
-  async function publishMergeReadiness(job: JobRow, reviewConclusion: string | undefined): Promise<void> {
+  type GuidedAttentionOutcome = { state: "satisfied" | "waiting" | "auto_continue" | "not_required"; detail: string };
+
+  function attentionKey(job: JobRow) {
+    return { provider: job.provider, instance: job.provider_instance, repoFullName: job.repo_full_name, prNumber: job.pr_number, headSha: job.head_sha };
+  }
+
+  function attentionDecisionDetail(row: NonNullable<ReturnType<typeof deps.store.guidedAttention.decisionFor>>): string {
+    return `${row.action === "delegate_to_maomao" ? "delegated to Maomao" : "human chose to review"} by ${row.actor_provider}:${row.actor_id} at ${row.created_at} (${row.reason_tag})`;
+  }
+
+  /** Bounded pre-review grace for exact-head Guided Review work on diagnosis jobs. */
+  async function waitForGuidedDiagnosisGrace(job: JobRow, signal: AbortSignal): Promise<void> {
+    if (job.job_type !== "pr_review" || job.routing_profile !== "diagnosis") return;
+    const key = attentionKey(job);
+    if (deps.store.guidedAttention.decisionFor(key)) return;
+    if (!deps.store.guidedAttention.hasActiveHumanReview(key)) {
+      guidedDiagnosisGraceMemory.set(job.id, "no active exact-SHA Guided Review draft; automatic review continued without delay");
+      return;
+    }
+    const graceMs = deps.config.guidedReviewDiagnosisGraceMs;
+    if (graceMs <= 0) {
+      guidedDiagnosisGraceMemory.set(job.id, "diagnosis grace disabled; automatic review continued");
+      return;
+    }
+    deps.store.log(job.id, `Guided Review diagnosis grace: waiting up to ${graceMs}ms for an exact-SHA human-attention decision`);
+    const deadline = Date.now() + graceMs;
+    while (Date.now() < deadline) {
+      throwIfStale(deps.store, job.id, signal);
+      await sleep(Math.min(500, deadline - Date.now()));
+      if (deps.store.guidedAttention.decisionFor(key)) return;
+    }
+    const detail = `diagnosis human-attention grace expired after ${graceMs}ms; automatic review continued`;
+    guidedDiagnosisGraceMemory.set(job.id, detail);
+    deps.store.log(job.id, detail);
+  }
+
+  /**
+   * Guided Review attention seam. Observation never waits; diagnosis records
+   * the bounded pre-review grace outcome; poison-alert remains non-green until
+   * a persisted exact-SHA human decision.
+   */
+  function resolveGuidedHumanAttention(job: JobRow): GuidedAttentionOutcome {
+    if (job.job_type !== "pr_review" || job.pr_number <= 0) return { state: "not_required", detail: "not a pull review" };
+    const profile = job.routing_profile ?? "diagnosis";
+    if (profile === "observation") return { state: "not_required", detail: "observation profile never waits for Guided Review" };
+    const key = attentionKey(job);
+    const existing = deps.store.guidedAttention.decisionFor(key);
+    if (existing) return { state: "satisfied", detail: attentionDecisionDetail(existing) };
+    if (profile === "diagnosis") {
+      const remembered = guidedDiagnosisGraceMemory.get(job.id);
+      if (remembered) return { state: "auto_continue", detail: remembered };
+      return { state: "auto_continue", detail: "diagnosis grace already elapsed; automatic review continued" };
+    }
+    if (profile !== "poison-alert") return { state: "not_required", detail: `routing profile ${profile} has no guided human-attention requirement` };
+
+    return {
+      state: "waiting",
+      detail: "poison-alert requires an explicit exact-SHA decision: review myself or delegate this review to Maomao; no timeout silently delegates",
+    };
+  }
+
+  async function publishMergeReadiness(job: JobRow, reviewConclusion: string | undefined) {
     let policy;
     try {
       policy = trustedPolicyMemory.get(job.id) ?? (typeof trustedChecks.policyForRepo === "function"
@@ -235,11 +298,13 @@ export function createPipeline(deps: PipelineDeps) {
       return;
     }
     const rows = deps.store.listTrustedCheckResults(job.id);
+    const humanAttention = resolveGuidedHumanAttention(job);
     const { conclusion, detail } = mergeReadinessDecision({
       reviewConclusion,
       requireReview: policy.requireReview,
       requiredChecks: policy.requiredChecks,
       results: rows,
+      humanAttention,
     });
     await readinessPublisher.publish(job, {
       status: "completed",
@@ -248,10 +313,12 @@ export function createPipeline(deps: PipelineDeps) {
       summary: [
         `${detail} for ${job.job_type === "merge_group_check" ? "the GitHub merge group" : `PR #${job.pr_number}`} at exact head ${job.head_sha.slice(0, 12)}.`,
         `Policy source: ${policy.source}; trusted revision: ${policy.revision}; review required: ${policy.requireReview ? "yes" : "no"}.`,
+        `Guided human attention: ${humanAttention.detail}.`,
       ].join("\n\n"),
       validateHead: true,
     });
     trustedPolicyMemory.delete(job.id);
+    guidedDiagnosisGraceMemory.delete(job.id);
   }
 
   async function publishTrustedTerminal(job: JobRow, conclusion: "cancelled" | "action_required", reason: string): Promise<void> {
@@ -270,6 +337,7 @@ export function createPipeline(deps: PipelineDeps) {
     }
     await publishReadinessTerminal(job, conclusion, reason);
     trustedPolicyMemory.delete(job.id);
+    guidedDiagnosisGraceMemory.delete(job.id);
     forgetTrustedPublicationMemory(job);
   }
 
@@ -487,6 +555,47 @@ export function createPipeline(deps: PipelineDeps) {
       const job = deps.store.getJob(jobId);
       if (job) await publishTrustedTerminal(job, "cancelled", "the review job was cancelled or superseded before the scanner completed");
     },
+    /** Re-evaluate the existing merge-readiness gate after a persisted Guided Review attention decision. */
+    async republishGuidedAttention(jobId: number): Promise<void> {
+      // A decision can land while the original job is in its short publication
+      // transition. Wait briefly for that same run to settle rather than
+      // dropping the only re-evaluation trigger; terminal cancellation/failure
+      // still closes the seam without inventing a passing gate.
+      let job = deps.store.getJob(jobId);
+      for (let attempt = 0; job?.state === "publishing" && attempt < 20; attempt += 1) {
+        await sleep(100);
+        job = deps.store.getJob(jobId);
+      }
+      if (!job || job.job_type !== "pr_review" || job.state !== "completed") return;
+      const reviewPublication = deps.store.getCheckPublication({
+        provider: job.provider,
+        providerInstance: job.provider_instance,
+        repoFullName: job.repo_full_name,
+        prNumber: job.pr_number,
+        headSha: job.head_sha,
+        name: "maomao/review",
+      });
+      await publishMergeReadiness(job, reviewPublication?.conclusion ?? reviewConclusionForJob(job));
+      const readinessPublication = deps.store.getCheckPublication({
+        provider: job.provider,
+        providerInstance: job.provider_instance,
+        repoFullName: job.repo_full_name,
+        prNumber: job.pr_number,
+        headSha: job.head_sha,
+        name: MERGE_READINESS_CHECK_NAME,
+      });
+      if (readinessPublication?.publish_error) throw new Error(`merge-readiness publication failed: ${readinessPublication.publish_error}`);
+    },
+    /** Restart recovery: decisions are durable, so re-evaluate any completed exact-head gate left action_required by a crash. */
+    async recoverGuidedAttention(): Promise<void> {
+      for (const jobId of deps.store.guidedAttention.completedJobsMissingDecidedReadiness()) {
+        try {
+          await this.republishGuidedAttention(jobId);
+        } catch (error) {
+          deps.store.log(jobId, `Guided attention recovery could not republish merge readiness: ${formatError(error)}`, "warn");
+        }
+      }
+    },
     async run(jobId: number): Promise<void> {
       const existing = aborts.get(jobId);
       if (existing) existing.abort();
@@ -524,9 +633,9 @@ export function createPipeline(deps: PipelineDeps) {
         } else if (job?.job_type === "repo_brief") {
           await runBriefJob(deps, forge, jobId, controller.signal);
         } else if (job?.job_type === "stack_review") {
-          await runStackJob(deps, forge, jobId, controller.signal, checks, { run: runTrustedChecks, finish: publishTrustedTerminal, complete: publishMergeReadiness });
+          await runStackJob(deps, forge, jobId, controller.signal, checks, { run: runTrustedChecks, finish: publishTrustedTerminal, complete: publishMergeReadiness, routed: waitForGuidedDiagnosisGrace });
         } else {
-          await runJob(deps, forge, jobId, controller.signal, checks, { run: runTrustedChecks, finish: publishTrustedTerminal, complete: publishMergeReadiness });
+          await runJob(deps, forge, jobId, controller.signal, checks, { run: runTrustedChecks, finish: publishTrustedTerminal, complete: publishMergeReadiness, routed: waitForGuidedDiagnosisGrace });
         }
       } finally {
         if (aborts.get(jobId) === controller) aborts.delete(jobId);
@@ -954,6 +1063,8 @@ async function runJob(
         jobId,
         `Risk route: ${routed?.routing_profile ?? "diagnosis"} — ${routed?.routing_reason ?? ""}; current findings=${currentFindings.length} (resolved/dismissed excluded)`,
       );
+      throwIfStale(store, jobId, signal);
+      if (routed) await trustedHooks.routed(routed, signal);
       throwIfStale(store, jobId, signal);
 
       store.setJobState(jobId, "reviewing");

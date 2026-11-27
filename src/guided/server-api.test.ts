@@ -654,4 +654,59 @@ describe("Guided Review session API", () => {
     expect(posts).toHaveLength(1);
   });
 
+
+  it("records poison-alert attention decisions only for the exact head and rejects concurrent conflicts", async () => {
+    const reevaluated: number[] = [];
+    const { app, store } = guidedTestApp(undefined, { guidedAttentionReevaluate: async (jobId) => { reevaluated.push(jobId); } });
+    const auth = operator(1001);
+    const stranger = operator(2002);
+    const openedResponse = await postJson(app, "/api/guided-review/sessions/open", auth.cookies, openBody(auth.csrfToken));
+    const opened = (await openedResponse.json()) as { session: { id: number } };
+    const job = store.enqueue({
+      repoFullName: "acme/widgets",
+      repoOwner: "acme",
+      repoName: "widgets",
+      installationId: 1,
+      prNumber: 12,
+      prTitle: "risk",
+      prBody: "",
+      prHtmlUrl: "",
+      prAuthor: "dev",
+      baseSha,
+      headSha,
+      baseRef: "main",
+      headRef: "feature",
+      reviewers: [],
+    }).job;
+    store.patchJob(job.id, { routing_profile: "poison-alert" });
+
+    const form = new URLSearchParams({ action: "delegate_to_maomao", reasonTag: "risk-review", reasonDetail: "security-sensitive", csrf_token: auth.csrfToken });
+    const response = await app.request(`/guided/sessions/${opened.session.id}/attention`, {
+      method: "POST",
+      headers: { cookie: auth.cookies, "content-type": "application/x-www-form-urlencoded" },
+      body: form.toString(),
+    });
+    expect(response.status).toBe(303);
+    expect(reevaluated).toEqual([job.id]);
+    expect(store.guidedAttention.decisionFor({ provider: "github", instance: "github.com", repoFullName: "acme/widgets", prNumber: 12, headSha })).toMatchObject({ actor_id: "1001", action: "delegate_to_maomao", head_sha: headSha });
+
+    const strangerOpenedResponse = await postJson(app, "/api/guided-review/sessions/open", stranger.cookies, openBody(stranger.csrfToken));
+    const strangerOpened = (await strangerOpenedResponse.json()) as { session: { id: number } };
+    const conflictForm = new URLSearchParams({ action: "review_myself", reasonTag: "policy", csrf_token: stranger.csrfToken });
+    const conflict = await app.request(`/guided/sessions/${strangerOpened.session.id}/attention`, {
+      method: "POST",
+      headers: { cookie: stranger.cookies, "content-type": "application/x-www-form-urlencoded" },
+      body: conflictForm.toString(),
+    });
+    expect(conflict.status).toBe(409);
+    expect(await conflict.text()).toContain("Another exact-SHA human-attention decision already exists");
+    const stolen = await app.request(`/guided/sessions/${opened.session.id}/attention`, {
+      method: "POST",
+      headers: { cookie: stranger.cookies, "content-type": "application/x-www-form-urlencoded" },
+      body: conflictForm.toString(),
+    });
+    expect(stolen.status).toBe(404);
+    expect(store.guidedAttention.decisionFor({ provider: "github", instance: "github.com", repoFullName: "acme/widgets", prNumber: 12, headSha: nextHeadSha })).toBeUndefined();
+  });
+
 });

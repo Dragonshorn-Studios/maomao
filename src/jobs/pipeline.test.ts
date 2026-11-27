@@ -8655,3 +8655,154 @@ describe("tree-equivalent review carry-forward", () => {
     expect(posted[0]?.body).not.toContain("Carry-forward validation");
   });
 });
+
+describe("guided human attention merge-readiness integration", () => {
+  async function fixture(diff: string, headSha: string, graceMs = "0") {
+    const config = loadConfig({
+      REVIEWER_ROUTING: "deterministic",
+      REVIEWER_ROLES: "correctness,security",
+      OPENCODE_REVIEWER_MODEL: "test/model",
+      POST_EMPTY_REVIEW: "true",
+      GUIDED_REVIEW_DIAGNOSIS_GRACE_MS: graceMs,
+    });
+    const store = new JobStore(openDb(":memory:"));
+    const checks: Array<{ name?: string; status?: string; conclusion?: string; summary?: string }> = [];
+    const control = { failReadinessSuccess: false };
+    const github = githubPort({
+      upsertCheckRun: async (input: { name?: string; status?: string; conclusion?: string; summary?: string }) => {
+        if (control.failReadinessSuccess && input.name === "maomao/merge-readiness" && input.conclusion === "success") throw new Error("github unavailable");
+        checks.push(input);
+        return { id: `check-${checks.length}`, url: "" };
+      },
+      getPullDiff: async () => diff,
+      getPull: async () => ({
+        installationId: 9,
+        accountId: 1001,
+        repositoryId: 2002,
+        repoOwner: "acme",
+        repoName: "widgets",
+        repoFullName: "acme/widgets",
+        prNumber: 4,
+        prTitle: "Change",
+        prBody: "",
+        prHtmlUrl: "",
+        prAuthor: "dev",
+        baseSha: "base",
+        headSha,
+        baseRef: "main",
+        headRef: "feat",
+        draft: false,
+      }),
+      createCommentReview: async () => ({ id: "review-1", url: "https://example.test/review" }),
+    } as unknown as Partial<GithubPort>) as GithubPort;
+    const opencode: OpenCodePort = {
+      async run(input) {
+        const role = input.prompt.match(/Role id: (\w+)/)?.[1];
+        const text = role
+          ? JSON.stringify({ schema_version: 1, reviewer: role, verdict: "clean", findings: [] })
+          : JSON.stringify({ schema_version: 1, verdict: "clean", summary: "clean", findings: [] });
+        return { stdout: text, stderr: "", exitCode: 0, text, usage: {} };
+      },
+    };
+    const checkout = await fixtureCheckout();
+    const created = store.enqueue({ ...jobInput(headSha), reviewers: [] });
+    const pipeline = createPipeline({ config, store, github, checkout, opencode });
+    return { config, store, checks, created, pipeline, github, checkout, opencode, control };
+  }
+
+  function openActiveSession(store: JobStore, headSha: string): void {
+    const actor = { actorProvider: "github", actorId: "1001" };
+    const opened = store.guidedReview.open({
+      ...actor,
+      provider: "github",
+      instance: "github.com",
+      repoFullName: "acme/widgets",
+      prNumber: 4,
+      baseSha: "e".repeat(40),
+      headSha,
+    });
+    store.guidedReview.updateSession(opened.session.id, actor, opened.session.version, { viewedFiles: ["example.ts"] });
+  }
+
+  it("keeps poison-alert readiness action_required until an exact-head decision, then republishes through the same readiness seam", async () => {
+    const headSha = "a".repeat(40);
+    const { store, checks, created, pipeline } = await fixture(AUTH_DIFF, headSha);
+    await pipeline.run(created.job.id);
+
+    expect(store.getJob(created.job.id)?.state).toBe("completed");
+    expect(store.getJob(created.job.id)?.routing_profile).toBe("poison-alert");
+    const initial = checks.filter((check) => check.name === "maomao/merge-readiness").at(-1);
+    expect(initial).toMatchObject({ status: "completed", conclusion: "action_required" });
+    expect(initial?.summary).toContain("no timeout silently delegates");
+
+    const actor = { actorProvider: "github", actorId: "1001" };
+    store.guidedAttention.recordDecision(actor, { provider: "github", instance: "github.com", repoFullName: "acme/widgets", prNumber: 4, headSha: "0".repeat(40) }, "delegate_to_maomao", "risk-review");
+    await pipeline.republishGuidedAttention(created.job.id);
+    expect(checks.filter((check) => check.name === "maomao/merge-readiness").at(-1)?.conclusion).toBe("action_required");
+
+    store.guidedAttention.recordDecision(actor, { provider: "github", instance: "github.com", repoFullName: "acme/widgets", prNumber: 4, headSha }, "delegate_to_maomao", "risk-review");
+    await pipeline.republishGuidedAttention(created.job.id);
+    const final = checks.filter((check) => check.name === "maomao/merge-readiness").at(-1);
+    expect(final).toMatchObject({ status: "completed", conclusion: "success" });
+    expect(final?.summary).toContain("delegated to Maomao by github:1001");
+  });
+
+  it("lets diagnosis auto-continue after the configured grace with a visible reason", async () => {
+    const headSha = "b".repeat(40);
+    const sourceDiff = `diff --git a/src/example.ts b/src/example.ts\n${Array.from({ length: 30 }, (_, index) => `+export const value${index} = ${index};`).join("\n")}\n`;
+    const { store, checks, created, pipeline } = await fixture(sourceDiff, headSha, "30");
+    openActiveSession(store, headSha);
+    const started = Date.now();
+    await pipeline.run(created.job.id);
+    expect(Date.now() - started).toBeGreaterThanOrEqual(25);
+    expect(store.getJob(created.job.id)?.routing_profile).toBe("diagnosis");
+    const readiness = checks.filter((check) => check.name === "maomao/merge-readiness").at(-1);
+    expect(readiness?.conclusion).toBe("success");
+    expect(readiness?.summary).toContain("diagnosis human-attention grace expired");
+  });
+
+  it("never delays observation even when an exact-head guided draft is active", async () => {
+    const headSha = "c".repeat(40);
+    const { store, checks, created, pipeline } = await fixture(README_DIFF, headSha, "5000");
+    openActiveSession(store, headSha);
+    const started = Date.now();
+    await pipeline.run(created.job.id);
+    expect(Date.now() - started).toBeLessThan(2000);
+    expect(store.getJob(created.job.id)?.routing_profile).toBe("observation");
+    expect(checks.filter((check) => check.name === "maomao/merge-readiness").at(-1)?.summary).toContain("observation profile never waits");
+  });
+
+
+
+  it("recovers a decided action_required gate after a restart-like pipeline reconstruction", async () => {
+    const headSha = "f".repeat(40);
+    const { config, store, checks, created, pipeline, github, checkout, opencode, control } = await fixture(AUTH_DIFF, headSha);
+    await pipeline.run(created.job.id);
+    expect(checks.filter((check) => check.name === "maomao/merge-readiness").at(-1)?.conclusion).toBe("action_required");
+    store.guidedAttention.recordDecision({ actorProvider: "github", actorId: "1001" }, { provider: "github", instance: "github.com", repoFullName: "acme/widgets", prNumber: 4, headSha }, "review_myself", "policy");
+
+    control.failReadinessSuccess = true;
+    await expect(pipeline.republishGuidedAttention(created.job.id)).rejects.toThrow("merge-readiness publication failed");
+    control.failReadinessSuccess = false;
+    const recovered = createPipeline({ config, store, github, checkout, opencode });
+    await recovered.recoverGuidedAttention();
+    const final = checks.filter((check) => check.name === "maomao/merge-readiness").at(-1);
+    expect(final?.conclusion).toBe("success");
+    expect(final?.summary).toContain("human chose to review by github:1001");
+  });
+
+  it("does not publish a successful readiness gate when a diagnosis wait is cancelled", async () => {
+    const headSha = "d".repeat(40);
+    const sourceDiff = `diff --git a/src/example.ts b/src/example.ts\n${Array.from({ length: 30 }, (_, index) => `+export const value${index} = ${index};`).join("\n")}\n`;
+    const { store, checks, created, pipeline } = await fixture(sourceDiff, headSha, "5000");
+    openActiveSession(store, headSha);
+    const running = pipeline.run(created.job.id);
+    await vi.waitFor(() => {
+      expect(store.listLogs(created.job.id).some((log) => log.message.includes("Guided Review diagnosis grace"))).toBe(true);
+    });
+    store.cancelJobs({ jobId: created.job.id }, "manual_cancel", "operator");
+    await running;
+    expect(store.getJob(created.job.id)?.state).toBe("cancelled");
+    expect(checks.some((check) => check.name === "maomao/merge-readiness" && check.conclusion === "success")).toBe(false);
+  });
+});

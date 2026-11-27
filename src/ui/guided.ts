@@ -384,6 +384,34 @@ export function renderGuidedPublishPanel(input: { publish?: GuidedPublishPanelVi
   </section>`;
 }
 
+
+export interface GuidedAttentionPanelView {
+  state: "pending" | "decided" | "informational";
+  profile: string;
+  message: string;
+  decision?: { action: string; actor: string; reasonTag: string; createdAt: string };
+}
+
+export function renderGuidedAttentionPanel(input: { attention?: GuidedAttentionPanelView; sessionId?: number; csrfToken?: string; readOnly?: boolean }): string {
+  if (!input.attention || !input.sessionId) return "";
+  const attention = input.attention;
+  const decision = attention.decision ? `<p class="muted">Decision: ${escapeHtml(attention.decision.action)} by ${escapeHtml(attention.decision.actor)} at ${escapeHtml(attention.decision.createdAt)} · ${escapeHtml(attention.decision.reasonTag)}</p>` : "";
+  const controls = attention.state === "pending" && input.csrfToken && !input.readOnly ? `<form method="post" action="/guided/sessions/${input.sessionId}/attention" class="gd-attention-form">
+    ${csrfInput(input.csrfToken)}
+    <label>Reason tag <select name="reasonTag"><option value="risk-review">risk-review</option><option value="author-context">author-context</option><option value="time-sensitive">time-sensitive</option><option value="policy">policy</option><option value="other">other</option></select></label>
+    <label>Optional reason detail <input name="reasonDetail" maxlength="300" placeholder="explainable decision context"/></label>
+    <div class="gd-compare-actions">
+      <button class="if-button if-button--primary" type="submit" name="action" value="review_myself">Review myself</button>
+      <button class="if-button" type="submit" name="action" value="delegate_to_maomao">Delegate this review to Maomao</button>
+    </div>
+  </form>` : "";
+  return `<section id="attention" class="config-section gd-attention" data-guided-attention>
+    <div class="gd-head"><h2>Human attention gate</h2><span class="job-chip">${escapeHtml(attention.state)}</span></div>
+    <p class="muted">${escapeHtml(attention.message)} Exact-SHA decisions are auditable and a newer head invalidates them.</p>
+    ${decision}${controls}
+  </section>`;
+}
+
 export function renderGuidedDiffWorkspace(input: {
   files: GuidedDiffFile[];
   statusFilter?: string;
@@ -401,6 +429,7 @@ export function renderGuidedDiffWorkspace(input: {
   walkthrough?: GuidedWalkthroughView;
   comparison?: GuidedComparisonView;
   publish?: GuidedPublishPanelView;
+  attention?: GuidedAttentionPanelView;
   pullUrl?: string;
   readOnly?: boolean;
 }): string {
@@ -433,6 +462,7 @@ export function renderGuidedDiffWorkspace(input: {
   }).join("\n");
   const draftPanel = input.sessionView ? renderGuidedDraftPanel({ session: input.sessionView, comments: input.comments ?? [], csrfToken: input.csrfToken, readOnly: input.readOnly }) : "";
   const walkthroughPanel = renderGuidedWalkthroughPanel({ walkthrough: input.walkthrough, files: filtered, sessionId: input.sessionId, csrfToken: input.csrfToken });
+  const attentionPanel = renderGuidedAttentionPanel({ attention: input.attention, sessionId: input.sessionId, csrfToken: input.csrfToken, readOnly: input.readOnly });
   const publishPanel = renderGuidedPublishPanel({ publish: input.publish, sessionId: input.sessionId, sessionVersion: input.sessionVersion, csrfToken: input.csrfToken });
   const comparisonPanel = renderGuidedComparisonPanel({ comparison: input.comparison, files: filtered, sessionId: input.sessionId, sessionVersion: input.sessionVersion, csrfToken: input.csrfToken, pullUrl: input.pullUrl });
   return `${walkthroughPanel}${draftPanel}<section class="config-section guided-diff-workspace" data-guided-diff-workspace>
@@ -447,6 +477,7 @@ export function renderGuidedDiffWorkspace(input: {
     </form>
     <div class="gd-layout"><nav class="gd-tree" aria-label="Changed files"><ol>${tree}</ol></nav><div class="gd-files">${rendered || `<div class="empty">No files match this diff filter.</div>`}</div></div>
   </section>
+  ${attentionPanel}
   ${comparisonPanel}
   ${publishPanel}
   <script>

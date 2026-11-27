@@ -12,11 +12,14 @@ export function mergeReadinessDecision(input: {
   requireReview: boolean;
   requiredChecks: TrustedCheckName[];
   results: Array<{ name: string; status: string }>;
+  /** Exact-SHA human-attention outcome from the Guided Review integration seam. */
+  humanAttention?: { state: "satisfied" | "waiting" | "auto_continue" | "not_required"; detail: string };
 }): MergeReadinessDecision {
   const failures: string[] = [];
   const errors: string[] = [];
   if (input.reviewConclusion === "failure" || input.reviewConclusion === "timed_out") failures.push("review");
   if (input.requireReview && input.reviewConclusion !== "success") failures.push("review did not pass required policy");
+  if (input.humanAttention?.state === "waiting") errors.push("guided human attention decision missing");
   for (const name of input.requiredChecks) {
     const native = trustedCheckNativeName(name);
     const row = input.results.find((candidate) => candidate.name === native);
@@ -28,6 +31,8 @@ export function mergeReadinessDecision(input: {
     conclusion: failures.length ? "failure" : errors.length ? "action_required" : "success",
     detail: failures.length || errors.length
       ? [...failures.map((item) => `blocking: ${item}`), ...errors.map((item) => `unavailable: ${item}`)].join("; ")
-      : "all required review and deterministic check inputs passed",
+      : input.humanAttention && input.humanAttention.state !== "not_required"
+        ? `all required inputs passed; guided human attention: ${input.humanAttention.detail}`
+        : "all required review and deterministic check inputs passed",
   };
 }

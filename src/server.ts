@@ -94,6 +94,7 @@ import {
 import { renderProvidersPage } from "./ui/providers.js";
 import { renderGuidedDiffWorkspace, renderGuidedInboxPage, renderGuidedOpenError, renderGuidedSessionPage ,
   type GuidedPublishPanelView,
+  type GuidedAttentionPanelView,
 } from "./ui/guided.js";
 import { parseUnifiedDiff } from "./guided/diff.js";
 import { buildGuidedPublishPreview } from "./guided/publish-preview.js";
@@ -197,6 +198,8 @@ export interface ServerContext {
   guidedWalkthrough?: { service: GuidedWalkthroughService; store: GuidedWalkthroughStore };
   /** Encrypted actor-owned credentials and audit rows for deliberate human publication. */
   guidedHumanPublish?: GuidedHumanPublishStore;
+  /** Pipeline-owned seam that republishes merge readiness after an exact-SHA human-attention decision. */
+  guidedAttentionReevaluate?: (jobId: number) => Promise<void>;
   /** Operator-managed OpenObserve settings for /config/telemetry; defaults to the XDG path. */
   telemetrySettings?: TelemetrySettingsStore;
   /** Operator-managed trusted-check pinning for /config/trusted-checks. */
@@ -639,6 +642,30 @@ function guidedPublishPanelForSession(input: {
     canConnect: true,
     connectHref,
     login: input.login,
+  };
+}
+
+function guidedAttentionPanelForSession(ctx: ServerContext, session: GuidedReviewSessionRow): GuidedAttentionPanelView | undefined {
+  const job = ctx.store.reviewJobForComparison(session.repo_full_name, session.pr_number, session.head_sha, { provider: session.provider, instance: session.provider_instance });
+  const profile = job?.routing_profile;
+  if (!job || (profile !== "poison-alert" && profile !== "diagnosis")) return undefined;
+  const key = { provider: session.provider, instance: session.provider_instance, repoFullName: session.repo_full_name, prNumber: session.pr_number, headSha: session.head_sha };
+  const decision = ctx.store.guidedAttention.decisionFor(key);
+  if (decision) {
+    return {
+      state: "decided",
+      profile,
+      message: "The exact-SHA human-attention decision is recorded for the merge-readiness gate.",
+      decision: { action: decision.action, actor: `${decision.actor_provider}:${decision.actor_id}`, reasonTag: decision.reason_tag, createdAt: decision.created_at },
+    };
+  }
+  if (profile === "diagnosis") {
+    return { state: "informational", profile, message: "Diagnosis jobs use only a bounded grace period for active guided review, then continue automatically." };
+  }
+  return {
+    state: "pending",
+    profile,
+    message: "Poison-alert merge readiness is waiting for an explicit human decision. It will not silently delegate on timeout.",
   };
 }
 
@@ -1447,6 +1474,7 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
             walkthrough,
             comments: session ? ctx.store.guidedReview.listComments(session.id).map(guidedCommentView) : [],
             comparison: session ? guidedComparisonForSession(ctx, session) : undefined,
+            attention: session ? guidedAttentionPanelForSession(ctx, session) : undefined,
             publish: session ? guidedPublishPanelForSession({ ctx, store: humanPublish, session, actor, login: c.get("identity")?.login, oauthConfigured: oauthOn, workspacePath: `/guided/github/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/${prNumber}` }) : undefined,
             pullUrl: pull.prHtmlUrl,
             readOnly: !actor,
@@ -1618,6 +1646,45 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
   );
 
 
+
+  app.post("/guided/sessions/:id/attention", async (c) =>
+    guidedRoute(c, async () => {
+      const actor = guidedActor(c);
+      if (!actor) return guidedIdentityRequired(c);
+      const session = ctx.store.guidedReview.getOwned(guidedId(c.req.param("id")), actor);
+      if (!session) return c.json({ error: "guided_review_session_not_found" }, 404);
+      const body = await c.req.parseBody();
+      const action = body.action === "review_myself" || body.action === "delegate_to_maomao" ? body.action : undefined;
+      const reasonTag = typeof body.reasonTag === "string" ? body.reasonTag : "";
+      const reasonDetail = typeof body.reasonDetail === "string" ? body.reasonDetail : null;
+      if (!action) return c.html(renderGuidedOpenError({ options: guidedPageOpts(c), error: "Choose either review myself or delegate this review to Maomao." }), 400);
+      const key = { provider: session.provider, instance: session.provider_instance, repoFullName: session.repo_full_name, prNumber: session.pr_number, headSha: session.head_sha };
+      const job = ctx.store.reviewJobForComparison(session.repo_full_name, session.pr_number, session.head_sha, { provider: session.provider, instance: session.provider_instance });
+      if (!job || job.routing_profile !== "poison-alert") {
+        return c.html(renderGuidedOpenError({ options: guidedPageOpts(c), error: "This exact head has no poison-alert human-attention gate waiting for a decision." }), 400);
+      }
+      const reevaluate = ctx.guidedAttentionReevaluate;
+      if (!reevaluate) {
+        return c.html(renderGuidedOpenError({ options: guidedPageOpts(c), error: "The Guided Review merge-readiness integration is not configured on this server; no attention decision was recorded." }), 503);
+      }
+      let outcome;
+      try {
+        outcome = ctx.store.guidedAttention.recordDecision(actor, key, action, reasonTag, reasonDetail);
+      } catch (error) {
+        return c.html(renderGuidedOpenError({ options: guidedPageOpts(c), error: error instanceof Error ? error.message : "Malformed attention decision." }), 400);
+      }
+      if (outcome.status === "conflict") {
+        return c.html(renderGuidedOpenError({ options: guidedPageOpts(c), error: `Another exact-SHA human-attention decision already exists: ${outcome.row.action} by ${outcome.row.actor_provider}:${outcome.row.actor_id}. A new head requires a new decision.` }), 409);
+      }
+      try {
+        await reevaluate(job.id);
+      } catch (error) {
+        return c.html(renderGuidedOpenError({ options: guidedPageOpts(c), error: `The decision was recorded, but merge-readiness re-evaluation failed: ${error instanceof Error ? error.message : String(error)}. Repeat the same decision after recovery; it is idempotent.` }), 502);
+      }
+      const [owner, repo] = session.repo_full_name.split("/");
+      return c.redirect(`/guided/github/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/${session.pr_number}#attention`, 303);
+    }),
+  );
 
   app.post("/guided/sessions/:id/publish", async (c) =>
     guidedRoute(c, async () => {
