@@ -77,7 +77,7 @@ export interface ManualTriggerPort {
     owner: string,
     repo: string,
   ): Promise<{ installationId: number; accountId: number }>;
-  getRepository(owner: string, repo: string, installationId: number): Promise<{ id: number }>;
+  getRepository(owner: string, repo: string, installationId: number): Promise<{ id: number; private?: boolean }>;
   getPull(installationId: number, owner: string, repo: string, pullNumber: number): Promise<ResolvedPull>;
 }
 
@@ -404,13 +404,13 @@ export class GithubClient implements GithubPort, ManualTriggerPort {
     }
   }
 
-  async getRepository(owner: string, repo: string, installationId: number): Promise<{ id: number }> {
+  async getRepository(owner: string, repo: string, installationId: number): Promise<{ id: number; private?: boolean }> {
     const response = await this.installationOctokit(installationId).rest.repos.get({ owner, repo });
     const id = Number(response.data.id);
     if (!Number.isSafeInteger(id) || id <= 0) {
       throw new Error("repository is missing a numeric id");
     }
-    return { id };
+    return { id, private: response.data.private === true };
   }
 
   async getPull(
