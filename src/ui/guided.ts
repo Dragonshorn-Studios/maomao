@@ -209,7 +209,6 @@ function severityOptions(value = ""): string {
 export function renderGuidedDraftPanel(input: { session: GuidedSessionView; comments: GuidedCommentView[]; csrfToken?: string; readOnly?: boolean }): string {
   if (input.readOnly) return "";
   const active = input.comments.filter((comment) => !comment.deletedAt && (comment.kind === "general" || comment.anchorStatus === "unplaced"));
-  const hasUnplaced = active.some((comment) => comment.anchorStatus === "unplaced");
   return `<section class="config-section gd-human-draft" data-guided-draft data-session-id="${input.session.id}" data-version="${input.session.version}" data-csrf="${escapeHtml(input.csrfToken ?? "")}">
     <div class="gd-head"><h2>Your private draft</h2><span class="gd-save-state" data-save-state data-state="saved">Saved privately</span></div>
     <p class="error if-banner if-banner--danger" data-guided-bundle-error hidden>Guided draft enhancement failed to load. Run the asset build; these controls require JavaScript.</p>
@@ -217,33 +216,29 @@ export function renderGuidedDraftPanel(input: { session: GuidedSessionView; comm
     <noscript><p class="notice if-banner if-banner--warning">Guided notes and publication preview require JavaScript. The diff remains readable, but draft controls are inactive.</p></noscript>
     <div class="gd-draft-grid gd-draft-grid--simple">
       <label class="gd-summary-label">Draft summary <textarea data-draft-summary rows="3" maxlength="10000" placeholder="Overall human review summary (optional)">${escapeHtml(input.session.draftSummary)}</textarea></label>
+    </div>
+    <div class="gd-draft-actions">
       <div class="gd-verdict-buttons" role="group" aria-label="Review verdict">
         <input type="hidden" data-draft-verdict value="${escapeHtml(input.session.draftVerdict ?? "")}"/>
         ${[["COMMENT", "Comment"], ["APPROVE", "Approve"], ["REQUEST_CHANGES", "Require changes"]].map(([verdict, label]) => `<button type="button" class="gd-verdict gd-verdict--${verdict.toLowerCase().replaceAll("_", "-")}${input.session.draftVerdict === verdict ? " is-active" : ""}" data-verdict-choice="${verdict}">${label}</button>`).join("")}
       </div>
+      <button type="button" class="if-button if-button--primary" data-goto-step="compare">Continue to comparison</button>
     </div>
-    <div class="gd-step-actions"><button type="button" class="if-button if-button--primary" data-goto-step="compare">Continue to comparison</button><span class="muted">Inline notes save automatically while you review.</span></div>
-    <details class="gd-draft-details"${hasUnplaced ? " open" : ""}><summary>General notes, stale notes, and publication controls</summary>
-    <h3>General and unplaced notes</h3>
-    <div data-comment-list>${active.length ? active.map(renderGuidedComment).join("\n") : `<p class="muted">No general notes yet. Inline notes appear directly in the diff.</p>`}</div>
-    <form data-general-form class="gd-general-form">
-      <h4>General note</h4>
-      <input type="hidden" data-comment-client-id/>
-      <label>Note <textarea class="if-textarea" data-comment-body rows="4" maxlength="4000" required></textarea></label>
-      <div class="gd-inline-fields">
-        <label>Severity <select class="if-select" data-comment-severity>${severityOptions()}</select></label>
-        <label>Category <input class="if-input" data-comment-category maxlength="80" placeholder="optional"/></label>
-        <label class="gd-check"><input class="if-checkbox" type="checkbox" data-comment-publishable/> Candidate for review summary</label>
-      </div>
-      <button type="submit" class="if-button if-button--primary">Save general note</button>
-    </form>
-    <div class="gd-preview-controls">
-      <button type="button" class="if-button" data-refresh-draft>Refresh draft</button>
-      <button type="button" class="if-button if-button--primary" data-preview-publish>Preview publication payload</button>
+    <div class="gd-general-panel">
+      <div class="gd-general-head"><h3>General notes</h3><span><button type="button" class="if-button if-button--sm" data-toggle-general>Add general note</button><button type="button" class="if-button if-button--sm" data-refresh-draft>Refresh</button></span></div>
+      <div data-comment-list>${active.map(renderGuidedComment).join("\n")}</div>
+      <form data-general-form class="gd-general-form" hidden>
+        <input type="hidden" data-comment-client-id/>
+        <label>Note <textarea class="if-textarea" data-comment-body rows="3" maxlength="4000" required></textarea></label>
+        <div class="gd-inline-fields">
+          <label>Severity <select class="if-select" data-comment-severity>${severityOptions()}</select></label>
+          <label>Category <input class="if-input" data-comment-category maxlength="80" placeholder="optional"/></label>
+          <label class="gd-check"><input class="if-checkbox" type="checkbox" data-comment-publishable/> Candidate for review summary</label>
+        </div>
+        <button type="submit" class="if-button if-button--primary">Save general note</button>
+      </form>
     </div>
-    <div data-preview-output class="gd-preview-output" aria-live="polite"></div>
-    </details>
-    <div class="gd-inline-editor" data-inline-editor hidden>
+    <div class="gd-inline-editor-home" data-inline-editor-home><div class="gd-inline-editor" data-inline-editor hidden>
       <h4>Inline note <span class="muted" data-inline-target></span></h4>
       <input type="hidden" data-comment-client-id/>
       <label>Note <textarea class="if-textarea" data-comment-body rows="4" maxlength="4000" required></textarea></label>
@@ -252,10 +247,8 @@ export function renderGuidedDraftPanel(input: { session: GuidedSessionView; comm
         <label>Category <input class="if-input" data-comment-category maxlength="80" placeholder="optional"/></label>
         <label class="gd-check"><input class="if-checkbox" type="checkbox" data-comment-publishable/> Candidate GitHub comment</label>
       </div>
-      <button type="button" class="if-button if-button--primary" data-save-inline>Save inline note</button>
-      <button type="button" class="if-button" data-cancel-inline>Cancel</button>
-      <p class="muted">Unchecked stays private. Unplaced stale-hunk notes cannot be candidates until re-anchored.</p>
-    </div>
+      <div class="gd-inline-editor-actions"><button type="button" class="if-button if-button--primary" data-save-inline>Save inline note</button><button type="button" class="if-button" data-cancel-inline>Cancel</button></div>
+    </div></div>
   </section>`;
 }
 

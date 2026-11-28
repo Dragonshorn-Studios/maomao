@@ -15,7 +15,7 @@ import { annotationForLine, diffLayoutOptions, nextLayout, type DiffLayout, synt
 
 declare global {
   // eslint-disable-next-line no-var
-  var __maomaoPierre: { enhance(): void; applyLayout(layout: "unified" | "split"): void; scrollToGuidedLine(path: string, line: number, side: "LEFT" | "RIGHT"): boolean; updateGuidedComments(comments: GuidedBrowserComment[]): void; setGuidedComparisonVisible(visible: boolean): void };
+  var __maomaoPierre: { enhance(): void; applyLayout(layout: "unified" | "split"): void; scrollToGuidedLine(path: string, line: number, side: "LEFT" | "RIGHT"): boolean; updateGuidedComments(comments: GuidedBrowserComment[]): void; setGuidedComparisonVisible(visible: boolean): void; openGuidedInlineEditor(anchor: { path: string; side: "LEFT" | "RIGHT"; line: number }): boolean; closeGuidedInlineEditor(): void };
 }
 
 const LAYOUT_STORAGE_KEY = "maomao-diff-layout";
@@ -23,6 +23,7 @@ const LAYOUT_STORAGE_KEY = "maomao-diff-layout";
 const instances = new Map<HTMLElement, FileDiff<any>>();
 let guidedComparisonVisible = false;
 let latestGuidedComments: GuidedBrowserComment[] | null = null;
+let guidedEditorAnchor: { path: string; side: "LEFT" | "RIGHT"; line: number } | null = null;
 
 const GUIDED_UNSAFE_CSS = `
 .gd-inline-annotation { max-width: 44rem; margin: .35rem .5rem; padding: .55rem .65rem; border: 1px solid var(--line, #d0d7de); border-left: 3px solid var(--jade, #2da160); border-radius: 7px; background: var(--surface, #fff); color: var(--ink, #24292f); font-family: var(--font-sans, system-ui, sans-serif); font-size: .82rem; line-height: 1.35; box-shadow: 0 4px 14px rgba(0,0,0,.08); }
@@ -36,7 +37,7 @@ const GUIDED_UNSAFE_CSS = `
 `;
 
 interface GuidedAnnotationMetadata {
-  source: "human" | "maomao";
+  source: "human" | "maomao" | "editor";
   summary: string;
   body?: string;
   severity?: string;
@@ -160,7 +161,15 @@ function effectiveGuidedAnnotations(container: HTMLElement): GuidedAnnotation[] 
   const initial = annotationsForContainer(container);
   const human = currentHumanAnnotations(container, initial);
   const maomao = guidedComparisonVisible ? initial.filter((annotation) => annotation.metadata?.source === "maomao") : [];
-  return groupGuidedAnnotations([...human, ...maomao]);
+  const path = container.getAttribute("data-path") ?? "";
+  const editor = guidedEditorAnchor?.path === path
+    ? [{
+        side: guidedEditorAnchor.side === "LEFT" ? "deletions" as const : "additions" as const,
+        lineNumber: guidedEditorAnchor.line,
+        metadata: { source: "editor" as const, summary: "", path, side: guidedEditorAnchor.side, line: guidedEditorAnchor.line },
+      }]
+    : [];
+  return groupGuidedAnnotations([...human, ...maomao, ...editor]);
 }
 
 function refreshGuidedAnnotations(): void {
@@ -177,6 +186,13 @@ function setGuidedComparisonVisible(visible: boolean): void {
 }
 
 function renderGuidedAnnotationContent(meta: GuidedAnnotationMetadata): HTMLElement {
+  if (meta.source === "editor") {
+    const editor = (globalThis as typeof globalThis & { __maomaoGuidedInlineEditor?: HTMLElement }).__maomaoGuidedInlineEditor;
+    if (editor) {
+      editor.hidden = false;
+      return editor;
+    }
+  }
   const node = document.createElement("div");
   node.className = `gd-inline-annotation gd-inline-annotation--${meta.source}`;
   const title = document.createElement("div");
@@ -356,6 +372,21 @@ function updateGuidedComments(comments: GuidedBrowserComment[]): void {
   refreshGuidedAnnotations();
 }
 
+function openGuidedInlineEditor(anchor: { path: string; side: "LEFT" | "RIGHT"; line: number }): boolean {
+  const container = Array.from(document.querySelectorAll<HTMLElement>(".guided-pierre-file[data-guided-pierre]"))
+    .find((candidate) => candidate.getAttribute("data-path") === anchor.path);
+  if (!container || container.getAttribute("data-enhanced") !== "1" || !Number.isSafeInteger(anchor.line) || anchor.line < 1) return false;
+  guidedEditorAnchor = { path: anchor.path, side: anchor.side, line: anchor.line };
+  refreshGuidedAnnotations();
+  return true;
+}
+
+function closeGuidedInlineEditor(): void {
+  if (!guidedEditorAnchor) return;
+  guidedEditorAnchor = null;
+  refreshGuidedAnnotations();
+}
+
 function scrollToGuidedLine(path: string, line: number, side: "LEFT" | "RIGHT"): boolean {
   if (!Number.isSafeInteger(line) || line < 1) return false;
   const container = Array.from(document.querySelectorAll<HTMLElement>(".guided-pierre-file[data-guided-pierre]"))
@@ -460,9 +491,9 @@ function enhanceAll(): void {
   }
 }
 
-export { enhanceAll as enhance, applyLayout, scrollToGuidedLine, updateGuidedComments, setGuidedComparisonVisible };
+export { enhanceAll as enhance, applyLayout, scrollToGuidedLine, updateGuidedComments, setGuidedComparisonVisible, openGuidedInlineEditor, closeGuidedInlineEditor };
 
-globalThis.__maomaoPierre = { enhance: enhanceAll, applyLayout, scrollToGuidedLine, updateGuidedComments, setGuidedComparisonVisible };
+globalThis.__maomaoPierre = { enhance: enhanceAll, applyLayout, scrollToGuidedLine, updateGuidedComments, setGuidedComparisonVisible, openGuidedInlineEditor, closeGuidedInlineEditor };
 const pierre = globalThis.__maomaoPierre;
 
 if (typeof document !== "undefined") {

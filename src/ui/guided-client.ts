@@ -37,7 +37,9 @@ function enhanceDraft(root: HTMLElement): void {
   const listEl = root.querySelector<HTMLElement>("[data-comment-list]");
   const inlineEditor = root.querySelector<HTMLElement>("[data-inline-editor]");
   const generalForm = root.querySelector<HTMLFormElement>("[data-general-form]");
-  const previewOutput = root.querySelector<HTMLElement>("[data-preview-output]");
+  const inlineEditorHome = root.querySelector<HTMLElement>("[data-inline-editor-home]");
+  let fallbackEditorRow: HTMLTableRowElement | null = null;
+  (window as Window & { __maomaoGuidedInlineEditor?: HTMLElement }).__maomaoGuidedInlineEditor = inlineEditor ?? undefined;
 
   function status(state: SaveState, detail = ""): void {
     if (!statusEl) return;
@@ -62,15 +64,7 @@ function enhanceDraft(root: HTMLElement): void {
     if (!listEl) return;
     listEl.textContent = "";
     const active = comments.filter((comment) => !comment.deletedAt && (comment.kind === "general" || comment.anchorStatus === "unplaced"));
-    if (active.length === 0) {
-      const empty = document.createElement("p");
-      empty.className = "muted";
-      empty.textContent = "No general notes yet. Inline notes appear directly in the diff.";
-      listEl.append(empty);
-      return;
-    }
-    const details = root.querySelector<HTMLDetailsElement>(".gd-draft-details");
-    if (details && active.some((comment) => comment.anchorStatus === "unplaced")) details.open = true;
+    if (active.length === 0) return;
     for (const comment of active) {
       const item = document.createElement("article");
       item.className = "gd-comment";
@@ -124,7 +118,7 @@ function enhanceDraft(root: HTMLElement): void {
     renderComments(data.comments);
     (window as unknown as { __maomaoPierre?: { updateGuidedComments?: (comments: GuidedCommentView[]) => void } }).__maomaoPierre?.updateGuidedComments?.(data.comments);
     if (summaryEl && document.activeElement !== summaryEl) summaryEl.value = data.session.draftSummary;
-    if (verdictEl && document.activeElement !== verdictEl) {
+    if (verdictEl && !summaryDirty) {
       verdictEl.value = data.session.draftVerdict ?? "";
       for (const candidate of root.querySelectorAll<HTMLButtonElement>("[data-verdict-choice]")) {
         candidate.classList.toggle("is-active", candidate.dataset.verdictChoice === verdictEl.value);
@@ -267,28 +261,53 @@ function enhanceDraft(root: HTMLElement): void {
     if (client) client.value = "";
   }
 
-  function positionInlineEditor(anchor?: { top?: number; bottom?: number; left?: number; right?: number }): void {
-    if (!inlineEditor || anchor?.top == null) {
-      if (inlineEditor) {
-        inlineEditor.style.top = "";
-        inlineEditor.style.left = "";
-      }
-      return;
+  function parkInlineEditor(): void {
+    if (!inlineEditor || !inlineEditorHome) return;
+    fallbackEditorRow?.remove();
+    fallbackEditorRow = null;
+    inlineEditorHome.appendChild(inlineEditor);
+  }
+
+  function mountFallbackInlineEditor(anchor: { path: string; side: string; line: string }): boolean {
+    if (!inlineEditor || !anchor.path || !anchor.side || !anchor.line) return false;
+    const file = document.querySelector<HTMLElement>(`[data-guided-file][data-path="${CSS.escape(anchor.path)}"]`);
+    const line = file?.querySelector<HTMLElement>(`[data-anchor-side="${CSS.escape(anchor.side)}"][data-anchor-line="${CSS.escape(anchor.line)}"]`);
+    if (!line) return false;
+    if (!fallbackEditorRow) {
+      fallbackEditorRow = document.createElement("tr");
+      fallbackEditorRow.className = "gd-inline-editor-row";
+      const cell = document.createElement("td");
+      cell.colSpan = 4;
+      fallbackEditorRow.appendChild(cell);
     }
-    const width = Math.min(420, window.innerWidth - 24);
-    const desiredLeft = anchor.right != null ? anchor.right + 8 : anchor.left ?? 12;
-    const viewportLeft = Math.max(12, Math.min(desiredLeft, window.innerWidth - width - 12));
-    const left = viewportLeft + window.scrollX;
-    const top = (anchor.bottom ?? anchor.top) + 6 + window.scrollY;
-    inlineEditor.style.width = `${width}px`;
-    inlineEditor.style.left = `${left}px`;
-    inlineEditor.style.top = `${top}px`;
+    fallbackEditorRow.firstElementChild?.appendChild(inlineEditor);
+    line.insertAdjacentElement("afterend", fallbackEditorRow);
+    return true;
+  }
+
+  function mountInlineEditor(anchor: { path: string; side: string; line: string }): void {
+    if (!inlineEditor) return;
+    const line = Number(anchor.line);
+    const pierce = (window as Window & {
+      __maomaoPierre?: {
+        openGuidedInlineEditor?: (target: { path: string; side: "LEFT" | "RIGHT"; line: number }) => boolean;
+      };
+    }).__maomaoPierre;
+    if ((anchor.side === "LEFT" || anchor.side === "RIGHT") && Number.isSafeInteger(line) && pierce?.openGuidedInlineEditor?.({ path: anchor.path, side: anchor.side, line })) return;
+    if (!mountFallbackInlineEditor(anchor)) parkInlineEditor();
+  }
+
+  function closeInlineEditor(): void {
+    if (!inlineEditor) return;
+    inlineEditor.hidden = true;
+    inlineEditor.dataset.reanchoring = "";
+    parkInlineEditor();
+    (window as Window & { __maomaoPierre?: { closeGuidedInlineEditor?: () => void } }).__maomaoPierre?.closeGuidedInlineEditor?.();
   }
 
   function showInlineEditor(anchor?: { path: string; side: string; line: string; top?: number; bottom?: number; left?: number; right?: number }, comment?: HTMLElement): void {
     if (!inlineEditor) return;
     inlineEditor.hidden = false;
-    positionInlineEditor(anchor);
     const unplaced = comment?.dataset.anchorStatus === "unplaced";
     inlineEditor.dataset.reanchoring = unplaced ? "1" : "";
     inlineEditor.dataset.path = unplaced ? "" : comment?.dataset.path || anchor?.path || "";
@@ -310,6 +329,11 @@ function enhanceDraft(root: HTMLElement): void {
     if (publishable) {
       publishable.checked = comment?.dataset.publishable === "1";
     }
+    if (!unplaced && inlineEditor.dataset.path && inlineEditor.dataset.side && inlineEditor.dataset.line) {
+      mountInlineEditor({ path: inlineEditor.dataset.path, side: inlineEditor.dataset.side, line: inlineEditor.dataset.line });
+    } else {
+      parkInlineEditor();
+    }
     body?.focus();
   }
 
@@ -322,6 +346,7 @@ function enhanceDraft(root: HTMLElement): void {
       inlineEditor.dataset.side = anchor.side;
       inlineEditor.dataset.line = anchor.line;
       setText(inlineEditor.querySelector("[data-inline-target]"), `${anchor.path} ${anchor.side}:${anchor.line}`);
+      mountInlineEditor({ path: anchor.path, side: anchor.side, line: anchor.line });
       return;
     }
     showInlineEditor(anchor);
@@ -396,18 +421,14 @@ function enhanceDraft(root: HTMLElement): void {
         side: inlineEditor.dataset.side,
         line: Number(inlineEditor.dataset.line),
       });
-      inlineEditor.hidden = true;
-      inlineEditor.dataset.reanchoring = "";
+      closeInlineEditor();
       await refresh();
     });
   });
   inlineEditor?.querySelector("[data-cancel-inline]")?.addEventListener("click", (event) => {
     event.preventDefault();
-    if (inlineEditor) {
-      inlineEditor.hidden = true;
-      inlineEditor.dataset.reanchoring = "";
-      if (!summaryDirty) status("saved");
-    }
+    closeInlineEditor();
+    if (!summaryDirty) status("saved");
   });
 
   generalForm?.addEventListener("submit", (event) => {
@@ -417,6 +438,7 @@ function enhanceDraft(root: HTMLElement): void {
     enqueue(async () => {
       await write("/comments", { ...data, kind: "general" });
       resetGeneralForm();
+      generalForm.hidden = true;
       await refresh();
     });
   });
@@ -433,6 +455,7 @@ function enhanceDraft(root: HTMLElement): void {
         showInlineEditor({ path: "", side: "", line: "", top: rect.top, bottom: rect.bottom, left: rect.left, right: rect.right }, item);
       }
       else if (generalForm) {
+        generalForm.hidden = false;
         const client = generalForm.querySelector<HTMLInputElement>("[data-comment-client-id]");
         if (client) client.value = item.dataset.clientId ?? "";
         const body = generalForm.querySelector<HTMLTextAreaElement>("[data-comment-body]");
@@ -454,31 +477,19 @@ function enhanceDraft(root: HTMLElement): void {
     }
   });
 
+  root.querySelector("[data-toggle-general]")?.addEventListener("click", (event) => {
+    event.preventDefault();
+    if (!generalForm) return;
+    generalForm.hidden = !generalForm.hidden;
+    if (!generalForm.hidden) generalForm.querySelector<HTMLTextAreaElement>("[data-comment-body]")?.focus();
+  });
+
   root.querySelector("[data-refresh-draft]")?.addEventListener("click", (event) => {
     event.preventDefault();
     enqueue(refresh);
   });
 
-  root.querySelector("[data-preview-publish]")?.addEventListener("click", async (event) => {
-    event.preventDefault();
-    if (!previewOutput) return;
-    previewOutput.textContent = "Loading exact preview…";
-    window.clearTimeout(summaryTimer);
-    if (summaryDirty) saveSummary();
-    await queue;
-    if (writeFailed || conflicted) {
-      previewOutput.textContent = "Resolve the draft save error or conflict before previewing; the preview must reflect persisted draft state exactly.";
-      return;
-    }
-    try {
-      const response = await fetch(`/api/guided-review/sessions/${sessionId}/preview`);
-      if (!response.ok) throw new Error(`preview failed (${response.status})`);
-      const { preview } = (await response.json()) as { preview: GuidedPublishPreview };
-      renderPublishPreview(previewOutput, preview);
-    } catch (error) {
-      previewOutput.textContent = `Could not load preview: ${error instanceof Error ? error.message : String(error)}`;
-    }
-  });
+
 }
 
 
