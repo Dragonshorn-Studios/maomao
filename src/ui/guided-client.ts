@@ -266,6 +266,7 @@ function enhanceDraft(root: HTMLElement): void {
     fallbackEditorRow?.remove();
     fallbackEditorRow = null;
     inlineEditorHome.appendChild(inlineEditor);
+    (window as Window & { __maomaoPierre?: { closeGuidedInlineEditor?: () => void } }).__maomaoPierre?.closeGuidedInlineEditor?.();
   }
 
   function mountFallbackInlineEditor(anchor: { path: string; side: string; line: string }): boolean {
@@ -302,7 +303,6 @@ function enhanceDraft(root: HTMLElement): void {
     inlineEditor.hidden = true;
     inlineEditor.dataset.reanchoring = "";
     parkInlineEditor();
-    (window as Window & { __maomaoPierre?: { closeGuidedInlineEditor?: () => void } }).__maomaoPierre?.closeGuidedInlineEditor?.();
   }
 
   function showInlineEditor(anchor?: { path: string; side: string; line: string; top?: number; bottom?: number; left?: number; right?: number }, comment?: HTMLElement): void {
