@@ -223,6 +223,24 @@ const APPEARANCE_BOOT = `
  * drop animation once, then records the id. No chip (plain flavor, other
  * pages) means no script work.
  */
+const SHELL_TOP_BOOT = `
+(function () {
+  function measure() {
+    var top = document.querySelector(".top");
+    if (!top) return;
+    document.documentElement.style.setProperty("--shell-top-height", Math.ceil(top.getBoundingClientRect().height) + "px");
+  }
+  function boot() {
+    measure();
+    var top = document.querySelector(".top");
+    if (top && "ResizeObserver" in window) new ResizeObserver(measure).observe(top);
+    window.addEventListener("resize", measure);
+  }
+  if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", boot);
+  else boot();
+})();
+`.trim();
+
 const PANCAKE_BOOT = `
 (function () {
   function boot() {
@@ -448,6 +466,7 @@ export function layout(title: string, body: string, options: PageOptions = {}): 
   <link rel="stylesheet" href="${THEME_URL}"/>
   <script src="${diskAssetUrl(PIERRE_DIFFS_HREF)}" defer></script>
   <script>${APPEARANCE_BOOT}</script>
+  <script>${SHELL_TOP_BOOT}</script>
   <script>${PANCAKE_BOOT}</script>
   <script>${ACCOUNT_BOOT}</script>
 </head>

@@ -660,7 +660,13 @@ function renderExplorationPrimer(view: GuidedWalkthroughView): void {
       appendText(root, "p", `Flow: ${compactPrimerText(payload.flow, 520)}`, "muted");
       appendText(root, "p", `Uncertainty: ${compactPrimerText(payload.intent.uncertainty, 220)}`, "muted");
     } else if (view.status === "pending" || view.status === "running") {
-      appendText(root, "p", "Independent exploration is running. It explains the pinned change without using Maomao review findings or verdicts.", "muted");
+      const message = document.createElement("p");
+      message.className = "muted";
+      const spinner = document.createElement("span");
+      spinner.className = "gd-spinner";
+      spinner.setAttribute("aria-hidden", "true");
+      message.append(spinner, document.createTextNode(" Independent exploration is running. It explains the pinned change without using Maomao review findings or verdicts."));
+      root.append(message);
     } else if (view.status === "failed") {
       appendText(root, "p", `Exploration failed${view.error ? `: ${view.error}` : "."} Review can continue manually.`, "muted");
     } else if (view.status === "cancelled") {
@@ -679,8 +685,8 @@ function renderExplorationPrimer(view: GuidedWalkthroughView): void {
     }
     appendText(element, "strong", "Maomao exploration");
     if (change) {
-      appendText(element, "p", compactPrimerText(change.summary, 220));
-      appendText(element, "p", compactPrimerText(change.evidence, 160), "muted");
+      appendText(element, "p", change.summary);
+      appendText(element, "p", change.evidence, "muted");
     } else {
       appendText(element, "p", "No concise file-specific evidence was produced by the independent exploration.", "muted");
     }

@@ -215,7 +215,7 @@ export function renderGuidedDraftPanel(input: { session: GuidedSessionView; comm
     <p class="muted">Nothing here publishes to GitHub. Notes and the verdict are actor-private until a later deliberate publish step.</p>
     <noscript><p class="notice if-banner if-banner--warning">Guided notes and publication preview require JavaScript. The diff remains readable, but draft controls are inactive.</p></noscript>
     <div class="gd-draft-grid gd-draft-grid--simple">
-      <label class="gd-summary-label">Draft summary <textarea data-draft-summary rows="3" maxlength="10000" placeholder="Overall human review summary (optional)">${escapeHtml(input.session.draftSummary)}</textarea></label>
+      <label class="gd-summary-label">Draft summary <textarea class="if-textarea" data-draft-summary rows="3" maxlength="10000" placeholder="Overall human review summary (optional)">${escapeHtml(input.session.draftSummary)}</textarea></label>
     </div>
     <div class="gd-draft-actions">
       <div class="gd-verdict-buttons" role="group" aria-label="Review verdict">
@@ -282,7 +282,7 @@ function primerChangeFor(payload: GuidedWalkthroughPayload | undefined, path: st
 
 function renderFilePrimerContent(change: GuidedWalkthroughPayload["changeMap"][number] | undefined): string {
   if (!change) return `<strong>Maomao exploration</strong><p class="muted">No concise file-specific evidence was produced by the independent exploration.</p>`;
-  return `<strong>Maomao exploration</strong><p>${escapeHtml(shortPrimerText(change.summary, 220))}</p><p class="muted">${escapeHtml(shortPrimerText(change.evidence, 160))}</p>`;
+  return `<strong>Maomao exploration</strong><p>${escapeHtml(change.summary)}</p><p class="muted">${escapeHtml(change.evidence)}</p>`;
 }
 
 function renderGuidedExplorationPrimer(input: { walkthrough?: GuidedWalkthroughView; sessionId?: number }): string {
@@ -651,7 +651,6 @@ export function renderGuidedDiffWorkspace(input: {
         <script type="application/json" class="guided-patch-raw">${jsJson(file.patch)}</script>
         <script type="application/json" class="guided-annotations-raw">${jsJson(guidedAnnotationsFor(file, input.comments, input.comparison))}</script>
       </div>
-      ${input.sessionId ? `<details class="gd-context"><summary>Read-only surrounding code at the pinned SHA</summary><button type="button" class="if-button if-button--sm" data-load-context="${escapeHtml(file.path)}">Load head-side file</button><pre class="gd-context-panel" hidden></pre><p class="muted">Path-boundary validated; oversized or unavailable files fail explicitly.</p></details>` : ""}
     </article>`;
   }).join("\n");
   const draftPanel = input.sessionView ? renderGuidedDraftPanel({ session: input.sessionView, comments: input.comments ?? [], csrfToken: input.csrfToken, readOnly: input.readOnly }) : "";
@@ -695,7 +694,6 @@ export function renderGuidedDiffWorkspace(input: {
     document.addEventListener('keydown',function(event){if(event.target&&/INPUT|TEXTAREA|SELECT/.test(event.target.tagName))return;if(event.key==='j'){event.preventDefault();move(1);}if(event.key==='k'){event.preventDefault();move(-1);}});
     var treeToggle=document.querySelector('[data-guided-tree-toggle]'),treeNav=document.querySelector('.gd-tree');
     if(treeToggle&&treeNav){treeToggle.checked=localStorage.getItem('maomao-guided-file-tree')==='tree';treeNav.classList.toggle('gd-tree-mode',treeToggle.checked);treeToggle.addEventListener('change',function(){localStorage.setItem('maomao-guided-file-tree',treeToggle.checked?'tree':'flat');treeNav.classList.toggle('gd-tree-mode',treeToggle.checked);});}
-    document.addEventListener('click',async function(event){var button=event.target.closest('[data-load-context]');if(!button||!guidedSessionId)return;var details=button.closest('details'),panel=details&&details.querySelector('.gd-context-panel');if(!panel)return;button.disabled=true;button.textContent='Loading…';try{var res=await fetch('/api/guided-review/sessions/'+guidedSessionId+'/file?path='+encodeURIComponent(button.getAttribute('data-load-context'))+'&side=head');var body=await res.json();if(!res.ok)throw new Error(body.message||body.error||'load failed');panel.textContent=body.content;panel.hidden=false;button.textContent='Reload head-side file';}catch(error){panel.textContent='Could not load surrounding code: '+(error&&error.message?error.message:error);panel.hidden=false;button.textContent='Retry';}finally{button.disabled=false;}});
     var wizardRoot=document.querySelector('[data-guided-wizard]');
     function wizardStepForHash(hash){if(hash==='#compare'||hash==='#attention')return 'compare';if(hash==='#publish')return 'publish';return 'review';}
     function selectWizardStep(step,updateHash){var input=document.getElementById('gd-step-'+step);if(!input)return;input.checked=true;if(window.__maomaoPierre&&window.__maomaoPierre.setGuidedComparisonVisible)window.__maomaoPierre.setGuidedComparisonVisible(step==='compare');document.dispatchEvent(new CustomEvent('guided:wizard-step',{detail:{step:step}}));if(updateHash&&window.history&&history.replaceState)history.replaceState(null,'','#'+step);}

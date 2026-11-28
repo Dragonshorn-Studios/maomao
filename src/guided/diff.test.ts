@@ -250,7 +250,7 @@ Binary files a/a.png and b/a.png differ
           schema_version: 1,
           kind: "guided_walkthrough",
           intent: { text: "Intent <unsafe>", uncertainty: "No docs" },
-          changeMap: [{ path: "x.ts", summary: "Changed behavior", evidence: "hunk evidence" }],
+          changeMap: [{ path: "x.ts", summary: `Changed behavior ${"with complete evidence ".repeat(18)}`, evidence: `hunk evidence ${"without clipping ".repeat(14)}` }],
           flow: "Flow",
           decisions: [],
           tests: "Tests unavailable",
@@ -265,6 +265,9 @@ Binary files a/a.png and b/a.png differ
     expect(ready).toContain("independent · no findings or verdicts");
     expect(ready).toContain('data-file-primer data-path="x.ts"');
     expect(ready).toContain("Changed behavior");
+    expect(ready).toContain("with complete evidence with complete evidence");
+    expect(ready).toContain("without clipping without clipping");
+    expect(ready).not.toContain("with complete evidence…");
     expect(ready).toContain("Full exploration evidence");
   });
 
