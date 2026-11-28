@@ -2263,37 +2263,47 @@ export class JobStore {
       .run(pullUpdatedAt ?? null, nowIso(), repoFullName, prNumber, pullUpdatedAt ?? null, pullUpdatedAt ?? null);
   }
 
-  closeMissingGuidedInboxRepos(openRepoFullNames: string[]): void {
+  closeMissingGuidedInboxRepos(openRepoFullNames: string[], unchangedSince?: string): void {
     const now = nowIso();
+    const untouched = unchangedSince ? "AND updated_at < ?" : "";
+    const args = unchangedSince ? [unchangedSince] : [];
     if (openRepoFullNames.length === 0) {
-      this.db.prepare(`UPDATE guided_inbox_pulls SET state = 'closed', updated_at = ? WHERE provider = 'github' AND provider_instance = 'github.com' AND state = 'open'`).run(now);
+      this.db.prepare(`UPDATE guided_inbox_pulls SET state = 'closed', updated_at = ? WHERE provider = 'github' AND provider_instance = 'github.com' AND state = 'open' ${untouched}`).run(now, ...args);
       return;
     }
     const placeholders = openRepoFullNames.map(() => "?").join(", ");
     this.db
       .prepare(
         `UPDATE guided_inbox_pulls SET state = 'closed', updated_at = ?
-         WHERE provider = 'github' AND provider_instance = 'github.com' AND state = 'open' AND repo_full_name NOT IN (${placeholders})`,
+         WHERE provider = 'github' AND provider_instance = 'github.com' AND state = 'open' AND repo_full_name NOT IN (${placeholders}) ${untouched}`,
       )
-      .run(now, ...openRepoFullNames);
+      .run(now, ...openRepoFullNames, ...args);
   }
 
-  closeMissingGuidedInboxPulls(repoFullName: string, openPrNumbers: number[]): void {
+  closeMissingGuidedInboxPulls(repoFullName: string, openPrNumbers: number[], unchangedSince?: string): void {
     const now = nowIso();
+    const untouched = unchangedSince ? "AND updated_at < ?" : "";
+    const args = unchangedSince ? [unchangedSince] : [];
     if (openPrNumbers.length === 0) {
-      this.db.prepare(`UPDATE guided_inbox_pulls SET state = 'closed', updated_at = ? WHERE provider = 'github' AND provider_instance = 'github.com' AND repo_full_name = ? AND state = 'open'`).run(now, repoFullName);
+      this.db.prepare(`UPDATE guided_inbox_pulls SET state = 'closed', updated_at = ? WHERE provider = 'github' AND provider_instance = 'github.com' AND repo_full_name = ? AND state = 'open' ${untouched}`).run(now, repoFullName, ...args);
       return;
     }
     const placeholders = openPrNumbers.map(() => "?").join(", ");
     this.db
       .prepare(
         `UPDATE guided_inbox_pulls SET state = 'closed', updated_at = ?
-         WHERE provider = 'github' AND provider_instance = 'github.com' AND repo_full_name = ? AND state = 'open' AND pr_number NOT IN (${placeholders})`,
+         WHERE provider = 'github' AND provider_instance = 'github.com' AND repo_full_name = ? AND state = 'open' AND pr_number NOT IN (${placeholders}) ${untouched}`,
       )
-      .run(now, repoFullName, ...openPrNumbers);
+      .run(now, repoFullName, ...openPrNumbers, ...args);
+  }
+
+  pruneClosedGuidedInboxPulls(retentionMs = 30 * 24 * 60 * 60 * 1000): void {
+    const cutoff = new Date(Date.now() - retentionMs).toISOString();
+    this.db.prepare(`DELETE FROM guided_inbox_pulls WHERE state = 'closed' AND updated_at < ?`).run(cutoff);
   }
 
   listGuidedInboxPulls(): GuidedInboxPullRow[] {
+    this.pruneClosedGuidedInboxPulls();
     return this.db
       .prepare(
         `SELECT * FROM guided_inbox_pulls

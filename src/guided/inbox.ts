@@ -4,6 +4,7 @@ import { enumerateGithubInstallationRepositories } from "../github/enumerate.js"
 import type { JobStore } from "../jobs/store.js";
 import type { GuidedActor } from "./store.js";
 import type { ForgeConnectionStore } from "../forge/connections.js";
+import { nowIso } from "../util.js";
 
 export const GUIDED_INBOX_PAGE_SIZE = 25;
 
@@ -69,6 +70,7 @@ export async function refreshGuidedInbox(input: {
   const github = input.github;
   const errors: string[] = [];
   let pulls = 0;
+  const enumerationStartedAt = nowIso();
   let repos: Awaited<ReturnType<typeof enumerateGithubInstallationRepositories>> = [];
   try {
     repos = await enumerateGithubInstallationRepositories(input.github as Pick<GithubPort, "listAppInstallations" | "listInstallationRepositories">, input.config, "guided inbox sync", { limit: Number.POSITIVE_INFINITY, strict: true });
@@ -79,6 +81,7 @@ export async function refreshGuidedInbox(input: {
     const slash = repo.fullName.indexOf("/");
     const owner = repo.fullName.slice(0, slash);
     const name = repo.fullName.slice(slash + 1);
+    const listingStartedAt = nowIso();
     try {
       const openPulls = await github.listOpenPulls!(repo.installationId, owner, name);
       for (const pull of openPulls) {
@@ -99,13 +102,13 @@ export async function refreshGuidedInbox(input: {
           reviewRequested: pull.requestedReviewers === undefined ? undefined : pull.requestedReviewers.length > 0,
         });
       }
-      input.store.closeMissingGuidedInboxPulls(repo.fullName, openPulls.map((pull) => pull.prNumber));
+      input.store.closeMissingGuidedInboxPulls(repo.fullName, openPulls.map((pull) => pull.prNumber), listingStartedAt);
       pulls += openPulls.length;
     } catch (error) {
       errors.push(`${repo.fullName}: synchronization failed (${error instanceof Error ? error.message : String(error)})`);
     }
   });
-  input.store.closeMissingGuidedInboxRepos(repos.map((repo) => repo.fullName));
+  input.store.closeMissingGuidedInboxRepos(repos.map((repo) => repo.fullName), enumerationStartedAt);
   return { repos: repos.length, pulls, errors };
 }
 

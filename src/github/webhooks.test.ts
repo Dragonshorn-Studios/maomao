@@ -1751,6 +1751,10 @@ describe("pull_request.closed merge cancellation", () => {
     expect(result.status).toBe(200);
     expect(result.body.cancelled).toBe(0);
     expect(result.body.cancelledJobIds).toEqual([]);
+    const cached = (store as unknown as { db: { prepare(sql: string): { get(): { count: number } } } })
+      .db.prepare("SELECT COUNT(*) AS count FROM guided_inbox_pulls")
+      .get();
+    expect(cached.count).toBe(0);
   });
 });
 
