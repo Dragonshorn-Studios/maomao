@@ -118,6 +118,68 @@ function jsJson(value: unknown): string {
   return JSON.stringify(value).replace(/</g, "\\u003c");
 }
 
+function fileIconLabel(path: string): string {
+  const ext = path.includes(".") ? path.split(".").pop()!.slice(0, 4).toLowerCase() : path.split("/").pop()!.slice(0, 4).toLowerCase();
+  return ext || "file";
+}
+
+function inlineCommentsFor(comments: GuidedCommentView[] | undefined, file: GuidedDiffFile, line: GuidedDiffFile["hunks"][number]["lines"][number]): GuidedCommentView[] {
+  const lineNumber = line.kind === "del" ? line.oldLine : line.newLine;
+  const side = line.kind === "del" ? "LEFT" : "RIGHT";
+  if (!lineNumber) return [];
+  return (comments ?? []).filter((comment) => !comment.deletedAt && comment.kind === "inline" && comment.path === file.path && comment.side === side && comment.line === lineNumber);
+}
+
+function guidedInlineCommentHtml(comment: GuidedCommentView): string {
+  return `<tr class="gd-inline-note-row"><td colspan="4"><article class="gd-comment gd-comment--inline" data-client-id="${escapeHtml(comment.clientId)}" data-kind="inline" data-path="${escapeHtml(comment.path ?? "")}" data-side="${escapeHtml(comment.side ?? "")}" data-line="${comment.line ?? ""}" data-severity="${escapeHtml(comment.severity ?? "")}" data-category="${escapeHtml(comment.category ?? "")}" data-publishable="${comment.publishable ? "1" : ""}" data-anchor-status="${escapeHtml(comment.anchorStatus)}">
+    <div class="gd-comment-head"><strong>You</strong><span class="muted">${comment.publishable ? "candidate GitHub comment" : "private note"}${comment.severity ? ` · ${escapeHtml(comment.severity)}` : ""}</span><button type="button" class="if-button if-button--sm" data-edit-comment="${escapeHtml(comment.clientId)}">Edit</button><button type="button" class="if-button if-button--sm" data-delete-comment="${escapeHtml(comment.clientId)}">Delete</button></div>
+    <p class="gd-comment-body">${escapeHtml(comment.body)}</p>
+  </article></td></tr>`;
+}
+
+interface GuidedInlineAnnotation {
+  side: "additions" | "deletions";
+  lineNumber: number;
+  metadata: {
+    source: "human" | "maomao";
+    summary: string;
+    body?: string;
+    severity?: string;
+    clientId?: string;
+    publishable?: boolean;
+    category?: string;
+    anchorStatus?: "anchored" | "unplaced";
+    path?: string;
+    side?: "LEFT" | "RIGHT";
+    line?: number;
+    match?: string;
+  };
+}
+
+function guidedAnnotationsFor(file: GuidedDiffFile, comments: GuidedCommentView[] | undefined, comparison: GuidedComparisonView | undefined): GuidedInlineAnnotation[] {
+  const annotations: GuidedInlineAnnotation[] = [];
+  for (const comment of comments ?? []) {
+    if (comment.deletedAt || comment.kind !== "inline" || comment.anchorStatus === "unplaced" || comment.path !== file.path || !comment.line || !comment.side) continue;
+    annotations.push({
+      side: comment.side === "LEFT" ? "deletions" : "additions",
+      lineNumber: comment.line,
+      metadata: { source: "human", summary: comment.body, body: comment.body, severity: comment.severity ?? undefined, clientId: comment.clientId, publishable: comment.publishable, category: comment.category ?? undefined, anchorStatus: comment.anchorStatus, path: comment.path, side: comment.side, line: comment.line },
+    });
+  }
+  if (!comparison || comparison.state !== "ready" && comparison.state !== "stale") return annotations;
+  const addMaomao = (side: GuidedComparisonSide, match: string) => {
+    if (side.path !== file.path || !side.line) return;
+    annotations.push({
+      side: "additions",
+      lineNumber: side.line,
+      metadata: { source: "maomao", summary: side.summary, body: side.body, severity: side.severity, match },
+    });
+  };
+  for (const pair of [...comparison.agreements, ...comparison.uncertain]) addMaomao(pair.maomao, pair.match === "agreement" ? "same issue" : "possible match");
+  for (const item of comparison.maomaoOnly) addMaomao(item, "Maomao only");
+  return annotations;
+}
+
 function guidedDiffLineHtml(file: GuidedDiffFile, hunkIndex: number, line: GuidedDiffFile["hunks"][number]["lines"][number], baseSha = "", headSha = "", commentable = false): string {
   const side = line.kind === "del" ? "LEFT" : "RIGHT";
   const lineNumber = line.kind === "del" ? line.oldLine : line.newLine;
@@ -145,34 +207,24 @@ function severityOptions(value = ""): string {
 
 export function renderGuidedDraftPanel(input: { session: GuidedSessionView; comments: GuidedCommentView[]; csrfToken?: string; readOnly?: boolean }): string {
   if (input.readOnly) return "";
-  const active = input.comments.filter((comment) => !comment.deletedAt);
+  const active = input.comments.filter((comment) => !comment.deletedAt && (comment.kind === "general" || comment.anchorStatus === "unplaced"));
+  const hasUnplaced = active.some((comment) => comment.anchorStatus === "unplaced");
   return `<section class="config-section gd-human-draft" data-guided-draft data-session-id="${input.session.id}" data-version="${input.session.version}" data-csrf="${escapeHtml(input.csrfToken ?? "")}">
     <div class="gd-head"><h2>Your private draft</h2><span class="gd-save-state" data-save-state data-state="saved">Saved privately</span></div>
     <p class="error if-banner if-banner--danger" data-guided-bundle-error hidden>Guided draft enhancement failed to load. Run the asset build; these controls require JavaScript.</p>
     <p class="muted">Nothing here publishes to GitHub. Notes and the verdict are actor-private until a later deliberate publish step.</p>
     <noscript><p class="notice if-banner if-banner--warning">Guided notes and publication preview require JavaScript. The diff remains readable, but draft controls are inactive.</p></noscript>
     <div class="gd-draft-grid">
-      <label>Draft summary <textarea data-draft-summary rows="5" maxlength="10000" placeholder="Overall human review summary (optional)">${escapeHtml(input.session.draftSummary)}</textarea></label>
+      <label>Draft summary <textarea data-draft-summary rows="3" maxlength="10000" placeholder="Overall human review summary (optional)">${escapeHtml(input.session.draftSummary)}</textarea></label>
       <label>Verdict <select data-draft-verdict>
         <option value="">No verdict required</option>
         ${["COMMENT", "APPROVE", "REQUEST_CHANGES"].map((verdict) => `<option value="${verdict}"${input.session.draftVerdict === verdict ? " selected" : ""}>${verdict.replaceAll("_", " ")}</option>`).join("")}
       </select></label>
     </div>
-    <h3>Notes</h3>
-    <div data-comment-list>${active.length ? active.map(renderGuidedComment).join("\n") : `<p class="muted">No notes yet. Use a diff line for an inline note, or add a general note below.</p>`}</div>
-    <div class="gd-inline-editor" data-inline-editor hidden>
-      <h4>Inline note <span class="muted" data-inline-target></span></h4>
-      <input type="hidden" data-comment-client-id/>
-      <label>Note <textarea data-comment-body rows="4" maxlength="4000" required></textarea></label>
-      <div class="gd-inline-fields">
-        <label>Severity <select data-comment-severity>${severityOptions()}</select></label>
-        <label>Category <input data-comment-category maxlength="80" placeholder="optional"/></label>
-        <label class="gd-check"><input type="checkbox" data-comment-publishable/> Candidate GitHub comment</label>
-      </div>
-      <button type="button" class="if-button if-button--primary" data-save-inline>Save inline note</button>
-      <button type="button" class="if-button" data-cancel-inline>Cancel</button>
-      <p class="muted">Unchecked stays private. Unplaced stale-hunk notes cannot be candidates until re-anchored.</p>
-    </div>
+    <div class="gd-step-actions"><button type="button" class="if-button if-button--primary" data-goto-step="compare">Continue to comparison</button><span class="muted">Inline notes save automatically while you review.</span></div>
+    <details class="gd-draft-details"${hasUnplaced ? " open" : ""}><summary>General notes, stale notes, and publication controls</summary>
+    <h3>General and unplaced notes</h3>
+    <div data-comment-list>${active.length ? active.map(renderGuidedComment).join("\n") : `<p class="muted">No general notes yet. Inline notes appear directly in the diff.</p>`}</div>
     <form data-general-form class="gd-general-form">
       <h4>General note</h4>
       <input type="hidden" data-comment-client-id/>
@@ -189,6 +241,20 @@ export function renderGuidedDraftPanel(input: { session: GuidedSessionView; comm
       <button type="button" class="if-button if-button--primary" data-preview-publish>Preview publication payload</button>
     </div>
     <div data-preview-output class="gd-preview-output" aria-live="polite"></div>
+    </details>
+    <div class="gd-inline-editor" data-inline-editor hidden>
+      <h4>Inline note <span class="muted" data-inline-target></span></h4>
+      <input type="hidden" data-comment-client-id/>
+      <label>Note <textarea data-comment-body rows="4" maxlength="4000" required></textarea></label>
+      <div class="gd-inline-fields">
+        <label>Severity <select data-comment-severity>${severityOptions()}</select></label>
+        <label>Category <input data-comment-category maxlength="80" placeholder="optional"/></label>
+        <label class="gd-check"><input type="checkbox" data-comment-publishable/> Candidate GitHub comment</label>
+      </div>
+      <button type="button" class="if-button if-button--primary" data-save-inline>Save inline note</button>
+      <button type="button" class="if-button" data-cancel-inline>Cancel</button>
+      <p class="muted">Unchecked stays private. Unplaced stale-hunk notes cannot be candidates until re-anchored.</p>
+    </div>
   </section>`;
 }
 
@@ -461,6 +527,7 @@ export function renderGuidedComparisonPanel(input: { comparison?: GuidedComparis
     ${outsideSection}
     ${excluded}
     <details class="gd-inactive"><summary>Suppressed or resolved Maomao findings (${comparison.summary.inactive})</summary>${verboseList(comparison.inactiveMaomao, "No suppressed or resolved findings.")}</details>
+    <div class="gd-step-actions"><button type="button" class="if-button if-button--primary" data-goto-step="publish">Continue to publish preview</button></div>
   </section>`;
 }
 
@@ -491,7 +558,9 @@ export function renderGuidedPublishPanel(input: { publish?: GuidedPublishPanelVi
   return `<section id="publish" class="config-section gd-human-publish-panel">
     <div class="gd-head"><h2>Publish as human</h2><span class="job-chip">${escapeHtml(publish.state)}</span></div>
     <p class="muted">${escapeHtml(publish.message)}${publish.scope ? ` Granted scope: ${escapeHtml(publish.scope)}.` : ""} Bot publication semantics are unchanged.</p>
+    <div class="gd-publish-preview-box" data-guided-publish-preview data-session-id="${input.sessionId}"><div class="gd-head"><h3>Publication preview</h3><button type="button" class="if-button if-button--sm" data-load-publish-preview>Refresh exact preview</button></div><div data-publish-preview-output><p class="muted">Loading the exact review body and selected inline comments…</p></div></div>
     ${published}${connect}${confirm}${disconnect}
+    <section class="gd-maomao-discussions" data-guided-discussions data-session-id="${input.sessionId}" data-csrf="${escapeHtml(input.csrfToken ?? "")}"><h3>Published Maomao threads</h3><div data-discussion-list><p class="muted">Loading unresolved threads…</p></div></section>
   </section>`;
 }
 
@@ -500,6 +569,7 @@ export interface GuidedAttentionPanelView {
   state: "pending" | "decided" | "informational";
   profile: string;
   message: string;
+  optional?: boolean;
   decision?: { action: string; actor: string; reasonTag: string; createdAt: string };
 }
 
@@ -514,11 +584,12 @@ export function renderGuidedAttentionPanel(input: { attention?: GuidedAttentionP
     <div class="gd-compare-actions">
       <button class="if-button if-button--primary" type="submit" name="action" value="review_myself">Review myself</button>
       <button class="if-button" type="submit" name="action" value="delegate_to_maomao">Delegate this review to Maomao</button>
+      ${attention.optional ? `<button class="if-button gd-button-warning" type="submit" name="action" value="skip_guided_review">Continue without Guided Review</button>` : ""}
     </div>
   </form>` : "";
   return `<section id="attention" class="config-section gd-attention" data-guided-attention>
     <div class="gd-head"><h2>Human attention gate</h2><span class="job-chip">${escapeHtml(attention.state)}</span></div>
-    <p class="muted">${escapeHtml(attention.message)} Exact-SHA decisions are auditable and a newer head invalidates them.</p>
+    <p class="muted">${escapeHtml(attention.message)} Exact-SHA decisions are auditable and a newer head invalidates them.${attention.optional ? " This profile keeps the gate green without a decision; the warning action only records an explicit opt-out." : ""}</p>
     ${decision}${controls}
   </section>`;
 }
@@ -549,27 +620,42 @@ export function renderGuidedDiffWorkspace(input: {
   }
   const statuses = [...new Set(input.files.map((file) => file.status))].sort();
   const filtered = input.files.filter((file) =>
-    (!input.statusFilter || input.statusFilter === "all" || file.status === input.statusFilter) &&
-    (!input.fileFilter || file.path.toLowerCase().includes(input.fileFilter.toLowerCase())),
+    (!input.statusFilter || input.statusFilter === "all" || file.status === input.statusFilter),
   );
   const total = input.files.reduce((sum, file) => sum + file.additions + file.deletions, 0);
   const viewed = new Set(input.viewedFiles ?? []);
   const walkthroughPayload = input.walkthrough && (input.walkthrough.status === "ready" || input.walkthrough.status === "stale") ? input.walkthrough.payload : undefined;
-  const tree = filtered.map((file, index) => `<li><a href="#guided-file-${index}" data-guided-file-link>${viewed.has(file.path) ? "✓ " : ""}${escapeHtml(file.path)}</a> <span class="muted">${escapeHtml(file.status)} +${file.additions} −${file.deletions}</span></li>`).join("");
+  const treeItems = filtered.map((file, index) => ({ file, index }));
+  const tree = treeItems.map(({ file, index }) => `<li><a href="#guided-file-${index}" data-guided-file-link><span class="gd-file-icon" aria-hidden="true">${escapeHtml(fileIconLabel(file.path))}</span><span class="gd-tree-path">${viewed.has(file.path) ? "✓ " : ""}${escapeHtml(file.path)}</span></a><span class="muted">+${file.additions} −${file.deletions}</span></li>`).join("");
+  type TreeNode = { dirs: Map<string, TreeNode>; files: typeof treeItems };
+  const root: TreeNode = { dirs: new Map(), files: [] };
+  for (const item of treeItems) {
+    const parts = item.file.path.split("/");
+    let node = root;
+    for (const part of parts.slice(0, -1)) {
+      let next = node.dirs.get(part);
+      if (!next) node.dirs.set(part, next = { dirs: new Map(), files: [] });
+      node = next;
+    }
+    node.files.push(item);
+  }
+  const renderTreeNode = (node: TreeNode): string => `${node.files.map(({ file, index }) => `<li><a href="#guided-file-${index}" data-guided-file-link><span class="gd-file-icon" aria-hidden="true">${escapeHtml(fileIconLabel(file.path))}</span><span class="gd-tree-path">${viewed.has(file.path) ? "✓ " : ""}${escapeHtml(file.path.split("/").pop() ?? file.path)}</span></a><span class="muted">+${file.additions} −${file.deletions}</span></li>`).join("")}${[...node.dirs.entries()].map(([dir, child]) => `<li class="gd-tree-dir"><details open><summary>${escapeHtml(dir)}/</summary><ol>${renderTreeNode(child)}</ol></details></li>`).join("")}`;
+  const treeView = `<ol>${renderTreeNode(root)}</ol>`;
   const rendered = filtered.map((file, index) => {
     const filePrimer = primerChangeFor(walkthroughPayload, file.path);
     const hunks = file.hunks.map((hunk, hunkIndex) => `<details class="gd-hunk" open>
       <summary>${escapeHtml(hunk.header)}</summary>
-      <table class="gd-table"><tbody>${hunk.lines.map((line) => guidedDiffLineHtml(file, hunkIndex, line, input.baseSha, input.headSha, Boolean(input.sessionView && !input.readOnly))).join("\n")}</tbody></table>
+      <table class="gd-table"><tbody>${hunk.lines.map((line) => `${guidedDiffLineHtml(file, hunkIndex, line, input.baseSha, input.headSha, Boolean(input.sessionView && !input.readOnly))}${inlineCommentsFor(input.comments, file, line).map(guidedInlineCommentHtml).join("")}`).join("\n")}</tbody></table>
     </details>`).join("\n");
     const empty = file.binary ? `<p class="muted">Binary file changed; inline diff is unavailable.</p>` : file.hunks.length === 0 ? `<p class="muted">No textual hunks are available for this file.</p>` : "";
     return `<article class="gd-file${viewed.has(file.path) ? " gd-viewed" : ""}" id="guided-file-${index}" data-guided-file data-path="${escapeHtml(file.path)}" data-status="${escapeHtml(file.status)}">
-      <h3>${escapeHtml(file.path)} <span class="muted">${escapeHtml(file.status)} +${file.additions} −${file.deletions}</span></h3>
+      <h3 class="gd-file-header"><span class="gd-file-title"><span class="gd-file-icon" aria-hidden="true">${escapeHtml(fileIconLabel(file.path))}</span><span>${escapeHtml(file.path)}</span></span><span class="muted">${escapeHtml(file.status)} +${file.additions} −${file.deletions}</span>${input.sessionView && !input.readOnly ? `<label class="gd-viewed-check"><input type="checkbox" data-guided-viewed-toggle data-path="${escapeHtml(file.path)}"${viewed.has(file.path) ? " checked" : ""}/> Viewed</label>` : ""}</h3>
       <div class="gd-file-primer" data-file-primer data-path="${escapeHtml(file.path)}"${walkthroughPayload ? "" : " hidden"}>${renderFilePrimerContent(filePrimer)}</div>
       ${file.truncated ? `<p class="notice if-banner if-banner--warning">This file exceeded the per-file rendering bound and is partially shown.</p>` : ""}
-      <div class="guided-pierre-file" data-guided-pierre data-path="${escapeHtml(file.path)}" data-commentable="${input.sessionView && !input.readOnly ? "1" : ""}">
+      <div class="guided-pierre-file" data-guided-pierre data-path="${escapeHtml(file.path)}" data-old-path="${escapeHtml(file.oldPath ?? file.path)}" data-session-id="${input.sessionId ?? ""}" data-commentable="${input.sessionView && !input.readOnly ? "1" : ""}">
         <div class="gd-fallback">${hunks}${empty}</div>
         <script type="application/json" class="guided-patch-raw">${jsJson(file.patch)}</script>
+        <script type="application/json" class="guided-annotations-raw">${jsJson(guidedAnnotationsFor(file, input.comments, input.comparison))}</script>
       </div>
       ${input.sessionId ? `<details class="gd-context"><summary>Read-only surrounding code at the pinned SHA</summary><button type="button" class="if-button if-button--sm" data-load-context="${escapeHtml(file.path)}">Load head-side file</button><pre class="gd-context-panel" hidden></pre><p class="muted">Path-boundary validated; oversized or unavailable files fail explicitly.</p></details>` : ""}
     </article>`;
@@ -586,13 +672,12 @@ export function renderGuidedDiffWorkspace(input: {
     <p class="error if-banner if-banner--danger" role="alert" data-guided-write-error hidden>Could not save viewed-file progress.</p>
     ${input.diffTruncated ? `<p class="notice if-banner if-banner--warning">The forge diff reached the configured byte bound. Hidden changes are not implied to be reviewed.</p>` : ""}
     <form class="trigger job-filters" method="get">
-      <label>File filter <input type="search" name="file" value="${escapeHtml(input.fileFilter ?? "")}" placeholder="path"/></label>
       <label>Status <select name="status"><option value="all">All statuses</option>${statuses.map((status) => `<option value="${status}"${input.statusFilter === status ? " selected" : ""}>${status}</option>`).join("")}</select></label>
       <button class="if-button if-button--sm" type="submit">Filter diff</button>
     </form>
-    <div class="gd-layout"><nav class="gd-tree" aria-label="Changed files"><div class="gd-tree-head">Changed files</div><ol>${tree}</ol></nav><div class="gd-files">${rendered || `<div class="empty">No files match this diff filter.</div>`}</div></div>
+    <div class="gd-layout"><nav class="gd-tree" aria-label="Changed files"><div class="gd-tree-head"><span>Changed files</span><label class="gd-tree-toggle"><input type="checkbox" data-guided-tree-toggle/> Tree</label></div><div class="gd-tree-flat"><ol>${tree}</ol></div><div class="gd-tree-nested">${treeView}</div></nav><div class="gd-files">${rendered || `<div class="empty">No files match this diff filter.</div>`}</div></div>
   </section>`;
-  const reviewStep = `${explorationPrimer}${diffSection}<div class="gd-review-secondary">${draftPanel}${walkthroughPanel}</div>`;
+  const reviewStep = `${explorationPrimer}${draftPanel}${diffSection}<div class="gd-review-secondary">${walkthroughPanel}</div>`;
   return `<div class="gd-wizard" data-guided-wizard>
     <input class="gd-wizard-radio" type="radio" name="gd-wizard-step" id="gd-step-review" checked/>
     <input class="gd-wizard-radio" type="radio" name="gd-wizard-step" id="gd-step-compare"/>
@@ -611,19 +696,19 @@ export function renderGuidedDiffWorkspace(input: {
   </div>
   <script>
   (function(){
-    var guidedSessionId=${jsJson(input.sessionId ?? null)},guidedViewed=${jsJson(input.viewedFiles ?? [])};
+    var guidedSessionId=${jsJson(input.sessionId ?? null)};
     function move(delta){var rows=Array.from(document.querySelectorAll('[data-anchor-line]'));if(!rows.length)return;var current=document.activeElement&&rows.indexOf(document.activeElement);var next=rows[(current<0?0:current+delta+rows.length)%rows.length];next.tabIndex=-1;next.focus();next.scrollIntoView({block:'center'});}
     document.addEventListener('keydown',function(event){if(event.target&&/INPUT|TEXTAREA|SELECT/.test(event.target.tagName))return;if(event.key==='j'){event.preventDefault();move(1);}if(event.key==='k'){event.preventDefault();move(-1);}});
-    function markViewed(path){if(!path||guidedViewed.indexOf(path)>=0)return;guidedViewed.push(path);if(!window.__guidedDraftListenerReady){window.__guidedViewedPending=window.__guidedViewedPending||[];window.__guidedViewedPending.push(path);}document.dispatchEvent(new CustomEvent("guided:viewed",{detail:{path:path}}));var file=document.querySelector('[data-guided-file][data-path="'+CSS.escape(path)+'"]');if(file)file.classList.add("gd-viewed");}
-    if('IntersectionObserver' in window){var seen=new WeakSet(),observer=new IntersectionObserver(function(entries){entries.forEach(function(entry){if(entry.isIntersecting&&!seen.has(entry.target)){seen.add(entry.target);setTimeout(function(){markViewed(entry.target.getAttribute('data-path')||'')},500);}})},{threshold:.35});document.querySelectorAll('[data-guided-file]').forEach(function(file){observer.observe(file)});}
+    var treeToggle=document.querySelector('[data-guided-tree-toggle]'),treeNav=document.querySelector('.gd-tree');
+    if(treeToggle&&treeNav){treeToggle.checked=localStorage.getItem('maomao-guided-file-tree')==='tree';treeNav.classList.toggle('gd-tree-mode',treeToggle.checked);treeToggle.addEventListener('change',function(){localStorage.setItem('maomao-guided-file-tree',treeToggle.checked?'tree':'flat');treeNav.classList.toggle('gd-tree-mode',treeToggle.checked);});}
     document.addEventListener('click',async function(event){var button=event.target.closest('[data-load-context]');if(!button||!guidedSessionId)return;var details=button.closest('details'),panel=details&&details.querySelector('.gd-context-panel');if(!panel)return;button.disabled=true;button.textContent='Loading…';try{var res=await fetch('/api/guided-review/sessions/'+guidedSessionId+'/file?path='+encodeURIComponent(button.getAttribute('data-load-context'))+'&side=head');var body=await res.json();if(!res.ok)throw new Error(body.message||body.error||'load failed');panel.textContent=body.content;panel.hidden=false;button.textContent='Reload head-side file';}catch(error){panel.textContent='Could not load surrounding code: '+(error&&error.message?error.message:error);panel.hidden=false;button.textContent='Retry';}finally{button.disabled=false;}});
     var wizardRoot=document.querySelector('[data-guided-wizard]');
     function wizardStepForHash(hash){if(hash==='#compare'||hash==='#attention')return 'compare';if(hash==='#publish')return 'publish';return 'review';}
-    function selectWizardStep(step,updateHash){var input=document.getElementById('gd-step-'+step);if(!input)return;input.checked=true;if(updateHash&&window.history&&history.replaceState)history.replaceState(null,'','#'+step);}
+    function selectWizardStep(step,updateHash){var input=document.getElementById('gd-step-'+step);if(!input)return;input.checked=true;if(window.__maomaoPierre&&window.__maomaoPierre.setGuidedComparisonVisible)window.__maomaoPierre.setGuidedComparisonVisible(step==='compare');document.dispatchEvent(new CustomEvent('guided:wizard-step',{detail:{step:step}}));if(updateHash&&window.history&&history.replaceState)history.replaceState(null,'','#'+step);}
     if(wizardRoot){
       wizardRoot.addEventListener('change',function(event){if(event.target&&event.target.matches('.gd-wizard-radio'))selectWizardStep(event.target.id.replace('gd-step-',''),true);});
       var syncWizard=function(){var hash=window.location.hash||'#review';var step=wizardStepForHash(hash);selectWizardStep(step,false);if(hash.length>1&&step==='review'){var target=document.getElementById(hash.slice(1));if(target)target.scrollIntoView({block:'start'});}};
-      document.addEventListener('click',function(event){var link=event.target&&event.target.closest?event.target.closest('a[href^="#f"],a[href^="#guided-file-"]'):null;if(!link)return;var hash=link.getAttribute('href')||'';selectWizardStep('review',false);setTimeout(function(){var target=document.getElementById(hash.slice(1));if(target)target.scrollIntoView({block:'center'});},0);});
+      document.addEventListener('click',function(event){var stepButton=event.target&&event.target.closest?event.target.closest('[data-goto-step]'):null;if(stepButton){selectWizardStep(stepButton.getAttribute('data-goto-step'),true);window.scrollTo({top:0,behavior:'smooth'});return;}var link=event.target&&event.target.closest?event.target.closest('a[href^="#f"],a[href^="#guided-file-"]'):null;if(!link)return;var hash=link.getAttribute('href')||'';selectWizardStep('review',false);setTimeout(function(){var target=document.getElementById(hash.slice(1));if(target)target.scrollIntoView({block:'center'});},0);});
       syncWizard();window.addEventListener('hashchange',syncWizard);
     }
   })();

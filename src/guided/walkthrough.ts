@@ -19,6 +19,8 @@ import {
   type GuidedWalkthroughRow,
 } from "./walkthrough-store.js";
 
+export type GuidedReviewRunOptions = import("./walkthrough-store.js").GuidedWalkthroughRunOptions;
+
 export interface GuidedWalkthroughServiceDeps {
   config: Config;
   store: GuidedWalkthroughStore;
@@ -29,6 +31,8 @@ export interface GuidedWalkthroughServiceDeps {
   briefCache?: {
     getRepoBriefCache(provider: string, providerInstance: string, repoFullName: string, sha: string): { payload: string; created_at: string } | undefined;
   };
+  /** Guided Review overrides for the repository or exact-head review profile revision, snapshotted when a walkthrough is enqueued. */
+  resolveOptions?: (repoFullName: string, session?: GuidedReviewSessionRow) => GuidedReviewRunOptions | undefined;
 }
 
 function walkthroughWorkspaceRoot(workspaceRoot: string): string {
@@ -118,8 +122,17 @@ export class GuidedWalkthroughService {
     this.deps.store.recoverInterrupted();
   }
 
-  model(): string {
-    return this.deps.config.chat.model || "opencode-default";
+  private options(repoFullName: string, session?: GuidedReviewSessionRow): GuidedReviewRunOptions {
+    const profile = this.deps.resolveOptions?.(repoFullName, session) ?? {};
+    return {
+      model: profile.model || this.deps.config.chat.model || undefined,
+      timeoutMs: profile.timeoutMs || this.deps.config.chat.timeoutMs || undefined,
+      maxCostUsd: profile.maxCostUsd || this.deps.config.chat.maxCostUsd || undefined,
+    };
+  }
+
+  model(repoFullName?: string): string {
+    return (repoFullName ? this.options(repoFullName).model : this.deps.config.chat.model) || "opencode-default";
   }
 
   ensure(session: GuidedReviewSessionRow, installationId: number): GuidedWalkthroughRow {
@@ -132,7 +145,7 @@ export class GuidedWalkthroughService {
         baseSha: session.base_sha,
         headSha: session.head_sha,
       },
-      this.model(),
+      this.options(session.repo_full_name, session),
     );
     for (const stale of this.deps.store.listStaleCancellations(
       {
@@ -169,12 +182,20 @@ export class GuidedWalkthroughService {
     const run = this.generate(row, installationId, controller.signal)
       .catch((error) => {
         const secrets = [...githubSecrets(this.deps.config), ...opencodeEnvSecrets(process.env), ...providerAuthSecrets(process.env)];
-        const cancelled = controller.signal.aborted || this.deps.store.cancelRequested(row.id);
-        this.deps.store.markFailed(row.id, redactSecrets(error instanceof Error ? error.message : String(error), secrets), cancelled);
+        const latest = this.deps.store.get(row.id);
+        // A superseded generation can settle after its fingerprint is revived;
+        // the old abort must not overwrite the row's new pending/ready lifecycle.
+        const revived = controller.signal.aborted && latest !== undefined && (latest.status === "pending" || latest.status === "ready");
+        if (!revived) {
+          const cancelled = controller.signal.aborted || this.deps.store.cancelRequested(row.id);
+          this.deps.store.markFailed(row.id, redactSecrets(error instanceof Error ? error.message : String(error), secrets), cancelled);
+        }
       })
       .finally(() => {
         this.controllers.delete(row.fingerprint);
         this.runs.delete(row.fingerprint);
+        const latest = this.deps.store.get(row.id);
+        if (latest?.status === "pending" && latest.cancel_requested === 0) this.start(latest, installationId);
       });
     this.runs.set(row.fingerprint, run);
   }
@@ -247,10 +268,10 @@ export class GuidedWalkthroughService {
     try {
       const result = await this.deps.opencode.run({
         cwd: workspace.repoDir,
-        model: this.deps.config.chat.model,
+        model: row.model === "opencode-default" ? this.deps.config.chat.model : row.model,
         prompt: buildPrompt({ target, model: row.model }),
         files,
-        timeoutMs: Math.min(this.deps.config.chat.timeoutMs || 180_000, 240_000),
+        timeoutMs: row.timeout_ms ?? this.deps.config.chat.timeoutMs ?? 180_000,
         signal,
       });
       const text = result.text || result.stdout;
@@ -259,8 +280,9 @@ export class GuidedWalkthroughService {
         throw new Error(`walkthrough run failed (exit ${result.exitCode}): ${truncate(result.stderr.trim() || "no output", 300)}`);
       }
       if (text.length > GUIDED_WALKTHROUGH_OUTPUT_CHARS) throw new Error("walkthrough output exceeded the output bound");
-      if (this.deps.config.chat.maxCostUsd > 0 && (result.usage.cost ?? 0) > this.deps.config.chat.maxCostUsd) {
-        throw new Error(`walkthrough exceeded the configured cost ceiling ($${this.deps.config.chat.maxCostUsd.toFixed(2)})`);
+      const maxCostUsd = row.max_cost_usd ?? this.deps.config.chat.maxCostUsd ?? 0;
+      if (maxCostUsd > 0 && (result.usage.cost ?? 0) > maxCostUsd) {
+        throw new Error(`walkthrough exceeded the configured cost ceiling ($${maxCostUsd.toFixed(2)})`);
       }
       const payload = parsePayload(text);
       if (!payload) throw new Error("walkthrough output was not valid structured JSON");

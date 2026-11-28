@@ -28,6 +28,10 @@ import {
  *   router_model           optional provider/model
  *   verifier_model         optional provider/model (reconciliation verifier)
  *   verifier_timeout       optional timeout in SECONDS (decimals allowed)
+ *   guided_model           optional Guided Review walkthrough provider/model
+ *   guided_timeout         optional Guided Review timeout in SECONDS
+ *   guided_max_cost_usd    optional Guided Review cost ceiling
+ *   guided_poison_attention required | optional
  *   min_severity           severity enum value
  *   max_cost_usd           optional positive number
  *   max_tokens             optional positive integer
@@ -51,6 +55,10 @@ export interface ProfileFormValues {
   routerModel: string;
   verifierModel: string;
   verifierTimeoutSeconds: string;
+  guidedModel: string;
+  guidedTimeoutSeconds: string;
+  guidedMaxCostUsd: string;
+  guidedPoisonAttention: string;
   minSeverity: string;
   maxCostUsd: string;
   maxTokens: string;
@@ -80,6 +88,10 @@ export type ProfileFieldKey =
   | "router_model"
   | "verifier_model"
   | "verifier_timeout"
+  | "guided_model"
+  | "guided_timeout"
+  | "guided_max_cost_usd"
+  | "guided_poison_attention"
   | "min_severity"
   | "max_cost_usd"
   | "max_tokens"
@@ -101,6 +113,10 @@ export function initialProfileFormValues(): ProfileFormValues {
     routerModel: "",
     verifierModel: "",
     verifierTimeoutSeconds: "",
+    guidedModel: "",
+    guidedTimeoutSeconds: "",
+    guidedMaxCostUsd: "",
+    guidedPoisonAttention: "required",
     minSeverity: "info",
     maxCostUsd: "",
     maxTokens: "",
@@ -149,6 +165,10 @@ export function decodeProfileForm(body: Record<string, unknown>): ProfileFormVal
     routerModel: asString(body.router_model).trim(),
     verifierModel: asString(body.verifier_model).trim(),
     verifierTimeoutSeconds: asString(body.verifier_timeout),
+    guidedModel: asString(body.guided_model).trim(),
+    guidedTimeoutSeconds: asString(body.guided_timeout),
+    guidedMaxCostUsd: asString(body.guided_max_cost_usd).trim(),
+    guidedPoisonAttention: asString(body.guided_poison_attention) === "optional" ? "optional" : "required",
     minSeverity: asString(body.min_severity) || "info",
     maxCostUsd: asString(body.max_cost_usd).trim(),
     maxTokens: asString(body.max_tokens).trim(),
@@ -299,6 +319,20 @@ export function profileFormToDefinition(
     if (verifierTimeout !== undefined && verifierTimeout !== "invalid") verifier.timeoutMs = verifierTimeout;
     definition.verifier = verifier;
   }
+  const guidedModel = optionalString(values.guidedModel);
+  const guidedTimeout = timeoutToMs(values.guidedTimeoutSeconds);
+  if (guidedTimeout === "invalid") {
+    errors.guided_timeout = "timeout must be a positive number of seconds (max 30 minutes)";
+  }
+  const guidedCost = optionalPositive(values.guidedMaxCostUsd);
+  if (guidedCost === "invalid") errors.guided_max_cost_usd = "must be a positive number";
+  if (guidedModel !== undefined || (guidedTimeout !== undefined && guidedTimeout !== "invalid") || (guidedCost !== undefined && guidedCost !== "invalid") || values.guidedPoisonAttention === "optional") {
+    const guided: Record<string, unknown> = { poisonAlertAttention: values.guidedPoisonAttention === "optional" ? "optional" : "required" };
+    if (guidedModel !== undefined) guided.model = guidedModel;
+    if (guidedTimeout !== undefined && guidedTimeout !== "invalid") guided.timeoutMs = guidedTimeout;
+    if (guidedCost !== undefined && guidedCost !== "invalid") guided.maxCostUsd = guidedCost;
+    definition.guidedReview = guided;
+  }
   const cost = optionalPositive(values.maxCostUsd);
   if (cost === "invalid") errors.max_cost_usd = "must be a positive number";
   else if (cost !== undefined) definition.maxTotalCostUsd = cost;
@@ -361,6 +395,12 @@ function zodPathToFieldKey(path: PropertyKey[], formIndices: readonly number[]):
     if (index === "model") return "verifier_model";
     if (index === "timeoutMs") return "verifier_timeout";
   }
+  if (head === "guidedReview") {
+    if (index === "model") return "guided_model";
+    if (index === "timeoutMs") return "guided_timeout";
+    if (index === "maxCostUsd") return "guided_max_cost_usd";
+    if (index === "poisonAlertAttention") return "guided_poison_attention";
+  }
   if (head === "minPublishableSeverity") return "min_severity";
   if (head === "maxTotalCostUsd") return "max_cost_usd";
   if (head === "maxTotalTokens") return "max_tokens";
@@ -393,6 +433,7 @@ export function profileFormValuesFromDefinition(
     reviewers?: Array<{ role?: string; model?: string; timeoutMs?: number }>;
     routerModel?: string;
     verifier?: { model?: string; timeoutMs?: number };
+    guidedReview?: { model?: string; timeoutMs?: number; maxCostUsd?: number; poisonAlertAttention?: string };
     minPublishableSeverity?: string;
     maxTotalCostUsd?: number;
     maxTotalTokens?: number;
@@ -411,6 +452,10 @@ export function profileFormValuesFromDefinition(
     routerModel: def.routerModel ?? "",
     verifierModel: def.verifier?.model ?? "",
     verifierTimeoutSeconds: def.verifier?.timeoutMs != null ? String(def.verifier.timeoutMs / 1000) : "",
+    guidedModel: def.guidedReview?.model ?? "",
+    guidedTimeoutSeconds: def.guidedReview?.timeoutMs != null ? String(def.guidedReview.timeoutMs / 1000) : "",
+    guidedMaxCostUsd: def.guidedReview?.maxCostUsd != null ? String(def.guidedReview.maxCostUsd) : "",
+    guidedPoisonAttention: def.guidedReview?.poisonAlertAttention === "optional" ? "optional" : "required",
     minSeverity: def.minPublishableSeverity ?? "info",
     maxCostUsd: def.maxTotalCostUsd != null ? String(def.maxTotalCostUsd) : "",
     maxTokens: def.maxTotalTokens != null ? String(def.maxTotalTokens) : "",

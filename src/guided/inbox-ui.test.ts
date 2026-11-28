@@ -271,6 +271,18 @@ describe("Guided Review inbox", () => {
     expect(missingCapability.status).toBe(503);
     expect(((await missingCapability.json()) as { error: string }).error).toBe("guided_review_context_unavailable");
 
+    const absentGithub = githubFake();
+    absentGithub.getFileContent = async () => {
+      const error = new Error("not found") as Error & { status?: number };
+      error.status = 404;
+      throw error;
+    };
+    const absent = testApp(absentGithub);
+    const absentSession = openSession(absent.store);
+    const absentResponse = await absent.app.request(`/api/guided-review/sessions/${absentSession.id}/file?path=deleted.ts&side=head`, { headers: { cookie: auth.cookies } });
+    expect(absentResponse.status).toBe(200);
+    expect(await absentResponse.json()).toMatchObject({ path: "deleted.ts", side: "head", absent: true });
+
     const failingGithub = githubFake();
     failingGithub.getFileContent = async () => {
       throw new Error("upstream failed using webhook-secret");

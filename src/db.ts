@@ -404,6 +404,8 @@ function migrate(db: SqliteDb): void {
       head_sha TEXT NOT NULL,
       prompt_revision INTEGER NOT NULL,
       model TEXT NOT NULL,
+      timeout_ms INTEGER,
+      max_cost_usd REAL,
       status TEXT NOT NULL CHECK (status IN ('pending', 'running', 'ready', 'failed', 'cancelled', 'stale')),
       output_json TEXT NOT NULL DEFAULT '',
       error TEXT,
@@ -424,7 +426,7 @@ function migrate(db: SqliteDb): void {
       head_sha TEXT NOT NULL,
       actor_provider TEXT NOT NULL,
       actor_id TEXT NOT NULL,
-      action TEXT NOT NULL CHECK (action IN ('review_myself', 'delegate_to_maomao')),
+      action TEXT NOT NULL CHECK (action IN ('review_myself', 'delegate_to_maomao', 'skip_guided_review')),
       reason_tag TEXT NOT NULL,
       reason_detail TEXT,
       created_at TEXT NOT NULL,
@@ -445,6 +447,26 @@ function migrate(db: SqliteDb): void {
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL,
       UNIQUE (actor_provider, actor_id, provider, provider_instance)
+    );
+
+    CREATE TABLE IF NOT EXISTS guided_attention_decision_history (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      decision_id INTEGER NOT NULL,
+      provider TEXT NOT NULL,
+      provider_instance TEXT NOT NULL,
+      repo_full_name TEXT NOT NULL,
+      pr_number INTEGER NOT NULL,
+      head_sha TEXT NOT NULL,
+      actor_provider TEXT NOT NULL,
+      actor_id TEXT NOT NULL,
+      action TEXT NOT NULL CHECK (action IN ('review_myself', 'delegate_to_maomao', 'skip_guided_review')),
+      reason_tag TEXT NOT NULL,
+      reason_detail TEXT,
+      created_at TEXT NOT NULL,
+      superseded_at TEXT NOT NULL,
+      superseded_by_actor_provider TEXT NOT NULL,
+      superseded_by_actor_id TEXT NOT NULL,
+      replacement_action TEXT NOT NULL CHECK (replacement_action IN ('review_myself', 'delegate_to_maomao', 'skip_guided_review'))
     );
 
     CREATE TABLE IF NOT EXISTS guided_human_publications (
@@ -707,6 +729,8 @@ function migrate(db: SqliteDb): void {
     );
   `);
 
+    rebuildGuidedAttentionActions(db);
+
     // Legacy (pre-multi-forge) databases: rebuild the provider-scoped tables so
     // the scoped keys replace the repo-name-only ones. `rebuildTableScoped`
     // skips tables that already carry the provider columns (fresh databases).
@@ -723,6 +747,8 @@ function migrate(db: SqliteDb): void {
     CREATE INDEX IF NOT EXISTS idx_findings_pr ON findings(repo_full_name, pr_number, status);
     CREATE INDEX IF NOT EXISTS idx_findings_thread ON findings(github_thread_id);
     CREATE INDEX IF NOT EXISTS idx_findings_comment ON findings(github_comment_id);
+    CREATE INDEX IF NOT EXISTS idx_guided_attention_decisions_pull
+      ON guided_attention_decisions(provider, provider_instance, repo_full_name, pr_number, head_sha);
 
     CREATE INDEX IF NOT EXISTS idx_profile_revisions_name ON profile_revisions(name, status);
     CREATE INDEX IF NOT EXISTS idx_prompt_revisions_role ON prompt_revisions(role_id, status);
@@ -730,6 +756,8 @@ function migrate(db: SqliteDb): void {
     CREATE INDEX IF NOT EXISTS idx_stack_run_members_member_job ON stack_run_members(member_job_id, state);
   `);
 
+    ensureColumn(db, "guided_walkthroughs", "timeout_ms", "INTEGER");
+    ensureColumn(db, "guided_walkthroughs", "max_cost_usd", "REAL");
     ensureColumn(db, "jobs", "review_event", "TEXT");
     ensureColumn(db, "jobs", "review_event_reason", "TEXT");
     ensureColumn(db, "jobs", "aggregator_fallback", "INTEGER");
@@ -954,6 +982,22 @@ interface ColumnInfo {
  */
 const JOBS_DEDUP_UNIQUE =
   "UNIQUE (provider, provider_instance, repo_full_name, pr_number, head_sha, job_type, dedup_key)";
+
+function rebuildGuidedAttentionActions(db: SqliteDb): void {
+  const row = db
+    .prepare(`SELECT sql FROM sqlite_master WHERE type='table' AND name='guided_attention_decisions'`)
+    .get() as { sql: string } | undefined;
+  if (!row?.sql || row.sql.includes("'skip_guided_review'")) return;
+  const legacyPattern = /action\s+TEXT\s+NOT\s+NULL\s+CHECK\s*\(\s*action\s+IN\s*\(\s*'review_myself'\s*,\s*'delegate_to_maomao'\s*\)\s*\)/;
+  if (!legacyPattern.test(row.sql)) {
+    throw new Error(`Cannot migrate guided_attention_decisions: expected the legacy action CHECK constraint, got: ${row.sql}. Refusing to rebuild the table.`);
+  }
+  const newSql = row.sql.replace(
+    legacyPattern,
+    "action TEXT NOT NULL CHECK (action IN ('review_myself', 'delegate_to_maomao', 'skip_guided_review'))",
+  );
+  applyTableRebuild(db, "guided_attention_decisions", newSql);
+}
 
 function rebuildJobsForScopedJobType(db: SqliteDb): void {
   const row = db

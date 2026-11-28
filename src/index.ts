@@ -15,6 +15,7 @@ import { ChatService } from "./chat/service.js";
 import { ChatStore } from "./chat/store.js";
 import { GuidedWalkthroughStore } from "./guided/walkthrough-store.js";
 import { GuidedWalkthroughService } from "./guided/walkthrough.js";
+import { guidedReviewOptionsForSession } from "./guided/profile-options.js";
 import { GuidedHumanPublishStore } from "./guided/human-publish.js";
 import { oauthCallbackUrl, oauthEnabled } from "./oauth.js";
 import { ForgeConnectionStore, countConnections } from "./forge/connections.js";
@@ -148,7 +149,14 @@ const chat = chatStore
 const guidedWalkthroughStore = new GuidedWalkthroughStore(db);
 const guidedWalkthrough = {
   store: guidedWalkthroughStore,
-  service: new GuidedWalkthroughService({ config, store: guidedWalkthroughStore, forge, opencode, briefCache: store }),
+  service: new GuidedWalkthroughService({
+    config,
+    store: guidedWalkthroughStore,
+    forge,
+    opencode,
+    briefCache: store,
+    resolveOptions: (repoFullName, session) => guidedReviewOptionsForSession(store, repoFullName, session),
+  }),
 };
 
 const app = createApp({

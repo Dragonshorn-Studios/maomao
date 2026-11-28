@@ -7,6 +7,12 @@ export const GUIDED_WALKTHROUGH_OUTPUT_CHARS = 80_000;
 
 export type GuidedWalkthroughStatus = "pending" | "running" | "ready" | "failed" | "cancelled" | "stale";
 
+export interface GuidedWalkthroughRunOptions {
+  model?: string;
+  timeoutMs?: number;
+  maxCostUsd?: number;
+}
+
 export interface GuidedWalkthroughRow {
   id: number;
   fingerprint: string;
@@ -18,6 +24,8 @@ export interface GuidedWalkthroughRow {
   head_sha: string;
   prompt_revision: number;
   model: string;
+  timeout_ms: number | null;
+  max_cost_usd: number | null;
   status: GuidedWalkthroughStatus;
   output_json: string;
   error: string | null;
@@ -50,7 +58,7 @@ export interface GuidedWalkthroughPayload {
   generatedAt: string;
 }
 
-export function guidedWalkthroughFingerprint(identity: GuidedWalkthroughIdentity, model: string): string {
+export function guidedWalkthroughFingerprint(identity: GuidedWalkthroughIdentity, model: string, timeoutMs?: number | null, maxCostUsd?: number | null): string {
   return createHash("sha256")
     .update(
       JSON.stringify({
@@ -62,6 +70,8 @@ export function guidedWalkthroughFingerprint(identity: GuidedWalkthroughIdentity
         headSha: identity.headSha,
         promptRevision: GUIDED_WALKTHROUGH_PROMPT_REVISION,
         model: model || "opencode-default",
+        timeoutMs: timeoutMs ?? null,
+        maxCostUsd: maxCostUsd ?? null,
       }),
     )
     .digest("hex");
@@ -141,8 +151,24 @@ export class GuidedWalkthroughStore {
     return this.db.prepare("SELECT * FROM guided_walkthroughs WHERE fingerprint = ?").get(fingerprint) as GuidedWalkthroughRow | undefined;
   }
 
-  open(identity: GuidedWalkthroughIdentity, model: string): GuidedWalkthroughRow {
-    const fingerprint = guidedWalkthroughFingerprint(identity, model);
+
+  getCurrentForIdentity(identity: GuidedWalkthroughIdentity): GuidedWalkthroughRow | undefined {
+    return this.db
+      .prepare(
+        `SELECT * FROM guided_walkthroughs
+         WHERE provider = ? AND provider_instance = ? AND repo_full_name = ? AND pr_number = ?
+           AND base_sha = ? AND head_sha = ?
+         ORDER BY CASE WHEN status = 'stale' THEN 1 ELSE 0 END, updated_at DESC, id DESC LIMIT 1`,
+      )
+      .get(identity.provider, identity.instance, identity.repoFullName, identity.prNumber, identity.baseSha, identity.headSha) as GuidedWalkthroughRow | undefined;
+  }
+
+  open(identity: GuidedWalkthroughIdentity, options: string | GuidedWalkthroughRunOptions): GuidedWalkthroughRow {
+    const runOptions = typeof options === "string" ? { model: options } : options;
+    const model = runOptions.model || "opencode-default";
+    const timeoutMs = runOptions.timeoutMs ?? null;
+    const maxCostUsd = runOptions.maxCostUsd ?? null;
+    const fingerprint = guidedWalkthroughFingerprint(identity, model, timeoutMs, maxCostUsd);
     const existing = this.getByFingerprint(fingerprint);
     if (existing) {
       if (existing.status === "stale") {
@@ -165,9 +191,9 @@ export class GuidedWalkthroughStore {
       .prepare(
         `INSERT INTO guided_walkthroughs (
           fingerprint, provider, provider_instance, repo_full_name, pr_number, base_sha, head_sha,
-          prompt_revision, model, status, output_json, error, cancel_requested, request_count,
+          prompt_revision, model, timeout_ms, max_cost_usd, status, output_json, error, cancel_requested, request_count,
           created_at, updated_at, started_at, finished_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', '', NULL, 0, 1, ?, ?, NULL, NULL)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', '', NULL, 0, 1, ?, ?, NULL, NULL)
         ON CONFLICT(fingerprint) DO NOTHING`,
       )
       .run(
@@ -179,7 +205,9 @@ export class GuidedWalkthroughStore {
         identity.baseSha,
         identity.headSha,
         GUIDED_WALKTHROUGH_PROMPT_REVISION,
-        model || "opencode-default",
+        model,
+        timeoutMs,
+        maxCostUsd,
         now,
         now,
       );
@@ -192,9 +220,9 @@ export class GuidedWalkthroughStore {
       .prepare(
         `UPDATE guided_walkthroughs SET status = 'stale', cancel_requested = CASE WHEN status IN ('pending','running') THEN 1 ELSE cancel_requested END, updated_at = ?
          WHERE provider = ? AND provider_instance = ? AND repo_full_name = ? AND pr_number = ?
-           AND head_sha != ? AND fingerprint != ? AND status IN ('pending','running','ready','failed','cancelled')`,
+           AND fingerprint != ? AND status IN ('pending','running','ready','failed','cancelled')`,
       )
-      .run(nowIso(), identity.provider, identity.instance, identity.repoFullName, identity.prNumber, identity.headSha, exceptFingerprint);
+      .run(nowIso(), identity.provider, identity.instance, identity.repoFullName, identity.prNumber, exceptFingerprint);
   }
 
   claim(id: number): boolean {

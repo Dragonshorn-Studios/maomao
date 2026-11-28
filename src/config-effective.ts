@@ -576,5 +576,12 @@ export function effectiveConfigEntries(
   row(chatGroup, "Explainer message ceiling", "MAOMAO_EXPLAIN_MAX_MESSAGES", String(config.chat.maxMessages));
   row(chatGroup, "Explainer cost ceiling (USD)", "MAOMAO_EXPLAIN_MAX_COST_USD", String(config.chat.maxCostUsd));
   row(chatGroup, "Explainer timeout (ms)", "MAOMAO_EXPLAIN_TIMEOUT_MS", String(config.chat.timeoutMs));
+  if (activeRevision?.definition.guidedReview) {
+    const guided = activeRevision.definition.guidedReview;
+    if (guided.model) add({ group: chatGroup, label: "Profile Guided Review model", value: guided.model, source: "profile", sourceDetail: `#${activeRevision.id} (${activeRevision.name})` });
+    if (guided.timeoutMs != null) add({ group: chatGroup, label: "Profile Guided Review timeout", value: `${Math.round(guided.timeoutMs / 1000)}s`, source: "profile", sourceDetail: `#${activeRevision.id} (${activeRevision.name})` });
+    if (guided.maxCostUsd != null) add({ group: chatGroup, label: "Profile Guided Review cost ceiling (USD)", value: String(guided.maxCostUsd), source: "profile", sourceDetail: `#${activeRevision.id} (${activeRevision.name})` });
+    add({ group: chatGroup, label: "Poison-alert Guided Review attention", value: guided.poisonAlertAttention, source: "profile", sourceDetail: `#${activeRevision.id} (${activeRevision.name})` });
+  }
   return entries;
 }

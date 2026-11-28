@@ -100,8 +100,9 @@ import { renderGuidedDiffWorkspace, renderGuidedInboxPage, renderGuidedOpenError
 import { parseUnifiedDiff } from "./guided/diff.js";
 import { buildGuidedPublishPreview } from "./guided/publish-preview.js";
 import { buildGuidedComparison, comparisonOverrides } from "./guided/comparison.js";
+import { guidedPoisonAttentionOptional } from "./guided/attention.js";
 import { GuidedHumanPublishStore, HUMAN_PUBLISH_PENDING_LEASE_MS, guidedHumanPayloadHash, submitHumanGitHubReview } from "./guided/human-publish.js";
-import { guidedWalkthroughFingerprint, guidedWalkthroughView, type GuidedWalkthroughStore } from "./guided/walkthrough-store.js";
+import { guidedWalkthroughView, type GuidedWalkthroughStore } from "./guided/walkthrough-store.js";
 import type { GuidedWalkthroughService } from "./guided/walkthrough.js";
 import { listGuidedInbox } from "./guided/inbox.js";
 import { renderTelemetryPage, TELEMETRY_PAGE_HREF, TELEMETRY_PAGE_JS, type TelemetryProbeRow } from "./ui/telemetry.js";
@@ -584,6 +585,17 @@ async function guidedInstallationId(ctx: ServerContext, session: { provider: str
   return installation.installationId;
 }
 
+function guidedWalkthroughIdentity(session: GuidedReviewSessionRow) {
+  return {
+    provider: session.provider,
+    instance: session.provider_instance,
+    repoFullName: session.repo_full_name,
+    prNumber: session.pr_number,
+    baseSha: session.base_sha,
+    headSha: session.head_sha,
+  };
+}
+
 function guidedComparisonForSession(ctx: ServerContext, session: GuidedReviewSessionRow) {
   const job = ctx.store.reviewJobForComparison(session.repo_full_name, session.pr_number, session.head_sha, { provider: session.provider, instance: session.provider_instance });
   return buildGuidedComparison({
@@ -655,8 +667,9 @@ function guidedAttentionPanelForSession(ctx: ServerContext, session: GuidedRevie
   const profile = job?.routing_profile;
   if (!job || (profile !== "poison-alert" && profile !== "diagnosis")) return undefined;
   const key = { provider: session.provider, instance: session.provider_instance, repoFullName: session.repo_full_name, prNumber: session.pr_number, headSha: session.head_sha };
+  const optional = guidedPoisonAttentionOptional(job.profile_revision_id ? ctx.store.configs.getRevision(job.profile_revision_id)?.definition : undefined);
   const decision = ctx.store.guidedAttention.decisionFor(key);
-  if (decision) {
+  if (decision && !(decision.action === "skip_guided_review" && !optional)) {
     return {
       state: "decided",
       profile,
@@ -670,8 +683,44 @@ function guidedAttentionPanelForSession(ctx: ServerContext, session: GuidedRevie
   return {
     state: "pending",
     profile,
-    message: "Poison-alert merge readiness is waiting for an explicit human decision. It will not silently delegate on timeout.",
+    optional,
+    message: optional
+      ? "This profile makes Guided Review optional for poison-alert pulls. Merge readiness can pass without a decision; use the warning action only to record an explicit skip."
+      : "Poison-alert merge readiness is waiting for an explicit human decision. It will not silently delegate on timeout.",
   };
+}
+
+async function guidedActorRepoPermission(
+  ctx: ServerContext,
+  c: Context<AppEnv>,
+  session: GuidedReviewSessionRow,
+  installationId?: number,
+): Promise<
+  | { ok: true; installationId: number; permission: string }
+  | { ok: false; status: 403 | 502 | 503; error: string; message: string }
+> {
+  const login = c.get("identity")?.login;
+  const [owner, repo] = session.repo_full_name.split("/");
+  if (!login || !owner || !repo || !ctx.github?.getCollaboratorPermission) {
+    return { ok: false, status: 503, error: "collaborator_permission_unavailable", message: "GitHub collaborator authorization is unavailable." };
+  }
+  try {
+    const resolvedInstallationId = installationId ?? await guidedInstallationId(ctx, session);
+    if (!resolvedInstallationId) return { ok: false, status: 403, error: "forbidden", message: "The repository installation is not authorized." };
+    const permission = await ctx.github.getCollaboratorPermission(resolvedInstallationId, owner, repo, login);
+    if (!canIssueOverride(permission)) {
+      return { ok: false, status: 403, error: "forbidden", message: `GitHub collaborator permission ${permission || "none"} cannot release a poison-alert human-attention gate or resolve review threads. Write, maintain, or admin permission is required.` };
+    }
+    return { ok: true, installationId: resolvedInstallationId, permission };
+  } catch (error) {
+    return { ok: false, status: 502, error: "collaborator_permission_unavailable", message: `Could not verify GitHub collaborator permission: ${error instanceof Error ? error.message : String(error)}` };
+  }
+}
+
+async function guidedActorCanWriteRepo(ctx: ServerContext, c: Context<AppEnv>, session: GuidedReviewSessionRow, installationId?: number): Promise<{ ok: true } | { ok: false; response: Response }> {
+  const result = await guidedActorRepoPermission(ctx, c, session, installationId);
+  if (!result.ok) return { ok: false, response: c.json({ error: result.error, message: result.message }, result.status) };
+  return { ok: true };
 }
 
 export function createApp(ctx: ServerContext): Hono<AppEnv> {
@@ -1467,7 +1516,6 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
           diffWorkspace = renderGuidedDiffWorkspace({
             files,
             diffTruncated: rawFileCount > files.length,
-            fileFilter: c.req.query("file") || undefined,
             statusFilter: c.req.query("status") || undefined,
             baseSha: pull.baseSha,
             headSha: pull.headSha,
@@ -1581,19 +1629,8 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
       const session = ctx.store.guidedReview.getOwned(guidedId(c.req.param("id")), actor);
       if (!session) return c.json({ error: "guided_review_session_not_found" }, 404);
       if (!ctx.guidedWalkthrough) return c.json({ error: "guided_walkthrough_unavailable" }, 503);
-      const fingerprint = guidedWalkthroughFingerprint(
-        {
-          provider: session.provider,
-          instance: session.provider_instance,
-          repoFullName: session.repo_full_name,
-          prNumber: session.pr_number,
-          baseSha: session.base_sha,
-          headSha: session.head_sha,
-        },
-        ctx.guidedWalkthrough.service.model(),
-      );
-      const row = ctx.guidedWalkthrough.store.getByFingerprint(fingerprint);
-      if (!row) return c.json({ walkthrough: { fingerprint, status: "pending", payload: undefined, error: null } });
+      const row = ctx.guidedWalkthrough.store.getCurrentForIdentity(guidedWalkthroughIdentity(session));
+      if (!row) return c.json({ walkthrough: { fingerprint: "", status: "pending", payload: undefined, error: null } });
       return c.json({ walkthrough: guidedWalkthroughView(row) });
     }),
   );
@@ -1607,18 +1644,7 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
       if (!ctx.guidedWalkthrough) return c.json({ error: "guided_walkthrough_unavailable" }, 503);
       const installationId = await guidedInstallationId(ctx, session);
       if (!installationId) return c.json({ error: "forbidden" }, 403);
-      const fingerprint = guidedWalkthroughFingerprint(
-        {
-          provider: session.provider,
-          instance: session.provider_instance,
-          repoFullName: session.repo_full_name,
-          prNumber: session.pr_number,
-          baseSha: session.base_sha,
-          headSha: session.head_sha,
-        },
-        ctx.guidedWalkthrough.service.model(),
-      );
-      const row = ctx.guidedWalkthrough.store.getByFingerprint(fingerprint);
+      const row = ctx.guidedWalkthrough.store.getCurrentForIdentity(guidedWalkthroughIdentity(session));
       if (!row) return c.json({ error: "guided_walkthrough_not_found" }, 404);
       const fresh = ctx.guidedWalkthrough.service.retry(row, installationId);
       return c.json({ walkthrough: fresh ? guidedWalkthroughView(fresh) : undefined });
@@ -1632,18 +1658,7 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
       const session = ctx.store.guidedReview.getOwned(guidedId(c.req.param("id")), actor);
       if (!session) return c.json({ error: "guided_review_session_not_found" }, 404);
       if (!ctx.guidedWalkthrough) return c.json({ error: "guided_walkthrough_unavailable" }, 503);
-      const fingerprint = guidedWalkthroughFingerprint(
-        {
-          provider: session.provider,
-          instance: session.provider_instance,
-          repoFullName: session.repo_full_name,
-          prNumber: session.pr_number,
-          baseSha: session.base_sha,
-          headSha: session.head_sha,
-        },
-        ctx.guidedWalkthrough.service.model(),
-      );
-      const row = ctx.guidedWalkthrough.store.getByFingerprint(fingerprint);
+      const row = ctx.guidedWalkthrough.store.getCurrentForIdentity(guidedWalkthroughIdentity(session));
       if (!row) return c.json({ error: "guided_walkthrough_not_found" }, 404);
       ctx.guidedWalkthrough.service.cancel(row);
       return c.json({ walkthrough: guidedWalkthroughView(ctx.guidedWalkthrough.store.get(row.id) ?? row) });
@@ -1659,7 +1674,7 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
       const session = ctx.store.guidedReview.getOwned(guidedId(c.req.param("id")), actor);
       if (!session) return c.json({ error: "guided_review_session_not_found" }, 404);
       const body = await c.req.parseBody();
-      const action = body.action === "review_myself" || body.action === "delegate_to_maomao" ? body.action : undefined;
+      const action = body.action === "review_myself" || body.action === "delegate_to_maomao" || body.action === "skip_guided_review" ? body.action : undefined;
       const reasonTag = typeof body.reasonTag === "string" ? body.reasonTag : "";
       const reasonDetail = typeof body.reasonDetail === "string" ? body.reasonDetail : null;
       if (!action) return c.html(renderGuidedOpenError({ options: guidedPageOpts(c), error: "Choose either review myself or delegate this review to Maomao." }), 400);
@@ -1668,20 +1683,15 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
       if (!job || job.routing_profile !== "poison-alert") {
         return c.html(renderGuidedOpenError({ options: guidedPageOpts(c), error: "This exact head has no poison-alert human-attention gate waiting for a decision." }), 400);
       }
-      const login = c.get("identity")?.login;
+      const attentionOptional = guidedPoisonAttentionOptional(job.profile_revision_id ? ctx.store.configs.getRevision(job.profile_revision_id)?.definition : undefined);
+      if (action === "skip_guided_review" && !attentionOptional) {
+        return c.html(renderGuidedOpenError({ options: guidedPageOpts(c), error: "This profile requires Guided Review for poison-alert pulls; the optional skip action is not available." }), 400);
+      }
+      const permission = await guidedActorRepoPermission(ctx, c, session);
+      if (!permission.ok) {
+        return c.html(renderGuidedOpenError({ options: guidedPageOpts(c), error: `${permission.message} No attention decision was recorded.` }), permission.status);
+      }
       const [owner, repo] = session.repo_full_name.split("/");
-      if (!login || !owner || !repo || !ctx.github?.getCollaboratorPermission) {
-        return c.html(renderGuidedOpenError({ options: guidedPageOpts(c), error: "GitHub collaborator authorization is unavailable; no attention decision was recorded." }), 503);
-      }
-      let permission: string;
-      try {
-        permission = await ctx.github.getCollaboratorPermission(job.installation_id, owner, repo, login);
-      } catch (error) {
-        return c.html(renderGuidedOpenError({ options: guidedPageOpts(c), error: `Could not verify GitHub collaborator permission; no attention decision was recorded: ${error instanceof Error ? error.message : String(error)}` }), 502);
-      }
-      if (!canIssueOverride(permission)) {
-        return c.html(renderGuidedOpenError({ options: guidedPageOpts(c), error: `GitHub collaborator permission ${permission || "none"} cannot release a poison-alert human-attention gate. Write, maintain, or admin permission is required.` }), 403);
-      }
       const reevaluate = ctx.guidedAttentionReevaluate;
       if (!reevaluate) {
         return c.html(renderGuidedOpenError({ options: guidedPageOpts(c), error: "The Guided Review merge-readiness integration is not configured on this server; no attention decision was recorded." }), 503);
@@ -1891,6 +1901,7 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
         const content = await ctx.github.getFileContent(installation.installationId, owner, repo, path, ref, 200_000);
         return c.json({ path, side, sha: ref, content });
       } catch (error) {
+        if ((error as { status?: number }).status === 404) return c.json({ path, side, sha: ref, absent: true });
         if (isPermissionDenied(error)) return c.json({ error: "forbidden" }, 403);
         const detail = truncate(redactSecrets(error instanceof Error ? error.message : String(error), githubSecrets(ctx.config)), 240);
         return c.json({ error: "guided_review_context_unavailable", message: detail }, 502);
@@ -1909,6 +1920,75 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
         ctx.store.guidedReview.listComments(session.id).map(guidedCommentView),
       );
       return c.json({ preview });
+    }),
+  );
+
+  app.get("/api/guided-review/sessions/:id/discussions", async (c) =>
+    guidedRoute(c, async () => {
+      const actor = guidedActor(c);
+      if (!actor) return guidedIdentityRequired(c);
+      const session = ctx.store.guidedReview.getOwned(guidedId(c.req.param("id")), actor);
+      if (!session) return c.json({ error: "guided_review_session_not_found" }, 404);
+      if (!ctx.forge || session.provider !== "github" || session.provider_instance !== "github.com") return c.json({ discussions: [], unsupported: true });
+      const installationId = await guidedInstallationId(ctx, session);
+      if (!installationId) return c.json({ error: "forbidden" }, 403);
+      const permission = await guidedActorCanWriteRepo(ctx, c, session, installationId);
+      if (!permission.ok) return permission.response;
+      const [repoOwner, repoName] = session.repo_full_name.split("/");
+      if (!repoOwner || !repoName) return c.json({ error: "invalid_input", message: "repoFullName must be owner/repository" }, 400);
+      const forge = ctx.forge.forJob({ provider: session.provider, provider_instance: session.provider_instance, installation_id: installationId });
+      const discussions = await forge.listDiscussions({
+        provider: session.provider,
+        instance: session.provider_instance,
+        repoOwner,
+        repoName,
+        repoFullName: session.repo_full_name,
+        changeNumber: session.pr_number,
+      });
+      const botNames = new Set([ctx.config.github.appSlug, `${ctx.config.github.appSlug}[bot]`].filter(Boolean));
+      return c.json({
+        discussions: discussions.filter((discussion) => !discussion.isResolved).map((discussion) => ({
+          id: discussion.id,
+          path: discussion.path,
+          line: discussion.line,
+          maomaoAuthored: discussion.comments.some((comment) => comment.authorLogin ? botNames.has(comment.authorLogin) : false),
+          comments: discussion.comments.slice(-3).map((comment) => ({ authorLogin: comment.authorLogin, body: comment.body, path: comment.path, line: comment.line })),
+        })),
+      });
+    }),
+  );
+
+  app.post("/api/guided-review/sessions/:id/discussions/resolve", async (c) =>
+    guidedRoute(c, async () => {
+      const actor = guidedActor(c);
+      if (!actor) return guidedIdentityRequired(c);
+      const session = ctx.store.guidedReview.getOwned(guidedId(c.req.param("id")), actor);
+      if (!session) return c.json({ error: "guided_review_session_not_found" }, 404);
+      if (!ctx.forge || session.provider !== "github" || session.provider_instance !== "github.com") return c.json({ error: "unsupported" }, 422);
+      const body = await guidedBody(c);
+      const discussionId = typeof body.discussionId === "string" ? body.discussionId.trim() : "";
+      if (!discussionId) throw new GuidedInputError("discussionId is required");
+      const installationId = await guidedInstallationId(ctx, session);
+      if (!installationId) return c.json({ error: "forbidden" }, 403);
+      const permission = await guidedActorCanWriteRepo(ctx, c, session, installationId);
+      if (!permission.ok) return permission.response;
+      const [repoOwner, repoName] = session.repo_full_name.split("/");
+      if (!repoOwner || !repoName) return c.json({ error: "invalid_input", message: "repoFullName must be owner/repository" }, 400);
+      const forge = ctx.forge.forJob({ provider: session.provider, provider_instance: session.provider_instance, installation_id: installationId });
+      const target = {
+        provider: session.provider,
+        instance: session.provider_instance,
+        repoOwner,
+        repoName,
+        repoFullName: session.repo_full_name,
+        changeNumber: session.pr_number,
+      } as const;
+      const discussions = await forge.listDiscussions(target);
+      if (!discussions.some((discussion) => discussion.id === discussionId && !discussion.isResolved)) {
+        return c.json({ error: "discussion_not_found", message: "The unresolved discussion does not belong to this pull request." }, 404);
+      }
+      await forge.resolveDiscussion(target, discussionId);
+      return c.json({ ok: true });
     }),
   );
 
@@ -3082,7 +3162,7 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
     }
     const models = [
       ...new Set(
-        [values.routerModel, values.verifierModel, ...values.reviewers.map((row) => row.model)]
+        [values.routerModel, values.verifierModel, values.guidedModel, ...values.reviewers.map((row) => row.model)]
           .map((model) => model.trim())
           .filter((model) => model !== ""),
       ),

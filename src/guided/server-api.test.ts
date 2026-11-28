@@ -164,6 +164,100 @@ describe("Guided Review session API", () => {
     expect(readBody.comments).toHaveLength(1);
   });
 
+  it("lists only same-pull unresolved discussions and resolves them after write-permission validation", async () => {
+    const resolved: string[] = [];
+    const discussions = [
+      {
+        id: "thread-open",
+        path: "src/index.ts",
+        line: 20,
+        isResolved: false,
+        comments: [
+          { authorLogin: "maomao[bot]", body: "Maomao finding", path: "src/index.ts", line: 20 },
+          { authorLogin: "operator-1001", body: "handled", path: "src/index.ts", line: 20 },
+        ],
+      },
+      { id: "thread-resolved", path: "src/other.ts", line: 3, isResolved: true, comments: [] },
+    ];
+    const port = {
+      listDiscussions: async () => discussions,
+      resolveDiscussion: async (_target: unknown, discussionId: string) => { resolved.push(discussionId); },
+    };
+    const forge = { forJob: () => port };
+    let permission = "read";
+    const github = {
+      async getRepoInstallation() { return { installationId: 1, accountId: 1001 }; },
+      getCollaboratorPermission: async () => permission,
+    } as unknown as ManualTriggerPort;
+    const { app, store } = guidedTestApp(github, { forge: forge as never }, { GITHUB_APP_SLUG: "maomao" });
+    const auth = operator(1001);
+    const opened = store.guidedReview.open({
+      actorProvider: "github",
+      actorId: "1001",
+      provider: "github",
+      instance: "github.com",
+      repoFullName: "acme/widgets",
+      prNumber: 12,
+      baseSha,
+      headSha,
+    }).session;
+
+    const deniedList = await app.request(`/api/guided-review/sessions/${opened.id}/discussions`, { headers: { cookie: auth.cookies } });
+    expect(deniedList.status).toBe(403);
+    const deniedResolve = await postJson(app, `/api/guided-review/sessions/${opened.id}/discussions/resolve`, auth.cookies, {
+      discussionId: "thread-open",
+      csrf_token: auth.csrfToken,
+    });
+    expect(deniedResolve.status).toBe(403);
+    expect(resolved).toEqual([]);
+
+    permission = "write";
+    const listed = await app.request(`/api/guided-review/sessions/${opened.id}/discussions`, { headers: { cookie: auth.cookies } });
+    expect(listed.status).toBe(200);
+    const listedBody = (await listed.json()) as { discussions: Array<{ id: string; maomaoAuthored: boolean; comments: unknown[] }> };
+    expect(listedBody.discussions).toHaveLength(1);
+    expect(listedBody.discussions[0]).toMatchObject({ id: "thread-open", maomaoAuthored: true });
+    expect(listedBody.discussions[0].comments).toHaveLength(2);
+
+    const missing = await postJson(app, `/api/guided-review/sessions/${opened.id}/discussions/resolve`, auth.cookies, {
+      discussionId: "thread-resolved",
+      csrf_token: auth.csrfToken,
+    });
+    expect(missing.status).toBe(404);
+    expect(resolved).toEqual([]);
+
+    const resolvedResponse = await postJson(app, `/api/guided-review/sessions/${opened.id}/discussions/resolve`, auth.cookies, {
+      discussionId: "thread-open",
+      csrf_token: auth.csrfToken,
+    });
+    expect(resolvedResponse.status).toBe(200);
+    expect(resolved).toEqual(["thread-open"]);
+  });
+
+  it("reports discussion resolution as unsupported without a forge port", async () => {
+    const { app, store } = guidedTestApp();
+    const auth = operator(1001);
+    const opened = store.guidedReview.open({
+      actorProvider: "github",
+      actorId: "1001",
+      provider: "github",
+      instance: "github.com",
+      repoFullName: "acme/widgets",
+      prNumber: 12,
+      baseSha,
+      headSha,
+    }).session;
+    const listed = await app.request(`/api/guided-review/sessions/${opened.id}/discussions`, { headers: { cookie: auth.cookies } });
+    expect(listed.status).toBe(200);
+    expect(await listed.json()).toEqual({ discussions: [], unsupported: true });
+    const resolved = await postJson(app, `/api/guided-review/sessions/${opened.id}/discussions/resolve`, auth.cookies, {
+      discussionId: "thread-open",
+      csrf_token: auth.csrfToken,
+    });
+    expect(resolved.status).toBe(422);
+    expect(await resolved.json()).toEqual({ error: "unsupported" });
+  });
+
   it("rejects password-only attribution and isolates drafts between operators", async () => {
     const { app } = guidedTestApp();
     const first = operator(1001);
@@ -754,7 +848,7 @@ describe("Guided Review session API", () => {
         return permission;
       },
     } as ManualTriggerPort;
-    const { app, store } = guidedTestApp(github, { guidedAttentionReevaluate: async (jobId) => { reevaluated.push(jobId); } });
+    const { app, store, db } = guidedTestApp(github, { guidedAttentionReevaluate: async (jobId) => { reevaluated.push(jobId); } });
     const auth = operator(1001);
     const stranger = operator(2002);
     const openedResponse = await postJson(app, "/api/guided-review/sessions/open", auth.cookies, openBody(auth.csrfToken));
@@ -790,10 +884,37 @@ describe("Guided Review session API", () => {
     expect(store.guidedAttention.decisionFor({ provider: "github", instance: "github.com", repoFullName: "acme/widgets", prNumber: 12, headSha })).toBeUndefined();
 
     permission = "write";
-    const response = await postDecision();
+    const skipForm = new URLSearchParams({ action: "skip_guided_review", reasonTag: "risk-review", csrf_token: auth.csrfToken });
+    const skipDenied = await app.request(`/guided/sessions/${opened.session.id}/attention`, {
+      method: "POST",
+      headers: { cookie: auth.cookies, "content-type": "application/x-www-form-urlencoded" },
+      body: skipForm.toString(),
+    });
+    expect(skipDenied.status).toBe(400);
+    expect(await skipDenied.text()).toContain("optional skip action is not available");
+    expect(store.guidedAttention.decisionFor({ provider: "github", instance: "github.com", repoFullName: "acme/widgets", prNumber: 12, headSha })).toBeUndefined();
+
+    const draft = store.configs.createDraft({
+      definition: {
+        name: "default",
+        reviewers: [{ role: "correctness" }],
+        minPublishableSeverity: "info",
+        guidedReview: { poisonAlertAttention: "optional" },
+      },
+      createdBy: "octocat",
+    });
+    if (!("revision" in draft)) throw new Error("optional profile draft failed");
+    store.configs.activateRevision(draft.revision.id, "octocat");
+    db.prepare(`UPDATE jobs SET profile_revision_id = ? WHERE id = ?`).run(draft.revision.id, job.id);
+    const postSkip = () => app.request(`/guided/sessions/${opened.session.id}/attention`, {
+      method: "POST",
+      headers: { cookie: auth.cookies, "content-type": "application/x-www-form-urlencoded" },
+      body: skipForm.toString(),
+    });
+    const response = await postSkip();
     expect(response.status).toBe(303);
     expect(reevaluated).toEqual([job.id]);
-    expect(store.guidedAttention.decisionFor({ provider: "github", instance: "github.com", repoFullName: "acme/widgets", prNumber: 12, headSha })).toMatchObject({ actor_id: "1001", action: "delegate_to_maomao", head_sha: headSha });
+    expect(store.guidedAttention.decisionFor({ provider: "github", instance: "github.com", repoFullName: "acme/widgets", prNumber: 12, headSha })).toMatchObject({ actor_id: "1001", action: "skip_guided_review", head_sha: headSha });
 
     const strangerOpenedResponse = await postJson(app, "/api/guided-review/sessions/open", stranger.cookies, openBody(stranger.csrfToken));
     const strangerOpened = (await strangerOpenedResponse.json()) as { session: { id: number } };
@@ -803,8 +924,16 @@ describe("Guided Review session API", () => {
       headers: { cookie: stranger.cookies, "content-type": "application/x-www-form-urlencoded" },
       body: conflictForm.toString(),
     });
-    expect(conflict.status).toBe(409);
-    expect(await conflict.text()).toContain("Another exact-SHA human-attention decision already exists");
+    expect(conflict.status).toBe(303);
+    expect(store.guidedAttention.decisionFor({ provider: "github", instance: "github.com", repoFullName: "acme/widgets", prNumber: 12, headSha })).toMatchObject({ actor_id: "2002", action: "review_myself" });
+    const afterSuperseded = new URLSearchParams({ action: "delegate_to_maomao", reasonTag: "risk-review", csrf_token: auth.csrfToken });
+    const supersededConflict = await app.request(`/guided/sessions/${opened.session.id}/attention`, {
+      method: "POST",
+      headers: { cookie: auth.cookies, "content-type": "application/x-www-form-urlencoded" },
+      body: afterSuperseded.toString(),
+    });
+    expect(supersededConflict.status).toBe(409);
+    expect(await supersededConflict.text()).toContain("Another exact-SHA human-attention decision already exists");
     const stolen = await app.request(`/guided/sessions/${opened.session.id}/attention`, {
       method: "POST",
       headers: { cookie: stranger.cookies, "content-type": "application/x-www-form-urlencoded" },

@@ -15,7 +15,7 @@ const baseSha = "a".repeat(40);
 const headSha = "b".repeat(40);
 const nextHeadSha = "c".repeat(40);
 
-function fixture(outputText?: string, briefCache?: { getRepoBriefCache(provider: string, providerInstance: string, repoFullName: string, sha: string): { payload: string; created_at: string } | undefined }) {
+function fixture(outputText?: string, briefCache?: { getRepoBriefCache(provider: string, providerInstance: string, repoFullName: string, sha: string): { payload: string; created_at: string } | undefined }, resolveOptions?: () => { model?: string; timeoutMs?: number; maxCostUsd?: number }) {
   const db = openDb(":memory:");
   const jobs = new JobStore(db);
   const walkthroughs = new GuidedWalkthroughStore(db);
@@ -62,7 +62,7 @@ function fixture(outputText?: string, briefCache?: { getRepoBriefCache(provider:
       usage: { cost: 0.01 },
     })),
   };
-  const service = new GuidedWalkthroughService({ config, store: walkthroughs, forge, opencode, checkout, briefCache });
+  const service = new GuidedWalkthroughService({ config, store: walkthroughs, forge, opencode, checkout, briefCache, resolveOptions });
   return { db, jobs, walkthroughs, config, session: opened.session, service, prepare, cleanup, cloneSpec, getChangeDiff, forge, opencode };
 }
 
@@ -106,19 +106,64 @@ describe("Guided Review walkthrough cache", () => {
     expect(f.cleanup).toHaveBeenCalledWith(expect.stringContaining("work"));
   });
 
+
+  it("uses repository-scoped profile guided-review model, timeout, and cost ceiling", async () => {
+    const resolveOptions = vi.fn(() => ({ model: "profile/guided", timeoutMs: 45_000, maxCostUsd: 0.02 }));
+    const f = fixture(undefined, undefined, resolveOptions);
+    const row = f.service.ensure(f.session, 42);
+    expect(resolveOptions).toHaveBeenCalledWith("acme/widgets", f.session);
+    expect(row.model).toBe("profile/guided");
+    await waitForStatus(f.walkthroughs, row.id, ["ready"]);
+    expect(f.opencode.run).toHaveBeenCalledWith(expect.objectContaining({ model: "profile/guided", timeoutMs: 45_000 }));
+  });
+
+  it("snapshots profile execution options and enforces their cost ceiling", async () => {
+    let options = { model: "profile/guided", timeoutMs: 45_000, maxCostUsd: 0.005 };
+    const f = fixture(undefined, undefined, () => options);
+    const row = f.service.ensure(f.session, 42);
+    expect(row).toMatchObject({ model: "profile/guided", timeout_ms: 45_000, max_cost_usd: 0.005 });
+    options = { ...options, timeoutMs: 90_000, maxCostUsd: 10 };
+    const done = await waitForStatus(f.walkthroughs, row.id, ["failed"]);
+    expect(done.error).toContain("cost ceiling");
+    expect(f.opencode.run).toHaveBeenCalledWith(expect.objectContaining({ timeoutMs: 45_000 }));
+  });
+
+  it("supersedes a same-head walkthrough when its model fingerprint changes", () => {
+    const f = fixture();
+    const identity = { provider: "github", instance: "github.com", repoFullName: "acme/widgets", prNumber: 12, baseSha, headSha };
+    const oldRow = f.walkthroughs.open(identity, "old/model");
+    const newRow = f.walkthroughs.open(identity, "new/model");
+    expect(newRow.id).not.toBe(oldRow.id);
+    expect(f.walkthroughs.get(oldRow.id)?.status).toBe("stale");
+    expect(f.walkthroughs.getCurrentForIdentity(identity)?.id).toBe(newRow.id);
+  });
+
+  it("supersedes a same-head walkthrough when profile execution bounds change", () => {
+    const f = fixture();
+    const identity = { provider: "github", instance: "github.com", repoFullName: "acme/widgets", prNumber: 12, baseSha, headSha };
+    const oldRow = f.walkthroughs.open(identity, { model: "same/model", timeoutMs: 45_000, maxCostUsd: 0.5 });
+    const timeoutRow = f.walkthroughs.open(identity, { model: "same/model", timeoutMs: 90_000, maxCostUsd: 0.5 });
+    const costRow = f.walkthroughs.open(identity, { model: "same/model", timeoutMs: 90_000, maxCostUsd: 1 });
+    expect(new Set([oldRow.id, timeoutRow.id, costRow.id])).toHaveLength(3);
+    expect(f.walkthroughs.get(oldRow.id)?.status).toBe("stale");
+    expect(f.walkthroughs.get(timeoutRow.id)?.status).toBe("stale");
+  });
+
   it("marks older head fingerprints stale when a new exact head opens", () => {
     const f = fixture();
     const oldRow = f.walkthroughs.open({ provider: "github", instance: "github.com", repoFullName: "acme/widgets", prNumber: 12, baseSha, headSha }, "m");
     const newRow = f.walkthroughs.open({ provider: "github", instance: "github.com", repoFullName: "acme/widgets", prNumber: 12, baseSha, headSha: nextHeadSha }, "m");
     expect(newRow.id).not.toBe(oldRow.id);
     expect(f.walkthroughs.get(oldRow.id)?.status).toBe("stale");
+    expect(f.walkthroughs.getCurrentForIdentity({ provider: "github", instance: "github.com", repoFullName: "acme/widgets", prNumber: 12, baseSha, headSha })?.status).toBe("stale");
     expect(f.walkthroughs.get(newRow.id)?.status).toBe("pending");
   });
 
   it("revives a stale exact-head fingerprint when that head becomes current again", async () => {
-    const f = fixture();
-    const first = f.walkthroughs.open({ provider: "github", instance: "github.com", repoFullName: "acme/widgets", prNumber: 12, baseSha, headSha }, f.service.model());
-    const moved = f.walkthroughs.open({ provider: "github", instance: "github.com", repoFullName: "acme/widgets", prNumber: 12, baseSha, headSha: nextHeadSha }, f.service.model());
+    const options = { model: "model/a", timeoutMs: 45_000, maxCostUsd: 1 };
+    const f = fixture(undefined, undefined, () => options);
+    const first = f.walkthroughs.open({ provider: "github", instance: "github.com", repoFullName: "acme/widgets", prNumber: 12, baseSha, headSha }, options);
+    const moved = f.walkthroughs.open({ provider: "github", instance: "github.com", repoFullName: "acme/widgets", prNumber: 12, baseSha, headSha: nextHeadSha }, options);
     expect(moved.id).not.toBe(first.id);
     expect(f.walkthroughs.get(first.id)?.status).toBe("stale");
 
@@ -191,6 +236,80 @@ describe("Guided Review walkthrough cache", () => {
     expect(finishedStale.error).toContain("aborted");
   });
 
+
+  it("restarts a revived same-model walkthrough after its superseded abort settles", async () => {
+    let options = { model: "model/a", timeoutMs: 45_000, maxCostUsd: 1 };
+    const f = fixture(undefined, undefined, () => options);
+    let calls = 0;
+    vi.mocked(f.opencode.run).mockImplementation(async ({ signal }) => {
+      calls += 1;
+      if (calls === 1) {
+        return await new Promise((_, reject) => {
+          if (signal?.aborted) reject(new Error("aborted"));
+          else signal?.addEventListener("abort", () => reject(new Error("aborted")), { once: true });
+        });
+      }
+      return {
+        stdout: "",
+        stderr: "",
+        exitCode: 0,
+        text: JSON.stringify({
+          intent: { text: "Intent", uncertainty: "Uncertainty" },
+          changeMap: [{ path: "src/a.ts", summary: "Summary", evidence: "Evidence" }],
+          flow: "Flow",
+          decisions: [],
+          tests: "Tests",
+          risks: [],
+        }),
+        usage: { cost: 0.01 },
+      };
+    });
+    const first = f.service.ensure(f.session, 42);
+    await waitForStatus(f.walkthroughs, first.id, ["running"]);
+    options = { ...options, model: "model/b" };
+    const replacement = f.service.ensure(f.session, 42);
+    expect(replacement.id).not.toBe(first.id);
+    options = { ...options, model: "model/a" };
+    const revived = f.service.ensure(f.session, 42);
+    expect(revived.id).toBe(first.id);
+    const done = await waitForStatus(f.walkthroughs, first.id, ["ready"]);
+    expect(done.error).toBeNull();
+    expect(calls).toBeGreaterThanOrEqual(3);
+  });
+
+  it("does not let a superseded retry overwrite a revived cached-ready walkthrough", async () => {
+    let options = { model: "model/a", timeoutMs: 45_000, maxCostUsd: 1 };
+    const f = fixture(undefined, undefined, () => options);
+    const first = f.service.ensure(f.session, 42);
+    await waitForStatus(f.walkthroughs, first.id, ["ready"]);
+
+    f.walkthroughs.markFailed(first.id, "transient retry failure");
+    let abortObserved!: () => void;
+    const retryAborted = new Promise<void>((resolve) => { abortObserved = resolve; });
+    vi.mocked(f.opencode.run).mockImplementationOnce(({ signal }) => new Promise((_, reject) => {
+      const fail = () => {
+        abortObserved();
+        reject(new Error("aborted"));
+      };
+      if (signal?.aborted) fail();
+      else signal?.addEventListener("abort", fail, { once: true });
+    }));
+    expect(f.service.retry(f.walkthroughs.get(first.id)!, 42)?.status).toBe("pending");
+    await waitForStatus(f.walkthroughs, first.id, ["running"]);
+
+    options = { ...options, model: "model/b" };
+    const replacement = f.service.ensure(f.session, 42);
+    expect(replacement.id).not.toBe(first.id);
+    options = { ...options, model: "model/a" };
+    const revived = f.service.ensure(f.session, 42);
+    expect(revived.id).toBe(first.id);
+    expect(revived.status).toBe("ready");
+
+    await retryAborted;
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(f.walkthroughs.get(first.id)?.status).toBe("ready");
+    expect(f.walkthroughs.get(first.id)?.error).toBeNull();
+  });
 
   it("enforces the configured generation cost and output bounds", async () => {
     const costly = fixture();

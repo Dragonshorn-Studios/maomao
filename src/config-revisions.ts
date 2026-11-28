@@ -50,6 +50,17 @@ export const profileDefinitionSchema = z
     maxTotalTokens: z.number().int().positive().max(PROFILE_MAX_TOTAL_TOKENS).optional(),
     /** What happens when a cost/token ceiling is hit mid-pipeline. */
     onBudgetExceeded: z.enum(["degrade", "fail"]).default("degrade"),
+    /** Guided Review explainer and human-attention behavior for repositories using this profile. */
+    guidedReview: z
+      .object({
+        model: z.string().regex(/^[\w./:-]+$/, "model must be provider/model").max(120).optional(),
+        timeoutMs: z.number().int().positive().max(PROFILE_MAX_TIMEOUT_MS).optional(),
+        maxCostUsd: z.number().positive().max(PROFILE_MAX_TOTAL_COST_USD).optional(),
+        /** Optional poison-alert attention never blocks merge readiness; required keeps the hard exact-SHA decision gate. */
+        poisonAlertAttention: z.enum(["required", "optional"]).default("required"),
+      })
+      .strict()
+      .optional(),
     /**
      * Per alert level, the roles that run instead of the router's picks —
      * subsets of `reviewers` (models/timeouts inherit the base entry). The
@@ -701,6 +712,9 @@ export function validateModelCatalog(definition: ProfileDefinition, catalog: str
   }
   if (definition.verifier?.model && !allowed.has(definition.verifier.model)) {
     issues.push(`verifier model ${definition.verifier.model} is not in the approved catalog`);
+  }
+  if (definition.guidedReview?.model && !allowed.has(definition.guidedReview.model)) {
+    issues.push(`guided review model ${definition.guidedReview.model} is not in the approved catalog`);
   }
   return issues;
 }
