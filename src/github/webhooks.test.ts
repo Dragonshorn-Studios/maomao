@@ -25,6 +25,9 @@ function prPayload(overrides: Record<string, unknown> = {}) {
       body: "does a thing",
       html_url: "https://github.com/acme/widgets/pull/7",
       draft: false,
+      state: "open",
+      updated_at: "2026-11-28T07:00:00Z",
+      requested_reviewers: [{ login: "reviewer" }],
       user: { login: "octocat" },
       base: { sha: "base111", ref: "main" },
       head: { sha: "head222", ref: "feature" },
@@ -193,6 +196,27 @@ describe("webhook handling", () => {
     );
   });
 
+  it("caches draft pull requests for Guided Review even when automatic review ignores them", async () => {
+    const secret = "s3cret";
+    const config = loadConfig({
+      GITHUB_WEBHOOK_SECRET: secret,
+      GITHUB_APP_ID: "1",
+      GITHUB_APP_PRIVATE_KEY: "k",
+      REVIEWER_ROLES: "correctness",
+      REVIEW_DRAFTS: "false",
+    });
+    const store = new JobStore(openDb(":memory:"));
+    const rawBody = JSON.stringify(prPayload({ pull_request: { ...prPayload().pull_request, draft: true } }));
+    const result = await handleGithubWebhook({
+      config,
+      store,
+      request: { event: "pull_request", deliveryId: "draft-cache", signature: sign(secret, rawBody), rawBody },
+    });
+    expect(result.status).toBe(202);
+    expect(result.body.ignored).toBe(true);
+    expect(store.listGuidedInboxPulls()[0]).toMatchObject({ pr_number: 7, draft: 1, state: "open" });
+  });
+
   it("enqueues opened pull requests idempotently and stales old SHAs", async () => {
     const secret = "s3cret";
     const config = loadConfig({
@@ -215,6 +239,30 @@ describe("webhook handling", () => {
     });
     expect(first.status).toBe(202);
     expect(first.body.created).toBe(true);
+    expect(store.listGuidedInboxPulls()).toHaveLength(1);
+    expect(store.listGuidedInboxPulls()[0]).toMatchObject({
+      repo_full_name: "acme/widgets",
+      pr_number: 7,
+      github_account_id: 1001,
+      github_repository_id: 2002,
+      state: "open",
+      review_requested: 1,
+      pull_updated_at: "2026-11-28T07:00:00Z",
+    });
+    store.upsertGuidedInboxPull({
+      installationId: 42,
+      repoFullName: "acme/widgets",
+      prNumber: 7,
+      prTitle: "stale close replay",
+      prHtmlUrl: "",
+      prAuthor: "octocat",
+      baseSha: "base111",
+      headSha: "head222",
+      draft: false,
+      state: "closed",
+      pullUpdatedAt: "2026-11-27T07:00:00Z",
+    });
+    expect(store.listGuidedInboxPulls()[0]).toMatchObject({ state: "open", github_account_id: 1001, review_requested: 1 });
 
     const dup = await handleGithubWebhook({
       config,
@@ -283,6 +331,7 @@ describe("webhook handling", () => {
     expect(result.body).toEqual({ ok: true, ignored: true, reason: "unauthorized account" });
     expect(result.enqueue).toBeUndefined();
     expect(store.listJobs()).toEqual([]);
+    expect(store.listGuidedInboxPulls()).toEqual([]);
     const log = String(warn.mock.calls[0]?.[0]);
     expect(log).toContain("unauthorized account");
     expect(log).toContain('"installation_id":42');
@@ -317,6 +366,7 @@ describe("webhook handling", () => {
     expect(result.body).toEqual({ ok: true, ignored: true, reason: "unauthorized repository" });
     expect(result.enqueue).toBeUndefined();
     expect(store.listJobs()).toEqual([]);
+    expect(store.listGuidedInboxPulls()).toEqual([]);
     warn.mockRestore();
   });
 
@@ -1701,6 +1751,10 @@ describe("pull_request.closed merge cancellation", () => {
     expect(result.status).toBe(200);
     expect(result.body.cancelled).toBe(0);
     expect(result.body.cancelledJobIds).toEqual([]);
+    const cached = (store as unknown as { db: { prepare(sql: string): { get(): { count: number } } } })
+      .db.prepare("SELECT COUNT(*) AS count FROM guided_inbox_pulls")
+      .get();
+    expect(cached.count).toBe(0);
   });
 });
 
@@ -1759,6 +1813,20 @@ describe("merge-cancellation hardening", () => {
       GITHUB_APP_PRIVATE_KEY: "k",
       REVIEWER_ROLES: "correctness",
     });
+    store.upsertGuidedInboxPull({
+      installationId: 42,
+      githubAccountId: 1001,
+      githubRepositoryId: 2002,
+      repoFullName: "acme/widgets",
+      prNumber: 7,
+      prTitle: "t",
+      prHtmlUrl: "",
+      prAuthor: "a",
+      baseSha: "base111",
+      headSha: "head222",
+      draft: false,
+      state: "open",
+    });
     const closedBody = JSON.stringify({
       action: "closed",
       installation: { id: 42, account: { id: 1001 } },
@@ -1774,6 +1842,7 @@ describe("merge-cancellation hardening", () => {
     expect(store.hasMergedPull("acme/widgets", 7)).toBe(true);
     expect(store.hasMergedPullAtHead("acme/widgets", 7, "merged-head")).toBe(true);
     expect(store.hasMergedPullAtHead("acme/widgets", 7, "superseded-head")).toBe(false);
+    expect(store.listGuidedInboxPulls()).toEqual([]);
 
     // A delayed synchronize (push raced the merge button) arrives after the close.
     const latePushBody = JSON.stringify({
@@ -1795,6 +1864,7 @@ describe("merge-cancellation hardening", () => {
     expect(late.status).toBe(202);
     expect(late.body.ignored).toBe(true);
     expect(store.findLatestJobForPull("acme/widgets", 7, "late-push")).toBeUndefined();
+    expect(store.listGuidedInboxPulls()).toEqual([]);
     expect(store.getJob(jobId)?.state).toBe("cancelled");
   });
 });

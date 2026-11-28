@@ -73,6 +73,7 @@ export function renderGuidedInboxPage(input: {
       </label>
       <button class="if-button if-button--primary" type="submit">Open guided review</button>
     </form>
+    <form class="trigger gd-sync-form" method="post" action="/guided/sync">${csrfInput(input.options.csrfToken)}<button class="if-button if-button--sm" type="submit">Sync webhook inbox</button><span class="muted">The list itself is webhook-cached; sync only reconciles missed history.</span></form>
     ${input.directError ? `<p class="error if-banner if-banner--danger" role="alert">${escapeHtml(input.directError)}</p>` : ""}
     <form class="trigger job-filters" method="get" action="/guided">
       <label>Repository
@@ -208,53 +209,46 @@ function severityOptions(value = ""): string {
 export function renderGuidedDraftPanel(input: { session: GuidedSessionView; comments: GuidedCommentView[]; csrfToken?: string; readOnly?: boolean }): string {
   if (input.readOnly) return "";
   const active = input.comments.filter((comment) => !comment.deletedAt && (comment.kind === "general" || comment.anchorStatus === "unplaced"));
-  const hasUnplaced = active.some((comment) => comment.anchorStatus === "unplaced");
   return `<section class="config-section gd-human-draft" data-guided-draft data-session-id="${input.session.id}" data-version="${input.session.version}" data-csrf="${escapeHtml(input.csrfToken ?? "")}">
     <div class="gd-head"><h2>Your private draft</h2><span class="gd-save-state" data-save-state data-state="saved">Saved privately</span></div>
     <p class="error if-banner if-banner--danger" data-guided-bundle-error hidden>Guided draft enhancement failed to load. Run the asset build; these controls require JavaScript.</p>
     <p class="muted">Nothing here publishes to GitHub. Notes and the verdict are actor-private until a later deliberate publish step.</p>
     <noscript><p class="notice if-banner if-banner--warning">Guided notes and publication preview require JavaScript. The diff remains readable, but draft controls are inactive.</p></noscript>
-    <div class="gd-draft-grid">
-      <label>Draft summary <textarea data-draft-summary rows="3" maxlength="10000" placeholder="Overall human review summary (optional)">${escapeHtml(input.session.draftSummary)}</textarea></label>
-      <label>Verdict <select data-draft-verdict>
-        <option value="">No verdict required</option>
-        ${["COMMENT", "APPROVE", "REQUEST_CHANGES"].map((verdict) => `<option value="${verdict}"${input.session.draftVerdict === verdict ? " selected" : ""}>${verdict.replaceAll("_", " ")}</option>`).join("")}
-      </select></label>
+    <div class="gd-draft-grid gd-draft-grid--simple">
+      <label class="gd-summary-label">Draft summary <textarea data-draft-summary rows="3" maxlength="10000" placeholder="Overall human review summary (optional)">${escapeHtml(input.session.draftSummary)}</textarea></label>
     </div>
-    <div class="gd-step-actions"><button type="button" class="if-button if-button--primary" data-goto-step="compare">Continue to comparison</button><span class="muted">Inline notes save automatically while you review.</span></div>
-    <details class="gd-draft-details"${hasUnplaced ? " open" : ""}><summary>General notes, stale notes, and publication controls</summary>
-    <h3>General and unplaced notes</h3>
-    <div data-comment-list>${active.length ? active.map(renderGuidedComment).join("\n") : `<p class="muted">No general notes yet. Inline notes appear directly in the diff.</p>`}</div>
-    <form data-general-form class="gd-general-form">
-      <h4>General note</h4>
-      <input type="hidden" data-comment-client-id/>
-      <label>Note <textarea data-comment-body rows="4" maxlength="4000" required></textarea></label>
-      <div class="gd-inline-fields">
-        <label>Severity <select data-comment-severity>${severityOptions()}</select></label>
-        <label>Category <input data-comment-category maxlength="80" placeholder="optional"/></label>
-        <label class="gd-check"><input type="checkbox" data-comment-publishable/> Candidate for review summary</label>
+    <div class="gd-draft-actions">
+      <div class="gd-verdict-buttons" role="group" aria-label="Review verdict">
+        <input type="hidden" data-draft-verdict value="${escapeHtml(input.session.draftVerdict ?? "")}"/>
+        ${[["COMMENT", "Comment"], ["APPROVE", "Approve"], ["REQUEST_CHANGES", "Require changes"]].map(([verdict, label]) => `<button type="button" class="gd-verdict gd-verdict--${verdict.toLowerCase().replaceAll("_", "-")}${input.session.draftVerdict === verdict ? " is-active" : ""}" data-verdict-choice="${verdict}">${label}</button>`).join("")}
       </div>
-      <button type="submit" class="if-button if-button--primary">Save general note</button>
-    </form>
-    <div class="gd-preview-controls">
-      <button type="button" class="if-button" data-refresh-draft>Refresh draft</button>
-      <button type="button" class="if-button if-button--primary" data-preview-publish>Preview publication payload</button>
+      <button type="button" class="if-button if-button--primary" data-goto-step="compare">Continue to comparison</button>
     </div>
-    <div data-preview-output class="gd-preview-output" aria-live="polite"></div>
-    </details>
-    <div class="gd-inline-editor" data-inline-editor hidden>
+    <div class="gd-general-panel">
+      <div class="gd-general-head"><h3>General notes</h3><span><button type="button" class="if-button if-button--sm" data-toggle-general>Add general note</button><button type="button" class="if-button if-button--sm" data-refresh-draft>Refresh</button></span></div>
+      <div data-comment-list>${active.map(renderGuidedComment).join("\n")}</div>
+      <form data-general-form class="gd-general-form" hidden>
+        <input type="hidden" data-comment-client-id/>
+        <label>Note <textarea class="if-textarea" data-comment-body rows="3" maxlength="4000" required></textarea></label>
+        <div class="gd-inline-fields">
+          <label>Severity <select class="if-select" data-comment-severity>${severityOptions()}</select></label>
+          <label>Category <input class="if-input" data-comment-category maxlength="80" placeholder="optional"/></label>
+          <label class="gd-check"><input class="if-checkbox" type="checkbox" data-comment-publishable/> Candidate for review summary</label>
+        </div>
+        <button type="submit" class="if-button if-button--primary">Save general note</button>
+      </form>
+    </div>
+    <div class="gd-inline-editor-home" data-inline-editor-home><div class="gd-inline-editor" data-inline-editor hidden>
       <h4>Inline note <span class="muted" data-inline-target></span></h4>
       <input type="hidden" data-comment-client-id/>
-      <label>Note <textarea data-comment-body rows="4" maxlength="4000" required></textarea></label>
+      <label>Note <textarea class="if-textarea" data-comment-body rows="4" maxlength="4000" required></textarea></label>
       <div class="gd-inline-fields">
-        <label>Severity <select data-comment-severity>${severityOptions()}</select></label>
-        <label>Category <input data-comment-category maxlength="80" placeholder="optional"/></label>
-        <label class="gd-check"><input type="checkbox" data-comment-publishable/> Candidate GitHub comment</label>
+        <label>Severity <select class="if-select" data-comment-severity>${severityOptions()}</select></label>
+        <label>Category <input class="if-input" data-comment-category maxlength="80" placeholder="optional"/></label>
+        <label class="gd-check"><input class="if-checkbox" type="checkbox" data-comment-publishable/> Candidate GitHub comment</label>
       </div>
-      <button type="button" class="if-button if-button--primary" data-save-inline>Save inline note</button>
-      <button type="button" class="if-button" data-cancel-inline>Cancel</button>
-      <p class="muted">Unchecked stays private. Unplaced stale-hunk notes cannot be candidates until re-anchored.</p>
-    </div>
+      <div class="gd-inline-editor-actions"><button type="button" class="if-button if-button--primary" data-save-inline>Save inline note</button><button type="button" class="if-button" data-cancel-inline>Cancel</button></div>
+    </div></div>
   </section>`;
 }
 
@@ -626,7 +620,7 @@ export function renderGuidedDiffWorkspace(input: {
   const viewed = new Set(input.viewedFiles ?? []);
   const walkthroughPayload = input.walkthrough && (input.walkthrough.status === "ready" || input.walkthrough.status === "stale") ? input.walkthrough.payload : undefined;
   const treeItems = filtered.map((file, index) => ({ file, index }));
-  const tree = treeItems.map(({ file, index }) => `<li><a href="#guided-file-${index}" data-guided-file-link><span class="gd-file-icon" aria-hidden="true">${escapeHtml(fileIconLabel(file.path))}</span><span class="gd-tree-path">${viewed.has(file.path) ? "✓ " : ""}${escapeHtml(file.path)}</span></a><span class="muted">+${file.additions} −${file.deletions}</span></li>`).join("");
+  const tree = treeItems.map(({ file, index }) => `<li><a href="#guided-file-${index}" data-guided-file-link><span class="gd-file-icon" aria-hidden="true">${escapeHtml(fileIconLabel(file.path))}</span><span class="gd-tree-path">${escapeHtml(file.path)}</span></a><span class="muted">+${file.additions} −${file.deletions}</span></li>`).join("");
   type TreeNode = { dirs: Map<string, TreeNode>; files: typeof treeItems };
   const root: TreeNode = { dirs: new Map(), files: [] };
   for (const item of treeItems) {
@@ -639,7 +633,7 @@ export function renderGuidedDiffWorkspace(input: {
     }
     node.files.push(item);
   }
-  const renderTreeNode = (node: TreeNode): string => `${node.files.map(({ file, index }) => `<li><a href="#guided-file-${index}" data-guided-file-link><span class="gd-file-icon" aria-hidden="true">${escapeHtml(fileIconLabel(file.path))}</span><span class="gd-tree-path">${viewed.has(file.path) ? "✓ " : ""}${escapeHtml(file.path.split("/").pop() ?? file.path)}</span></a><span class="muted">+${file.additions} −${file.deletions}</span></li>`).join("")}${[...node.dirs.entries()].map(([dir, child]) => `<li class="gd-tree-dir"><details open><summary>${escapeHtml(dir)}/</summary><ol>${renderTreeNode(child)}</ol></details></li>`).join("")}`;
+  const renderTreeNode = (node: TreeNode): string => `${node.files.map(({ file, index }) => `<li><a href="#guided-file-${index}" data-guided-file-link><span class="gd-file-icon" aria-hidden="true">${escapeHtml(fileIconLabel(file.path))}</span><span class="gd-tree-path">${escapeHtml(file.path.split("/").pop() ?? file.path)}</span></a><span class="muted">+${file.additions} −${file.deletions}</span></li>`).join("")}${[...node.dirs.entries()].map(([dir, child]) => `<li class="gd-tree-dir"><details open><summary>${escapeHtml(dir)}/</summary><ol>${renderTreeNode(child)}</ol></details></li>`).join("")}`;
   const treeView = `<ol>${renderTreeNode(root)}</ol>`;
   const rendered = filtered.map((file, index) => {
     const filePrimer = primerChangeFor(walkthroughPayload, file.path);
@@ -649,7 +643,7 @@ export function renderGuidedDiffWorkspace(input: {
     </details>`).join("\n");
     const empty = file.binary ? `<p class="muted">Binary file changed; inline diff is unavailable.</p>` : file.hunks.length === 0 ? `<p class="muted">No textual hunks are available for this file.</p>` : "";
     return `<article class="gd-file${viewed.has(file.path) ? " gd-viewed" : ""}" id="guided-file-${index}" data-guided-file data-path="${escapeHtml(file.path)}" data-status="${escapeHtml(file.status)}">
-      <h3 class="gd-file-header"><span class="gd-file-title"><span class="gd-file-icon" aria-hidden="true">${escapeHtml(fileIconLabel(file.path))}</span><span>${escapeHtml(file.path)}</span></span><span class="muted">${escapeHtml(file.status)} +${file.additions} −${file.deletions}</span>${input.sessionView && !input.readOnly ? `<label class="gd-viewed-check"><input type="checkbox" data-guided-viewed-toggle data-path="${escapeHtml(file.path)}"${viewed.has(file.path) ? " checked" : ""}/> Viewed</label>` : ""}</h3>
+      <h3 class="gd-file-header"><span class="gd-file-title"><span class="gd-file-icon" aria-hidden="true">${escapeHtml(fileIconLabel(file.path))}</span><span>${escapeHtml(file.path)}</span></span><span class="muted">${escapeHtml(file.status)} +${file.additions} −${file.deletions}</span>${input.sessionView && !input.readOnly ? `<label class="gd-viewed-check"><input class="if-checkbox" type="checkbox" data-guided-viewed-toggle data-path="${escapeHtml(file.path)}"${viewed.has(file.path) ? " checked" : ""}/> Viewed</label>` : ""}</h3>
       <div class="gd-file-primer" data-file-primer data-path="${escapeHtml(file.path)}"${walkthroughPayload ? "" : " hidden"}>${renderFilePrimerContent(filePrimer)}</div>
       ${file.truncated ? `<p class="notice if-banner if-banner--warning">This file exceeded the per-file rendering bound and is partially shown.</p>` : ""}
       <div class="guided-pierre-file" data-guided-pierre data-path="${escapeHtml(file.path)}" data-old-path="${escapeHtml(file.oldPath ?? file.path)}" data-session-id="${input.sessionId ?? ""}" data-commentable="${input.sessionView && !input.readOnly ? "1" : ""}">

@@ -319,6 +319,28 @@ function migrate(db: SqliteDb): void {
       UNIQUE (provider, provider_instance, repo_full_name, pr_number, head_sha, name)
     );
 
+    CREATE TABLE IF NOT EXISTS guided_inbox_pulls (
+      provider TEXT NOT NULL,
+      provider_instance TEXT NOT NULL,
+      repo_full_name TEXT NOT NULL,
+      pr_number INTEGER NOT NULL,
+      installation_id INTEGER NOT NULL,
+      github_account_id INTEGER,
+      github_repository_id INTEGER,
+      title TEXT NOT NULL DEFAULT '',
+      author TEXT NOT NULL DEFAULT '',
+      url TEXT NOT NULL DEFAULT '',
+      base_sha TEXT NOT NULL,
+      head_sha TEXT NOT NULL,
+      draft INTEGER NOT NULL DEFAULT 0,
+      state TEXT NOT NULL DEFAULT 'open',
+      review_requested INTEGER,
+      pull_updated_at TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      PRIMARY KEY (provider, provider_instance, repo_full_name, pr_number)
+    );
+
     CREATE TABLE IF NOT EXISTS merged_pulls (
       repo_full_name TEXT NOT NULL,
       pr_number INTEGER NOT NULL,
@@ -894,6 +916,8 @@ function migrate(db: SqliteDb): void {
     // Stamps finished_at to match the runtime retireReviewerRuns path; the
     // column is ensured first because pre-usage schemas may not have it.
     ensureColumn(db, "merged_pulls", "head_sha", "TEXT");
+    ensureColumn(db, "guided_inbox_pulls", "github_account_id", "INTEGER");
+    ensureColumn(db, "guided_inbox_pulls", "github_repository_id", "INTEGER");
     ensureColumn(db, "reviewer_runs", "finished_at", "TEXT");
     const backfillRunState = db.prepare(
       `UPDATE reviewer_runs SET state = ?, finished_at = COALESCE(finished_at, ?)

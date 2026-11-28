@@ -111,7 +111,7 @@ Binary files a/a.png and b/a.png differ
     };
     const html = renderGuidedDiffWorkspace({ files: [file], sessionView, comments: [], csrfToken: "csrf" });
     expect(html).toContain("data-guided-draft");
-    expect(html).toContain("data-preview-publish");
+    expect(html).toContain("data-toggle-general");
     expect(html).toContain("data-guided-comment-anchor");
     expect(html).toContain("draft &lt;summary&gt;");
     expect(html).not.toContain("draft <summary>");
@@ -184,14 +184,13 @@ Binary files a/a.png and b/a.png differ
     expect(html).not.toContain("IntersectionObserver");
     expect(html).toContain("guided:wizard-step");
     expect(html).toContain("Unplaced stale-hunk note");
-    expect(html).toContain('<details class="gd-draft-details" open>');
+    expect(html).toContain('class="gd-general-panel"');
     const annotationJson = html.match(/<script type="application\/json" class="guided-annotations-raw">([\s\S]*?)<\/script>/)?.[1] ?? "";
     expect(annotationJson).toContain("c-note");
     expect(annotationJson).toContain('\"anchorStatus\":\"anchored\"');
     expect(annotationJson).not.toContain("c-stale");
-    const detailsStart = html.indexOf('<details class="gd-draft-details"');
-    const detailsEnd = html.indexOf("</details>", detailsStart);
-    expect(html.indexOf("data-inline-editor")).toBeGreaterThan(detailsEnd);
+    expect(html).not.toContain('class="gd-draft-details"');
+    expect(html.indexOf("data-inline-editor-home")).toBeGreaterThan(html.indexOf("data-comment-list"));
   });
 
   it("renders the optional poison-alert skip action only for optional attention", () => {

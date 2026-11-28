@@ -353,6 +353,44 @@ export function retiredMemberDedupKey(stackJobId: number, prNumber: number, atte
   return `stack-member-retired:${stackJobId}:${prNumber}:${attempt}`;
 }
 
+export interface GuidedInboxPullRow {
+  provider: string;
+  provider_instance: string;
+  repo_full_name: string;
+  pr_number: number;
+  installation_id: number;
+  github_account_id: number | null;
+  github_repository_id: number | null;
+  title: string;
+  author: string;
+  url: string;
+  base_sha: string;
+  head_sha: string;
+  draft: number;
+  state: string;
+  review_requested: number | null;
+  pull_updated_at: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface GuidedInboxPullInput {
+  installationId: number;
+  githubAccountId?: number;
+  githubRepositoryId?: number;
+  repoFullName: string;
+  prNumber: number;
+  prTitle: string;
+  prHtmlUrl: string;
+  prAuthor: string;
+  baseSha: string;
+  headSha: string;
+  draft: boolean;
+  state: string;
+  pullUpdatedAt?: string;
+  reviewRequested?: boolean;
+}
+
 export interface EnqueueResult {
   job: JobRow;
   created: boolean;
@@ -2164,6 +2202,115 @@ export class JobStore {
         )
         .get(resolved.provider, resolved.instance, repoFullName, prNumber),
     );
+  }
+
+  upsertGuidedInboxPull(input: GuidedInboxPullInput): void {
+    const now = nowIso();
+    this.db
+      .prepare(
+        `INSERT INTO guided_inbox_pulls (
+           provider, provider_instance, repo_full_name, pr_number, installation_id,
+           github_account_id, github_repository_id,
+           title, author, url, base_sha, head_sha, draft, state, review_requested,
+           pull_updated_at, created_at, updated_at
+         ) VALUES ('github', 'github.com', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(provider, provider_instance, repo_full_name, pr_number) DO UPDATE SET
+           installation_id = excluded.installation_id,
+           github_account_id = COALESCE(excluded.github_account_id, guided_inbox_pulls.github_account_id),
+           github_repository_id = COALESCE(excluded.github_repository_id, guided_inbox_pulls.github_repository_id),
+           title = excluded.title,
+           author = excluded.author,
+           url = excluded.url,
+           base_sha = excluded.base_sha,
+           head_sha = excluded.head_sha,
+           draft = excluded.draft,
+           state = excluded.state,
+           review_requested = COALESCE(excluded.review_requested, guided_inbox_pulls.review_requested),
+           pull_updated_at = COALESCE(excluded.pull_updated_at, guided_inbox_pulls.pull_updated_at),
+           updated_at = excluded.updated_at
+         WHERE excluded.pull_updated_at IS NULL
+            OR guided_inbox_pulls.pull_updated_at IS NULL
+            OR excluded.pull_updated_at >= guided_inbox_pulls.pull_updated_at`,
+      )
+      .run(
+        input.repoFullName,
+        input.prNumber,
+        input.installationId,
+        input.githubAccountId ?? null,
+        input.githubRepositoryId ?? null,
+        input.prTitle,
+        input.prAuthor,
+        input.prHtmlUrl,
+        input.baseSha,
+        input.headSha,
+        input.draft ? 1 : 0,
+        input.state,
+        input.reviewRequested == null ? null : input.reviewRequested ? 1 : 0,
+        input.pullUpdatedAt ?? null,
+        now,
+        now,
+      );
+  }
+
+  markGuidedInboxPullClosed(repoFullName: string, prNumber: number, pullUpdatedAt?: string): void {
+    this.db
+      .prepare(
+        `UPDATE guided_inbox_pulls
+         SET state = 'closed', pull_updated_at = COALESCE(?, pull_updated_at), updated_at = ?
+         WHERE provider = 'github' AND provider_instance = 'github.com' AND repo_full_name = ? AND pr_number = ?
+           AND (? IS NULL OR pull_updated_at IS NULL OR ? >= pull_updated_at)`,
+      )
+      .run(pullUpdatedAt ?? null, nowIso(), repoFullName, prNumber, pullUpdatedAt ?? null, pullUpdatedAt ?? null);
+  }
+
+  closeMissingGuidedInboxRepos(openRepoFullNames: string[], unchangedSince?: string): void {
+    const now = nowIso();
+    const untouched = unchangedSince ? "AND updated_at <= ?" : "";
+    const args = unchangedSince ? [unchangedSince] : [];
+    if (openRepoFullNames.length === 0) {
+      this.db.prepare(`UPDATE guided_inbox_pulls SET state = 'closed', updated_at = ? WHERE provider = 'github' AND provider_instance = 'github.com' AND state = 'open' ${untouched}`).run(now, ...args);
+      return;
+    }
+    const placeholders = openRepoFullNames.map(() => "?").join(", ");
+    this.db
+      .prepare(
+        `UPDATE guided_inbox_pulls SET state = 'closed', updated_at = ?
+         WHERE provider = 'github' AND provider_instance = 'github.com' AND state = 'open' AND repo_full_name NOT IN (${placeholders}) ${untouched}`,
+      )
+      .run(now, ...openRepoFullNames, ...args);
+  }
+
+  closeMissingGuidedInboxPulls(repoFullName: string, openPrNumbers: number[], unchangedSince?: string): void {
+    const now = nowIso();
+    const untouched = unchangedSince ? "AND updated_at <= ?" : "";
+    const args = unchangedSince ? [unchangedSince] : [];
+    if (openPrNumbers.length === 0) {
+      this.db.prepare(`UPDATE guided_inbox_pulls SET state = 'closed', updated_at = ? WHERE provider = 'github' AND provider_instance = 'github.com' AND repo_full_name = ? AND state = 'open' ${untouched}`).run(now, repoFullName, ...args);
+      return;
+    }
+    const placeholders = openPrNumbers.map(() => "?").join(", ");
+    this.db
+      .prepare(
+        `UPDATE guided_inbox_pulls SET state = 'closed', updated_at = ?
+         WHERE provider = 'github' AND provider_instance = 'github.com' AND repo_full_name = ? AND state = 'open' AND pr_number NOT IN (${placeholders}) ${untouched}`,
+      )
+      .run(now, repoFullName, ...openPrNumbers, ...args);
+  }
+
+  pruneClosedGuidedInboxPulls(retentionMs = 30 * 24 * 60 * 60 * 1000): void {
+    const cutoff = new Date(Date.now() - retentionMs).toISOString();
+    this.db.prepare(`DELETE FROM guided_inbox_pulls WHERE state = 'closed' AND updated_at < ?`).run(cutoff);
+  }
+
+  listGuidedInboxPulls(): GuidedInboxPullRow[] {
+    this.pruneClosedGuidedInboxPulls();
+    return this.db
+      .prepare(
+        `SELECT * FROM guided_inbox_pulls
+         WHERE state = 'open'
+         ORDER BY COALESCE(pull_updated_at, updated_at) DESC, pr_number DESC`,
+      )
+      .all() as GuidedInboxPullRow[];
   }
 
   resetInterrupted(id: number): void {

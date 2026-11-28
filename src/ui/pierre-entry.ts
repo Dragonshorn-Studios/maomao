@@ -15,14 +15,16 @@ import { annotationForLine, diffLayoutOptions, nextLayout, type DiffLayout, synt
 
 declare global {
   // eslint-disable-next-line no-var
-  var __maomaoPierre: { enhance(): void; applyLayout(layout: "unified" | "split"): void; scrollToGuidedLine(path: string, line: number, side: "LEFT" | "RIGHT"): boolean; updateGuidedComments(comments: GuidedBrowserComment[]): void; setGuidedComparisonVisible(visible: boolean): void };
+  var __maomaoPierre: { enhance(): void; applyLayout(layout: "unified" | "split"): void; scrollToGuidedLine(path: string, line: number, side: "LEFT" | "RIGHT"): boolean; updateGuidedComments(comments: GuidedBrowserComment[]): void; setGuidedComparisonVisible(visible: boolean): void; openGuidedInlineEditor(anchor: { path: string; side: "LEFT" | "RIGHT"; line: number }): boolean; closeGuidedInlineEditor(): void };
 }
 
 const LAYOUT_STORAGE_KEY = "maomao-diff-layout";
 
 const instances = new Map<HTMLElement, FileDiff<any>>();
+const guidedAnnotationSignatures = new Map<HTMLElement, string>();
 let guidedComparisonVisible = false;
 let latestGuidedComments: GuidedBrowserComment[] | null = null;
+let guidedEditorAnchor: { path: string; side: "LEFT" | "RIGHT"; line: number } | null = null;
 
 const GUIDED_UNSAFE_CSS = `
 .gd-inline-annotation { max-width: 44rem; margin: .35rem .5rem; padding: .55rem .65rem; border: 1px solid var(--line, #d0d7de); border-left: 3px solid var(--jade, #2da160); border-radius: 7px; background: var(--surface, #fff); color: var(--ink, #24292f); font-family: var(--font-sans, system-ui, sans-serif); font-size: .82rem; line-height: 1.35; box-shadow: 0 4px 14px rgba(0,0,0,.08); }
@@ -36,7 +38,7 @@ const GUIDED_UNSAFE_CSS = `
 `;
 
 interface GuidedAnnotationMetadata {
-  source: "human" | "maomao";
+  source: "human" | "maomao" | "editor";
   summary: string;
   body?: string;
   severity?: string;
@@ -160,12 +162,54 @@ function effectiveGuidedAnnotations(container: HTMLElement): GuidedAnnotation[] 
   const initial = annotationsForContainer(container);
   const human = currentHumanAnnotations(container, initial);
   const maomao = guidedComparisonVisible ? initial.filter((annotation) => annotation.metadata?.source === "maomao") : [];
-  return groupGuidedAnnotations([...human, ...maomao]);
+  const path = container.getAttribute("data-path") ?? "";
+  const editor = guidedEditorAnchor?.path === path
+    ? [{
+        side: guidedEditorAnchor.side === "LEFT" ? "deletions" as const : "additions" as const,
+        lineNumber: guidedEditorAnchor.line,
+        metadata: { source: "editor" as const, summary: "", path, side: guidedEditorAnchor.side, line: guidedEditorAnchor.line },
+      }]
+    : [];
+  return groupGuidedAnnotations([...human, ...maomao, ...editor]);
+}
+
+function normalizedGuidedMetadata(meta: GuidedAnnotationMetadata | undefined): unknown {
+  if (!meta) return null;
+  return {
+    source: meta.source,
+    summary: meta.summary,
+    body: meta.body,
+    severity: meta.severity,
+    clientId: meta.clientId,
+    publishable: meta.publishable,
+    category: meta.category,
+    anchorStatus: meta.anchorStatus,
+    path: meta.path,
+    side: meta.side,
+    line: meta.line,
+    match: meta.match,
+    entries: meta.entries?.map(normalizedGuidedMetadata),
+  };
+}
+
+function guidedAnnotationsSignature(annotations: GuidedAnnotation[]): string {
+  return JSON.stringify(annotations.map((annotation) => ({
+    side: annotation.side,
+    lineNumber: annotation.lineNumber,
+    metadata: normalizedGuidedMetadata(annotation.metadata),
+  })));
 }
 
 function refreshGuidedAnnotations(): void {
   for (const container of Array.from(document.querySelectorAll<HTMLElement>(".guided-pierre-file[data-enhanced]"))) {
-    instances.get(container)?.setLineAnnotations(effectiveGuidedAnnotations(container));
+    const instance = instances.get(container);
+    if (!instance) continue;
+    const annotations = effectiveGuidedAnnotations(container);
+    const signature = guidedAnnotationsSignature(annotations);
+    if (guidedAnnotationSignatures.get(container) === signature) continue;
+    instance.setLineAnnotations(annotations);
+    instance.rerender();
+    guidedAnnotationSignatures.set(container, signature);
   }
 }
 
@@ -175,6 +219,13 @@ function setGuidedComparisonVisible(visible: boolean): void {
 }
 
 function renderGuidedAnnotationContent(meta: GuidedAnnotationMetadata): HTMLElement {
+  if (meta.source === "editor") {
+    const editor = (globalThis as typeof globalThis & { __maomaoGuidedInlineEditor?: HTMLElement }).__maomaoGuidedInlineEditor;
+    if (editor) {
+      editor.hidden = false;
+      return editor;
+    }
+  }
   const node = document.createElement("div");
   node.className = `gd-inline-annotation gd-inline-annotation--${meta.source}`;
   const title = document.createElement("div");
@@ -201,7 +252,8 @@ function renderGuidedAnnotationContent(meta: GuidedAnnotationMetadata): HTMLElem
       button.addEventListener("click", (event) => {
         event.preventDefault();
         event.stopPropagation();
-        document.dispatchEvent(new CustomEvent(eventName, { detail: meta }));
+        const rect = node.getBoundingClientRect();
+        document.dispatchEvent(new CustomEvent(eventName, { detail: { ...meta, top: rect.top, bottom: rect.bottom, left: rect.left, right: rect.right } }));
       });
       actions.appendChild(button);
     }
@@ -308,15 +360,17 @@ function renderGuidedFile(container: HTMLElement): void {
         event.stopPropagation();
         const current = getHoveredRow();
         if (!current || !path || hoveredLineTypes.get(keyFor(current)) === "context-expanded") return;
+        const rect = button.getBoundingClientRect();
         document.dispatchEvent(new CustomEvent("guided:line-anchor", {
-          detail: { path, side: current.side === "deletions" ? "LEFT" : "RIGHT", line: String(current.lineNumber) },
+          detail: { path, side: current.side === "deletions" ? "LEFT" : "RIGHT", line: String(current.lineNumber), top: rect.top, bottom: rect.bottom, left: rect.left, right: rect.right },
         }));
       });
       return button;
     } : undefined,
   });
+  const initialAnnotations = effectiveGuidedAnnotations(container);
   try {
-    fileDiff.render({ fileDiff: metadata, lineAnnotations: effectiveGuidedAnnotations(container), containerWrapper: container });
+    fileDiff.render({ fileDiff: metadata, lineAnnotations: initialAnnotations, containerWrapper: container });
   } catch {
     fileDiff.cleanUp();
     return;
@@ -329,6 +383,7 @@ function renderGuidedFile(container: HTMLElement): void {
   if (fallback) fallback.hidden = true;
   container.setAttribute("data-enhanced", "1");
   instances.set(container, fileDiff);
+  guidedAnnotationSignatures.set(container, guidedAnnotationsSignature(initialAnnotations));
 }
 
 function commentsToGuidedAnnotations(comments: GuidedBrowserComment[]): Map<string, GuidedAnnotation[]> {
@@ -349,6 +404,21 @@ function commentsToGuidedAnnotations(comments: GuidedBrowserComment[]): Map<stri
 
 function updateGuidedComments(comments: GuidedBrowserComment[]): void {
   latestGuidedComments = comments;
+  refreshGuidedAnnotations();
+}
+
+function openGuidedInlineEditor(anchor: { path: string; side: "LEFT" | "RIGHT"; line: number }): boolean {
+  const container = Array.from(document.querySelectorAll<HTMLElement>(".guided-pierre-file[data-guided-pierre]"))
+    .find((candidate) => candidate.getAttribute("data-path") === anchor.path);
+  if (!container || container.getAttribute("data-enhanced") !== "1" || !Number.isSafeInteger(anchor.line) || anchor.line < 1) return false;
+  guidedEditorAnchor = { path: anchor.path, side: anchor.side, line: anchor.line };
+  refreshGuidedAnnotations();
+  return true;
+}
+
+function closeGuidedInlineEditor(): void {
+  if (!guidedEditorAnchor) return;
+  guidedEditorAnchor = null;
   refreshGuidedAnnotations();
 }
 
@@ -387,6 +457,7 @@ function applyLayout(layout: DiffLayout): void {
     const previous = instances.get(container);
     previous?.cleanUp();
     instances.delete(container);
+    guidedAnnotationSignatures.delete(container);
     container.removeAttribute("data-enhanced");
     for (const child of Array.from(container.children)) {
       if (child.classList.contains("diff-raw") || child.classList.contains("guided-patch-raw") || child.classList.contains("guided-annotations-raw")) continue;
@@ -456,9 +527,9 @@ function enhanceAll(): void {
   }
 }
 
-export { enhanceAll as enhance, applyLayout, scrollToGuidedLine, updateGuidedComments, setGuidedComparisonVisible };
+export { enhanceAll as enhance, applyLayout, scrollToGuidedLine, updateGuidedComments, setGuidedComparisonVisible, openGuidedInlineEditor, closeGuidedInlineEditor };
 
-globalThis.__maomaoPierre = { enhance: enhanceAll, applyLayout, scrollToGuidedLine, updateGuidedComments, setGuidedComparisonVisible };
+globalThis.__maomaoPierre = { enhance: enhanceAll, applyLayout, scrollToGuidedLine, updateGuidedComments, setGuidedComparisonVisible, openGuidedInlineEditor, closeGuidedInlineEditor };
 const pierre = globalThis.__maomaoPierre;
 
 if (typeof document !== "undefined") {

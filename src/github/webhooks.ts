@@ -176,6 +176,9 @@ export interface PullRequestWebhookPayload {
     html_url?: string;
     draft?: boolean;
     merged?: boolean;
+    state?: string;
+    updated_at?: string;
+    requested_reviewers?: Array<{ login?: string }>;
     user?: { login?: string; type?: string };
     author_association?: string;
     base?: { sha?: string; ref?: string };
@@ -271,6 +274,10 @@ export function parsePullRequestPayload(payload: PullRequestWebhookPayload): {
   headSha: string;
   baseRef: string;
   headRef: string;
+  draft: boolean;
+  state: string;
+  pullUpdatedAt?: string;
+  reviewRequested?: boolean;
   /** Null = deleted-fork head; undefined = field absent from the payload. */
   headRepoFullName?: string | null;
 } {
@@ -303,6 +310,10 @@ export function parsePullRequestPayload(payload: PullRequestWebhookPayload): {
     headSha: pr.head.sha,
     baseRef: pr.base.ref ?? "",
     headRef: pr.head.ref ?? "",
+    draft: pr.draft === true,
+    state: pr.state ?? (payload.action === "closed" ? "closed" : "open"),
+    pullUpdatedAt: pr.updated_at,
+    reviewRequested: Array.isArray(pr.requested_reviewers) ? pr.requested_reviewers.length > 0 : undefined,
     headRepoFullName: pr.head.repo === null ? null : (pr.head.repo?.full_name ?? undefined),
   };
 }
@@ -347,10 +358,6 @@ function handlePullClosed(
     }
     return ignored("closed payload missing installation, repository, or pull request context");
   }
-  // Never infer a merge from the PR merely being closed.
-  if (payload.pull_request?.merged !== true) {
-    return ignored("pull request closed without merge");
-  }
   const auth = rejectUnauthorized(input.config, {
     installationId,
     accountId: githubAccountId,
@@ -358,6 +365,11 @@ function handlePullClosed(
   });
   if (!auth.ok) {
     return ignored(auth.reason);
+  }
+  input.store.markGuidedInboxPullClosed(repoFullName, prNumber, payload.pull_request?.updated_at);
+  // Never infer a merge from the PR merely being closed.
+  if (payload.pull_request?.merged !== true) {
+    return ignored("pull request closed without merge");
   }
   if (input.store.hasWebhookDelivery(input.request.deliveryId)) {
     return { status: 200, body: { ok: true, duplicate: true, reason: "duplicate delivery" } };
@@ -515,6 +527,22 @@ async function handleGithubWebhookRequest(input: GithubWebhookInput): Promise<We
     return { status: 400, body: { error: "invalid JSON" } };
   }
 
+  let cachedPull: ReturnType<typeof parsePullRequestPayload> | undefined;
+  try {
+    const parsed = parsePullRequestPayload(payload);
+    const cacheAuth = rejectUnauthorized(input.config, {
+      installationId: parsed.installationId,
+      accountId: parsed.githubAccountId,
+      repositoryId: parsed.githubRepositoryId,
+    });
+    if (cacheAuth.ok) {
+      if (payload.action !== "closed" && !input.store.hasMergedPull(parsed.repoFullName, parsed.prNumber)) input.store.upsertGuidedInboxPull(parsed);
+      cachedPull = parsed;
+    }
+  } catch {
+    // Malformed or incomplete payloads still use the event-specific fail-safe paths below.
+  }
+
   if (payload.action === "closed") {
     return handlePullClosed(input, payload);
   }
@@ -525,7 +553,7 @@ async function handleGithubWebhookRequest(input: GithubWebhookInput): Promise<We
   }
 
   try {
-    const parsed = parsePullRequestPayload(payload);
+    const parsed = cachedPull ?? parsePullRequestPayload(payload);
     const auth = rejectUnauthorized(input.config, {
       installationId: parsed.installationId,
       accountId: parsed.githubAccountId,
