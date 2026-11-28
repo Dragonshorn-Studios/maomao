@@ -428,7 +428,10 @@ function enhanceDraft(root: HTMLElement): void {
     if (!item) return;
     if (editButton) {
       event.preventDefault();
-      if (item.dataset.kind === "inline") showInlineEditor(undefined, item);
+      if (item.dataset.kind === "inline") {
+        const rect = editButton.getBoundingClientRect();
+        showInlineEditor({ path: "", side: "", line: "", top: rect.top, bottom: rect.bottom, left: rect.left, right: rect.right }, item);
+      }
       else if (generalForm) {
         const client = generalForm.querySelector<HTMLInputElement>("[data-comment-client-id]");
         if (client) client.value = item.dataset.clientId ?? "";

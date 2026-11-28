@@ -2263,6 +2263,21 @@ export class JobStore {
       .run(pullUpdatedAt ?? null, nowIso(), repoFullName, prNumber, pullUpdatedAt ?? null, pullUpdatedAt ?? null);
   }
 
+  closeMissingGuidedInboxRepos(openRepoFullNames: string[]): void {
+    const now = nowIso();
+    if (openRepoFullNames.length === 0) {
+      this.db.prepare(`UPDATE guided_inbox_pulls SET state = 'closed', updated_at = ? WHERE provider = 'github' AND provider_instance = 'github.com' AND state = 'open'`).run(now);
+      return;
+    }
+    const placeholders = openRepoFullNames.map(() => "?").join(", ");
+    this.db
+      .prepare(
+        `UPDATE guided_inbox_pulls SET state = 'closed', updated_at = ?
+         WHERE provider = 'github' AND provider_instance = 'github.com' AND state = 'open' AND repo_full_name NOT IN (${placeholders})`,
+      )
+      .run(now, ...openRepoFullNames);
+  }
+
   closeMissingGuidedInboxPulls(repoFullName: string, openPrNumbers: number[]): void {
     const now = nowIso();
     if (openPrNumbers.length === 0) {

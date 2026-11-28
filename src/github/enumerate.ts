@@ -14,11 +14,12 @@ export async function enumerateGithubInstallationRepositories(
   github: Pick<GithubPort, "listAppInstallations" | "listInstallationRepositories">,
   config: Config,
   logPrefix: string,
+  options?: { limit?: number; strict?: boolean },
 ): Promise<GithubInstallationRepoOption[]> {
   if (!github.listAppInstallations || !github.listInstallationRepositories) {
     throw new Error("this GitHub client does not support repository enumeration");
   }
-  const options: GithubInstallationRepoOption[] = [];
+  const repoOptions: GithubInstallationRepoOption[] = [];
   const installations = await github.listAppInstallations();
   for (const installation of installations) {
     const subject = { installationId: installation.id, accountId: installation.accountId };
@@ -27,11 +28,13 @@ export async function enumerateGithubInstallationRepositories(
       const repos = await github.listInstallationRepositories(installation.id);
       for (const repo of repos) {
         if (!authorizeGithubRepository(config, { ...subject, repositoryId: repo.id }).ok) continue;
-        options.push({ fullName: repo.fullName, installationId: installation.id, repositoryId: repo.id, accountId: installation.accountId });
+        repoOptions.push({ fullName: repo.fullName, installationId: installation.id, repositoryId: repo.id, accountId: installation.accountId });
       }
     } catch (error) {
+      if (options?.strict) throw error;
       console.warn(`${logPrefix}: could not list repositories for installation ${installation.id}: ${error instanceof Error ? error.message : String(error)}`);
     }
   }
-  return options.sort((a, b) => a.fullName.localeCompare(b.fullName)).slice(0, 500);
+  const sorted = repoOptions.sort((a, b) => a.fullName.localeCompare(b.fullName));
+  return sorted.slice(0, options?.limit ?? 500);
 }

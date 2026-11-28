@@ -249,6 +249,20 @@ describe("webhook handling", () => {
       review_requested: 1,
       pull_updated_at: "2026-11-28T07:00:00Z",
     });
+    store.upsertGuidedInboxPull({
+      installationId: 42,
+      repoFullName: "acme/widgets",
+      prNumber: 7,
+      prTitle: "stale close replay",
+      prHtmlUrl: "",
+      prAuthor: "octocat",
+      baseSha: "base111",
+      headSha: "head222",
+      draft: false,
+      state: "closed",
+      pullUpdatedAt: "2026-11-27T07:00:00Z",
+    });
+    expect(store.listGuidedInboxPulls()[0]).toMatchObject({ state: "open", github_account_id: 1001, review_requested: 1 });
 
     const dup = await handleGithubWebhook({
       config,
@@ -317,6 +331,7 @@ describe("webhook handling", () => {
     expect(result.body).toEqual({ ok: true, ignored: true, reason: "unauthorized account" });
     expect(result.enqueue).toBeUndefined();
     expect(store.listJobs()).toEqual([]);
+    expect(store.listGuidedInboxPulls()).toEqual([]);
     const log = String(warn.mock.calls[0]?.[0]);
     expect(log).toContain("unauthorized account");
     expect(log).toContain('"installation_id":42');
@@ -351,6 +366,7 @@ describe("webhook handling", () => {
     expect(result.body).toEqual({ ok: true, ignored: true, reason: "unauthorized repository" });
     expect(result.enqueue).toBeUndefined();
     expect(store.listJobs()).toEqual([]);
+    expect(store.listGuidedInboxPulls()).toEqual([]);
     warn.mockRestore();
   });
 
@@ -1793,6 +1809,20 @@ describe("merge-cancellation hardening", () => {
       GITHUB_APP_PRIVATE_KEY: "k",
       REVIEWER_ROLES: "correctness",
     });
+    store.upsertGuidedInboxPull({
+      installationId: 42,
+      githubAccountId: 1001,
+      githubRepositoryId: 2002,
+      repoFullName: "acme/widgets",
+      prNumber: 7,
+      prTitle: "t",
+      prHtmlUrl: "",
+      prAuthor: "a",
+      baseSha: "base111",
+      headSha: "head222",
+      draft: false,
+      state: "open",
+    });
     const closedBody = JSON.stringify({
       action: "closed",
       installation: { id: 42, account: { id: 1001 } },
@@ -1808,6 +1838,7 @@ describe("merge-cancellation hardening", () => {
     expect(store.hasMergedPull("acme/widgets", 7)).toBe(true);
     expect(store.hasMergedPullAtHead("acme/widgets", 7, "merged-head")).toBe(true);
     expect(store.hasMergedPullAtHead("acme/widgets", 7, "superseded-head")).toBe(false);
+    expect(store.listGuidedInboxPulls()).toEqual([]);
 
     // A delayed synchronize (push raced the merge button) arrives after the close.
     const latePushBody = JSON.stringify({
@@ -1829,6 +1860,7 @@ describe("merge-cancellation hardening", () => {
     expect(late.status).toBe(202);
     expect(late.body.ignored).toBe(true);
     expect(store.findLatestJobForPull("acme/widgets", 7, "late-push")).toBeUndefined();
+    expect(store.listGuidedInboxPulls()).toEqual([]);
     expect(store.getJob(jobId)?.state).toBe("cancelled");
   });
 });

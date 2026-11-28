@@ -200,7 +200,8 @@ describe("Guided Review inbox", () => {
   });
 
   it("omits installation repositories outside the allowlist", async () => {
-    const { app } = testApp(githubFake(), { ALLOWED_GITHUB_REPOSITORY_IDS: "999" });
+    const { app, store } = testApp(githubFake(), { ALLOWED_GITHUB_REPOSITORY_IDS: "999" });
+    seedInbox(store);
     const auth = operator();
     const response = await app.request("/guided", { headers: { cookie: auth.cookies } });
     expect(response.status).toBe(200);
@@ -334,6 +335,20 @@ describe("Guided Review inbox", () => {
     expect(await initial.text()).toContain("No open pull requests match");
     expect(listCalls).toBe(0);
 
+    store.upsertGuidedInboxPull({
+      installationId: 99,
+      githubAccountId: 100,
+      githubRepositoryId: 999,
+      repoFullName: "ghost/removed",
+      prNumber: 99,
+      prTitle: "Ghost pull",
+      prHtmlUrl: "https://github.com/ghost/removed/pull/99",
+      prAuthor: "ghost",
+      baseSha,
+      headSha,
+      draft: false,
+      state: "open",
+    });
     const sync = await app.request("/guided/sync", {
       method: "POST",
       headers: { cookie: auth.cookies, "content-type": "application/x-www-form-urlencoded" },
@@ -342,6 +357,7 @@ describe("Guided Review inbox", () => {
     expect(sync.status).toBe(302);
     expect(listCalls).toBe(1);
     expect(store.listGuidedInboxPulls()).toHaveLength(1);
+    expect(store.listGuidedInboxPulls()[0]?.repo_full_name).toBe("acme/widgets");
     const cached = await app.request("/guided", { headers: { cookie: auth.cookies } });
     expect(await cached.text()).toContain("Add guided review target");
     expect(listCalls).toBe(1);

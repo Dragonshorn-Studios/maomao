@@ -71,7 +71,7 @@ export async function refreshGuidedInbox(input: {
   let pulls = 0;
   let repos: Awaited<ReturnType<typeof enumerateGithubInstallationRepositories>> = [];
   try {
-    repos = await enumerateGithubInstallationRepositories(input.github as Pick<GithubPort, "listAppInstallations" | "listInstallationRepositories">, input.config, "guided inbox sync");
+    repos = await enumerateGithubInstallationRepositories(input.github as Pick<GithubPort, "listAppInstallations" | "listInstallationRepositories">, input.config, "guided inbox sync", { limit: Number.POSITIVE_INFINITY, strict: true });
   } catch (error) {
     return { repos: 0, pulls: 0, errors: [`Could not enumerate installation repositories: ${error instanceof Error ? error.message : String(error)}`] };
   }
@@ -105,6 +105,7 @@ export async function refreshGuidedInbox(input: {
       errors.push(`${repo.fullName}: synchronization failed (${error instanceof Error ? error.message : String(error)})`);
     }
   });
+  input.store.closeMissingGuidedInboxRepos(repos.map((repo) => repo.fullName));
   return { repos: repos.length, pulls, errors };
 }
 
@@ -112,7 +113,6 @@ export async function refreshGuidedInbox(input: {
 export async function listGuidedInbox(input: {
   config: Config;
   store: JobStore;
-  github?: Partial<GithubPort>;
   forgeConnections?: ForgeConnectionStore;
   actor?: GuidedActor;
   filters?: GuidedInboxFilters;

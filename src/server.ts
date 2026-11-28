@@ -1412,7 +1412,7 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
   });
   const renderGuidedInbox = async (c: Context<AppEnv>, directError?: string, directUrl?: string, status = 200) => {
     const filters = guidedFiltersFrom(c);
-    const page = await listGuidedInbox({ config: ctx.config, store: ctx.store, github: ctx.github, forgeConnections: ctx.forgeConnections, actor: guidedActor(c), filters });
+    const page = await listGuidedInbox({ config: ctx.config, store: ctx.store, forgeConnections: ctx.forgeConnections, actor: guidedActor(c), filters });
     return c.html(renderGuidedInboxPage({ options: guidedPageOpts(c), page, filters, directError, directUrl }), status as 200);
   };
 
