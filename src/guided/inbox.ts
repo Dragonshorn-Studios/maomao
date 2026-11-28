@@ -1,6 +1,6 @@
 import type { Config } from "../config.js";
 import type { GithubPort } from "../github/client.js";
-import { enumerateGithubInstallationRepositories, type GithubInstallationRepoOption } from "../github/enumerate.js";
+import { enumerateGithubInstallationRepositories } from "../github/enumerate.js";
 import type { JobStore } from "../jobs/store.js";
 import type { GuidedActor } from "./store.js";
 import type { ForgeConnectionStore } from "../forge/connections.js";
@@ -57,7 +57,58 @@ async function mapLimit<T, R>(items: T[], limit: number, fn: (item: T) => Promis
   return out;
 }
 
-/** Live open-PR inbox across authorized GitHub installations; failures stay per-repository. */
+/** Deliberate operator-initiated reconciliation used to backfill or repair the webhook cache; normal inbox reads never call it. */
+export async function refreshGuidedInbox(input: {
+  config: Config;
+  store: JobStore;
+  github?: Partial<GithubPort>;
+}): Promise<{ repos: number; pulls: number; errors: string[] }> {
+  if (!input.github?.listAppInstallations || !input.github.listInstallationRepositories || !input.github.listOpenPulls) {
+    return { repos: 0, pulls: 0, errors: ["GitHub open-pull synchronization is unavailable with the configured client."] };
+  }
+  const github = input.github;
+  const errors: string[] = [];
+  let pulls = 0;
+  let repos: Awaited<ReturnType<typeof enumerateGithubInstallationRepositories>> = [];
+  try {
+    repos = await enumerateGithubInstallationRepositories(input.github as Pick<GithubPort, "listAppInstallations" | "listInstallationRepositories">, input.config, "guided inbox sync");
+  } catch (error) {
+    return { repos: 0, pulls: 0, errors: [`Could not enumerate installation repositories: ${error instanceof Error ? error.message : String(error)}`] };
+  }
+  await mapLimit(repos, 4, async (repo) => {
+    const slash = repo.fullName.indexOf("/");
+    const owner = repo.fullName.slice(0, slash);
+    const name = repo.fullName.slice(slash + 1);
+    try {
+      const openPulls = await github.listOpenPulls!(repo.installationId, owner, name);
+      for (const pull of openPulls) {
+        input.store.upsertGuidedInboxPull({
+          installationId: pull.installationId,
+          githubAccountId: pull.accountId,
+          githubRepositoryId: pull.repositoryId,
+          repoFullName: repo.fullName,
+          prNumber: pull.prNumber,
+          prTitle: pull.prTitle,
+          prHtmlUrl: pull.prHtmlUrl,
+          prAuthor: pull.prAuthor,
+          baseSha: pull.baseSha,
+          headSha: pull.headSha,
+          draft: pull.draft,
+          state: pull.state ?? "open",
+          pullUpdatedAt: pull.updatedAt,
+          reviewRequested: pull.requestedReviewers === undefined ? undefined : pull.requestedReviewers.length > 0,
+        });
+      }
+      input.store.closeMissingGuidedInboxPulls(repo.fullName, openPulls.map((pull) => pull.prNumber));
+      pulls += openPulls.length;
+    } catch (error) {
+      errors.push(`${repo.fullName}: synchronization failed (${error instanceof Error ? error.message : String(error)})`);
+    }
+  });
+  return { repos: repos.length, pulls, errors };
+}
+
+/** Webhook-backed open-PR inbox. Reading the inbox must not fan out to GitHub for every installed repository. */
 export async function listGuidedInbox(input: {
   config: Config;
   store: JobStore;
@@ -66,73 +117,50 @@ export async function listGuidedInbox(input: {
   actor?: GuidedActor;
   filters?: GuidedInboxFilters;
 }): Promise<GuidedInboxPage> {
-  const errors: string[] = [];
   const unsupported: string[] = [];
   for (const connection of input.forgeConnections?.list().filter((row) => row.enabled === 1) ?? []) {
     unsupported.push(`${connection.provider} connection "${connection.label}" cannot list open pull requests for Guided Review yet.`);
   }
   const filters = input.filters ?? {};
-  let repos: GithubInstallationRepoOption[] = [];
-  if (!input.github?.listAppInstallations || !input.github.listInstallationRepositories) {
-    unsupported.push("GitHub open-pull listing is unavailable with the configured client.");
-  } else {
-    try {
-      repos = await enumerateGithubInstallationRepositories(input.github as Pick<GithubPort, "listAppInstallations" | "listInstallationRepositories">, input.config, "guided inbox");
-    } catch (error) {
-      errors.push(`Could not enumerate installation repositories: ${error instanceof Error ? error.message : String(error)}`);
-    }
-  }
-
-  const selectedRepos = repos.filter((repo) => !filters.repo || repo.fullName === filters.repo);
-  const rows = await mapLimit(selectedRepos, 4, async (repo) => {
-    if (!input.github?.listOpenPulls) {
-      unsupported.push("GitHub open-pull listing is unavailable with the configured client.");
-      return [] as GuidedInboxItem[];
-    }
-    const slash = repo.fullName.indexOf("/");
-    const owner = repo.fullName.slice(0, slash);
-    const name = repo.fullName.slice(slash + 1);
-    try {
-      const pulls = await input.github.listOpenPulls(repo.installationId, owner, name);
-      return pulls.map((pull): GuidedInboxItem => {
-        const latestJob = input.store.findLatestJobForPull(repo.fullName, pull.prNumber, undefined, { provider: "github", instance: "github.com" });
-        const session = input.actor
-          ? input.store.guidedReview.latestForPull(input.actor, "github", "github.com", repo.fullName, pull.prNumber)
-          : undefined;
-        const guidedState = !session
-          ? "none"
-          : session.historical_at
-            ? "historical"
-            : session.base_sha === pull.baseSha && session.head_sha === pull.headSha
-              ? "current"
-              : "stale";
-        return {
-          provider: "github",
-          providerInstance: "github.com",
-          repoFullName: repo.fullName,
-          prNumber: pull.prNumber,
-          title: pull.prTitle || `Pull request #${pull.prNumber}`,
-          author: pull.prAuthor,
-          url: pull.prHtmlUrl,
-          baseSha: pull.baseSha,
-          headSha: pull.headSha,
-          draft: pull.draft,
-          updatedAt: pull.updatedAt,
-          reviewRequested: pull.requestedReviewers === undefined ? undefined : pull.requestedReviewers.length > 0,
-          maomaoJobId: latestJob?.id,
-          maomaoState: latestJob?.state,
-          guidedSessionId: session?.id,
-          guidedState,
-          guidedCommentCount: session ? input.store.guidedReview.activeCommentCount(session.id) : undefined,
-        };
-      });
-    } catch (error) {
-      errors.push(`${repo.fullName}: open-pull listing failed (${error instanceof Error ? error.message : String(error)})`);
-      return [] as GuidedInboxItem[];
-    }
+  const rows = input.store.listGuidedInboxPulls().filter((pull) => {
+    if (input.config.allowedGithubAccountIds.length > 0 && (pull.github_account_id == null || !input.config.allowedGithubAccountIds.includes(pull.github_account_id))) return false;
+    if (input.config.allowedGithubRepositoryIds.length > 0 && (pull.github_repository_id == null || !input.config.allowedGithubRepositoryIds.includes(pull.github_repository_id))) return false;
+    return true;
+  });
+  let items = rows.map((pull): GuidedInboxItem => {
+    const latestJob = input.store.findLatestJobForPull(pull.repo_full_name, pull.pr_number, undefined, { provider: pull.provider, instance: pull.provider_instance });
+    const session = input.actor
+      ? input.store.guidedReview.latestForPull(input.actor, pull.provider, pull.provider_instance, pull.repo_full_name, pull.pr_number)
+      : undefined;
+    const guidedState = !session
+      ? "none"
+      : session.historical_at
+        ? "historical"
+        : session.base_sha === pull.base_sha && session.head_sha === pull.head_sha
+          ? "current"
+          : "stale";
+    return {
+      provider: pull.provider,
+      providerInstance: pull.provider_instance,
+      repoFullName: pull.repo_full_name,
+      prNumber: pull.pr_number,
+      title: pull.title || `Pull request #${pull.pr_number}`,
+      author: pull.author,
+      url: pull.url,
+      baseSha: pull.base_sha,
+      headSha: pull.head_sha,
+      draft: pull.draft === 1,
+      updatedAt: pull.pull_updated_at ?? pull.updated_at,
+      reviewRequested: pull.review_requested == null ? undefined : pull.review_requested === 1,
+      maomaoJobId: latestJob?.id,
+      maomaoState: latestJob?.state,
+      guidedSessionId: session?.id,
+      guidedState,
+      guidedCommentCount: session ? input.store.guidedReview.activeCommentCount(session.id) : undefined,
+    };
   });
 
-  let items = rows.flat();
+  if (filters.repo) items = items.filter((item) => item.repoFullName === filters.repo);
   const author = filters.author?.trim().toLowerCase();
   if (author) items = items.filter((item) => item.author.toLowerCase().includes(author));
   if (filters.reviewState && filters.reviewState !== "all") {
@@ -158,8 +186,8 @@ export async function listGuidedInbox(input: {
     total,
     offset,
     limit: GUIDED_INBOX_PAGE_SIZE,
-    repos: repos.map((repo) => repo.fullName),
-    errors: [...new Set(errors)],
+    repos: [...new Set(rows.map((row) => row.repo_full_name))].sort(),
+    errors: [],
     unsupported: [...new Set(unsupported)],
   };
 }

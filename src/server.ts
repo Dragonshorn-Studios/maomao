@@ -104,7 +104,7 @@ import { guidedPoisonAttentionOptional } from "./guided/attention.js";
 import { GuidedHumanPublishStore, HUMAN_PUBLISH_PENDING_LEASE_MS, guidedHumanPayloadHash, submitHumanGitHubReview } from "./guided/human-publish.js";
 import { guidedWalkthroughView, type GuidedWalkthroughStore } from "./guided/walkthrough-store.js";
 import type { GuidedWalkthroughService } from "./guided/walkthrough.js";
-import { listGuidedInbox } from "./guided/inbox.js";
+import { listGuidedInbox, refreshGuidedInbox } from "./guided/inbox.js";
 import { renderTelemetryPage, TELEMETRY_PAGE_HREF, TELEMETRY_PAGE_JS, type TelemetryProbeRow } from "./ui/telemetry.js";
 import {
   TELEMETRY_CHANNELS,
@@ -1417,6 +1417,15 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
   };
 
   app.get("/guided", async (c) => renderGuidedInbox(c));
+
+  app.post("/guided/sync", async (c) => {
+    const result = await refreshGuidedInbox({ config: ctx.config, store: ctx.store, github: ctx.github });
+    if (result.errors.length > 0) {
+      console.warn(`guided inbox sync partial: ${result.errors.join("; ")}`);
+      return renderGuidedInbox(c, "Guided Review inbox synchronization was partial; webhook-cached rows remain authoritative until the next successful sync.", undefined, result.pulls === 0 ? 502 : 200);
+    }
+    return c.redirect("/guided");
+  });
 
   app.post("/guided/open", async (c) => {
     const body = await c.req.parseBody();

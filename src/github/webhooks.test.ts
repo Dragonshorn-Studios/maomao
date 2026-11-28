@@ -25,6 +25,9 @@ function prPayload(overrides: Record<string, unknown> = {}) {
       body: "does a thing",
       html_url: "https://github.com/acme/widgets/pull/7",
       draft: false,
+      state: "open",
+      updated_at: "2026-11-28T07:00:00Z",
+      requested_reviewers: [{ login: "reviewer" }],
       user: { login: "octocat" },
       base: { sha: "base111", ref: "main" },
       head: { sha: "head222", ref: "feature" },
@@ -193,6 +196,27 @@ describe("webhook handling", () => {
     );
   });
 
+  it("caches draft pull requests for Guided Review even when automatic review ignores them", async () => {
+    const secret = "s3cret";
+    const config = loadConfig({
+      GITHUB_WEBHOOK_SECRET: secret,
+      GITHUB_APP_ID: "1",
+      GITHUB_APP_PRIVATE_KEY: "k",
+      REVIEWER_ROLES: "correctness",
+      REVIEW_DRAFTS: "false",
+    });
+    const store = new JobStore(openDb(":memory:"));
+    const rawBody = JSON.stringify(prPayload({ pull_request: { ...prPayload().pull_request, draft: true } }));
+    const result = await handleGithubWebhook({
+      config,
+      store,
+      request: { event: "pull_request", deliveryId: "draft-cache", signature: sign(secret, rawBody), rawBody },
+    });
+    expect(result.status).toBe(202);
+    expect(result.body.ignored).toBe(true);
+    expect(store.listGuidedInboxPulls()[0]).toMatchObject({ pr_number: 7, draft: 1, state: "open" });
+  });
+
   it("enqueues opened pull requests idempotently and stales old SHAs", async () => {
     const secret = "s3cret";
     const config = loadConfig({
@@ -215,6 +239,16 @@ describe("webhook handling", () => {
     });
     expect(first.status).toBe(202);
     expect(first.body.created).toBe(true);
+    expect(store.listGuidedInboxPulls()).toHaveLength(1);
+    expect(store.listGuidedInboxPulls()[0]).toMatchObject({
+      repo_full_name: "acme/widgets",
+      pr_number: 7,
+      github_account_id: 1001,
+      github_repository_id: 2002,
+      state: "open",
+      review_requested: 1,
+      pull_updated_at: "2026-11-28T07:00:00Z",
+    });
 
     const dup = await handleGithubWebhook({
       config,

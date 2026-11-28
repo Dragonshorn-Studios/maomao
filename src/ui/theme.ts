@@ -73,6 +73,8 @@ export const THEME_CSS = `
   --diff-del-ink: var(--cinnabar);
 
 }
+:root[data-if-theme="dark"], :root:not([data-if-theme]) { color-scheme: dark; }
+:root[data-if-theme="light"] { color-scheme: light; }
 
 /* Apothecary is the base Maomao pack: the pre-rebrand parchment/jade palette
    restated in Infernal token space. These rules intentionally live here rather
@@ -1036,7 +1038,7 @@ button, summary {
 
 
 /* Guided Review compact controls and inline annotations */
-.gd-human-draft { position: sticky; top: 4.4rem; z-index: 6; margin-block: .8rem 1rem; padding: .65rem .75rem; border: 1px solid color-mix(in srgb, var(--focus) 42%, var(--line)); border-radius: var(--if-radius); background: var(--surface); box-shadow: 0 12px 32px color-mix(in srgb, var(--ink) 12%, transparent); }
+.gd-human-draft { position: static; margin-block: .8rem 1rem; padding: .65rem .75rem; border: 1px solid var(--line); border-radius: var(--if-radius); background: var(--surface); box-shadow: none; }
 .gd-human-draft > .muted, .gd-human-draft noscript { display: none; }
 .gd-human-draft .gd-head { margin-bottom: .45rem; }
 .gd-human-draft h2 { margin: 0; font-size: 1rem; }
@@ -1051,13 +1053,25 @@ button, summary {
 .gd-comment-head { display: flex; align-items: center; gap: .35rem; flex-wrap: wrap; font-size: .74rem; }
 .gd-comment-head .muted { margin-right: auto; }
 .gd-comment-body { margin: .3rem 0 0; white-space: pre-wrap; overflow-wrap: anywhere; font-size: .84rem; }
-.gd-inline-editor { position: fixed !important; right: 1rem; bottom: 1rem; z-index: 20; width: min(25rem, calc(100vw - 2rem)); max-height: min(34rem, calc(100vh - 2rem)); overflow: auto; padding: .85rem; border: 1px solid color-mix(in srgb, var(--focus) 55%, var(--line)); border-radius: var(--if-radius); background: var(--surface); box-shadow: 0 22px 64px color-mix(in srgb, var(--ink) 28%, transparent); }
+.gd-inline-editor { position: absolute !important; left: 1rem; top: 1rem; z-index: 20; width: min(25rem, calc(100vw - 2rem)); max-height: min(34rem, calc(100vh - 2rem)); overflow: auto; padding: .85rem; border: 1px solid var(--line-strong); border-radius: var(--if-radius); background: var(--surface); color: var(--ink); box-shadow: var(--if-shadow); }
 .gd-inline-editor[hidden] { display: none; }
 .gd-inline-editor label, .gd-general-form label { display: grid; gap: .22rem; color: var(--ink-muted); font-size: .78rem; }
 .gd-inline-fields { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: .45rem; margin-block: .5rem; align-items: end; }
 .gd-check { display: flex !important; grid-auto-flow: column; align-items: center; justify-content: start; }
 .gd-general-form { margin-top: .5rem; padding-top: .5rem; border-top: 1px solid var(--line); }
 .gd-general-form h4, .gd-inline-editor h4 { margin: 0 0 .35rem; font-size: .82rem; }
+.gd-draft-grid--simple { grid-template-columns: minmax(0, 1fr) auto; align-items: end; }
+.gd-summary-label { min-width: 0; }
+.gd-verdict-buttons { display: flex; gap: .4rem; align-items: end; flex-wrap: wrap; }
+.gd-verdict { border: 1px solid var(--line-strong); border-radius: var(--if-radius-sm); padding: .42rem .7rem; background: var(--surface); color: var(--ink); font-weight: 700; cursor: pointer; }
+.gd-verdict--approve { border-color: color-mix(in srgb, var(--jade) 70%, var(--line)); color: var(--jade); }
+.gd-verdict--comment { border-color: color-mix(in srgb, var(--if-info) 70%, var(--line)); color: var(--if-info); }
+.gd-verdict--request-changes { border-color: color-mix(in srgb, var(--cinnabar) 70%, var(--line)); color: var(--cinnabar); }
+.gd-verdict.is-active { color: var(--action-ink); }
+.gd-verdict--approve.is-active { background: var(--jade); border-color: var(--jade); }
+.gd-verdict--comment.is-active { background: var(--if-info); border-color: var(--if-info); color: var(--if-accent-ink); }
+.gd-verdict--request-changes.is-active { background: var(--cinnabar); border-color: var(--cinnabar); }
+
 .gd-step-actions { display: flex; align-items: center; justify-content: flex-end; gap: .55rem; margin-top: .5rem; }
 .gd-preview-controls { display: flex; gap: .4rem; justify-content: flex-end; margin-top: .5rem; }
 .gd-preview-output { max-height: 24rem; overflow: auto; margin-top: .5rem; }
@@ -2411,6 +2425,69 @@ body.operator main select {
   border: 1px solid var(--line-strong);
   border-radius: var(--radius);
 }
+body.operator main select,
+body.operator main .if-select {
+  appearance: none;
+  padding-right: 2rem;
+  background-color: var(--surface);
+  background-image:
+    linear-gradient(45deg, transparent 50%, var(--ink-muted) 50%),
+    linear-gradient(135deg, var(--ink-muted) 50%, transparent 50%);
+  background-position: calc(100% - 1rem) 55%, calc(100% - .65rem) 55%;
+  background-size: .35rem .35rem, .35rem .35rem;
+  background-repeat: no-repeat;
+}
+body.operator main input:not([type="hidden"]):not([type="checkbox"]):not([type="radio"]):not(.chat-composer-input),
+body.operator main textarea:not(.chat-composer-input),
+body.operator main select,
+body.operator main .if-input,
+body.operator main .if-textarea,
+body.operator main .if-select {
+  background-color: var(--surface);
+  color: var(--ink);
+  caret-color: var(--ink);
+  border: 1px solid var(--line-strong);
+  box-shadow: none;
+}
+body.operator main input::placeholder,
+body.operator main textarea::placeholder { color: var(--ink-muted); opacity: .75; }
+body.operator main input:focus-visible,
+body.operator main textarea:focus-visible,
+body.operator main select:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--focus) 72%, transparent);
+  outline-offset: 1px;
+  border-color: var(--focus);
+}
+input[type="checkbox"].if-checkbox,
+body.operator main input[type="checkbox"] {
+  appearance: none;
+  width: 1rem;
+  height: 1rem;
+  margin: 0;
+  display: inline-grid;
+  place-content: center;
+  flex: none;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--if-radius-sm);
+  background: var(--surface);
+  color: var(--ink);
+  cursor: pointer;
+}
+input[type="checkbox"].if-checkbox:checked,
+body.operator main input[type="checkbox"]:checked {
+  background: var(--action);
+  border-color: var(--action);
+}
+input[type="checkbox"].if-checkbox:checked::before,
+body.operator main input[type="checkbox"]:checked::before {
+  content: "";
+  width: .55rem;
+  height: .32rem;
+  border-left: 2px solid var(--action-ink);
+  border-bottom: 2px solid var(--action-ink);
+  transform: rotate(-45deg) translateY(-1px);
+}
+
 body.operator main fieldset {
   border: 1px solid var(--line);
   background: var(--surface);

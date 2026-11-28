@@ -33,7 +33,7 @@ function enhanceDraft(root: HTMLElement): void {
   let currentComments: GuidedCommentView[] = [];
   const statusEl = root.querySelector<HTMLElement>("[data-save-state]");
   const summaryEl = root.querySelector<HTMLTextAreaElement>("[data-draft-summary]");
-  const verdictEl = root.querySelector<HTMLSelectElement>("[data-draft-verdict]");
+  const verdictEl = root.querySelector<HTMLInputElement>("[data-draft-verdict]");
   const listEl = root.querySelector<HTMLElement>("[data-comment-list]");
   const inlineEditor = root.querySelector<HTMLElement>("[data-inline-editor]");
   const generalForm = root.querySelector<HTMLFormElement>("[data-general-form]");
@@ -124,7 +124,12 @@ function enhanceDraft(root: HTMLElement): void {
     renderComments(data.comments);
     (window as unknown as { __maomaoPierre?: { updateGuidedComments?: (comments: GuidedCommentView[]) => void } }).__maomaoPierre?.updateGuidedComments?.(data.comments);
     if (summaryEl && document.activeElement !== summaryEl) summaryEl.value = data.session.draftSummary;
-    if (verdictEl && document.activeElement !== verdictEl) verdictEl.value = data.session.draftVerdict ?? "";
+    if (verdictEl && document.activeElement !== verdictEl) {
+      verdictEl.value = data.session.draftVerdict ?? "";
+      for (const candidate of root.querySelectorAll<HTMLButtonElement>("[data-verdict-choice]")) {
+        candidate.classList.toggle("is-active", candidate.dataset.verdictChoice === verdictEl.value);
+      }
+    }
     status("saved");
   }
 
@@ -196,6 +201,18 @@ function enhanceDraft(root: HTMLElement): void {
     });
   }
 
+  for (const button of root.querySelectorAll<HTMLButtonElement>("[data-verdict-choice]")) {
+    button.addEventListener("click", () => {
+      if (!verdictEl) return;
+      verdictEl.value = verdictEl.value === button.dataset.verdictChoice ? "" : button.dataset.verdictChoice || "";
+      for (const candidate of root.querySelectorAll<HTMLButtonElement>("[data-verdict-choice]")) {
+        candidate.classList.toggle("is-active", candidate.dataset.verdictChoice === verdictEl.value);
+      }
+      summaryDirty = true;
+      saveSummary();
+    });
+  }
+
   function saveViewed(path: string, viewed = true): void {
     enqueue(async () => {
       const current = await readSession();
@@ -250,9 +267,28 @@ function enhanceDraft(root: HTMLElement): void {
     if (client) client.value = "";
   }
 
-  function showInlineEditor(anchor?: { path: string; side: string; line: string }, comment?: HTMLElement): void {
+  function positionInlineEditor(anchor?: { top?: number; bottom?: number; left?: number; right?: number }): void {
+    if (!inlineEditor || anchor?.top == null) {
+      if (inlineEditor) {
+        inlineEditor.style.top = "";
+        inlineEditor.style.left = "";
+      }
+      return;
+    }
+    const width = Math.min(420, window.innerWidth - 24);
+    const desiredLeft = anchor.right != null ? anchor.right + 8 : anchor.left ?? 12;
+    const viewportLeft = Math.max(12, Math.min(desiredLeft, window.innerWidth - width - 12));
+    const left = viewportLeft + window.scrollX;
+    const top = (anchor.bottom ?? anchor.top) + 6 + window.scrollY;
+    inlineEditor.style.width = `${width}px`;
+    inlineEditor.style.left = `${left}px`;
+    inlineEditor.style.top = `${top}px`;
+  }
+
+  function showInlineEditor(anchor?: { path: string; side: string; line: string; top?: number; bottom?: number; left?: number; right?: number }, comment?: HTMLElement): void {
     if (!inlineEditor) return;
     inlineEditor.hidden = false;
+    positionInlineEditor(anchor);
     const unplaced = comment?.dataset.anchorStatus === "unplaced";
     inlineEditor.dataset.reanchoring = unplaced ? "1" : "";
     inlineEditor.dataset.path = unplaced ? "" : comment?.dataset.path || anchor?.path || "";
@@ -277,7 +313,7 @@ function enhanceDraft(root: HTMLElement): void {
     body?.focus();
   }
 
-  function openAnchor(anchor: { path: string; side: string; line: string }): void {
+  function openAnchor(anchor: { path: string; side: string; line: string; top?: number; bottom?: number; left?: number; right?: number }): void {
     if (!anchor.path || !anchor.side || !anchor.line || !inlineEditor) return;
     if (!inlineEditor.hidden) {
       const editingExisting = Boolean(inlineEditor.querySelector<HTMLInputElement>("[data-comment-client-id]")?.value);
@@ -295,13 +331,14 @@ function enhanceDraft(root: HTMLElement): void {
     const trigger = closest<HTMLElement>(event.target, "[data-guided-comment-anchor]");
     if (!trigger) return;
     event.preventDefault();
-    openAnchor({ path: trigger.dataset.path || "", side: trigger.dataset.side || "", line: trigger.dataset.line || "" });
+    const rect = trigger.getBoundingClientRect();
+    openAnchor({ path: trigger.dataset.path || "", side: trigger.dataset.side || "", line: trigger.dataset.line || "", top: rect.top, bottom: rect.bottom, left: rect.left, right: rect.right });
   });
   document.addEventListener("guided:line-anchor", (event) => {
-    openAnchor((event as CustomEvent<{ path: string; side: string; line: string }>).detail);
+    openAnchor((event as CustomEvent<{ path: string; side: string; line: string; top?: number; bottom?: number; left?: number; right?: number }>).detail);
   });
   document.addEventListener("guided:edit-inline-comment", (event) => {
-    const detail = (event as CustomEvent<{ clientId?: string; path?: string; side?: string; line?: number; body?: string; severity?: string; category?: string; publishable?: boolean; anchorStatus?: "anchored" | "unplaced" }>).detail;
+    const detail = (event as CustomEvent<{ clientId?: string; path?: string; side?: string; line?: number; body?: string; severity?: string; category?: string; publishable?: boolean; anchorStatus?: "anchored" | "unplaced"; top?: number; bottom?: number; left?: number; right?: number }>).detail;
     if (!detail?.clientId || !inlineEditor) return;
     const comment = document.createElement("article");
     comment.dataset.clientId = detail.clientId;
@@ -316,7 +353,15 @@ function enhanceDraft(root: HTMLElement): void {
     body.className = "gd-comment-body";
     body.textContent = detail.body ?? currentComments.find((candidate) => candidate.clientId === detail.clientId)?.body ?? "";
     comment.appendChild(body);
-    showInlineEditor(undefined, comment);
+    showInlineEditor({
+      path: detail.path ?? "",
+      side: detail.side ?? "",
+      line: detail.line ? String(detail.line) : "",
+      top: detail.top,
+      bottom: detail.bottom,
+      left: detail.left,
+      right: detail.right,
+    }, comment);
   });
   document.addEventListener("guided:delete-inline-comment", (event) => {
     const clientId = (event as CustomEvent<{ clientId?: string }>).detail?.clientId;

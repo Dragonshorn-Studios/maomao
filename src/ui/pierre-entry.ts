@@ -165,7 +165,9 @@ function effectiveGuidedAnnotations(container: HTMLElement): GuidedAnnotation[] 
 
 function refreshGuidedAnnotations(): void {
   for (const container of Array.from(document.querySelectorAll<HTMLElement>(".guided-pierre-file[data-enhanced]"))) {
-    instances.get(container)?.setLineAnnotations(effectiveGuidedAnnotations(container));
+    const instance = instances.get(container);
+    instance?.setLineAnnotations(effectiveGuidedAnnotations(container));
+    instance?.rerender();
   }
 }
 
@@ -201,7 +203,8 @@ function renderGuidedAnnotationContent(meta: GuidedAnnotationMetadata): HTMLElem
       button.addEventListener("click", (event) => {
         event.preventDefault();
         event.stopPropagation();
-        document.dispatchEvent(new CustomEvent(eventName, { detail: meta }));
+        const rect = node.getBoundingClientRect();
+        document.dispatchEvent(new CustomEvent(eventName, { detail: { ...meta, top: rect.top, bottom: rect.bottom, left: rect.left, right: rect.right } }));
       });
       actions.appendChild(button);
     }
@@ -308,8 +311,9 @@ function renderGuidedFile(container: HTMLElement): void {
         event.stopPropagation();
         const current = getHoveredRow();
         if (!current || !path || hoveredLineTypes.get(keyFor(current)) === "context-expanded") return;
+        const rect = button.getBoundingClientRect();
         document.dispatchEvent(new CustomEvent("guided:line-anchor", {
-          detail: { path, side: current.side === "deletions" ? "LEFT" : "RIGHT", line: String(current.lineNumber) },
+          detail: { path, side: current.side === "deletions" ? "LEFT" : "RIGHT", line: String(current.lineNumber), top: rect.top, bottom: rect.bottom, left: rect.left, right: rect.right },
         }));
       });
       return button;

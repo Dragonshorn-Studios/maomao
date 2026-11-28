@@ -66,6 +66,26 @@ function githubFake(currentPull = pull()): ManualTriggerPort & Partial<GithubPor
   };
 }
 
+
+function seedInbox(store: JobStore, currentPull = pull()): void {
+  store.upsertGuidedInboxPull({
+    installationId: currentPull.installationId,
+    githubAccountId: currentPull.accountId,
+    githubRepositoryId: currentPull.repositoryId,
+    repoFullName: currentPull.repoFullName,
+    prNumber: currentPull.prNumber,
+    prTitle: currentPull.prTitle,
+    prHtmlUrl: currentPull.prHtmlUrl,
+    prAuthor: currentPull.prAuthor,
+    baseSha: currentPull.baseSha,
+    headSha: currentPull.headSha,
+    draft: currentPull.draft,
+    state: currentPull.state ?? "open",
+    pullUpdatedAt: currentPull.updatedAt,
+    reviewRequested: currentPull.requestedReviewers === undefined ? undefined : currentPull.requestedReviewers.length > 0,
+  });
+}
+
 function testApp(github?: ManualTriggerPort & Partial<GithubPort>, env: Record<string, string> = {}, contextExtras: Partial<Parameters<typeof createApp>[0]> = {}) {
   const config = loadConfig({
     GITHUB_WEBHOOK_SECRET: "webhook-secret",
@@ -118,6 +138,7 @@ function passwordOperator() {
 describe("Guided Review inbox", () => {
   it("lists authorized open pull requests with review, Maomao, and draft state", async () => {
     const { app, store } = testApp(githubFake());
+    seedInbox(store);
     const enqueued = store.enqueue({
       repoFullName: "acme/widgets",
       repoOwner: "acme",
@@ -164,7 +185,9 @@ describe("Guided Review inbox", () => {
   });
 
   it("applies author and review-state filters and keeps filter state in pagination", async () => {
-    const { app } = testApp(githubFake(pull({ requestedReviewers: [] })));
+    const unrequested = pull({ requestedReviewers: [] });
+    const { app, store } = testApp(githubFake(unrequested));
+    seedInbox(store, unrequested);
     const auth = operator();
     const filtered = await app.request("/guided?author=octo&reviewState=unrequested", { headers: { cookie: auth.cookies } });
     expect(filtered.status).toBe(200);
@@ -296,6 +319,46 @@ describe("Guided Review inbox", () => {
     expect(failureBody.message).not.toContain("webhook-secret");
   });
 
+  it("keeps normal inbox reads webhook-cached and reconciles deliberately through sync", async () => {
+    const github = githubFake();
+    let listCalls = 0;
+    const originalList = github.listOpenPulls!.bind(github);
+    github.listOpenPulls = async (...args: unknown[]) => {
+      listCalls += 1;
+      return originalList(...args as [number, string, string]);
+    };
+    const { app, store } = testApp(github);
+    const auth = operator();
+    const initial = await app.request("/guided", { headers: { cookie: auth.cookies } });
+    expect(initial.status).toBe(200);
+    expect(await initial.text()).toContain("No open pull requests match");
+    expect(listCalls).toBe(0);
+
+    const sync = await app.request("/guided/sync", {
+      method: "POST",
+      headers: { cookie: auth.cookies, "content-type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({ csrf_token: auth.csrfToken }).toString(),
+    });
+    expect(sync.status).toBe(302);
+    expect(listCalls).toBe(1);
+    expect(store.listGuidedInboxPulls()).toHaveLength(1);
+    const cached = await app.request("/guided", { headers: { cookie: auth.cookies } });
+    expect(await cached.text()).toContain("Add guided review target");
+    expect(listCalls).toBe(1);
+
+    github.listOpenPulls = async () => {
+      listCalls += 1;
+      return [];
+    };
+    const closeSync = await app.request("/guided/sync", {
+      method: "POST",
+      headers: { cookie: auth.cookies, "content-type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({ csrf_token: auth.csrfToken }).toString(),
+    });
+    expect(closeSync.status).toBe(302);
+    expect(store.listGuidedInboxPulls()).toHaveLength(0);
+  });
+
   it("rejects closed direct targets and degrades when listing capability is absent", async () => {
     const closed = testApp(githubFake(pull({ state: "closed" })));
     const auth = operator();
@@ -304,8 +367,11 @@ describe("Guided Review inbox", () => {
     expect(await response.text()).toContain("Only open pull requests");
 
     const unavailable = testApp(undefined);
-    const degraded = await unavailable.app.request("/guided", { headers: { cookie: auth.cookies } });
-    expect(degraded.status).toBe(200);
-    expect(await degraded.text()).toContain("open-pull listing is unavailable");
+    seedInbox(unavailable.store);
+    const cached = await unavailable.app.request("/guided", { headers: { cookie: auth.cookies } });
+    expect(cached.status).toBe(200);
+    const cachedHtml = await cached.text();
+    expect(cachedHtml).toContain("Add guided review target");
+    expect(cachedHtml).not.toContain("open-pull listing is unavailable");
   });
 });
