@@ -375,6 +375,56 @@ describe("Guided Review inbox", () => {
     expect(store.listGuidedInboxPulls()).toHaveLength(0);
   });
 
+  it("backfills the webhook-cached inbox from the settings panel", async () => {
+    const github = githubFake();
+    const { app, store } = testApp(github);
+    const auth = operator();
+
+    const page = await app.request("/config/guided-inbox", { headers: { cookie: auth.cookies } });
+    expect(page.status).toBe(200);
+    const html = await page.text();
+    expect(html).toContain("Guided Review inbox");
+    expect(html).toContain("Backfill open pull requests");
+    expect(html).toContain("including PRs opened before webhook caching was enabled");
+
+    const sync = await app.request("/config/guided-inbox/sync", {
+      method: "POST",
+      headers: { cookie: auth.cookies, "content-type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({ csrf_token: auth.csrfToken }).toString(),
+    });
+    expect(sync.status).toBe(303);
+    expect(sync.headers.get("location")).toContain("/config/guided-inbox?notice=");
+    expect(store.listGuidedInboxPulls()).toHaveLength(1);
+    expect(store.guidedInboxCacheStats()).toMatchObject({ totalRows: 1, openPulls: 1, repos: 1 });
+
+    const after = await app.request(sync.headers.get("location")!, { headers: { cookie: auth.cookies } });
+    const afterHtml = await after.text();
+    expect(afterHtml).toContain("Backfilled 1 open pull request across 1 repository");
+    expect(afterHtml).toContain("Open pull requests cached");
+  });
+
+  it("reports a partial settings backfill without discarding cached rows", async () => {
+    const github = githubFake();
+    github.listOpenPulls = async () => {
+      throw new Error("github unavailable");
+    };
+    const { app, store } = testApp(github);
+    const auth = operator();
+    seedInbox(store);
+
+    const sync = await app.request("/config/guided-inbox/sync", {
+      method: "POST",
+      headers: { cookie: auth.cookies, "content-type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({ csrf_token: auth.csrfToken }).toString(),
+    });
+    expect(sync.status).toBe(303);
+    expect(sync.headers.get("location")).toContain("/config/guided-inbox?error=");
+    expect(store.listGuidedInboxPulls()).toHaveLength(1);
+
+    const after = await app.request(sync.headers.get("location")!, { headers: { cookie: auth.cookies } });
+    expect(await after.text()).toContain("Backfill was partial");
+  });
+
   it("rejects closed direct targets and degrades when listing capability is absent", async () => {
     const closed = testApp(githubFake(pull({ state: "closed" })));
     const auth = operator();

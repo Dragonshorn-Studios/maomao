@@ -2302,6 +2302,25 @@ export class JobStore {
     this.db.prepare(`DELETE FROM guided_inbox_pulls WHERE state = 'closed' AND updated_at < ?`).run(cutoff);
   }
 
+  guidedInboxCacheStats(): { totalRows: number; openPulls: number; repos: number; lastCacheWriteAt?: string } {
+    this.pruneClosedGuidedInboxPulls();
+    const row = this.db
+      .prepare(
+        `SELECT COUNT(*) AS total_rows,
+                COALESCE(SUM(CASE WHEN state = 'open' THEN 1 ELSE 0 END), 0) AS open_pulls,
+                COUNT(DISTINCT repo_full_name) AS repos,
+                MAX(updated_at) AS last_cache_write_at
+         FROM guided_inbox_pulls`,
+      )
+      .get() as { total_rows: number; open_pulls: number; repos: number; last_cache_write_at: string | null };
+    return {
+      totalRows: row.total_rows,
+      openPulls: row.open_pulls,
+      repos: row.repos,
+      lastCacheWriteAt: row.last_cache_write_at ?? undefined,
+    };
+  }
+
   listGuidedInboxPulls(): GuidedInboxPullRow[] {
     this.pruneClosedGuidedInboxPulls();
     return this.db

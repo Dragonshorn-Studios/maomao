@@ -89,6 +89,7 @@ export type SettingsSection =
   | "audit"
   | "deliveries"
   | "connections"
+  | "guided-inbox"
   | "health";
 
 export function pageBranding(options: Pick<PageOptions, "branding"> | undefined): InstanceBranding {
@@ -122,6 +123,7 @@ const SETTINGS_NAV: Array<{ group: string; items: Array<[SettingsSection, string
   {
     group: "Operations",
     items: [
+      ["guided-inbox", "/config/guided-inbox", "Guided inbox"],
       ["telemetry", "/config/telemetry", "Telemetry"],
       ["audit", "/config/audit", "Audit"],
       ["deliveries", "/config/deliveries", "Deliveries"],
