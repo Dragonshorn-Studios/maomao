@@ -2227,7 +2227,10 @@ export class JobStore {
            state = excluded.state,
            review_requested = COALESCE(excluded.review_requested, guided_inbox_pulls.review_requested),
            pull_updated_at = COALESCE(excluded.pull_updated_at, guided_inbox_pulls.pull_updated_at),
-           updated_at = excluded.updated_at`,
+           updated_at = excluded.updated_at
+         WHERE excluded.pull_updated_at IS NULL
+            OR guided_inbox_pulls.pull_updated_at IS NULL
+            OR excluded.pull_updated_at >= guided_inbox_pulls.pull_updated_at`,
       )
       .run(
         input.repoFullName,
@@ -2254,9 +2257,10 @@ export class JobStore {
       .prepare(
         `UPDATE guided_inbox_pulls
          SET state = 'closed', pull_updated_at = COALESCE(?, pull_updated_at), updated_at = ?
-         WHERE provider = 'github' AND provider_instance = 'github.com' AND repo_full_name = ? AND pr_number = ?`,
+         WHERE provider = 'github' AND provider_instance = 'github.com' AND repo_full_name = ? AND pr_number = ?
+           AND (? IS NULL OR pull_updated_at IS NULL OR ? >= pull_updated_at)`,
       )
-      .run(pullUpdatedAt ?? null, nowIso(), repoFullName, prNumber);
+      .run(pullUpdatedAt ?? null, nowIso(), repoFullName, prNumber, pullUpdatedAt ?? null, pullUpdatedAt ?? null);
   }
 
   closeMissingGuidedInboxPulls(repoFullName: string, openPrNumbers: number[]): void {
