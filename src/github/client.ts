@@ -768,10 +768,14 @@ export class GithubClient implements GithubPort, ManualTriggerPort {
   }
 
   async listInstallationRepositories(installationId: number) {
-    const response = await this.installationOctokit(installationId).rest.apps.listReposAccessibleToInstallation({
-      per_page: 100,
-    });
-    return response.data.repositories.map((repo) => ({
+    const octokit = this.installationOctokit(installationId);
+    const repositories = [];
+    for (let page = 1; ; page += 1) {
+      const response = await octokit.rest.apps.listReposAccessibleToInstallation({ per_page: 100, page });
+      repositories.push(...response.data.repositories);
+      if (response.data.repositories.length < 100) break;
+    }
+    return repositories.map((repo) => ({
       id: Number(repo.id),
       fullName: repo.full_name ?? `${repo.owner.login}/${repo.name}`,
     }));

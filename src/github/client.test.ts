@@ -115,6 +115,36 @@ describe("GithubClient.upsertCheckRun", () => {
   });
 });
 
+
+describe("GithubClient.listInstallationRepositories", () => {
+  it("reads every installation repository page before returning", async () => {
+    const pages: unknown[] = [];
+    const client = new GithubClient(loadConfig({ GITHUB_APP_ID: "1" }));
+    (client as unknown as { installationOctokit: () => unknown }).installationOctokit = () => ({
+      rest: {
+        apps: {
+          listReposAccessibleToInstallation: async (request: Record<string, unknown>) => {
+            pages.push(request.page);
+            const page = Number(request.page);
+            const repositories = Array.from({ length: page === 1 ? 100 : 1 }, (_, index) => ({
+              id: (page - 1) * 100 + index + 1,
+              full_name: `acme/repo-${(page - 1) * 100 + index + 1}`,
+              owner: { login: "acme" },
+              name: `repo-${(page - 1) * 100 + index + 1}`,
+            }));
+            return { data: { repositories } };
+          },
+        },
+      },
+    });
+
+    const repositories = await client.listInstallationRepositories(9);
+    expect(pages).toEqual([1, 2]);
+    expect(repositories).toHaveLength(101);
+    expect(repositories[100]).toEqual({ id: 101, fullName: "acme/repo-101" });
+  });
+});
+
 describe("GithubClient.getMergeCapabilities", () => {
   function clientWithGraphql(repository: unknown, protection?: { data?: unknown; error?: unknown }, observeVariables?: (variables: Record<string, unknown>) => void) {
     const client = new GithubClient(loadConfig({ GITHUB_APP_ID: "1" }));

@@ -536,7 +536,7 @@ async function handleGithubWebhookRequest(input: GithubWebhookInput): Promise<We
       repositoryId: parsed.githubRepositoryId,
     });
     if (cacheAuth.ok) {
-      if (!input.store.hasMergedPull(parsed.repoFullName, parsed.prNumber)) input.store.upsertGuidedInboxPull(parsed);
+      if (payload.action !== "closed" && !input.store.hasMergedPull(parsed.repoFullName, parsed.prNumber)) input.store.upsertGuidedInboxPull(parsed);
       cachedPull = parsed;
     }
   } catch {
