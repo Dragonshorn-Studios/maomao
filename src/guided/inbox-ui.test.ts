@@ -386,6 +386,7 @@ describe("Guided Review inbox", () => {
     expect(html).toContain("Guided Review inbox");
     expect(html).toContain("Backfill open pull requests");
     expect(html).toContain("including PRs opened before webhook caching was enabled");
+    expect(html.match(/name="csrf_token"/g)).toHaveLength(2);
 
     const sync = await app.request("/config/guided-inbox/sync", {
       method: "POST",

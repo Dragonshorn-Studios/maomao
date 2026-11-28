@@ -30,5 +30,5 @@ export function renderGuidedInboxSettingsPage(data: GuidedInboxSettingsPageData)
       <p class="muted">This deliberately contacts GitHub, upserts all open pull requests into the webhook cache, and closes cached rows that are no longer open or no longer accessible. It does not backfill closed pull requests because the inbox is an open-review worklist. Depending on installation size this can take a minute.</p>
       ${data.canWrite ? `<form method="post" action="/config/guided-inbox/sync">${csrfInput(data.csrfToken)}<button type="submit" class="if-button if-button--primary">Backfill open pull requests</button></form>` : `<p class="muted">Operator access is required to run backfill.</p>`}
     </section>`;
-  return layout("Guided Review inbox", body, { ...data.options, surface: "operator", nav: "settings", settingsSection: "guided-inbox" });
+  return layout("Guided Review inbox", body, { ...data.options, csrfToken: data.csrfToken, surface: "operator", nav: "settings", settingsSection: "guided-inbox" });
 }
