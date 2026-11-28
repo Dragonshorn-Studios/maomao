@@ -2265,7 +2265,7 @@ export class JobStore {
 
   closeMissingGuidedInboxRepos(openRepoFullNames: string[], unchangedSince?: string): void {
     const now = nowIso();
-    const untouched = unchangedSince ? "AND updated_at < ?" : "";
+    const untouched = unchangedSince ? "AND updated_at <= ?" : "";
     const args = unchangedSince ? [unchangedSince] : [];
     if (openRepoFullNames.length === 0) {
       this.db.prepare(`UPDATE guided_inbox_pulls SET state = 'closed', updated_at = ? WHERE provider = 'github' AND provider_instance = 'github.com' AND state = 'open' ${untouched}`).run(now, ...args);
@@ -2282,7 +2282,7 @@ export class JobStore {
 
   closeMissingGuidedInboxPulls(repoFullName: string, openPrNumbers: number[], unchangedSince?: string): void {
     const now = nowIso();
-    const untouched = unchangedSince ? "AND updated_at < ?" : "";
+    const untouched = unchangedSince ? "AND updated_at <= ?" : "";
     const args = unchangedSince ? [unchangedSince] : [];
     if (openPrNumbers.length === 0) {
       this.db.prepare(`UPDATE guided_inbox_pulls SET state = 'closed', updated_at = ? WHERE provider = 'github' AND provider_instance = 'github.com' AND repo_full_name = ? AND state = 'open' ${untouched}`).run(now, repoFullName, ...args);
