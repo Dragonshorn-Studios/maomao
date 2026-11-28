@@ -127,6 +127,7 @@ import type { MergeModeSettingsStore } from "./merge/settings.js";
 import type { UiSettingsStore } from "./ui/settings.js";
 import { resolveInstanceBranding, type UiFlavor, type UiThemePack } from "./branding.js";
 import { renderMergeModesPage } from "./ui/merge-modes.js";
+import { renderGuidedInboxSettingsPage } from "./ui/guided-inbox-settings.js";
 import type { ForgeRegistry } from "./forge/registry.js";
 import type { JobRow } from "./jobs/store.js";
 import type { FindingRow } from "./findings/types.js";
@@ -3241,6 +3242,30 @@ export function createApp(ctx: ServerContext): Hono<AppEnv> {
     // The providers page's refresh button lands back there, not on the editor.
     const base = c.req.query("next") === "providers" ? "/config/providers" : "/config/profiles/new";
     return c.redirect(base + "?notice=" + key, 303);
+  });
+
+  app.get("/config/guided-inbox", (c) => {
+    if (!gateOn) return c.redirect("/", 302);
+    return c.html(renderGuidedInboxSettingsPage({
+      options: { ...pageOpts, identity: c.get("identity"), notice: c.req.query("notice"), error: c.req.query("error") },
+      csrfToken: ensureCsrfToken(c, ctx.config.uiSessionSecret),
+      canWrite: gateOn,
+      stats: ctx.store.guidedInboxCacheStats(),
+    }));
+  });
+
+  app.post("/config/guided-inbox/sync", async (c) => {
+    if (!gateOn) return c.redirect("/", 302);
+    const result = await refreshGuidedInbox({ config: ctx.config, store: ctx.store, github: ctx.github });
+    if (result.errors.length > 0) {
+      console.warn(`guided inbox settings backfill partial: ${result.errors.join("; ")}`);
+      const pullLabel = result.pulls === 1 ? "pull request" : "pull requests";
+      const repoLabel = result.repos === 1 ? "repository" : "repositories";
+      return c.redirect(`/config/guided-inbox?error=${encodeURIComponent(`Backfill was partial: ${result.pulls} open ${pullLabel} across ${result.repos} ${repoLabel} were reconciled, but ${result.errors.length} error${result.errors.length === 1 ? "" : "s"} occurred. Cached rows remain authoritative until the next successful sync.`)}`, 303);
+    }
+    const pullLabel = result.pulls === 1 ? "pull request" : "pull requests";
+    const repoLabel = result.repos === 1 ? "repository" : "repositories";
+    return c.redirect(`/config/guided-inbox?notice=${encodeURIComponent(`Backfilled ${result.pulls} open ${pullLabel} across ${result.repos} ${repoLabel}.`)}`, 303);
   });
 
   app.get("/config", (c) => {
